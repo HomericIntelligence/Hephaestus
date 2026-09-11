@@ -2,12 +2,13 @@
 
 import subprocess
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 
 from hephaestus.automation.agent_config import AGENT_PLAN_REVIEWER, session_uuid
 from hephaestus.automation.learn import compact_agent_session, compact_session
+from hephaestus.utils import subprocess_registry
 
 
 class TestCompactSession:
@@ -22,8 +23,8 @@ class TestCompactSession:
 
     def test_compact_session_sends_command_via_stdin(self, tmp_path: Path) -> None:
         """Verify /compact is sent via stdin rather than process arguments."""
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
@@ -32,13 +33,13 @@ class TestCompactSession:
         assert "--resume" in cmd
         assert cmd[-1] == "--print"
         assert all("/compact" not in argument for argument in cmd)
-        assert mock_run.call_args.kwargs["input"] == "/compact"
-        assert mock_run.call_args.kwargs["text"] is True
+        assert mock_run.call_args.kwargs["stdin_text"] == "/compact"
+        assert mock_run.call_args.kwargs["use_devnull_stdin"] is False
 
     def test_compact_session_uses_deterministic_uuid(self, tmp_path: Path) -> None:
         """Verify compact_session uses the deterministic session_uuid."""
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             repo = "Hephaestus"
             issue = 842
@@ -58,8 +59,8 @@ class TestCompactSession:
 
     def test_inline_effort_uses_the_base_claude_session(self, tmp_path: Path) -> None:
         """Claude compaction strips the effort before it resolves the session key."""
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             compact_session(
                 "Hephaestus",
@@ -79,9 +80,9 @@ class TestCompactSession:
         )
 
     def test_compact_session_forwards_cwd(self, tmp_path: Path) -> None:
-        """Verify compact_session passes cwd to subprocess.run."""
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
+        """Verify compact_session passes cwd to the tracked runner."""
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             test_cwd = tmp_path / "test_workdir"
             compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, test_cwd)
@@ -95,8 +96,8 @@ class TestCompactSession:
         self, tmp_path: Path
     ) -> None:
         """Verify compact keeps text output without bypassing permissions."""
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
@@ -112,8 +113,8 @@ class TestCompactSession:
         Slow sessions should be allowed to finish because throughput matters
         more than minimizing per-attempt latency.
         """
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
@@ -124,8 +125,8 @@ class TestCompactSession:
     ) -> None:
         """An explicit compact timeout wins while the removed environment is inert."""
         monkeypatch.setenv("HEPH_AGENT_LEARN_TIMEOUT", "333")
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path, timeout=333)
 
@@ -133,7 +134,7 @@ class TestCompactSession:
 
     def test_compact_failure_returns_false_on_timeout(self, tmp_path: Path) -> None:
         """Verify compact_session returns False on timeout (non-fatal)."""
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired("claude", 60)
 
             result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
@@ -142,7 +143,7 @@ class TestCompactSession:
 
     def test_compact_failure_returns_false_on_oserror(self, tmp_path: Path) -> None:
         """Verify compact_session returns False on OSError (e.g., missing binary)."""
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
             mock_run.side_effect = FileNotFoundError("claude binary not found")
 
             result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
@@ -151,8 +152,10 @@ class TestCompactSession:
 
     def test_compact_returns_false_on_nonzero_exit(self, tmp_path: Path) -> None:
         """Verify compact_session returns False when subprocess exits non-zero."""
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=1, stderr="error: unknown command: /compact")
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
+            mock_run.side_effect = subprocess.CalledProcessError(
+                1, ["claude"], stderr="error: unknown command: /compact"
+            )
 
             result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
@@ -160,8 +163,8 @@ class TestCompactSession:
 
     def test_compact_returns_true_on_zero_exit(self, tmp_path: Path) -> None:
         """Verify compact_session returns True on successful zero-exit."""
-        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stderr="")
+        with patch("hephaestus.automation.learn.claude_invoke._run_tracked") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             result = compact_session("test-repo", 42, AGENT_PLAN_REVIEWER, tmp_path)
 
@@ -197,6 +200,7 @@ class TestCompactAgentSession:
             approval="never",
             disable_pi_automation=False,
             pi_dir=None,
+            process_tracker=subprocess_registry.track_process_group,
         )
 
     def test_direct_compact_without_a_session_is_a_safe_noop(self, tmp_path: Path) -> None:

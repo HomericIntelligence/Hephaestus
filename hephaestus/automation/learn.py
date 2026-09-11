@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
+import hephaestus.automation.claude_invoke as claude_invoke
+import hephaestus.utils.subprocess_registry as subprocess_registry
 from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.pi_session import AgentSessionBinding
@@ -26,6 +29,7 @@ def compact_session(
     cwd: Path,
     timeout: int | None = None,
     model: str | None = None,
+    remaining_timeout: Callable[[], int] | None = None,
 ) -> bool:
     """Send ``/compact`` to one Claude session.
 
@@ -39,16 +43,26 @@ def compact_session(
         cwd: Working directory for session lookup.
         timeout: Subprocess timeout in seconds.
         model: Optional ``MODEL[:EFFORT]`` value. Session lookup uses the model.
+        remaining_timeout: Optional operation deadline and cancellation check.
 
     Returns:
         True if compaction succeeds; otherwise False.
 
     """
-    effective_model = parse_model_selection(model).model if model is not None else None
-    sid = session_uuid(repo, issue, agent, effective_model, cwd=cwd)
     timeout_s = learn_claude_timeout() if timeout is None else timeout
     try:
-        result = subprocess.run(
+        if remaining_timeout is not None:
+            timeout_s = min(timeout_s, remaining_timeout())
+        effective_model = parse_model_selection(model).model if model is not None else None
+        sid = session_uuid(
+            repo,
+            issue,
+            agent,
+            effective_model,
+            cwd=cwd,
+            remaining_timeout=remaining_timeout,
+        )
+        claude_invoke._run_tracked(
             [
                 "claude",
                 "--resume",
@@ -57,40 +71,36 @@ def compact_session(
                 "text",
                 "--print",
             ],
-            input="/compact",
+            stdin_text="/compact",
             cwd=str(cwd),
             timeout=timeout_s,
-            check=False,
-            capture_output=True,
-            text=True,
             env=build_claude_child_env(),
+            use_devnull_stdin=False,
+            remaining_timeout=remaining_timeout,
         )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        logger.warning(
-            "Issue #%s: /compact failed for agent=%s (non-fatal): %s",
-            issue,
-            agent,
-            e,
-        )
-        return False
-
-    if result.returncode != 0:
-        stderr = result.stderr or ""
-        # A session can be absent when its role did no work.
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
         if "No conversation found with session ID" in stderr:
             logger.debug(
-                "Issue #%s: no %s session to compact (session %s); skipping",
+                "Issue #%s: no %s session to compact; skipping",
                 issue,
                 agent,
-                sid,
             )
             return False
         logger.warning(
             "Issue #%s: /compact for agent=%s exited %s (non-fatal); stderr=%s",
             issue,
             agent,
-            result.returncode,
+            exc.returncode,
             stderr[:200],
+        )
+        return False
+    except (subprocess.TimeoutExpired, OSError, InterruptedError) as e:
+        logger.warning(
+            "Issue #%s: /compact failed for agent=%s (non-fatal): %s",
+            issue,
+            agent,
+            e,
         )
         return False
 
@@ -114,6 +124,7 @@ def compact_agent_session(
     auth_status_timeout: int = 10,
     pi_isolation_adapter: str | None = None,
     pi_dir: Path | None = None,
+    remaining_timeout: Callable[[], int] | None = None,
 ) -> bool:
     """Compact a stored provider session.
 
@@ -122,34 +133,46 @@ def compact_agent_session(
     Return False when the session cannot be resumed or compaction fails.
     """
     if provider == "claude":
-        return compact_session(repo, issue, session_agent, cwd, timeout, model)
-    provider = resolve_agent(
-        provider,
-        cwd=cwd,
-        disable_pi_automation=disable_pi_automation,
-        auth_status_timeout=auth_status_timeout,
-        pi_isolation_adapter=pi_isolation_adapter,
-        pi_dir=pi_dir,
-        model_references=(model or "",),
-    )
-    resume = agent_compaction_resume(
-        provider,
-        session_agent=session_agent,
-        session_id=session_id,
-        session_binding=session_binding,
-        execution_request=execution_request,
-    )
-    if resume is None:
-        logger.debug(
-            "Issue #%s: no resumable %s session to compact for agent=%s; skipping",
+        return compact_session(
+            repo,
             issue,
-            provider,
             session_agent,
+            cwd,
+            timeout,
+            model,
+            remaining_timeout,
         )
-        return False
-    resume_session_id, resume_options = resume
-    timeout_s = learn_claude_timeout() if timeout is None else timeout
     try:
+        timeout_s = learn_claude_timeout() if timeout is None else timeout
+        if remaining_timeout is not None:
+            timeout_s = min(timeout_s, remaining_timeout())
+        provider = resolve_agent(
+            provider,
+            cwd=cwd,
+            disable_pi_automation=disable_pi_automation,
+            auth_status_timeout=auth_status_timeout,
+            pi_isolation_adapter=pi_isolation_adapter,
+            pi_dir=pi_dir,
+            model_references=(model or "",),
+        )
+        resume = agent_compaction_resume(
+            provider,
+            session_agent=session_agent,
+            session_id=session_id,
+            session_binding=session_binding,
+            execution_request=execution_request,
+        )
+        if resume is None:
+            logger.debug(
+                "Issue #%s: no resumable %s session to compact for agent=%s; skipping",
+                issue,
+                provider,
+                session_agent,
+            )
+            return False
+        resume_session_id, resume_options = resume
+        if remaining_timeout is not None:
+            timeout_s = min(timeout_s, remaining_timeout())
         resume_agent_session(
             agent=provider,
             session_id=resume_session_id,
@@ -161,9 +184,16 @@ def compact_agent_session(
             approval="never",
             disable_pi_automation=disable_pi_automation,
             pi_dir=pi_dir,
+            process_tracker=subprocess_registry.track_process_group,
             **resume_options,
         )
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, ValueError) as exc:
+    except (
+        InterruptedError,
+        subprocess.TimeoutExpired,
+        subprocess.CalledProcessError,
+        OSError,
+        ValueError,
+    ) as exc:
         logger.warning(
             "Issue #%s: /compact failed for provider=%s agent=%s (non-fatal): %s",
             issue,
