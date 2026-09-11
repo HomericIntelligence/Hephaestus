@@ -18868,6 +18868,7 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
     reservation = {"branch": branch, "base_sha": target_sha}
     ctx = MagicMock()
     ctx.org = "acme"
+    ctx.config.repo_state_roots = {}
     ctx.paths = SimpleNamespace(repo_root=repo)
     ImplementationStage().on_job_done(item, failure, ctx)
     assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
