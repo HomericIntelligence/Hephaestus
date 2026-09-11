@@ -45,7 +45,7 @@ jobs:
             uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers
             -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
         run: |
-          receipt=pr3113-complete-normal-569e5ae3.txt
+          receipt="$RUNNER_TEMP/pr3113-complete-normal-569e5ae3.txt"
           {
             echo "workflow: $GITHUB_WORKFLOW"
             echo "workflow_ref: $GITHUB_WORKFLOW_REF"
@@ -91,6 +91,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pr3113-complete-normal-569e5ae3
-          path: pr3113-complete-normal-569e5ae3.txt
+          path: ${{ runner.temp }}/pr3113-complete-normal-569e5ae3.txt
           if-no-files-found: error
           retention-days: 14
