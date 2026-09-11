@@ -1566,6 +1566,7 @@ class TestGate:
                 value={
                     "conflict_paths": ("hephaestus/example.py",),
                     "conflict_snapshot": {"hephaestus/example.py": "after"},
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                     "conflict_hunks": {"hephaestus/example.py": "resolved"},
                     "conflict_index_snapshot": "1" * 64,
                     "paused_head_sha": "c" * 40,
@@ -1629,12 +1630,14 @@ class TestGate:
                     "conflict.py": "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
                 },
                 "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                 "rebase_conflict_index_snapshot": "1" * 64,
                 "rebase_paused_head_sha": "c" * 40,
                 "rebase_base_sha": "b" * 40,
                 "rebase_expected_remote_sha": "a" * 40,
             }
         )
+        binding = _prepared_writer(item)
 
         first = stage.step(item, ctx)
         assert isinstance(first, JobRequest)
@@ -1645,6 +1648,10 @@ class TestGate:
         assert isinstance(validation, JobRequest)
         assert isinstance(validation.job, GitJob)
         assert validation.job.op == "validate_rebase_conflict"
+        assert validation.job.workspace == binding
+        assert validation.job.expected_repository == f"{ctx.org}/{item.repo}"
+        assert validation.job.kwargs["repo_root"] == str(ctx.paths.repo_root)
+        assert validation.job.kwargs["issue_number"] == item.issue
         assert validation.job.kwargs["agent_summary"] == "No files changed."
 
         stage.on_job_done(
@@ -1655,6 +1662,7 @@ class TestGate:
                 value={
                     "conflict_paths": ("conflict.py",),
                     "conflict_snapshot": {"conflict.py": "before"},
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                     "conflict_hunks": {
                         "conflict.py": ("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n")
                     },
@@ -1690,6 +1698,7 @@ class TestGate:
                 value={
                     "conflict_paths": ("conflict.py",),
                     "conflict_snapshot": {"conflict.py": "before"},
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
                     "conflict_hunks": {
                         "conflict.py": ("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n")
                     },

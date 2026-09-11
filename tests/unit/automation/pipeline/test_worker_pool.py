@@ -12415,10 +12415,12 @@ class TestGitOps:
                 "publish_rebased_head": True,
                 "branch": "7-auto-impl",
                 "expected_remote_sha": expected_remote_sha,
+                "rebase_reason": "review_conflict",
             },
         )
 
         with (
+            patch.object(pool, "_revalidate_review_conflict", return_value=None),
             patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
             patch.object(
                 pool,
@@ -12426,7 +12428,7 @@ class TestGitOps:
                 return_value=(os.environ.copy(), ()),
             ),
         ):
-            paused = pool._git_rebase(rebase_job)
+            paused = pool._git_rebase(rebase_job, record_source=Mock())
 
             assert paused.ok is False
             assert paused.error == "mechanical rebase hit conflicts; resolution required"
@@ -12480,7 +12482,8 @@ class TestGitOps:
                     op="continue_rebase",
                     timeout_s=60,
                     kwargs=continuation_kwargs,
-                )
+                ),
+                record_source=Mock(),
             )
 
         assert continued.ok is True
