@@ -39,7 +39,7 @@ def validate_worker_storage(
 ) -> None:
     """Reject shared scratch and overlapping authority/workspace directories."""
     if scratch_roots is None:
-        scratch_roots = (Path("/tmp"), Path("/var/tmp"), Path(tempfile.gettempdir()))
+        scratch_roots = (Path("/") / "tmp", Path("/") / "var" / "tmp", Path(tempfile.gettempdir()))
     paths = [path.resolve() for path in (codex_home, state_dir, workspace_root)]
     for private in paths[:2]:
         if any(private.is_relative_to(root.resolve()) for root in scratch_roots):

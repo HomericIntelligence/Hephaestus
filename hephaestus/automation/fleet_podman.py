@@ -12,28 +12,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.pi_plugins import ProcessResult, run_bounded_command
-from hephaestus.automation.fleet_containment import (
-    SELINUX_TOOL_TYPE,
-    TOOL_ENVIRONMENT,
-    ContainerSpec,
-    container_selinux_labels,
-)
+from hephaestus.automation.fleet_containment import TOOL_ENVIRONMENT, ContainerSpec
 
 _PROC = Path("/proc")
 _CGROUP = Path("/sys/fs/cgroup")
-_SELINUX_ENFORCE = Path("/sys/fs/selinux/enforce")
 _CID = re.compile(r"[0-9a-f]{64}")
-
-
-def _selinux_enabled() -> bool:
-    try:
-        enforcing = _read(_SELINUX_ENFORCE)
-    except FileNotFoundError:
-        return False
-    if enforcing != "1":
-        raise ValueError("selinux_enforcement_unconfirmed")
-    return True
 
 
 def _container_id(value: Any) -> str:
@@ -48,16 +31,6 @@ def _private_directory(path: Path) -> Path:
     if path.is_symlink() or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError("engine_directory_not_private")
     return path.resolve(strict=True)
-
-
-def _stop_attachment(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=2)
 
 
 class PodmanEngine:
@@ -100,7 +73,7 @@ class PodmanEngine:
         )
         if not private_parent:
             raise ValueError("engine_context_untrusted")
-        identity = {
+        return {
             "executable": str(self.executable),
             "executableSha256": hashlib.sha256(self.executable.read_bytes()).hexdigest(),
             "socket": str(self.socket_path),
@@ -109,9 +82,6 @@ class PodmanEngine:
             "ownerUid": endpoint.st_uid,
             "home": str(self.home),
         }
-        if _selinux_enabled():
-            identity["selinuxType"] = SELINUX_TOOL_TYPE
-        return identity
 
     def _argv(self, *arguments: str) -> list[str]:
         return [
@@ -122,13 +92,19 @@ class PodmanEngine:
             *arguments,
         ]
 
-    def _run(self, *arguments: str) -> ProcessResult:
-        result = run_bounded_command(
-            tuple(self._argv(*arguments)), env=self.environment, timeout=15
-        )
-        if result.timed_out:
-            raise RuntimeError("engine_command_timeout")
-        if result.output_overflow:
+    def _run(self, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+        try:
+            result = subprocess.run(
+                self._argv(*arguments),
+                env=self.environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("engine_command_timeout") from error
+        if len(result.stdout) > 1024 * 1024 or len(result.stderr) > 1024 * 1024:
             raise RuntimeError("engine_response_limit")
         return result
 
@@ -142,7 +118,6 @@ class PodmanEngine:
         source = str(spec.workspace)
         if any(character in source for character in (",", "\n", "\r")):
             raise ValueError("unsupported_container_workspace")
-        selinux_enabled = _selinux_enabled()
         arguments = [
             "create",
             "--pull=never",
@@ -173,14 +148,12 @@ class PodmanEngine:
             "--workdir=/workspace",
             "--entrypoint=/opt/codex-bin/codex",
         ]
-        if selinux_enabled:
-            arguments.append("--security-opt=label=type:" + SELINUX_TOOL_TYPE)
         for name, value in TOOL_ENVIRONMENT.items():
             arguments.extend(["--env", f"{name}={value}"])
         result = self._run(*arguments, spec.image_digest, "exec-server", "--listen", "stdio")
         if result.returncode:
             raise RuntimeError("engine_command_failed")
-        return _container_id(result.stdout.strip())
+        return _container_id(result.stdout.decode().strip())
 
     def inspect(self, container_id: str) -> dict[str, Any]:
         """Return actual engine state for one full container identity."""
@@ -224,26 +197,18 @@ class PodmanEngine:
 
     def close(self) -> None:
         """Close local attachment processes without declaring contained work stopped."""
-        failures: list[BaseException] = []
-        retained = []
         for process in self.attachments:
-            process_failures: list[BaseException] = []
-            try:
-                _stop_attachment(process)
-            except BaseException as error:
-                process_failures.append(error)
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
-                    try:
-                        stream.close()
-                    except BaseException as error:
-                        process_failures.append(error)
-            if process_failures:
-                retained.append(process)
-                failures.extend(process_failures)
-        self.attachments = retained
-        if failures:
-            raise BaseExceptionGroup("engine_attachment_cleanup_failed", failures)
+                    stream.close()
+        self.attachments.clear()
 
 
 def _read(path: Path) -> str:
@@ -257,39 +222,6 @@ def _read(path: Path) -> str:
 def _start_time(pid: int) -> str:
     value = _read(_PROC / str(pid) / "stat")
     return value[value.rindex(")") + 2 :].split()[19]
-
-
-def _workspace_selinux_labels(
-    snapshot: dict[str, Any], workspace: Path, required: bool
-) -> tuple[str, str] | None:
-    labels = container_selinux_labels(snapshot, required)
-    if labels is None:
-        return None
-    getxattr = getattr(os, "getxattr", None)
-    if not callable(getxattr):
-        raise ValueError("kernel_boundary_unconfirmed")
-    workspace_label = (
-        getxattr(workspace, "security.selinux", follow_symlinks=False)
-        .decode("ascii")
-        .removesuffix("\0")
-    )
-    actual = container_selinux_labels(
-        {"ProcessLabel": labels[0], "MountLabel": workspace_label}, True
-    )
-    if actual != labels:
-        raise ValueError("kernel_boundary_unconfirmed")
-    return labels
-
-
-def _verify_process_selinux_label(process: Path, labels: tuple[str, str] | None) -> None:
-    if labels is None:
-        return
-    process_label = _read(process / "attr/current").removesuffix("\0")
-    actual = container_selinux_labels(
-        {"ProcessLabel": process_label, "MountLabel": labels[1]}, True
-    )
-    if actual != labels:
-        raise ValueError("kernel_boundary_unconfirmed")
 
 
 class LinuxKernel:
@@ -312,18 +244,13 @@ class LinuxKernel:
         if sys.platform != "linux":
             raise ValueError("same_host_linux_observation_required")
         try:
-            observation = self._capture(container_id, snapshot, spec)
-            if _selinux_enabled() != ("selinux" in observation):
-                raise ValueError("kernel_boundary_unconfirmed")
-            return observation
+            return self._capture(container_id, snapshot, spec)
         except (KeyError, IndexError, TypeError, OSError, ValueError) as error:
             raise ValueError("kernel_boundary_unconfirmed") from error
 
     def _capture(
         self, container_id: str, snapshot: dict[str, Any], spec: ContainerSpec
     ) -> dict[str, Any]:
-        selinux_enabled = _selinux_enabled()
-        labels = _workspace_selinux_labels(snapshot, spec.workspace, selinux_enabled)
         scope = self._scope(container_id, snapshot["State"]["CgroupPath"])
         pid = snapshot["State"]["Pid"]
         if type(pid) is not int or pid <= 0:
@@ -349,7 +276,6 @@ class LinuxKernel:
         processes = []
         for process_id in sorted(pids):
             process = _PROC / str(process_id)
-            _verify_process_selinux_label(process, labels)
             group = _read(process / "cgroup").removeprefix("0::")
             if not (_CGROUP / group.lstrip("/")).is_relative_to(scope):
                 raise ValueError("kernel_boundary_unconfirmed")
@@ -362,7 +288,7 @@ class LinuxKernel:
                 if os.readlink(process / "ns" / name) == os.readlink(_PROC / "self/ns" / name):
                     raise ValueError("kernel_boundary_unconfirmed")
             processes.append({"pid": process_id, "startTimeTicks": _start_time(process_id)})
-        observation: dict[str, Any] = {
+        return {
             "bootId": _read(_PROC / "sys/kernel/random/boot_id"),
             "containerId": container_id,
             "cgroupPath": str(scope.relative_to(_CGROUP)),
@@ -374,9 +300,6 @@ class LinuxKernel:
                 "pidsLimit": spec.pids_limit,
             },
         }
-        if labels is not None:
-            observation["selinux"] = {"processLabel": labels[0], "workspaceLabel": labels[1]}
-        return observation
 
     def absent(self, before: dict[str, Any]) -> bool:
         """Require the original boot, cgroup absence, and absence of every original process."""

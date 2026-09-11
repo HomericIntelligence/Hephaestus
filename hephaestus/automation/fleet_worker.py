@@ -639,10 +639,3 @@ class FleetWorker:
         finally:
             self.journal.close()
             self._closed = True
-
-
-def main() -> int:
-    """Run the Fleet worker command line."""
-    from hephaestus.automation.fleet_worker_cli import main as cli_main
-
-    return cli_main()

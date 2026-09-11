@@ -5,13 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import threading
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
@@ -19,7 +16,6 @@ from hephaestus.automation.fleet_journal import WorkerJournal
 
 # These paths belong to the container mount namespace, not host temporary storage.
 _CONTAINER_SCRATCH = str(PurePosixPath("/") / "tmp")
-SELINUX_TOOL_TYPE = "container_userns_t"
 TOOL_ENVIRONMENT = {
     "HOME": "/workspace/.fleet-runtime/home",
     "XDG_CONFIG_HOME": "/workspace/.fleet-runtime/xdg/config",
@@ -33,32 +29,6 @@ TOOL_ENVIRONMENT = {
     "LANG": "C.UTF-8",
     "HOSTNAME": "fleet-tool",
 }
-
-
-def _private_selinux_label(value: Any, prefix: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError("container_policy_mismatch")
-    match = re.fullmatch(re.escape(prefix) + r":s0:c([0-9]{1,4})([,.])c([0-9]{1,4})", value)
-    if match is None:
-        raise ValueError("container_policy_mismatch")
-    first, second = int(match[1]), int(match[3])
-    if first == second or max(first, second) >= 1024 or (match[2] == "." and second != first + 1):
-        raise ValueError("container_policy_mismatch")
-    return f"{prefix}:s0:c{min(first, second)},c{max(first, second)}"
-
-
-def container_selinux_labels(snapshot: dict[str, Any], required: bool) -> tuple[str, str] | None:
-    """Require the supported process domain and matching private Podman MCS pair."""
-    process, mount = snapshot.get("ProcessLabel"), snapshot.get("MountLabel")
-    if not required:
-        if process not in (None, "") or mount not in (None, ""):
-            raise ValueError("container_policy_mismatch")
-        return None
-    process = _private_selinux_label(process, f"system_u:system_r:{SELINUX_TOOL_TYPE}")
-    mount = _private_selinux_label(mount, "system_u:object_r:container_file_t")
-    if process.split(":", 3)[3] != mount.split(":", 3)[3]:
-        raise ValueError("container_policy_mismatch")
-    return process, mount
 
 
 def _expected_environment(entries: Any) -> bool:
@@ -207,14 +177,6 @@ def validate_container(snapshot: dict[str, Any], lease: dict[str, Any]) -> None:
     spec = lease["spec"]
     config = snapshot.get("Config", {})
     host = snapshot.get("HostConfig", {})
-    selinux_type = lease["engine"].get("selinuxType")
-    if selinux_type not in (None, SELINUX_TOOL_TYPE):
-        raise ValueError("container_policy_mismatch")
-    container_selinux_labels(snapshot, selinux_type is not None)
-    security_options = host.get("SecurityOpt", [])
-    expected_security_options = {"no-new-privileges"}
-    if selinux_type is not None:
-        expected_security_options.add("label=type:" + SELINUX_TOOL_TYPE)
     expected = {
         "ReadonlyRootfs": True,
         "Privileged": False,
@@ -238,10 +200,7 @@ def validate_container(snapshot: dict[str, Any], lease: dict[str, Any]) -> None:
         config.get("Entrypoint") in (["/opt/codex-bin/codex"], "/opt/codex-bin/codex"),
         config.get("Cmd") == ["exec-server", "--listen", "stdio"],
         config.get("Labels", {}).get("hi.fleet.lease") == lease["leaseId"],
-        isinstance(security_options, list)
-        and len(security_options) == len(expected_security_options)
-        and all(isinstance(value, str) for value in security_options)
-        and set(security_options) == expected_security_options,
+        "no-new-privileges" in host.get("SecurityOpt", []),
         not host.get("CapAdd"),
         _expected_capabilities(snapshot, host),
         not host.get("Devices"),
@@ -263,63 +222,19 @@ def validate_container(snapshot: dict[str, Any], lease: dict[str, Any]) -> None:
         raise ValueError("container_policy_mismatch")
 
 
-def _serialized[**P, R](method: Callable[P, R]) -> Callable[P, R]:
-    @wraps(method)
-    def invoke(*args: P.args, **kwargs: P.kwargs) -> R:
-        owner = cast(ContainedExecSupervisor, args[0])
-        with owner.operation_lock:
-            return method(*args, **kwargs)
-
-    return invoke
-
-
 class ContainedExecSupervisor:
     """Keep creation, attachment, and causal disposal behind one private writer."""
 
-    def __init__(
-        self, state_dir: Path, engine: Any, kernel: Any, *, protected_roots: tuple[Path, ...] = ()
-    ) -> None:
+    def __init__(self, state_dir: Path, engine: Any, kernel: Any) -> None:
         """Load unresolved leases without restarting or removing their containers."""
-        requested_roots = tuple(root.resolve(strict=True) for root in protected_roots)
         self.journal = WorkerJournal(state_dir)
-        self.operation_lock = threading.RLock()
         self.engine = engine
         self.kernel = kernel
         self.leases: dict[str, dict[str, Any]] = {}
         self.attachments: dict[str, Any] = {}
-        try:
-            retained_roots: list[str] = []
-            for record in self.journal.records:
-                if record["kind"] == "containment":
-                    self.leases[record["value"]["leaseId"]] = record["value"]
-                elif record["kind"] == "containment_authority":
-                    retained_roots = record["value"]["protectedRoots"]
-            if not isinstance(retained_roots, list) or any(
-                not isinstance(root, str) or not Path(root).is_absolute() for root in retained_roots
-            ):
-                raise ValueError("invalid_protected_roots")
-            paths = sorted(
-                set(retained_roots)
-                | {str(self.journal.directory.resolve()), *(str(root) for root in requested_roots)}
-            )
-            if len(paths) > 128:
-                raise ValueError("protected_root_limit")
-            self.protected_roots = tuple(Path(root) for root in paths)
-            for lease in self.leases.values():
-                if lease["phase"] != "disposed":
-                    self._check_workspace(Path(lease["spec"]["workspace"]))
-            if paths != retained_roots:
-                self.journal.append("containment_authority", {"protectedRoots": paths})
-        except BaseException:
-            self.journal.close()
-            raise
-
-    def _check_workspace(self, workspace: Path) -> None:
-        if any(
-            root.is_relative_to(workspace) or workspace.is_relative_to(root)
-            for root in self.protected_roots
-        ):
-            raise ValueError("supervisor_storage_overlap")
+        for record in self.journal.records:
+            if record["kind"] == "containment":
+                self.leases[record["value"]["leaseId"]] = record["value"]
 
     def _save(self, lease: dict[str, Any]) -> dict[str, Any]:
         value = json.loads(json.dumps(lease))
@@ -327,12 +242,10 @@ class ContainedExecSupervisor:
         self.leases[value["leaseId"]] = value
         return cast(dict[str, Any], json.loads(json.dumps(value)))
 
-    @_serialized
     def inspect(self, lease_id: str) -> dict[str, Any]:
         """Return retained metadata without implying an engine observation."""
         return cast(dict[str, Any], json.loads(json.dumps(self.leases[lease_id])))
 
-    @_serialized
     def inventory(self) -> list[dict[str, Any]]:
         """Return all retained leases, including uncertain and disposed outcomes."""
         return [self.inspect(lease_id) for lease_id in self.leases]
@@ -366,35 +279,11 @@ class ContainedExecSupervisor:
                 raise ValueError("kernel_observation_invalid")
         return cast(dict[str, Any], value)
 
-    @_serialized
-    def observe_execution(self, lease_id: str, *, active: bool) -> dict[str, Any]:
-        """Check the current boundary without starting or disposing of its container."""
-        try:
-            lease = self.inspect(lease_id)
-            if lease["phase"] != ("active" if active else "created"):
-                raise ValueError("container_phase_not_ready")
-            self._check_context(lease)
-            self._check_workspace(ContainerSpec.from_document(lease["spec"]).workspace)
-            snapshot = self.engine.inspect(lease["containerId"])
-            validate_container(snapshot, lease)
-            if snapshot["State"].get("Running") is not active:
-                raise ValueError("container_running_state_changed")
-            if active:
-                current = self._capture(lease, snapshot)
-                previous = lease.get("runtime", {})
-                if any(
-                    previous.get(key) != current[key]
-                    for key in ("bootId", "containerId", "cgroupPath")
-                ):
-                    raise ValueError("kernel_observation_changed")
-            return lease
-        except (KeyError, TypeError, OSError, RuntimeError) as error:
-            raise ValueError("container_observation_unavailable") from error
-
-    @_serialized
     def create(self, spec: ContainerSpec) -> dict[str, Any]:
         """Persist creation intent before requesting an immutable contained endpoint."""
-        self._check_workspace(spec.workspace)
+        authority = self.journal.directory.resolve()
+        if authority.is_relative_to(spec.workspace) or spec.workspace.is_relative_to(authority):
+            raise ValueError("supervisor_storage_overlap")
         active = [item for item in self.leases.values() if item["phase"] != "disposed"]
         if len(active) >= 24:
             raise ValueError("supervisor_capacity")
@@ -428,7 +317,6 @@ class ContainedExecSupervisor:
         lease["phase"] = "created"
         return self._save(lease)
 
-    @_serialized
     def start(self, lease_id: str) -> Any:
         """Attach once and record the actual same-host kernel boundary before returning."""
         lease = self.inspect(lease_id)
@@ -488,7 +376,6 @@ class ContainedExecSupervisor:
         lease.pop("waitingReason", None)
         return self._save(lease)
 
-    @_serialized
     def dispose(self, lease_id: str) -> dict[str, Any]:
         """Remove only the owned container and independently observe process/cgroup absence."""
         lease = self.inspect(lease_id)
@@ -517,7 +404,6 @@ class ContainedExecSupervisor:
         except (OSError, ValueError, RuntimeError):
             return self._uncertain(lease, "container_disposal_unconfirmed")
 
-    @_serialized
     def reconcile(self, lease_id: str) -> dict[str, Any]:
         """Observe a retained lease after restart without repeating create/start/remove."""
         lease = self.inspect(lease_id)

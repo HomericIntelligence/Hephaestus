@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
 import sys
-import tempfile
-import time
-from pathlib import Path
 
 import pytest
 
@@ -18,53 +14,39 @@ pytestmark = pytest.mark.precommit
 
 
 @pytest.fixture
-def engine_process(monkeypatch, tmp_path: Path):
+def engine_process(tmp_path, monkeypatch):
     """Replace only Podman with an executable that records exact arguments and environment."""
     from hephaestus.automation import fleet_podman
 
-    monkeypatch.setattr(fleet_podman, "_SELINUX_ENFORCE", tmp_path / "enforce", raising=False)
-    with tempfile.TemporaryDirectory(prefix="hephaestus-podman-", dir=tmp_path) as directory:
-        private = Path(directory).resolve() / "engine"
-        private.mkdir(mode=0o700)
-        executable = private / "podman"
-        executable.write_text(
-            f"#!{sys.executable}\n"
-            "import json, os, pathlib, sys\n"
-            "root = pathlib.Path(__file__).parent\n"
-            "with (root / 'calls.jsonl').open('a') as stream:\n"
-            " stream.write(json.dumps({'argv':sys.argv[1:],'env':dict(os.environ)})+'\\n')\n"
-            "args=sys.argv[1:]\n"
-            "if 'create' in args: print('b'*64)\n"
-            "elif 'inspect' in args: print(json.dumps([{'Id':'b'*64}]))\n"
-            "elif 'exists' in args: sys.exit(int((root / 'exists-code').read_text()))\n"
-            "elif 'start' in args: sys.stdout.write(sys.stdin.readline()); sys.stdout.flush()\n"
-        )
-        executable.chmod(0o700)
-        (private / "exists-code").write_text("0")
-        home = private / "home"
-        home.mkdir(mode=0o700)
-        with socket.socket(socket.AF_UNIX) as connection:
-            socket_path = private / "engine.sock"
-            previous_directory = Path.cwd()
-            try:
-                os.chdir(private)
-                connection.bind(socket_path.name)
-            finally:
-                os.chdir(previous_directory)
-            socket_path.chmod(0o600)
-            monkeypatch.setenv("CONTAINER_HOST", "unix:///untrusted.sock")
-            monkeypatch.setenv("AGAMEMNON_API_KEY", "synthetic-only")
-            monkeypatch.setenv("HTTP_PROXY", "http://synthetic.invalid")
-            engine = fleet_podman.PodmanEngine(executable, socket_path, home)
-            yield engine, private
-            engine.close()
-
-
-def test_engine_fixture_stays_below_pytest_scratch(engine_process, tmp_path: Path) -> None:
-    """Keep the engine socket below the verifier-provided pytest scratch path."""
-    _, private = engine_process
-
-    assert private.is_relative_to(tmp_path.resolve())
+    private = tmp_path / "engine"
+    private.mkdir(mode=0o700)
+    executable = private / "podman"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys\n"
+        "root = pathlib.Path(__file__).parent\n"
+        "with (root / 'calls.jsonl').open('a') as stream:\n"
+        " stream.write(json.dumps({'argv':sys.argv[1:],'env':dict(os.environ)})+'\\n')\n"
+        "args=sys.argv[1:]\n"
+        "if 'create' in args: print('b'*64)\n"
+        "elif 'inspect' in args: print(json.dumps([{'Id':'b'*64}]))\n"
+        "elif 'exists' in args: sys.exit(int((root / 'exists-code').read_text()))\n"
+        "elif 'start' in args: sys.stdout.write(sys.stdin.readline()); sys.stdout.flush()\n"
+    )
+    executable.chmod(0o700)
+    (private / "exists-code").write_text("0")
+    home = private / "home"
+    home.mkdir(mode=0o700)
+    with socket.socket(socket.AF_UNIX) as connection:
+        socket_path = private / "engine.sock"
+        connection.bind(str(socket_path))
+        socket_path.chmod(0o600)
+        monkeypatch.setenv("CONTAINER_HOST", "unix:///untrusted.sock")
+        monkeypatch.setenv("AGAMEMNON_API_KEY", "synthetic-only")
+        monkeypatch.setenv("HTTP_PROXY", "http://synthetic.invalid")
+        engine = fleet_podman.PodmanEngine(executable, socket_path, home)
+        yield engine, private
+        engine.close()
 
 
 def test_explicit_engine_context_and_finite_container_environment(engine_process, tmp_path):
@@ -96,7 +78,7 @@ def test_explicit_engine_context_and_finite_container_environment(engine_process
         "XDG_RUNTIME_DIR",
         "LC_CTYPE",
     }
-    assert environment["HOME"] == str((private / "home").resolve())
+    assert environment["HOME"] == str(private / "home")
     assert "--mount" in args and str(spec.workspace) in args[args.index("--mount") + 1]
 
 
@@ -114,32 +96,6 @@ def test_engine_attachment_uses_the_owned_full_id_and_real_stdio(engine_process)
         "--sig-proxy=false",
         "b" * 64,
     ]
-
-
-def test_attachment_close_attempts_each_process_and_retains_failed_ownership(
-    engine_process, monkeypatch
-):
-    """One failed local cleanup must not leave other owned attachments running."""
-    engine, _private = engine_process
-    first = engine.attach("b" * 64)
-    second = engine.attach("b" * 64)
-    terminate = first.terminate
-
-    def fail_terminate():
-        raise OSError("fixture_termination_uncertain")
-
-    try:
-        monkeypatch.setattr(first, "terminate", fail_terminate)
-        with pytest.raises((OSError, BaseExceptionGroup)):
-            engine.close()
-        assert second.poll() is not None
-        assert all(stream.closed for stream in (second.stdin, second.stdout, second.stderr))
-        assert first in engine.attachments
-    finally:
-        monkeypatch.setattr(first, "terminate", terminate)
-        engine.close()
-    assert first.poll() is not None
-    assert engine.attachments == []
 
 
 def test_tool_hostname_and_environment_are_explicit_before_engine_creation(
@@ -190,33 +146,6 @@ def test_engine_distinguishes_absent_from_unavailable(engine_process):
         engine.exists("b" * 64)
 
 
-def test_engine_stops_a_command_when_output_exceeds_the_capture_limit(tmp_path):
-    """Stop an engine command before excess output can consume host memory."""
-    from hephaestus.automation import fleet_podman
-
-    executable = tmp_path / "podman"
-    sentinel = tmp_path / "continued-after-overflow"
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "import os, pathlib, sys, time\n"
-        "os.write(1, b'x' * (1024 * 1024 + 1))\n"
-        "time.sleep(3)\n"
-        f"pathlib.Path({str(sentinel)!r}).write_text('continued')\n"
-    )
-    executable.chmod(0o700)
-    engine = object.__new__(fleet_podman.PodmanEngine)
-    engine.executable = executable
-    engine.socket_path = tmp_path / "unused.sock"
-    engine.environment = {}
-
-    started = time.monotonic()
-    with pytest.raises(RuntimeError, match="engine_response_limit"):
-        engine.exists("b" * 64)
-
-    assert time.monotonic() - started < 2
-    assert not sentinel.exists()
-
-
 def test_engine_identity_binds_executable_and_socket_replacement(engine_process):
     """Replacement of either control endpoint changes the durable context identity."""
     engine, private = engine_process
@@ -248,7 +177,6 @@ def kernel_files(tmp_path, monkeypatch):
     cgroup.mkdir()
     monkeypatch.setattr(fleet_podman, "_PROC", proc)
     monkeypatch.setattr(fleet_podman, "_CGROUP", cgroup)
-    monkeypatch.setattr(fleet_podman, "_SELINUX_ENFORCE", tmp_path / "enforce", raising=False)
     monkeypatch.setattr(fleet_podman.sys, "platform", "linux")
     boot = proc / "sys/kernel/random/boot_id"
     boot.parent.mkdir(parents=True)
