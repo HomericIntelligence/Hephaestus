@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import subprocess
 import sys
 import threading
@@ -229,6 +230,42 @@ def test_worktree_removal_fallback_stops_during_directory_deletion(
     assert options["shutdown"] is shutdown
     assert callable(options["remaining_timeout"])
     assert not worktree_path.exists()
+
+
+def test_worktree_removal_stop_before_staging_preserves_predecessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop before staging must preserve the exact registered predecessor."""
+    repo, first, _ = _repository(tmp_path)
+    worktree_path = repo / "build" / ".worktrees" / "writer"
+    _git(repo, "worktree", "add", "--detach", str(worktree_path), first)
+    inode_before = worktree_path.stat().st_ino
+    contents_before = (worktree_path / "tracked.txt").read_bytes()
+    registration_before = _git(repo, "worktree", "list", "--porcelain")
+    manager = WorktreeManager(repo_root=repo)
+    shutdown = threading.Event()
+    real_run = git_runtime.run
+
+    def failed_git_remove(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[:4] == ["git", "worktree", "remove", "--force"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="removal failed")
+        return real_run(cmd, **kwargs)
+
+    def stop_after_initial_check(_size: int) -> str:
+        shutdown.set()
+        return "race"
+
+    monkeypatch.setattr(worktree_manager, "run", failed_git_remove)
+    monkeypatch.setattr(secrets, "token_hex", stop_after_initial_check)
+
+    with git_runtime.operation_deadline(time.monotonic() + 60.0, shutdown=shutdown):
+        with pytest.raises(InterruptedError):
+            manager._remove_worktree_path_forcefully(worktree_path)
+
+    assert worktree_path.exists()
+    assert worktree_path.stat().st_ino == inode_before
+    assert (worktree_path / "tracked.txt").read_bytes() == contents_before
+    assert _git(repo, "worktree", "list", "--porcelain") == registration_before
 
 
 def test_worktree_removal_partial_fallback_keeps_predecessor_recoverable(

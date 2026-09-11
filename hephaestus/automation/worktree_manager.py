@@ -1527,9 +1527,11 @@ class WorktreeManager:
                 if operation_timeout is None and shutdown is None:
                     shutil.rmtree(worktree_path)
                 else:
-                    staged_path = worktree_path.with_name(
+                    next_staged_path = worktree_path.with_name(
                         f".{worktree_path.name}.removing-{secrets.token_hex(16)}"
                     )
+                    remaining_operation_timeout(timeout)
+                    staged_path = next_staged_path
                     worktree_path.rename(staged_path)
 
                     def _remaining_timeout() -> int | float:
