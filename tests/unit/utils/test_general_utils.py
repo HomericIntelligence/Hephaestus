@@ -508,6 +508,36 @@ class TestInstallPackage:
 class TestRunSubprocessTimeoutLogging:
     """Tests that run_subprocess logs TimeoutExpired correctly (#382/A4-07)."""
 
+    def test_untracked_child_receives_text_input(self) -> None:
+        """The ordinary subprocess path can receive text input."""
+        real_run = subprocess.run
+        with patch("hephaestus.utils.helpers.subprocess.run", wraps=real_run) as run:
+            result = run_subprocess(
+                [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+                env={"PATH": os.defpath},
+                input_text="request",
+            )
+
+        assert result.stdout == "request\n"
+        assert "stdin" not in run.call_args.kwargs
+
+    def test_unsupported_process_group_fallback_receives_text_input(self) -> None:
+        """The process-group fallback can receive text input."""
+        real_run = subprocess.run
+        with (
+            patch("hephaestus.utils.subprocess_registry.supported", return_value=False),
+            patch("hephaestus.utils.helpers.subprocess.run", wraps=real_run) as run,
+        ):
+            result = run_subprocess(
+                [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+                env={"PATH": os.defpath},
+                input_text="request",
+                track_process_group=True,
+            )
+
+        assert result.stdout == "request\n"
+        assert "stdin" not in run.call_args.kwargs
+
     def test_tracked_child_receives_text_input(self) -> None:
         """A tracked command can receive text through standard input."""
         process = MagicMock(pid=123, returncode=0)
@@ -627,6 +657,7 @@ class TestRunSubprocessTimeoutLogging:
 
         assert result is completed
         run.assert_called_once()
+        assert run.call_args.kwargs["stdin"] is subprocess.DEVNULL
 
     @pytest.mark.skipif(
         not hasattr(os, "killpg"),

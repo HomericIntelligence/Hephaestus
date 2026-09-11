@@ -261,6 +261,13 @@ def _communicate_until_deadline(
                 raise
 
 
+def _subprocess_run_input(input_text: str | None) -> dict[str, Any]:
+    """Return one valid standard-input configuration for subprocess.run."""
+    if input_text is None:
+        return {"stdin": subprocess.DEVNULL}
+    return {"input": input_text}
+
+
 def _run_tracked_process_group(
     cmd: list[str],
     *,
@@ -280,13 +287,12 @@ def _run_tracked_process_group(
         return subprocess.run(
             cmd,
             cwd=cwd,
-            stdin=subprocess.DEVNULL if input_text is None else None,
-            input=input_text,
             capture_output=True,
             text=True,
             check=check,
             timeout=timeout,
             env=env,
+            **_subprocess_run_input(input_text),
         )
 
     if shutdown is not None and shutdown.is_set():
@@ -416,13 +422,12 @@ def run_subprocess(
             result = subprocess.run(
                 cmd,
                 cwd=cwd,
-                stdin=subprocess.DEVNULL if input_text is None else None,
-                input=input_text,
                 capture_output=True,
                 text=True,
                 check=check,
                 timeout=timeout,
                 env=effective_env,
+                **_subprocess_run_input(input_text),
             )
         return result
     except subprocess.TimeoutExpired:
