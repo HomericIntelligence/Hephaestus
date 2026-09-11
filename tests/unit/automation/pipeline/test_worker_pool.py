@@ -101,6 +101,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _path_content_identity,
     _prepare_host_output_aliases,
     _quota_backed_volume,
+    _RebaseConflictContextError,
     _repo_lock_path,
     _run_bounded_git_output,
     _run_bounded_host_command,
@@ -11633,6 +11634,220 @@ class TestGitOps:
         assert receipt["base_sha"] == base
         assert receipt["expected_remote_sha"] == writer_head
 
+    def test_validate_conflict_uses_source_lease_without_recording_detached_head(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Read-only conflict validation keeps the existing source receipt."""
+        binding = WorkspaceBinding.source(
+            cwd=tmp_path,
+            reusable_root=tmp_path,
+            repository="test/repo",
+            ownership_key="test-owner",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision="c" * 40,
+            generation=0,
+            detached=False,
+        )
+        manager = MagicMock(spec=SourceWorkspaceManager)
+        receipt = MagicMock()
+        receipt.to_dict.return_value = {"revision": "c" * 40}
+        manager._require_receipt.return_value = receipt
+        record = Mock(return_value=binding)
+        manager.implementation_local_commit.return_value = nullcontext(record)
+        (tmp_path / "x.py").write_text("resolved\n", encoding="utf-8")
+        job = GitJob(
+            repo="test/repo",
+            op="validate_rebase_conflict",
+            timeout_s=60,
+            deadline_s=time.monotonic() + 60,
+            workspace=binding,
+            kwargs={
+                "cwd": str(tmp_path),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "branch": "7-auto-impl",
+                "paused_head_sha": "c" * 40,
+                "base_sha": "b" * 40,
+                "expected_remote_sha": "a" * 40,
+                "conflict_paths": ("x.py",),
+                "conflict_snapshot": {"x.py": "before"},
+                "conflict_index_snapshot": "1" * 64,
+            },
+        )
+        current_receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
+            "conflict_hunks": {"x.py": "bounded hunk"},
+        }
+        with (
+            patch.object(pool, "_source_git_manager", return_value=(manager, binding)),
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=current_receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
+        ):
+            result = pool._run_source_git_operation(job)
+
+        assert result.ok is True
+        assert result.value["conflict_resolution"] == "resolved_content"
+        assert result.value["source_receipt"] == {"revision": "c" * 40}
+        record.assert_not_called()
+
+    def test_conflict_hunk_bounds_file_capture_before_reading_content(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An oversized conflict file is rejected before an oversized read."""
+        content = b"<<<<<<< HEAD\n" + (b"a" * 4001) + b"\n=======\ntheirs\n>>>>>>> topic\n"
+        target = tmp_path / "x.py"
+        target.write_bytes(content)
+        captured: list[int] = []
+        original_read_bytes = Path.read_bytes
+
+        def capture(path: Path) -> bytes:
+            value = original_read_bytes(path)
+            captured.append(len(value))
+            return value
+
+        with patch.object(Path, "read_bytes", capture), pytest.raises(_RebaseConflictContextError):
+            pool._conflict_path_hunk(tmp_path, "x.py", timeout=60)
+
+        assert not captured or max(captured) <= 4000
+
+    def test_marker_free_context_bounds_each_index_stage_capture(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Each marker-free index stage uses the per-stage context limit."""
+        limits: list[int] = []
+
+        def bounded(_argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
+            limits.append(cast(int, kwargs["max_bytes"]))
+            return _BoundedGitOutput(
+                text="x" * 4001,
+                sha256="0" * 64,
+                byte_count=4001,
+            )
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
+            patch(f"{_WP}.git_utils.run", return_value=MagicMock(stdout="x" * 4001)),
+            pytest.raises(_RebaseConflictContextError),
+        ):
+            pool._marker_free_conflict_context(tmp_path, "x.py", timeout=60)
+
+        assert limits == [4000]
+
+    def test_conflict_receipt_bounds_conflict_path_and_index_capture(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Conflict path and index listings use their bounded capture limit."""
+        limits: list[int] = []
+
+        def bounded(argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
+            limits.append(cast(int, kwargs["max_bytes"]))
+            text = "x.py\0" if argv[1] == "diff" else "100644 deadbeef 1\tx.py\0"
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert limits == [64 * 1024, 64 * 1024]
+
+    @pytest.mark.parametrize("path_kind", ["file_symlink", "parent_symlink"])
+    def test_conflict_context_rejects_symlinked_paths(
+        self, pool: WorkerPool, tmp_path: Path, path_kind: str
+    ) -> None:
+        """Conflict context never follows a file or parent-directory link."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "x.py").write_text(
+            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n", encoding="utf-8"
+        )
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        if path_kind == "file_symlink":
+            (worktree / "x.py").symlink_to(outside / "x.py")
+            path = "x.py"
+        else:
+            (worktree / "linked").symlink_to(outside, target_is_directory=True)
+            path = "linked/x.py"
+
+        with pytest.raises(_RebaseConflictContextError, match="unsafe"):
+            pool._conflict_path_hunk(worktree, path, timeout=60)
+
+    def test_conflict_receipt_rejects_changed_remote_base(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A conflict receipt cannot use a remote base different from its pin."""
+        captured_base = "b" * 40
+        current_base = "d" * 40
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
+                return MagicMock(stdout="x.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z"]:
+                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=current_base + "\n")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        def bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            if argv == ("git", "diff", "--name-only", "--diff-filter=U", "-z"):
+                text = "x.py\0"
+            elif argv == ("git", "ls-files", "--stage", "-z"):
+                text = "100644 deadbeef 1\tx.py\0"
+            else:
+                raise AssertionError(f"unexpected bounded Git command: {argv!r}")
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha=captured_base,
+            )
+
+        assert result == JobResult(
+            ok=False,
+            error="paused rebase base changed during conflict resolution",
+        )
+
     @staticmethod
     def _continue_rebase_job(tmp_path: Path, *, repo: str = "Hephaestus") -> GitJob:
         return GitJob(
@@ -11660,6 +11875,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "before"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
@@ -11711,9 +11927,21 @@ class TestGitOps:
                 return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
             if argv == ["git", "rev-parse", "HEAD"]:
                 return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
             raise AssertionError(f"unexpected Git command: {argv!r}")
 
+        def fake_bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            result = fake_run(list(argv))
+            text = result.stdout
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
         with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
@@ -11746,6 +11974,8 @@ class TestGitOps:
                 return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
             if argv == ["git", "rev-parse", "HEAD"]:
                 return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
             if argv == ["git", "show", ":1:x.py"]:
                 return MagicMock(stdout="base content\n")
             if argv == ["git", "show", ":2:x.py"]:
@@ -11754,7 +11984,17 @@ class TestGitOps:
                 raise subprocess.CalledProcessError(128, argv)
             raise AssertionError(f"unexpected Git command: {argv!r}")
 
+        def fake_bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            result = fake_run(list(argv))
+            text = result.stdout
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
         with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
@@ -11786,11 +12026,23 @@ class TestGitOps:
                 return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
             if argv == ["git", "rev-parse", "HEAD"]:
                 return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
             if argv == ["git", "show", ":1:x.py"]:
                 raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
             raise AssertionError(f"unexpected Git command: {argv!r}")
 
+        def fake_bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            result = fake_run(list(argv))
+            text = result.stdout
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
         with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
@@ -11825,9 +12077,21 @@ class TestGitOps:
                 return MagicMock(stdout="100644 deadbeef 1\tconflict_0.py\0")
             if argv == ["git", "rev-parse", "HEAD"]:
                 return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
             raise AssertionError(f"unexpected Git command: {argv!r}")
 
+        def fake_bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            result = fake_run(list(argv))
+            text = result.stdout
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
         with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
@@ -11883,6 +12147,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "before"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         current_receipt = {
             **receipt,
@@ -11917,6 +12182,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after", "outside.py": "new"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         validation_job = GitJob(
             repo=job.repo,
@@ -12012,6 +12278,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -12064,6 +12331,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -12119,6 +12387,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -12214,6 +12483,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
@@ -12236,6 +12506,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -12304,6 +12575,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "2" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -12345,6 +12617,7 @@ class TestGitOps:
             # The complete index changed after the agent staged outside.py.
             "conflict_index_snapshot": "2" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
@@ -12368,6 +12641,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "d" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -12464,6 +12738,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         record_source = Mock()
         with (
@@ -12502,6 +12777,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         record_source = Mock()
         with (
@@ -12533,6 +12809,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         signed = (
             "tree deadbeef\ngpgsig -----BEGIN SIGNATURE-----\n\nfix\n\n"

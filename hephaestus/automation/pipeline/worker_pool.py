@@ -263,6 +263,8 @@ _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _CONFLICT_HUNK_MAX = 4000
 _CONFLICT_CONTEXT_MAX = 16000
 _CONFLICT_CONTEXT_VERSION = 1
+_CONFLICT_INDEX_MAX_BYTES = 64 * 1024
+_CONFLICT_FILE_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
 _CONFLICT_RESOLUTION_OUTCOMES = frozenset(
     {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
 )
@@ -958,6 +960,105 @@ class _RebaseSigningEnvironmentError(RuntimeError):
 
 class _RebaseConflictContextError(RuntimeError):
     """Raised when conflict context is incomplete or unsafe to retain."""
+
+
+def _validated_conflict_path(cwd: Path, path: str) -> Path:
+    """Validate every path component before a conflict file read."""
+    target = cwd / path
+    try:
+        target.relative_to(cwd)
+        current = target
+        while True:
+            if current.is_symlink():
+                raise _RebaseConflictContextError("conflict source path is unsafe")
+            if current == cwd:
+                break
+            parent = current.parent
+            if parent == current:
+                raise _RebaseConflictContextError("conflict source path is unsafe")
+            current = parent
+    except (OSError, ValueError) as exc:
+        raise _RebaseConflictContextError("conflict source path is unsafe") from exc
+    return target
+
+
+def _open_bounded_conflict_file(target: Path) -> int:
+    """Open one conflict file with flags that prevent link traversal."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if not isinstance(nofollow, int) or not nofollow or not isinstance(nonblock, int):
+        raise _RebaseConflictContextError("secure conflict source reads are unavailable")
+    try:
+        return os.open(target, os.O_RDONLY | nofollow | nonblock)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise _RebaseConflictContextError("conflict source path is unsafe") from exc
+
+
+def _conflict_file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Return metadata that proves one file stayed unchanged."""
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _read_conflict_file_chunks(descriptor: int) -> bytes:
+    """Read at most the configured number of bytes from an open file."""
+    chunks: list[bytes] = []
+    size = 0
+    while size < _CONFLICT_FILE_MAX_BYTES:
+        chunk = os.read(descriptor, _CONFLICT_FILE_MAX_BYTES - size)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > _CONFLICT_FILE_MAX_BYTES:
+            raise _RebaseConflictContextError(
+                f"conflict source exceeds {_CONFLICT_HUNK_MAX} characters"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _read_bounded_conflict_descriptor(descriptor: int, target: Path) -> bytes:
+    """Read and verify one open conflict file without exceeding its bound."""
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise _RebaseConflictContextError("conflict source path is unsafe")
+    if before.st_size > _CONFLICT_FILE_MAX_BYTES:
+        raise _RebaseConflictContextError(
+            f"conflict source exceeds {_CONFLICT_HUNK_MAX} characters"
+        )
+    raw = _read_conflict_file_chunks(descriptor)
+    after = os.fstat(descriptor)
+    if after.st_size > _CONFLICT_FILE_MAX_BYTES:
+        raise _RebaseConflictContextError(
+            f"conflict source exceeds {_CONFLICT_HUNK_MAX} characters"
+        )
+    current = target.lstat()
+    if _conflict_file_identity(before) != _conflict_file_identity(after) or (
+        _conflict_file_identity(after) != _conflict_file_identity(current)
+    ):
+        raise _RebaseConflictContextError("conflict source changed during read")
+    return raw
+
+
+def _read_bounded_conflict_file(cwd: Path, path: str) -> bytes:
+    """Read one regular conflict file without following links or exceeding its bound."""
+    target = _validated_conflict_path(cwd, path)
+    descriptor = _open_bounded_conflict_file(target)
+    try:
+        return _read_bounded_conflict_descriptor(descriptor, target)
+    except _RebaseConflictContextError:
+        raise
+    except OSError as exc:
+        raise _RebaseConflictContextError("conflict source cannot be read") from exc
+    finally:
+        os.close(descriptor)
 
 
 class _RemoteGitAuthenticationError(RuntimeError):
@@ -5687,7 +5788,7 @@ class WorkerPool:
         if not result.ok and recorded is None:
             return result
         if recorded is None:
-            if job.op != "inspect_implementation_worktree":
+            if job.op not in {"inspect_implementation_worktree", "validate_rebase_conflict"}:
                 record_source(manager._head_revision(binding.cwd, deadline=deadline))
             else:
                 recorded = (
@@ -7048,6 +7149,91 @@ class WorkerPool:
             fetch_config=remote_config,
         )
 
+    def _conflict_receipt_index_data(
+        self, cwd: Path, *, timeout: int
+    ) -> tuple[tuple[str, ...], str] | JobResult:
+        """Capture bounded unmerged paths and the index snapshot."""
+        paths_result = _run_bounded_git_output(
+            ("git", "diff", "--name-only", "--diff-filter=U", "-z"),
+            cwd=cwd,
+            timeout=timeout,
+            max_bytes=_CONFLICT_INDEX_MAX_BYTES,
+            retain_text=True,
+            shutdown=self._shutdown,
+        )
+        try:
+            paths_result.text.encode("utf-8")
+        except UnicodeEncodeError:
+            return JobResult(ok=False, error="paused rebase conflict paths invalid")
+        paths = tuple(path for path in paths_result.text.split("\0") if path)
+        if not paths or any(not is_safe_scope_retraction_path(path) for path in paths):
+            return JobResult(ok=False, error="paused rebase conflict paths invalid")
+        index_result = _run_bounded_git_output(
+            ("git", "ls-files", "--stage", "-z"),
+            cwd=cwd,
+            timeout=timeout,
+            max_bytes=_CONFLICT_INDEX_MAX_BYTES,
+            retain_text=True,
+            shutdown=self._shutdown,
+        )
+        if not index_result.text:
+            return JobResult(ok=False, error="paused rebase conflict index invalid")
+        try:
+            index_bytes = index_result.text.encode("utf-8")
+        except UnicodeEncodeError:
+            return JobResult(ok=False, error="paused rebase conflict index invalid")
+        return paths, hashlib.sha256(index_bytes).hexdigest()
+
+    @staticmethod
+    def _conflict_receipt_revisions(
+        cwd: Path,
+        *,
+        remote: str,
+        base_branch: str,
+        timeout: int,
+        base_sha: str | None,
+    ) -> tuple[str, str] | JobResult:
+        """Capture HEAD and verify the remote base did not change."""
+        paused_head_sha = git_utils.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            timeout=timeout,
+        ).stdout.strip()
+        if not _is_full_commit_sha(paused_head_sha):
+            return JobResult(ok=False, error="paused rebase head invalid")
+        observed_base_sha = git_utils.run(
+            ["git", "rev-parse", f"{remote}/{base_branch}"],
+            cwd=cwd,
+            timeout=timeout,
+        ).stdout.strip()
+        if not _is_full_commit_sha(observed_base_sha):
+            return JobResult(ok=False, error="paused rebase base head invalid")
+        if base_sha is not None and observed_base_sha != base_sha:
+            return JobResult(
+                ok=False,
+                error="paused rebase base changed during conflict resolution",
+            )
+        captured_base_sha = base_sha or observed_base_sha
+        if not _is_full_commit_sha(captured_base_sha):
+            return JobResult(ok=False, error="paused rebase base head invalid")
+        return paused_head_sha, captured_base_sha
+
+    def _conflict_receipt_hunks(
+        self, cwd: Path, paths: tuple[str, ...], *, timeout: int
+    ) -> dict[str, str]:
+        """Capture bounded, redacted context for every conflict path."""
+        hunks: dict[str, str] = {}
+        context_size = 0
+        for path in paths:
+            context = self._conflict_path_hunk(cwd, path, timeout=timeout)
+            context_size += len(context)
+            if context_size > _CONFLICT_CONTEXT_MAX:
+                raise _RebaseConflictContextError(
+                    f"total conflict context exceeds {_CONFLICT_CONTEXT_MAX} characters"
+                )
+            hunks[path] = context
+        return hunks
+
     def _conflict_receipt(
         self,
         cwd: Path,
@@ -7060,60 +7246,37 @@ class WorkerPool:
     ) -> dict[str, object] | JobResult:
         """Capture the immutable inputs and file snapshot of a paused rebase."""
         try:
-            paths_result = git_utils.run(
-                ["git", "diff", "--name-only", "--diff-filter=U", "-z"],
-                cwd=cwd,
+            index_data = self._conflict_receipt_index_data(cwd, timeout=timeout)
+            if isinstance(index_data, JobResult):
+                return index_data
+            paths, index_snapshot = index_data
+            revision_data = self._conflict_receipt_revisions(
+                cwd,
+                remote=remote,
+                base_branch=base_branch,
                 timeout=timeout,
+                base_sha=base_sha,
             )
-            paths = tuple(path for path in paths_result.stdout.split("\0") if path)
-            if not paths or any(not is_safe_scope_retraction_path(path) for path in paths):
-                return JobResult(ok=False, error="paused rebase conflict paths invalid")
-            index_result = git_utils.run(
-                ["git", "ls-files", "--stage", "-z"],
-                cwd=cwd,
-                timeout=timeout,
-            )
-            if not index_result.stdout:
-                return JobResult(ok=False, error="paused rebase conflict index invalid")
-            index_snapshot = hashlib.sha256(index_result.stdout.encode()).hexdigest()
-            paused_head_sha = git_utils.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=cwd,
-                timeout=timeout,
-            ).stdout.strip()
-            if not _is_full_commit_sha(paused_head_sha):
-                return JobResult(ok=False, error="paused rebase head invalid")
-            base_sha = (
-                base_sha
-                or git_utils.run(
-                    ["git", "rev-parse", f"{remote}/{base_branch}"],
-                    cwd=cwd,
-                    timeout=timeout,
-                ).stdout.strip()
-            )
-            if not _is_full_commit_sha(base_sha):
-                return JobResult(ok=False, error="paused rebase base head invalid")
+            if isinstance(revision_data, JobResult):
+                return revision_data
+            paused_head_sha, base_sha = revision_data
             snapshot = {path: self._conflict_path_digest(cwd, path) for path in paths}
             content_snapshot = _dirty_worktree_content_snapshot(
                 cwd, timeout=timeout, shutdown=self._shutdown
             )
-            hunks: dict[str, str] = {}
-            context_size = 0
-            for path in paths:
-                context = self._conflict_path_hunk(cwd, path, timeout=timeout)
-                context_size += len(context)
-                if context_size > _CONFLICT_CONTEXT_MAX:
-                    raise _RebaseConflictContextError(
-                        f"total conflict context exceeds {_CONFLICT_CONTEXT_MAX} characters"
-                    )
-                hunks[path] = context
+            hunks = self._conflict_receipt_hunks(cwd, paths, timeout=timeout)
         except _RebaseConflictContextError as exc:
             return JobResult(
                 ok=False,
                 value={"failure_kind": "rebase_conflict_context_unavailable"},
                 error=f"rebase conflict context unavailable: {exc}",
             )
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        except (
+            _GitInspectionResourceLimitError,
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
             return JobResult(ok=False, error=f"cannot capture paused rebase: {exc}")
         return {
             "rebased": False,
@@ -7131,10 +7294,11 @@ class WorkerPool:
     @staticmethod
     def _conflict_path_digest(cwd: Path, path: str) -> str:
         """Return a stable digest for one host-validated conflict path."""
-        target = cwd / path
-        if not target.exists():
+        try:
+            raw = _read_bounded_conflict_file(cwd, path)
+        except FileNotFoundError:
             return "<absent>"
-        return hashlib.sha256(target.read_bytes()).hexdigest()
+        return hashlib.sha256(raw).hexdigest()
 
     @staticmethod
     def _conflict_marker_blocks(lines: list[str]) -> list[str]:
@@ -7172,10 +7336,9 @@ class WorkerPool:
 
     def _conflict_path_hunk(self, cwd: Path, path: str, *, timeout: int) -> str:
         """Return complete validated context for one conflict path."""
-        target = cwd / path
         try:
-            raw = target.read_bytes()
-        except OSError as exc:
+            raw = _read_bounded_conflict_file(cwd, path)
+        except FileNotFoundError as exc:
             raise _RebaseConflictContextError("conflict source cannot be read") from exc
         if b"\0" in raw:
             raise _RebaseConflictContextError("conflict source is binary")
@@ -7203,10 +7366,12 @@ class WorkerPool:
         present = False
         for stage, label in ((1, "Base"), (2, "Ours"), (3, "Theirs")):
             try:
-                result = git_utils.run(
-                    ["git", "show", f":{stage}:{path}"],
+                result = _run_bounded_git_output(
+                    ("git", "show", f":{stage}:{path}"),
                     cwd=cwd,
                     timeout=timeout,
+                    max_bytes=_CONFLICT_HUNK_MAX,
+                    retain_text=True,
                 )
             except subprocess.CalledProcessError as exc:
                 if exc.returncode != 128:
@@ -7216,10 +7381,18 @@ class WorkerPool:
                 value = "_(absent)_\n"
             except UnicodeDecodeError as exc:
                 raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
+            except _GitInspectionResourceLimitError as exc:
+                raise _RebaseConflictContextError(
+                    f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
+                ) from exc
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise _RebaseConflictContextError("conflict index context cannot be read") from exc
             else:
-                value = result.stdout
+                value = result.text
+                try:
+                    value.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
                 if "\0" in value:
                     raise _RebaseConflictContextError("conflict source is binary")
                 if len(value) > _CONFLICT_HUNK_MAX:
@@ -7628,10 +7801,15 @@ class WorkerPool:
             base_branch="main",
             expected_remote_sha=expected_remote_sha,
             timeout=timeout,
+            base_sha=base_sha,
         )
         if isinstance(current_receipt, JobResult):
             return current_receipt
-        current_receipt["base_sha"] = base_sha
+        if current_receipt.get("base_sha") != base_sha:
+            return JobResult(
+                ok=False,
+                error="paused rebase base changed during conflict resolution",
+            )
         raw_current_paths = current_receipt.get("conflict_paths")
         current_paths: tuple[str, ...] = (
             tuple(str(path) for path in raw_current_paths)
@@ -7785,9 +7963,9 @@ class WorkerPool:
                     base_branch="main",
                     expected_remote_sha=expected_remote_sha,
                     timeout=timeout,
+                    base_sha=base_sha,
                 )
                 if isinstance(next_receipt, dict):
-                    next_receipt["base_sha"] = base_sha
                     return JobResult(
                         ok=False,
                         value=next_receipt,

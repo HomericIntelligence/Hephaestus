@@ -1618,6 +1618,7 @@ class TestGate:
             ctx,
         )
         assert stage.step(item, ctx) == Continue(next_state="REBASE_CONTINUE_WAIT")
+        assert item.payload["rebase_conflict_validation_result"] == "resolved_content"
 
         item.state = "REBASE_CONTINUE_WAIT"
         request = stage.step(item, ctx)
@@ -1925,6 +1926,33 @@ class TestGate:
         assert "rebase_conflict" not in item.payload
         assert "rebase_conflict_index_snapshot" not in item.payload
         assert "rebase_paused_head_sha" not in item.payload
+
+    def test_legacy_conflict_completion_cannot_continue_without_host_proof(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart cannot continue from an unproven agent-complete flag."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_agent_complete": True,
+                "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+        _prepared_writer(item)
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="REBASE_CONFLICT_WAIT")
+        assert "rebase_conflict_agent_complete" not in item.payload
 
     def test_failed_host_rebase_retains_structured_diagnostics(
         self, make_ctx: Any, make_work_item: Any

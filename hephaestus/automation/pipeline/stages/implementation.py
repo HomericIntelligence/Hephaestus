@@ -2451,6 +2451,8 @@ class ImplementationStage(Stage):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         if not item.payload.pop("rebase_conflict_agent_complete", False):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
+        if item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY) != "resolved_content":
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
         try:
             workspace = _existing_impl_workspace(item)
         except (KeyError, TypeError, ValueError):
@@ -2856,13 +2858,15 @@ class ImplementationStage(Stage):
         """Route a host refresh of a legacy conflict receipt."""
         if item.payload.pop("rebase_error", None):
             return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
-        classification = item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+        classification = item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY)
         if classification == "resolved_content":
             item.payload["rebase_conflict_agent_complete"] = True
             return Continue(next_state=REBASE_CONTINUE_WAIT)
         if classification == "out_of_scope_edit":
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_out_of_scope_edit")
         if classification in _REBASE_CONFLICT_RETRYABLE:
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
             item.payload.pop("rebase_conflict_agent_complete", None)
             if not self._has_current_rebase_conflict_context(item):
                 return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_receipt_incompatible")
@@ -2884,8 +2888,9 @@ class ImplementationStage(Stage):
                 self._rebase_conflict_validation_job(item, ctx, workspace),
                 on_done_state=REBASE_CONFLICT_VALIDATE_WAIT,
             )
-        classification = item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+        classification = item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY)
         if classification in _REBASE_CONFLICT_RETRYABLE:
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
             if item.attempts.get("rebase_conflict", 0) >= ctx.budget("rebase_conflict"):
                 return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_exhausted")
             if (
@@ -2898,6 +2903,7 @@ class ImplementationStage(Stage):
             item.payload["rebase_conflict_agent_complete"] = True
             return Continue(next_state=REBASE_CONTINUE_WAIT)
         if classification == "out_of_scope_edit":
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_out_of_scope_edit")
         return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_validation_missing")
 
