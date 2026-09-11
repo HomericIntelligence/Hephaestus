@@ -4133,10 +4133,42 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
 
+    @pytest.mark.parametrize("old_conclusion", ["failure", "cancelled"])
+    def test_newer_success_supersedes_an_older_nonpassing_run(
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
+        old_conclusion: str,
+    ) -> None:
+        """The newest stable Check Run decides one required context."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = self._json_response(
+            {
+                "total_count": 2,
+                "check_runs": [
+                    self._check_run(head, check_run_id=41, conclusion=old_conclusion),
+                    self._check_run(head, check_run_id=42),
+                ],
+            }
+        )
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+
     @pytest.mark.parametrize(
         ("returned_head", "status", "conclusion"),
         [
             ("a" * 40, "in_progress", ""),
+            ("a" * 40, "queued", ""),
             ("a" * 40, "completed", "failure"),
             ("b" * 40, "completed", "success"),
         ],

@@ -153,7 +153,8 @@ def _passing_check_run_requirements(
     now_utc: datetime,
 ) -> frozenset[_RequiredCheck] | None:
     """Return requirements proved by passing exact-head Check Runs."""
-    matched_checks: set[_RequiredCheck] = set()
+    current_runs: dict[_RequiredCheck, tuple[int, dict[str, object]]] = {}
+    seen_ids: set[int] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             return None
@@ -166,9 +167,26 @@ def _passing_check_run_requirements(
             _check_run_app_id(check_run)
         except ValueError:
             return None
+        check_run_id = check_run.get("id")
+        if (
+            not isinstance(check_run_id, int)
+            or isinstance(check_run_id, bool)
+            or check_run_id <= 0
+            or check_run_id in seen_ids
+        ):
+            logger.warning("Check Run for %s has no unambiguous identity", head_sha)
+            return None
+        seen_ids.add(check_run_id)
         if check_run.get("head_sha") != head_sha:
             logger.warning("Check Run does not match reviewed head %s", head_sha)
             return None
+        for requirement in matches:
+            current = current_runs.get(requirement)
+            if current is None or check_run_id > current[0]:
+                current_runs[requirement] = (check_run_id, check_run)
+
+    matched_checks: set[_RequiredCheck] = set()
+    for requirement, (_check_run_id, check_run) in current_runs.items():
         status = str(check_run.get("status") or "").lower()
         conclusion = str(check_run.get("conclusion") or "").lower()
         if (
@@ -177,7 +195,7 @@ def _passing_check_run_requirements(
             or _current_evidence_timestamp(check_run.get("completed_at"), now_utc) is None
         ):
             return None
-        matched_checks.update(matches)
+        matched_checks.add(requirement)
     return frozenset(matched_checks)
 
 
