@@ -49,15 +49,19 @@ test "$(git remote get-url upstream)" = "https://github.com/HomericIntelligence/
 git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
 ```
 
-If a command fails, stop. Run the signed rebase. Then verify each new commit
-signature:
+If a command fails, stop. Use Bash strict mode to run the signed rebase. Then
+verify each new commit signature:
 
 ```bash
+set -euo pipefail
 git rebase -S upstream/main
 git rev-list --reverse upstream/main..HEAD | while IFS= read -r commit; do
     git verify-commit "$commit" || exit 1
 done
 ```
+
+Strict mode stops the sequence if the rebase, revision enumeration, or a
+signature check fails.
 
 Require `git status --porcelain=v1 --untracked-files=all` to have no output.
 Record `git rev-parse HEAD`. Run this command:

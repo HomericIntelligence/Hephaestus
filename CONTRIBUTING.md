@@ -243,14 +243,19 @@ For a manual contribution, use this sequence:
    ```
 
    If a command fails, stop.
-3. Rebase and sign each new commit. Then verify each commit signature:
+3. Use Bash strict mode to rebase and sign each new commit. Then verify each
+   commit signature:
 
    ```bash
+   set -euo pipefail
    git rebase -S upstream/main
    git rev-list --reverse upstream/main..HEAD | while IFS= read -r commit; do
        git verify-commit "$commit" || exit 1
    done
    ```
+
+   Strict mode stops the sequence if the rebase, revision enumeration, or a
+   signature check fails.
 
 4. If the rebase or conflict resolution changes a file, run each affected test
    again.
