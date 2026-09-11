@@ -72,9 +72,20 @@ class WorktreeRecord:
     """One strict record from Git's worktree porcelain output."""
 
     path: Path
+    identity: Path
     branch: str | None
     head: str | None
     attributes: frozenset[str]
+
+
+def _worktree_identity(path: Path) -> Path:
+    """Return one resolved worktree identity or reject the inventory."""
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise WorktreeInventoryError(
+            "Git returned a worktree path that cannot be resolved"
+        ) from error
 
 
 def _detect_repo_from_remote() -> str | None:
@@ -233,13 +244,15 @@ def _validate_inventory_record(attributes: set[str]) -> None:
 
 
 def _validate_unique_inventory_records(records: list[WorktreeRecord]) -> None:
-    """Reject records that have duplicate paths or attached branches."""
-    paths: set[Path] = set()
+    """Reject records that have duplicate worktrees or attached branches."""
+    identities: set[Path] = set()
     branches: set[str] = set()
     for record in records:
-        if record.path in paths or (record.branch is not None and record.branch in branches):
+        if record.identity in identities or (
+            record.branch is not None and record.branch in branches
+        ):
             raise WorktreeInventoryError("Git returned a malformed worktree inventory")
-        paths.add(record.path)
+        identities.add(record.identity)
         if record.branch is not None:
             branches.add(record.branch)
 
@@ -263,6 +276,7 @@ def _parse_worktree_records(output: str) -> list[WorktreeRecord]:
                 records.append(
                     WorktreeRecord(
                         path=path,
+                        identity=_worktree_identity(path),
                         branch=branch,
                         head=head,
                         attributes=frozenset(attributes),
@@ -282,13 +296,14 @@ def _parse_worktree_records(output: str) -> list[WorktreeRecord]:
 
 def _cleanup_candidate_records(records: list[WorktreeRecord], root: Path) -> list[WorktreeRecord]:
     """Return attached non-primary records that cleanup can consider."""
-    primary = records[0].path
+    primary = records[0].identity
+    root_identity = _worktree_identity(root)
     return [
         record
         for record in records
         if record.branch is not None
         and "prunable" not in record.attributes
-        and record.path not in {primary, root}
+        and record.identity not in {primary, root_identity}
     ]
 
 
@@ -378,14 +393,14 @@ def _git_common_dir(root: Path) -> Path:
 
 def _is_git_metadata_worktree_path(path: Path, common_git_dir: Path) -> bool:
     """Return whether a raw or resolved path is inside shared Git metadata."""
-    return path.is_relative_to(common_git_dir) or path.resolve().is_relative_to(
-        common_git_dir.resolve()
+    return path.is_relative_to(common_git_dir) or _worktree_identity(path).is_relative_to(
+        _worktree_identity(common_git_dir)
     )
 
 
 def _refresh_worktree_candidate(expected: WorktreeRecord, root: Path) -> WorktreeRecord | None:
     """Return a fresh candidate only when its full record is unchanged."""
-    if not expected.path.is_dir():
+    if not expected.identity.is_dir():
         logger.warning("Skipping missing worktree %s", expected.path)
         return None
 
@@ -394,7 +409,7 @@ def _refresh_worktree_candidate(expected: WorktreeRecord, root: Path) -> Worktre
         (
             record
             for record in _cleanup_candidate_records(records, root)
-            if record.path == expected.path
+            if record.identity == expected.identity
         ),
         None,
     )
@@ -404,15 +419,33 @@ def _refresh_worktree_candidate(expected: WorktreeRecord, root: Path) -> Worktre
     return current
 
 
-def _remove_worktree(path: Path, branch: str) -> bool:
-    """Remove a worktree and return whether its local branch was removed."""
+def _remove_worktree(path: Path, branch: str, expected_head: str, trunk: str) -> bool:
+    """Remove a worktree and delete an unchanged merged local branch."""
     try:
         run_git(["worktree", "remove", str(path)])
     except (OSError, subprocess.SubprocessError) as error:
         logger.warning("Could not remove worktree %s: %s", path, error)
         return False
     try:
-        result = run_git(["branch", "-d", branch], check=False, log_on_error=False)
+        inspected_head_merged = _branch_is_merged(expected_head, trunk)
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("Worktree removed %s; Retained local branch %s: %s", path, branch, error)
+        return False
+    if not inspected_head_merged:
+        logger.warning(
+            "Worktree removed %s; Retained local branch %s because its inspected commit "
+            "is not merged into %s",
+            path,
+            branch,
+            trunk,
+        )
+        return False
+    try:
+        result = run_git(
+            ["update-ref", "-d", f"refs/heads/{branch}", expected_head],
+            check=False,
+            log_on_error=False,
+        )
     except (OSError, subprocess.SubprocessError) as error:
         logger.warning("Worktree removed %s; Retained local branch %s: %s", path, branch, error)
         return False
@@ -455,6 +488,14 @@ def _fresh_stale_worktree_candidate(
     """Return a clean unchanged candidate and whether inspection is incomplete."""
     current = _refresh_worktree_candidate(expected, root)
     if current is None:
+        if common_git_dir is not None and _is_git_metadata_worktree_path(
+            expected.path, common_git_dir
+        ):
+            logger.error(
+                "Cannot clean worktree inside Git metadata %s; use the recovery workflow first",
+                expected.path,
+            )
+            return None, True
         return None, False
     if common_git_dir is not None and _is_git_metadata_worktree_path(current.path, common_git_dir):
         logger.error(
@@ -463,7 +504,7 @@ def _fresh_stale_worktree_candidate(
         )
         return None, True
     try:
-        dirty = _worktree_is_dirty(current.path)
+        dirty = _worktree_is_dirty(current.identity)
     except FileNotFoundError:
         logger.warning("Skipping missing worktree %s", current.path)
         return None, False
@@ -530,7 +571,10 @@ def _cleanup_stale_worktree_candidate(
     )
     if current is None:
         return incomplete
-    if current.branch is None or not _remove_worktree(current.path, current.branch):
+    if current.branch is None or current.head is None:
+        logger.warning("Retained worktree %s because its branch or HEAD is missing", current.path)
+        return True
+    if not _remove_worktree(current.identity, current.branch, current.head, trunk):
         return True
     logger.info("Removed stale worktree %s", current.path)
     return False
@@ -572,7 +616,7 @@ def _cleanup_stale_worktrees(
             )
             incomplete = True
             continue
-        if not candidate.path.is_dir():
+        if not candidate.identity.is_dir():
             logger.warning("Skipping missing worktree %s", candidate.path)
             incomplete = True
             continue
@@ -685,7 +729,10 @@ def _make_agent_prompt(branch: str, trunk: str, repo_path: Path, repo_slug: str)
 def _agent_worktree_path(repo_path: Path, branch: str) -> Path:
     """Return a safe single-component temporary path for a rebase agent."""
     branch_digest = hashlib.sha256(branch.encode("utf-8")).hexdigest()
-    return repo_path / "build" / ".worktrees" / f"tidy-{branch_digest}"
+    worktree_path = repo_path / "build" / ".worktrees" / f"tidy-{branch_digest}"
+    if _is_git_metadata_worktree_path(worktree_path, _git_common_dir(repo_path)):
+        raise WorktreeInventoryError("Cannot create an agent worktree inside Git metadata")
+    return worktree_path
 
 
 def _status_from_agent_text(text: str) -> str | None:
@@ -734,6 +781,14 @@ async def _dispatch_swarm(
 
     Returns a dict of branch -> status string.
     """
+    try:
+        prompts = {
+            branch: _make_agent_prompt(branch, trunk, repo_path, repo_slug) for branch in branches
+        }
+    except WorktreeInventoryError as error:
+        logger.error("Cannot dispatch agent worktrees safely: %s", error)
+        return dict.fromkeys(branches, "failed (unsafe agent worktree)")
+
     claude_swarm = None if uses_direct_agent_runner(agent) else _load_claude_swarm()
     if not uses_direct_agent_runner(agent) and claude_swarm is None:
         return dict.fromkeys(branches, "failed (claude_code_sdk missing)")
@@ -743,7 +798,7 @@ async def _dispatch_swarm(
 
     async def _run_one(branch: str) -> None:
         async with sem:
-            prompt = _make_agent_prompt(branch, trunk, repo_path, repo_slug)
+            prompt = prompts[branch]
             if dry_run:
                 logger.info("[dry-run] Would spawn %s agent for branch: %s", agent, branch)
                 results[branch] = "dry-run"

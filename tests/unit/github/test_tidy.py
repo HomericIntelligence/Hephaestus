@@ -373,6 +373,60 @@ def test_parse_worktree_records_rejects_duplicate_cleanup_identity(
         tidy_module._parse_worktree_records(porcelain)
 
 
+def test_parse_worktree_records_rejects_primary_parent_path_alias(tmp_path: Path) -> None:
+    """A parent-component alias of the primary worktree is unsafe."""
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    primary_alias = primary / "child" / ".."
+    porcelain = _candidate_worktree_porcelain(primary, primary_alias, "123-finished")
+
+    with pytest.raises(tidy_module.WorktreeInventoryError, match="malformed"):
+        tidy_module._parse_worktree_records(porcelain)
+
+
+def test_cleanup_rejects_current_worktree_symlink_alias_before_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A symlink alias of the current worktree cannot become a cleanup candidate."""
+    primary = tmp_path / "primary"
+    current = tmp_path / "current"
+    alias = tmp_path / "current-alias"
+    primary.mkdir()
+    current.mkdir()
+    try:
+        alias.symlink_to(current, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Cannot create the test symlink: {error}")
+    porcelain = "\0".join(
+        (
+            f"worktree {primary}",
+            "HEAD abcdef",
+            "branch refs/heads/main",
+            "",
+            f"worktree {current}",
+            "HEAD 123456",
+            "branch refs/heads/topic",
+            "",
+            f"worktree {alias}",
+            "HEAD 654321",
+            "branch refs/heads/123-finished",
+            "",
+        )
+    )
+    issue_is_closed = MagicMock()
+    branch_is_merged = MagicMock()
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", issue_is_closed)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", branch_is_merged)
+
+    with pytest.raises(tidy_module.WorktreeInventoryError, match="malformed"):
+        tidy_module._cleanup_stale_worktrees(current, "main", dry_run=False)
+
+    issue_is_closed.assert_not_called()
+    branch_is_merged.assert_not_called()
+
+
 def test_cleanup_rejects_malformed_inventory_without_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -889,12 +943,74 @@ def test_cleanup_reports_status_failure_as_incomplete(
     assert "Could not inspect worktree" in caplog.text
 
 
+def test_cleanup_retains_branch_when_conditional_delete_detects_a_new_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ref changed after worktree removal is never deleted by its reused name."""
+    expected_head = "a" * 40
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    porcelain = _candidate_worktree_porcelain(
+        tmp_path,
+        worktree_path,
+        "123-finished",
+        head=expected_head,
+    )
+    run_git = MagicMock(
+        side_effect=(
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 1, stdout="", stderr="ref changed"),
+        )
+    )
+    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", MagicMock(side_effect=(porcelain,) * 3))
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: True)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda path: False)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr(tidy_module, "run_git", run_git)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 1
+    assert "Retained local branch 123-finished" in caplog.text
+    run_git.assert_has_calls(
+        [
+            call(["worktree", "remove", str(worktree_path)]),
+            call(
+                ["update-ref", "-d", "refs/heads/123-finished", expected_head],
+                check=False,
+                log_on_error=False,
+            ),
+        ]
+    )
+
+
+def test_remove_worktree_retains_an_unmerged_inspected_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unmerged inspected commit retains its branch after worktree removal."""
+    expected_head = "a" * 40
+    worktree_path = tmp_path / "123-finished"
+    run_git = MagicMock(return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(tidy_module, "run_git", run_git)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+
+    assert not tidy_module._remove_worktree(worktree_path, "123-finished", expected_head, "main")
+    assert "Retained local branch 123-finished" in caplog.text
+    run_git.assert_called_once_with(["worktree", "remove", str(worktree_path)])
+
+
 def test_remove_worktree_reports_retained_branch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A branch-delete failure leaves cleanup incomplete and visible."""
+    """A conditional branch-delete failure leaves cleanup incomplete and visible."""
+    expected_head = "a" * 40
     caplog.set_level("WARNING", logger="hephaestus.github.tidy")
     run_git = MagicMock(
         side_effect=(
@@ -903,14 +1019,20 @@ def test_remove_worktree_reports_retained_branch(
         )
     )
     monkeypatch.setattr(tidy_module, "run_git", run_git)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: True)
 
-    assert tidy_module._remove_worktree(tmp_path / "123-finished", "123-finished") is False
+    assert (
+        tidy_module._remove_worktree(
+            tmp_path / "123-finished", "123-finished", expected_head, "main"
+        )
+        is False
+    )
     assert "Retained local branch 123-finished" in caplog.text
     run_git.assert_has_calls(
         [
             call(["worktree", "remove", str(tmp_path / "123-finished")]),
             call(
-                ["branch", "-d", "123-finished"],
+                ["update-ref", "-d", "refs/heads/123-finished", expected_head],
                 check=False,
                 log_on_error=False,
             ),
@@ -923,7 +1045,8 @@ def test_remove_worktree_reports_branch_delete_exception(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A branch-delete exception leaves the removed worktree visible as incomplete."""
+    """A conditional branch-delete exception leaves cleanup incomplete and visible."""
+    expected_head = "a" * 40
     caplog.set_level("WARNING", logger="hephaestus.github.tidy")
     run_git = MagicMock(
         side_effect=(
@@ -932,8 +1055,14 @@ def test_remove_worktree_reports_branch_delete_exception(
         )
     )
     monkeypatch.setattr(tidy_module, "run_git", run_git)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: True)
 
-    assert tidy_module._remove_worktree(tmp_path / "123-finished", "123-finished") is False
+    assert (
+        tidy_module._remove_worktree(
+            tmp_path / "123-finished", "123-finished", expected_head, "main"
+        )
+        is False
+    )
     assert "Retained local branch 123-finished" in caplog.text
 
 
@@ -981,6 +1110,102 @@ def test_agent_prompt_directs_temporary_worktree_outside_git_metadata(tmp_path: 
     assert "git worktree prune" not in prompt
 
 
+def test_agent_prompt_rejects_symlinked_worktree_parent_in_git_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A rendered agent command cannot target Git metadata through a symlink."""
+    repo_path = tmp_path / "repo"
+    metadata_worktrees = repo_path / ".git" / "worktrees"
+    metadata_worktrees.mkdir(parents=True)
+    agent_parent = repo_path / "build" / ".worktrees"
+    agent_parent.parent.mkdir()
+    try:
+        agent_parent.symlink_to(metadata_worktrees, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Cannot create the test symlink: {error}")
+    render = MagicMock(side_effect=AssertionError("must not render an unsafe prompt"))
+    catalog = MagicMock()
+    catalog.render = render
+    monkeypatch.setattr(tidy_module.PromptCatalog, "current", MagicMock(return_value=catalog))
+
+    with pytest.raises(tidy_module.WorktreeInventoryError, match="Git metadata"):
+        tidy_module._make_agent_prompt("feature/nested", "main", repo_path, "owner/repo")
+
+    render.assert_not_called()
+
+
+def test_dispatch_swarm_does_not_start_agents_for_an_unsafe_worktree_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """All agent dispatch stops when the shared temporary parent is unsafe."""
+    repo_path = tmp_path / "repo"
+    metadata_worktrees = repo_path / ".git" / "worktrees"
+    metadata_worktrees.mkdir(parents=True)
+    agent_parent = repo_path / "build" / ".worktrees"
+    agent_parent.parent.mkdir()
+    try:
+        agent_parent.symlink_to(metadata_worktrees, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Cannot create the test symlink: {error}")
+    run_agent = MagicMock(return_value="failed")
+    monkeypatch.setattr(tidy_module, "_run_direct_rebase_agent", run_agent)
+
+    result = asyncio.run(
+        tidy_module._dispatch_swarm(
+            ["feature/nested"],
+            "main",
+            repo_path,
+            "owner/repo",
+            max_concurrent=1,
+            dry_run=False,
+            agent="codex",
+        )
+    )
+
+    assert result == {"feature/nested": "failed (unsafe agent worktree)"}
+    run_agent.assert_not_called()
+
+
+def test_dispatch_swarm_does_not_partially_start_agents_for_an_unsafe_worktree_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unsafe later agent path prevents every agent from starting."""
+    repo_path = tmp_path / "repo"
+    metadata_worktrees = repo_path / ".git" / "worktrees"
+    metadata_worktrees.mkdir(parents=True)
+    agent_parent = repo_path / "build" / ".worktrees"
+    agent_parent.mkdir(parents=True)
+    unsafe_branch = "feature/unsafe"
+    unsafe_path = tidy_module._agent_worktree_path(repo_path, unsafe_branch)
+    try:
+        unsafe_path.symlink_to(metadata_worktrees, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Cannot create the test symlink: {error}")
+    run_agent = MagicMock(return_value="failed")
+    monkeypatch.setattr(tidy_module, "_run_direct_rebase_agent", run_agent)
+
+    result = asyncio.run(
+        tidy_module._dispatch_swarm(
+            ["feature/safe", unsafe_branch],
+            "main",
+            repo_path,
+            "owner/repo",
+            max_concurrent=1,
+            dry_run=False,
+            agent="codex",
+        )
+    )
+
+    assert result == {
+        "feature/safe": "failed (unsafe agent worktree)",
+        unsafe_branch: "failed (unsafe agent worktree)",
+    }
+    run_agent.assert_not_called()
+
+
 def test_rebase_prompt_renders_with_public_context_without_worktree_parent(tmp_path: Path) -> None:
     """The packaged rebase prompt does not require private builder context."""
     worktree_path = tmp_path / "repo" / "build" / ".worktrees" / "tidy-agent"
@@ -1006,6 +1231,79 @@ def test_agent_prompt_quotes_worktree_commands_for_a_path_with_spaces(tmp_path: 
     assert f"cd '{repo_path}'" in prompt
     assert f"mkdir -p \"$(dirname '{worktree_path}')\"" in prompt
     assert f"git worktree add '{worktree_path}' 'feature/nested'" in prompt
+
+
+def test_agent_prompt_quotes_shell_metacharacters_as_single_arguments(tmp_path: Path) -> None:
+    """A quote and shell metacharacters stay inside their intended command arguments."""
+    injection_probe = "hephaestus_injection_probe"
+    repo_path = tmp_path / f"repo ';$({injection_probe})"
+    branch = f"feature/quote';$({injection_probe})"
+    trunk = f"main';$({injection_probe})"
+    prompt = tidy_module._make_agent_prompt(branch, trunk, repo_path, "owner/repo")
+    worktree_path = tidy_module._agent_worktree_path(repo_path, branch)
+    lines = prompt.splitlines()
+
+    cd_line = next(line for line in lines if line.startswith("cd "))
+    mkdir_line = next(line for line in lines if line.startswith("mkdir -p "))
+    add_line = next(line for line in lines if line.startswith("git worktree add "))
+    fetch_line = next(
+        line for line in lines if line.startswith("git -C ") and " fetch origin " in line
+    )
+    rebase_line = next(line for line in lines if line.startswith("git -C ") and " rebase " in line)
+    push_line = next(
+        line for line in lines if line.startswith("git -C ") and " push --force-with-lease " in line
+    )
+    remove_line = next(
+        line for line in lines if line.startswith("git -C ") and " worktree remove " in line
+    )
+
+    assert shlex.split(cd_line) == ["cd", str(repo_path)]
+    mkdir_probe = subprocess.run(
+        [
+            "sh",
+            "-c",
+            "\n".join(
+                (
+                    f"{injection_probe}() {{ printf '%s\\n' invoked >&2; return 97; }}",
+                    'mkdir() { printf "%s\\n" "$@"; }',
+                    mkdir_line,
+                )
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert mkdir_probe.returncode == 0, mkdir_probe.stderr
+    assert mkdir_probe.stderr == ""
+    assert mkdir_probe.stdout.splitlines() == ["-p", str(worktree_path.parent)]
+    assert shlex.split(add_line) == ["git", "worktree", "add", str(worktree_path), branch]
+    assert shlex.split(fetch_line) == ["git", "-C", str(worktree_path), "fetch", "origin", trunk]
+    assert shlex.split(rebase_line) == [
+        "git",
+        "-C",
+        str(worktree_path),
+        "rebase",
+        f"origin/{trunk}",
+    ]
+    assert shlex.split(push_line) == [
+        "git",
+        "-C",
+        str(worktree_path),
+        "push",
+        "--force-with-lease",
+        "--force-if-includes",
+        "origin",
+        branch,
+    ]
+    assert shlex.split(remove_line) == [
+        "git",
+        "-C",
+        str(repo_path),
+        "worktree",
+        "remove",
+        str(worktree_path),
+    ]
 
 
 @pytest.mark.parametrize(
