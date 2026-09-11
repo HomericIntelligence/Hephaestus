@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.issue_waves import IssueWaveStore
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
@@ -19,6 +20,7 @@ from hephaestus.automation.pipeline.routing import (
 )
 from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.base import Stage
+from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
 from hephaestus.automation.pipeline.work_item import WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -201,10 +203,10 @@ def test_missing_direct_scope_checkout_clones_then_syncs_before_classification(
     assert issue_item.payload["_direct_scope_base_sha"] == "a" * 40
 
 
-def test_direct_issue_carries_the_bootstrap_checkout_pin(
+def test_direct_issue_rejects_scalar_intake_success_without_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An issue cursor preserves the exact default-branch SHA it was admitted under."""
+    """A bare SHA cannot replace the typed intake receipt in a light fixture."""
     checkout = tmp_path / "repo-a"
     checkout.mkdir()
     pin = "a" * 40
@@ -231,9 +233,72 @@ def test_direct_issue_carries_the_bootstrap_checkout_pin(
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
 
-    assert coordinator.run() == 0
-    issue_item = next(item for item in coordinator.items if item.issue == 101)
-    assert issue_item.payload["_direct_scope_base_sha"] == pin
+    assert coordinator.run() == 1
+    assert github.mutation_log == []
+    assert len(coordinator.ledger) == 1
+    assert "repository-intake receipt invalid" in coordinator.ledger[0].reason
+
+
+def test_issue_wave_classification_reads_receipt_owned_state_after_intake_adoption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue-wave recovery reads durable state outside the replaceable intake."""
+    durable_root = tmp_path / "intake-owner"
+    intake_root = durable_root / "checkout"
+    durable_root.mkdir()
+    intake_root.mkdir()
+    store = IssueWaveStore(durable_root, "acme", "hephaestus")
+    lease = store.seal_selection(store.plan_admission("a" * 40, 1), [19])
+    store.record_merge_receipt(
+        lease,
+        issue_number=19,
+        pr_number=23,
+        reviewed_head_sha="b" * 40,
+        merge_sha="c" * 40,
+    )
+    store.record_terminal_outcome(
+        lease,
+        issue_number=19,
+        passed=True,
+        reason="merged",
+        pr_number=23,
+    )
+    facts = IssueFacts(
+        number=19,
+        title="Merged issue",
+        body="",
+        is_epic=False,
+        labels=set(),
+        pr_number=23,
+        pr_is_open=False,
+        pr_is_merged=True,
+        issue_is_closed=True,
+    )
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda *_args: facts)
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="acme",
+            repos=["hephaestus"],
+            projects_dir=tmp_path,
+            repo_roots={"hephaestus": intake_root},
+            repo_state_roots={"hephaestus": durable_root},
+        ),
+        github=FakeStageGitHub(),
+        **fake_worker_factories(),
+        install_signals=False,
+    )
+
+    entry = coordinator._classify_repo_issue_entry(
+        "hephaestus",
+        RepoIssueSource(metadata=iter(()), wave_lease=lease),
+        19,
+        coordinator.github,
+    )
+
+    assert entry is not None
+    assert entry.stage is StageName.FINISHED
+    assert entry.passed is True
+    assert not (intake_root / "build" / ".automation-state").exists()
 
 
 def test_explicit_pr_scope_syncs_before_labels_and_pr_classification(

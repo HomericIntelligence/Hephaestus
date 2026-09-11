@@ -503,7 +503,7 @@ class RepoStage(Stage):
                 "title": str(issue_data.get("title") or "durable learning recovery"),
             }
 
-    def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:  # noqa: C901
+    def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Record checkout preparation success/failure (state still CLONE_WAIT).
 
         Args:
@@ -542,18 +542,6 @@ class RepoStage(Stage):
                 item.payload["checkout_verified"] = True
                 logger.info("repo:%s: checkout preparation completed", item.repo)
             elif operation == "prepare_intake":
-                if (
-                    is_full_commit_sha(result.value)
-                    and not (Path(str(ctx.paths.repo_root)) / ".git").exists()
-                ):
-                    # Lightweight stage fixtures do not materialize Git. Keep
-                    # their historical SHA characterization without allowing
-                    # a real checkout to bypass the typed intake receipt.
-                    item.payload[SYNCED_MAIN_SHA_KEY] = result.value
-                    if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
-                        item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = result.value
-                    item.payload["checkout_verified"] = True
-                    return
                 try:
                     receipt = RepoIntakeReceipt.from_dict(result.value)
                 except (RepoIntakeError, TypeError) as exc:
