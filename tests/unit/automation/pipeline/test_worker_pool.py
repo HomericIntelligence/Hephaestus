@@ -2399,6 +2399,7 @@ class TestWorkerPoolSubmitComplete:
             auth_status_timeout=10,
             pi_isolation_adapter="package:factory",
             pi_dir=Path("/private/pi-agent"),
+            remaining_timeout=ANY,
             shutdown=ANY,
         )
 
