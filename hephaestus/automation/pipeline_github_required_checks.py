@@ -21,15 +21,15 @@ logger = logging.getLogger(__name__)
 
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _GITHUB_TIMESTAMP_RE = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
+    r"\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d"
+    r"(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)"
 )
 _CHECK_RUNS_PAGE_SIZE = 100
 _CHECK_RUNS_MAX_TOTAL_COUNT = 2_000
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
-_CHECK_FAILURE_CONCLUSIONS = frozenset(
+_CHECK_CONCLUSIONS = _CHECK_SUCCESS_CONCLUSIONS | frozenset(
     {"action_required", "cancelled", "failure", "stale", "timed_out"}
 )
-_CHECK_CONCLUSIONS = _CHECK_SUCCESS_CONCLUSIONS | _CHECK_FAILURE_CONCLUSIONS
 _RequiredCheck = tuple[str, int | None]
 _CheckRunCandidate = tuple[datetime, int, dict[str, object]]
 _CheckRunGroups = dict[_RequiredCheck, dict[int, list[_CheckRunCandidate]]]
