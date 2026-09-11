@@ -271,7 +271,8 @@ synthetic nonce, process start time, session, and cgroup. The wrapper removed
 that exact container without first signaling the child. The child and parent
 PIDs, container cgroup, and enclosing scope were absent before the child's
 45-second self-limit. This demonstrates causal disposal in the tested engine.
-The production Fleet supervisor does not yet implement that lifecycle.
+That run predates the production supervisor below. The supervisor requires its
+own execution evidence; the earlier wrapper result cannot substitute for it.
 
 Raw results and wrapper observations are retained in the private artifact
 directory `image-build-20260911/exec-server-pair-01`. Its source manifest states
@@ -285,7 +286,7 @@ file and zero sessions. Those captures bind the frozen source manifest
 Later source edits require another explicit freeze before image validation.
 Fleet execution acceptance still requires the enforced adapter.
 
-Before admission, deliver a container supervisor that creates and inspects each
+Before admission, integrate and validate the supervisor that creates and inspects each
 immutable boundary, verifies the selected environment, and observes its complete
 cgroup after disposal. Missing or uncertain disposal evidence must retain the
 workspace and execution reservation. Codex's tracked-terminal list is not this
@@ -356,3 +357,89 @@ The current adapter slice does not connect the existing Hephaestus issue-stage
 callbacks, heavy-build MCP recipes, or private terminal history. Add those through
 their owning interfaces before claiming the full Fleet workflows are complete.
 Keep existing `exec` integrations and label/publication rules in effect.
+
+## Private approval evidence
+
+The private worker socket accepts
+`{"operation":"request-evidence","targetId":"SESSION","requestId":"REQUEST"}`.
+Keep the request ID's integer or string type. The reply binds the current worker,
+generation, session, provider thread, turn, item, and request fingerprint. For a
+current file-change approval, `evidence.changes` contains only bounded paths,
+change kinds, and diffs from that item. The helper reads the current provider
+thread and checks ownership and the pending request again after the read.
+
+Missing or incomplete evidence returns `evidence_unavailable`. Changed ownership
+rejects the request. Neither result grants approval. The web backend must compare
+the complete binding and fingerprint before it displays an acceptance action.
+Keep these details on the private attachment. Do not add them to GitHub records,
+Keystone observations, or dashboard snapshots. Approval responses still use the
+admitted command path and a private immutable response reference.
+
+## Contained exec-server supervisor
+
+`fleet_containment.ContainedExecSupervisor` owns a private single-writer journal.
+It records creation and removal intent before it calls the engine. Each lease
+binds a worker, session, execution, generation, immutable image ID, workspace, and
+resource budget. Restart reconciliation observes retained state; it does not
+repeat creation, attachment, or removal automatically.
+
+`fleet_podman.PodmanEngine` requires an absolute executable, an explicit owned
+Unix socket, and private engine configuration. It suppresses image environment
+inheritance and proxy injection. The tool container has one workspace bind,
+64 MiB of private scratch, no network, no added capabilities, a read-only root,
+and fixed CPU, memory, and process limits. Rootless `keep-id` maps the engine
+owner to tool UID/GID 1000 without changing source ownership. Inspection must
+confirm the requested settings before attachment. Podman can report `keep-id`
+as a private user namespace plus its exact annotation and UID/GID maps. A
+created or running container can lack effective capability data in that response.
+Missing data validates only the declared capability-drop policy; it does not
+prove enforcement. Active attachment always requires kernel capability and
+namespace checks before the supervisor returns the endpoint to its caller.
+An engine home or control
+socket must not overlap the workspace.
+The hostname and its environment variable are fixed explicitly because Podman
+can add the variable when a container starts. The exclusive workspace bind uses
+private SELinux relabeling; SELinux enforcement remains enabled. The supervisor
+does not relabel its authority directories or another session's workspace.
+
+`LinuxKernel` must run on the engine's Linux host. It checks cgroup budgets,
+process identities, namespace separation, capabilities, and `NoNewPrivs`.
+Disposal retains the original and current process identities. A receipt requires
+an explicit absent-container result, the same host boot, a missing owned cgroup,
+and absence of every recorded process identity. A stopped stream, a missing
+observation, or an engine error cannot release ownership. If an endpoint no
+longer exposes a complete inventory, disposal stays uncertain for reconciliation.
+
+The bounded no-auth probe uses the production supervisor and direct exec-server
+RPCs. It creates synthetic workspace, sibling, and authority markers, observes
+a live detached child, and requests disposal of that exact container:
+
+```sh
+just fleet-supervisor-probe /private/new-probe-root /usr/bin/podman \
+  /run/user/506/podman/podman.sock sha256:IMMUTABLE_IMAGE_ID
+```
+
+Run this command through the designated engine operator on the Linux guest.
+The parent of the new probe root must exist and be private. The wrapper must
+limit the whole run and retain actual output and any unresolved lease. It may
+remove only containers that the probe created. This command does not start a
+Fleet conversation, authenticate a provider, or call a model.
+
+An independent Linux run on September 11, 2026 used the production supervisor,
+Podman 6.1.1, the pinned exec-server image, and one CPU with 1 GiB of memory.
+The endpoint read its workspace marker and could not read existing sibling and
+authority markers. The supervisor observed a live detached child, removed the
+exact container, and confirmed absence of the retained process identities and
+owned cgroup. Its journal reached `disposed` with a causal receipt. The outer
+operator did not remove a container to obtain this result. The run used a frozen
+source manifest and retained raw output outside the repository. It measured
+direct exec-server operations; it did not measure normal provider tool routing
+or enable session admission.
+
+The supervisor is not connected to Fleet admission or provider environment
+attachment yet. Its lifecycle receipts cannot open those gates. Pinned Codex
+thread startup can require a nested platform sandbox when it reads `AGENTS.md`
+under the restricted profile, before the external turn policy is available.
+That startup contract, normal model-tool routing, all private authority roots,
+and cold-resume environment binding still need an enforced integration. Keep
+native and shared Linux admission closed until those gates pass.

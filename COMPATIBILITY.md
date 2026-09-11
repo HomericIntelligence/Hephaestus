@@ -91,7 +91,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-The console scripts registered in `[project.scripts]` are classified into one
+The 55 console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
 The installed script inventory is `[project.scripts]` in `pyproject.toml`.

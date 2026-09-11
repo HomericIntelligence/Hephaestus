@@ -18,10 +18,10 @@ if "--version" in sys.argv:
 threads = {}
 statuses = {}
 configurations = {}
-terminals = {}
+terminals: dict[str, list[dict[str, str]]] = {}
 cleanup_mode = {}
-cleanup_requests = {}
-turn_counts = {}
+cleanup_requests: dict[str, int] = {}
+turn_counts: dict[str, int] = {}
 last_requests = {}
 count = 0
 for line in sys.stdin:

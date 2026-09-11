@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.fleet_request_evidence import read_request_evidence
 from hephaestus.automation.fleet_worker import FleetWorker
 
 _MAX_MESSAGE = 1024 * 1024
@@ -51,6 +52,15 @@ def _dispatch(worker: FleetWorker, message: dict[str, Any]) -> dict[str, Any]:
                 if item["sessionId"] == message.get("targetId")
             ]
         }
+    if operation == "request-evidence":
+        target_id, request_id = message.get("targetId"), message.get("requestId")
+        if (
+            not isinstance(target_id, str)
+            or not isinstance(request_id, (str, int))
+            or isinstance(request_id, bool)
+        ):
+            raise ValueError("invalid_request")
+        return read_request_evidence(worker, target_id, request_id)
     return worker.handle(message)
 
 

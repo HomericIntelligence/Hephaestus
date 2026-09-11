@@ -617,7 +617,7 @@ def test_provider_write_deadline_applies_before_waiting_for_response(worker):
 
 
 def test_provider_cleanup_stops_descendants_after_leader_exit(worker):
-    """A leader exit does not establish that its process group stopped."""
+    """Stop child execution even when PID 1 retains its zombie process record."""
     result = worker.provider.request(
         "turn/start",
         {
@@ -626,13 +626,34 @@ def test_provider_cleanup_stops_descendants_after_leader_exit(worker):
         },
     )
     child_pid = result["childPid"]
+    proc_stat = Path(f"/proc/{child_pid}/stat")
+    original_start = None
+    if sys.platform == "linux":
+        original_fields = proc_stat.read_text().rsplit(")", 1)[1].split()
+        assert original_fields[0] not in {"Z", "X"}
+        original_start = original_fields[19]
     worker.provider.process.wait(timeout=3)
 
-    def emergency_cleanup():
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(child_pid, signal.SIGKILL)
+    def execution_stopped():
+        if original_start is not None:
+            try:
+                fields = proc_stat.read_text().rsplit(")", 1)[1].split()
+            except FileNotFoundError:
+                return True
+            # PID reuse and an unreaped zombie cannot run the original child.
+            return fields[19] != original_start or fields[0] in {"Z", "X"}
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
 
-    timer = threading.Timer(2, emergency_cleanup)
+    def emergency_cleanup():
+        if not execution_stopped():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+
+    timer = threading.Timer(5, emergency_cleanup)
     timer.start()
     try:
         started = time.monotonic()
@@ -640,17 +661,14 @@ def test_provider_cleanup_stops_descendants_after_leader_exit(worker):
         assert time.monotonic() - started < 1.5
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
+            if execution_stopped():
                 break
             time.sleep(0.02)
         else:
-            pytest.fail("provider descendant survived cleanup")
+            pytest.fail("provider descendant can still execute after cleanup")
     finally:
         timer.cancel()
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(child_pid, signal.SIGKILL)
+        emergency_cleanup()
 
 
 def test_controller_assignment_metadata_can_be_top_level(worker):

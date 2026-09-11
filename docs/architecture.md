@@ -46,6 +46,7 @@ Optimization"), file paths are repo-relative.
 6. [Automation ownership and architecture budgets](#11-automation-ownership-and-architecture-budgets)
 7. [Interrupt semantics and exit codes](#12-interrupt-semantics-and-exit-codes)
 8. [Glossary](#13-glossary)
+9. [Fleet execution boundary](#14-fleet-execution-boundary)
 
 ---
 
@@ -2440,3 +2441,57 @@ review. Retries retain that commit. A failed fetch stops source work. The plan
 update preserves the implementation branch and its uncommitted changes. A
 recovered journal continues its existing epoch. The standalone planner's
 `--force` option uses the same source refresh.
+
+## 14. Fleet execution boundary
+
+Fleet adds an opt-in execution adapter beside the existing queue pipeline.
+Agamemnon retains task admission, assignments, and orchestration decisions.
+Keystone transports admitted commands and worker facts. Odysseus owns the web
+interface. The Fleet adapter does not discover issues, create another task
+queue, or change implementation state labels. The existing pipeline keeps its
+label and publication authority.
+
+[`FleetWorker`](../hephaestus/automation/fleet_worker.py) owns one pinned Codex
+0.153.4 app-server process through
+[`CodexAppServer`](../hephaestus/automation/fleet_provider.py). Each logical
+session has its own task, agent, workspace, execution generation, and provider
+thread. The target remains five provider runtimes: one with 12 laptop sessions
+and two with 24 sessions on each cluster. A shared provider process does not
+combine those task owners.
+
+[`WorkerJournal`](../hephaestus/automation/fleet_journal.py) records command
+intent before provider dispatch and retains uncertain outcomes for recovery.
+These private receipts cannot authorize a replacement task. Public facts contain
+bounded activity metadata. Prompts, tool requests, answers, and credentials stay
+on private worker storage and attachments.
+
+The [private socket CLI](../hephaestus/automation/fleet_worker_cli.py) supplies
+inventory, pending requests, and
+[current file-change evidence](../hephaestus/automation/fleet_request_evidence.py).
+The evidence helper checks the current request, session, thread, turn, and item
+before and after the provider read. Odysseus must bind an approval to those
+identities and the displayed evidence. A response still requires an admitted
+command and an immutable private response reference. The private read interface
+does not dispatch a response or grant approval.
+
+[`ContainedExecSupervisor`](../hephaestus/automation/fleet_containment.py) is a
+separate, journaled lifecycle boundary for one tool container per session.
+[`PodmanEngine` and `LinuxKernel`](../hephaestus/automation/fleet_podman.py) bind
+the private engine context, immutable image and container IDs, workspace,
+generation, resource limits, namespaces, and process identities. They must run
+on the engine's Linux host. The supervisor records removal intent before it
+removes the exact container. It confirms disposal only after the engine,
+cgroup, and retained process identities show absence. A stopped stream or an
+empty provider terminal list is insufficient. Uncertain observations retain the
+lease and workspace exclusion.
+
+The supervisor is not yet connected to provider environment attachment.
+[`EnvironmentRegistry`](../hephaestus/automation/fleet_environments.py) supplies
+immutable remote-only selection metadata; metadata cannot prove containment.
+Native macOS and shared Linux session admission remain disabled by
+[`fleet_isolation`](../hephaestus/automation/fleet_isolation.py).
+The next integration must replace raw engine attachment with the supervisor,
+map permission and tool paths into the remote workspace, and prove restricted
+thread startup, normal tool routing, and cold-resume ownership. It must preserve
+the disabled local fallback. The [Fleet worker design and runbook](fleet-worker.md)
+records the supported contracts, bounded probes, and remaining gates.
