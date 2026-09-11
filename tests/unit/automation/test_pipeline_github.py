@@ -4333,15 +4333,15 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
 
-    @pytest.mark.parametrize("status", ["queued", "in_progress"])
-    def test_noncompleted_superseded_run_fails_closed(
+    @pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending"])
+    def test_documented_active_required_run_never_passes(
         self,
         adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         command_runner: MagicMock,
         status: str,
     ) -> None:
-        """A matching noncompleted run makes current selection unsafe."""
+        """A documented active run cannot supply passing required evidence."""
         adapter.repo = "repo"
         head = "a" * 40
         response = self._json_response(
@@ -4352,8 +4352,8 @@ class TestExactHeadChecks:
                         head,
                         check_run_id=41,
                         status=status,
-                        conclusion="",
-                        completed_at="2026-09-05T11:59:00Z",
+                        conclusion=None,
+                        completed_at=None,
                     ),
                     self._check_run(head, check_run_id=42),
                 ],
@@ -4369,6 +4369,7 @@ class TestExactHeadChecks:
         )
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
+        assert command_runner.call_count == 2
 
     def test_equal_completion_instants_are_ambiguous(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
@@ -4795,8 +4796,12 @@ class TestExactHeadChecks:
         assert second is not None
         assert first != second
 
-    def test_stable_unrelated_in_progress_run_does_not_block_success(
-        self, adapter: PipelineGitHub, command_runner: MagicMock
+    @pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending"])
+    def test_stable_unrelated_active_run_does_not_block_success(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        status: str,
     ) -> None:
         """A stable unrelated active run remains valid snapshot evidence."""
         adapter.repo = "repo"
@@ -4809,7 +4814,7 @@ class TestExactHeadChecks:
                     head,
                     check_run_id=2,
                     name="optional-ci",
-                    status="in_progress",
+                    status=status,
                     conclusion=None,
                     completed_at=None,
                 ),
@@ -4864,7 +4869,7 @@ class TestExactHeadChecks:
                     head,
                     check_run_id=2,
                     name="optional-ci",
-                    status="waiting",
+                    status="unknown",
                     conclusion=None,
                     completed_at=None,
                 ),

@@ -30,7 +30,7 @@ _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 _CHECK_CONCLUSIONS = _CHECK_SUCCESS_CONCLUSIONS | frozenset(
     {"action_required", "cancelled", "failure", "stale", "startup_failure", "timed_out"}
 )
-_ACTIVE_CHECK_STATUSES = frozenset({"in_progress", "queued"})
+_ACTIVE_CHECK_STATUSES = frozenset({"in_progress", "pending", "queued", "requested", "waiting"})
 _RequiredCheck = tuple[str, int | None]
 _CheckRunCandidate = tuple[datetime, int, dict[str, object]]
 _CheckRunGroups = dict[_RequiredCheck, dict[int, list[_CheckRunCandidate]]]
