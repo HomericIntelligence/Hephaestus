@@ -2400,6 +2400,7 @@ class TestWorkerPoolSubmitComplete:
             pi_isolation_adapter="package:factory",
             pi_dir=Path("/private/pi-agent"),
             remaining_timeout=ANY,
+            shutdown=ANY,
         )
 
     def test_compact_job_cancellation_stops_during_session_discovery(
@@ -2426,7 +2427,7 @@ class TestWorkerPoolSubmitComplete:
 
         with (
             patch("hephaestus.automation.learn.session_uuid", side_effect=cancel_discovery),
-            patch("hephaestus.automation.learn.claude_invoke._run_tracked") as provider,
+            patch("hephaestus.automation.learn.run_subprocess") as provider,
         ):
             result = pool._run(job)
 
@@ -2459,7 +2460,7 @@ class TestWorkerPoolSubmitComplete:
         with (
             patch(f"{_WP}.time.monotonic", side_effect=lambda: clock[0]),
             patch("hephaestus.automation.learn.session_uuid", side_effect=expire_discovery),
-            patch("hephaestus.automation.learn.claude_invoke._run_tracked") as provider,
+            patch("hephaestus.automation.learn.run_subprocess") as provider,
         ):
             result = pool._run(job)
 

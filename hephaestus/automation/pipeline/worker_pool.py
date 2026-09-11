@@ -5094,6 +5094,7 @@ class WorkerPool:
             pi_isolation_adapter=job.pi_isolation_adapter,
             pi_dir=job.pi_dir,
             remaining_timeout=remaining_timeout,
+            shutdown=self._shutdown,
         )
         # ``compact_agent_session`` intentionally swallows expected failures; a
         # missing or uncompactable transcript must not stall a review cycle.

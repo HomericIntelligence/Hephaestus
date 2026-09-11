@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
-import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.utils.subprocess_registry as subprocess_registry
 from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.model_selection import parse_model_selection
@@ -18,6 +18,7 @@ from hephaestus.automation.agent_config import (
     session_uuid,
 )
 from hephaestus.config.child_environments import build_claude_child_env
+from hephaestus.utils.helpers import run_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ def compact_session(
     timeout: int | None = None,
     model: str | None = None,
     remaining_timeout: Callable[[], int] | None = None,
+    shutdown: threading.Event | None = None,
 ) -> bool:
     """Send ``/compact`` to one Claude session.
 
@@ -44,6 +46,7 @@ def compact_session(
         timeout: Subprocess timeout in seconds.
         model: Optional ``MODEL[:EFFORT]`` value. Session lookup uses the model.
         remaining_timeout: Optional operation deadline and cancellation check.
+        shutdown: Optional cancellation event for active provider work.
 
     Returns:
         True if compaction succeeds; otherwise False.
@@ -62,7 +65,9 @@ def compact_session(
             cwd=cwd,
             remaining_timeout=remaining_timeout,
         )
-        claude_invoke._run_tracked(
+        if remaining_timeout is not None:
+            timeout_s = min(timeout_s, remaining_timeout())
+        run_subprocess(
             [
                 "claude",
                 "--resume",
@@ -71,12 +76,14 @@ def compact_session(
                 "text",
                 "--print",
             ],
-            stdin_text="/compact",
+            input_text="/compact",
             cwd=str(cwd),
             timeout=timeout_s,
             env=build_claude_child_env(),
-            use_devnull_stdin=False,
-            remaining_timeout=remaining_timeout,
+            check=True,
+            log_on_error=False,
+            track_process_group=True,
+            shutdown=shutdown,
         )
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr or ""
@@ -125,6 +132,7 @@ def compact_agent_session(
     pi_isolation_adapter: str | None = None,
     pi_dir: Path | None = None,
     remaining_timeout: Callable[[], int] | None = None,
+    shutdown: threading.Event | None = None,
 ) -> bool:
     """Compact a stored provider session.
 
@@ -141,6 +149,7 @@ def compact_agent_session(
             timeout,
             model,
             remaining_timeout,
+            shutdown,
         )
     try:
         timeout_s = learn_claude_timeout() if timeout is None else timeout
