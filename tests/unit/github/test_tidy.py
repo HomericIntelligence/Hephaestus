@@ -8,7 +8,7 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
@@ -97,6 +97,20 @@ LOCKED_SPACED_WORKTREE_PORCELAIN = "\0".join(
     )
 )
 
+PRUNABLE_WORKTREE_PORCELAIN = "\0".join(
+    (
+        "worktree /repo",
+        "HEAD abcdef",
+        "branch refs/heads/main",
+        "",
+        "worktree /repo/build/.worktrees/123-finished",
+        "HEAD 123456",
+        "branch refs/heads/123-finished",
+        "prunable gitdir file points to non-existent location",
+        "",
+    )
+)
+
 NEWLINE_WORKTREE_PORCELAIN = "\0".join(
     (
         "worktree /repo",
@@ -109,6 +123,30 @@ NEWLINE_WORKTREE_PORCELAIN = "\0".join(
         "",
     )
 )
+
+
+def _candidate_worktree_porcelain(
+    root: Path,
+    path: Path,
+    branch: str,
+    *,
+    head: str = "123456",
+    locked: bool = False,
+) -> str:
+    """Build a primary worktree and one attached cleanup candidate."""
+    return "\0".join(
+        (
+            f"worktree {root}",
+            "HEAD abcdef",
+            "branch refs/heads/main",
+            "",
+            f"worktree {path}",
+            f"HEAD {head}",
+            f"branch refs/heads/{branch}",
+            *(("locked",) if locked else ()),
+            "",
+        )
+    )
 
 
 def test_tidy_sdk_preserves_explicit_model() -> None:
@@ -302,6 +340,39 @@ def test_parse_worktree_porcelain_preserves_newline_in_nul_path() -> None:
     ) == [(Path("/repo/.worktrees/123\nfinished"), "123-finished")]
 
 
+@pytest.mark.parametrize(
+    ("second_path", "second_branch"),
+    [
+        ("/repo/.worktrees/123-finished", "replacement"),
+        ("/repo/.worktrees/replacement", "123-finished"),
+    ],
+)
+def test_parse_worktree_records_rejects_duplicate_cleanup_identity(
+    second_path: str,
+    second_branch: str,
+) -> None:
+    """Duplicate paths or attached branches make the inventory unsafe."""
+    porcelain = "\0".join(
+        (
+            "worktree /repo",
+            "HEAD abcdef",
+            "branch refs/heads/main",
+            "",
+            "worktree /repo/.worktrees/123-finished",
+            "HEAD 123456",
+            "branch refs/heads/123-finished",
+            "",
+            f"worktree {second_path}",
+            "HEAD 654321",
+            f"branch refs/heads/{second_branch}",
+            "",
+        )
+    )
+
+    with pytest.raises(tidy_module.WorktreeInventoryError, match="malformed"):
+        tidy_module._parse_worktree_records(porcelain)
+
+
 def test_cleanup_rejects_malformed_inventory_without_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -328,10 +399,13 @@ def test_cleanup_stale_worktrees_dry_run_reports_closed_issue_without_removing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Dry-run reports a closed-issue worktree and never invokes git removal."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    porcelain = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
     caplog.set_level("INFO", logger="hephaestus.github.tidy")
     if not hasattr(tidy_module, "_cleanup_stale_worktrees"):
         pytest.fail("tidy does not yet implement stale-worktree cleanup")
-    monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: WORKTREE_PORCELAIN)
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
     monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda path: False)
@@ -346,15 +420,18 @@ def test_cleanup_stale_worktrees_dry_run_reports_closed_issue_without_removing(
 
 def test_cleanup_stale_worktree_with_space_path(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Dry-run evaluates and reports the complete space-containing path."""
-    spaced_path = Path("/repo/.worktrees/123 finished")
+    spaced_path = tmp_path / "123 finished"
+    spaced_path.mkdir()
+    porcelain = _candidate_worktree_porcelain(tmp_path, spaced_path, "123-finished")
     caplog.set_level("INFO", logger="hephaestus.github.tidy")
     monkeypatch.setattr(
         tidy_module,
         "_worktree_porcelain",
-        lambda: SPACED_WORKTREE_PORCELAIN,
+        lambda: porcelain,
     )
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
@@ -372,15 +449,18 @@ def test_cleanup_stale_worktree_with_space_path(
 
 def test_cleanup_stale_worktree_with_newline_path(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Dry-run evaluates the complete newline-containing path."""
-    newline_path = Path("/repo/.worktrees/123\nfinished")
+    newline_path = tmp_path / "123\nfinished"
+    newline_path.mkdir()
+    porcelain = _candidate_worktree_porcelain(tmp_path, newline_path, "123-finished")
     caplog.set_level("INFO", logger="hephaestus.github.tidy")
     monkeypatch.setattr(
         tidy_module,
         "_worktree_porcelain",
-        lambda: NEWLINE_WORKTREE_PORCELAIN,
+        lambda: porcelain,
     )
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
@@ -398,15 +478,30 @@ def test_cleanup_stale_worktree_with_newline_path(
 
 def test_cleanup_skips_locked_worktree_with_space_path(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A locked spaced-path worktree is skipped without removal."""
-    spaced_path = Path("/repo/.worktrees/123 finished")
+    spaced_path = tmp_path / "123 finished"
+    spaced_path.mkdir()
+    porcelain = "\0".join(
+        (
+            f"worktree {tmp_path}",
+            "HEAD abcdef",
+            "branch refs/heads/main",
+            "",
+            f"worktree {spaced_path}",
+            "HEAD 123456",
+            "branch refs/heads/123-finished",
+            "locked",
+            "",
+        )
+    )
     caplog.set_level("INFO", logger="hephaestus.github.tidy")
     monkeypatch.setattr(
         tidy_module,
         "_worktree_porcelain",
-        lambda: LOCKED_SPACED_WORKTREE_PORCELAIN,
+        lambda: porcelain,
     )
     monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
     monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
@@ -414,9 +509,503 @@ def test_cleanup_skips_locked_worktree_with_space_path(
     remove = MagicMock()
     monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
 
-    assert tidy_module._cleanup_stale_worktrees(Path("/repo"), "main", dry_run=False) == 0
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 0
     assert f"Skipping locked worktree {spaced_path}" in caplog.text
     remove.assert_not_called()
+
+
+def test_cleanup_skips_prunable_worktree_without_touching_missing_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prunable record is not a cleanup target."""
+    monkeypatch.setattr(
+        tidy_module,
+        "_worktree_porcelain",
+        lambda: PRUNABLE_WORKTREE_PORCELAIN,
+    )
+    is_dirty = MagicMock(side_effect=AssertionError("must not inspect a prunable path"))
+    prompt = MagicMock()
+    remove = MagicMock()
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", is_dirty)
+    monkeypatch.setattr("builtins.input", prompt)
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(Path("/repo"), "main", dry_run=False) == 1
+    is_dirty.assert_not_called()
+    prompt.assert_not_called()
+    remove.assert_not_called()
+
+
+def test_cleanup_reports_prunable_worktree_as_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A prunable registration requires separate recovery before cleanup."""
+    caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(
+        tidy_module,
+        "_worktree_porcelain",
+        lambda: PRUNABLE_WORKTREE_PORCELAIN,
+    )
+
+    assert tidy_module._cleanup_stale_worktrees(Path("/repo"), "main", dry_run=False) == 1
+    assert "prunable worktree" in caplog.text
+
+
+def test_cleanup_reports_worktree_inside_git_metadata_as_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cleanup does not remove a checkout that Git metadata contains."""
+    metadata_path = tmp_path / ".git" / "worktrees" / "tidy-123-finished"
+    metadata_path.mkdir(parents=True)
+    porcelain = _candidate_worktree_porcelain(tmp_path, metadata_path, "123-finished")
+    is_dirty = MagicMock(side_effect=AssertionError("must not inspect Git metadata"))
+    caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", is_dirty)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 1
+    assert "Git metadata" in caplog.text
+    is_dirty.assert_not_called()
+
+
+def test_cleanup_reports_common_git_metadata_worktree_as_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cleanup protects a shared Git directory from a linked worktree."""
+    linked_root = tmp_path / "linked"
+    linked_root.mkdir()
+    common_git_dir = tmp_path / "primary" / ".git"
+    linked_git_dir = common_git_dir / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked_root / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    metadata_path = common_git_dir / "worktrees" / "tidy-123-finished"
+    metadata_path.mkdir(parents=True)
+    porcelain = _candidate_worktree_porcelain(linked_root, metadata_path, "123-finished")
+    is_dirty = MagicMock(side_effect=AssertionError("must not inspect Git metadata"))
+    caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", is_dirty)
+
+    assert tidy_module._cleanup_stale_worktrees(linked_root, "main", dry_run=False) == 1
+    assert "Git metadata" in caplog.text
+    is_dirty.assert_not_called()
+
+
+def test_git_metadata_path_with_parent_components_fails_closed(tmp_path: Path) -> None:
+    """A metadata path cannot bypass protection with parent components."""
+    common_git_dir = tmp_path / ".git"
+    candidate = common_git_dir / "worktrees" / "tidy" / ".." / ".." / ".." / "outside"
+
+    assert not candidate.resolve().is_relative_to(common_git_dir.resolve())
+    assert tidy_module._is_git_metadata_worktree_path(candidate, common_git_dir)
+
+
+def test_cleanup_rechecks_metadata_before_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cleanup does not inspect a candidate that changes into Git metadata."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    metadata_path = tmp_path / ".git" / "worktrees" / "tidy-123-finished"
+    metadata_path.mkdir(parents=True)
+    porcelain = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
+    calls = 0
+
+    def worktree_porcelain() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            worktree_path.rmdir()
+            try:
+                worktree_path.symlink_to(metadata_path, target_is_directory=True)
+            except OSError as error:
+                pytest.skip(f"Cannot create the test symlink: {error}")
+        return porcelain
+
+    is_dirty = MagicMock(side_effect=AssertionError("must not inspect Git metadata"))
+    caplog.set_level("ERROR", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", worktree_porcelain)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", is_dirty)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 1
+    assert "Git metadata" in caplog.text
+    is_dirty.assert_not_called()
+
+
+def test_git_common_dir_rejects_linked_gitfile_without_commondir(tmp_path: Path) -> None:
+    """A linked checkout with incomplete Git metadata fails closed."""
+    linked_root = tmp_path / "linked"
+    linked_root.mkdir()
+    linked_git_dir = tmp_path / "primary" / ".git" / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked_root / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+
+    with pytest.raises(tidy_module.WorktreeInventoryError, match="common Git directory"):
+        tidy_module._git_common_dir(linked_root)
+
+
+def test_cleanup_skips_candidate_that_disappears_before_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing worktree during cleanup does not stop the command."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    porcelain = "\0".join(
+        (
+            f"worktree {tmp_path}",
+            "HEAD abcdef",
+            "branch refs/heads/main",
+            "",
+            f"worktree {worktree_path}",
+            "HEAD 123456",
+            "branch refs/heads/123-finished",
+            "",
+        )
+    )
+    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(
+        tidy_module,
+        "_worktree_is_dirty",
+        MagicMock(side_effect=FileNotFoundError("worktree disappeared")),
+    )
+    remove = MagicMock()
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 0
+    assert "Skipping missing worktree" in caplog.text
+    remove.assert_not_called()
+
+
+def test_cleanup_reports_initial_missing_worktree_as_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing registration from the first inventory requires recovery."""
+    missing_path = tmp_path / "123-finished"
+    porcelain = _candidate_worktree_porcelain(tmp_path, missing_path, "123-finished")
+    issue_is_closed = MagicMock()
+    branch_is_merged = MagicMock()
+    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", issue_is_closed)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", branch_is_merged)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 1
+    assert "Skipping missing worktree" in caplog.text
+    issue_is_closed.assert_not_called()
+    branch_is_merged.assert_not_called()
+
+
+def test_cleanup_revalidates_candidate_before_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cleanup skips a path when its attached branch changes after inventory."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    first_inventory = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
+    replacement_inventory = _candidate_worktree_porcelain(tmp_path, worktree_path, "replacement")
+    inventories = MagicMock(side_effect=(first_inventory, replacement_inventory))
+    is_dirty = MagicMock(side_effect=AssertionError("must not inspect a replaced worktree"))
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", inventories)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", is_dirty)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 0
+    assert inventories.call_count == 2
+    is_dirty.assert_not_called()
+
+
+def test_cleanup_revalidates_same_branch_head_before_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cleanup skips a replacement that retains the same branch name."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    first_inventory = _candidate_worktree_porcelain(
+        tmp_path,
+        worktree_path,
+        "123-finished",
+        head="111111",
+    )
+    replacement_inventory = _candidate_worktree_porcelain(
+        tmp_path,
+        worktree_path,
+        "123-finished",
+        head="222222",
+    )
+    inventories = MagicMock(side_effect=(first_inventory, replacement_inventory))
+    is_dirty = MagicMock(side_effect=AssertionError("must not inspect a replacement"))
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", inventories)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", is_dirty)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 0
+    assert inventories.call_count == 2
+    is_dirty.assert_not_called()
+
+
+def test_cleanup_revalidates_candidate_before_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cleanup does not remove a path after its registration changes."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    first_inventory = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
+    replacement_inventory = _candidate_worktree_porcelain(tmp_path, worktree_path, "replacement")
+    inventories = MagicMock(
+        side_effect=(first_inventory, first_inventory, replacement_inventory),
+    )
+    remove = MagicMock()
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", inventories)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda path: False)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 0
+    assert inventories.call_count == 3
+    remove.assert_not_called()
+
+
+def test_cleanup_revalidates_clean_state_before_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cleanup does not remove a worktree that becomes dirty after confirmation."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    porcelain = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
+    inventories = MagicMock(side_effect=(porcelain, porcelain, porcelain))
+    is_dirty = MagicMock(side_effect=(False, True))
+    remove = MagicMock(side_effect=AssertionError("must not remove a dirty worktree"))
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", inventories)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", is_dirty)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 0
+    assert is_dirty.call_count == 2
+    remove.assert_not_called()
+
+
+def test_cleanup_revalidates_locked_state_before_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cleanup does not remove a worktree that becomes locked after confirmation."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    unlocked_inventory = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
+    locked_inventory = _candidate_worktree_porcelain(
+        tmp_path,
+        worktree_path,
+        "123-finished",
+        locked=True,
+    )
+    inventories = MagicMock(side_effect=(unlocked_inventory, unlocked_inventory, locked_inventory))
+    remove = MagicMock(side_effect=AssertionError("must not remove a locked worktree"))
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", inventories)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda path: False)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 0
+    remove.assert_not_called()
+
+
+def test_cleanup_revalidates_stale_reason_before_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cleanup does not remove a branch after its stale reason changes."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    porcelain = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
+    inventories = MagicMock(side_effect=(porcelain, porcelain, porcelain))
+    issue_is_closed = MagicMock(side_effect=(True, True, False))
+    remove = MagicMock(side_effect=AssertionError("must not remove a changed candidate"))
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", inventories)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", issue_is_closed)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda path: False)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 0
+    assert issue_is_closed.call_count == 3
+    remove.assert_not_called()
+
+
+def test_cleanup_reports_status_failure_as_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A status error leaves the candidate untouched and cleanup incomplete."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    porcelain = _candidate_worktree_porcelain(tmp_path, worktree_path, "123-finished")
+    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: porcelain)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(
+        tidy_module,
+        "_worktree_is_dirty",
+        MagicMock(side_effect=subprocess.CalledProcessError(1, ["git", "status"])),
+    )
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 1
+    assert "Could not inspect worktree" in caplog.text
+
+
+def test_remove_worktree_reports_retained_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A branch-delete failure leaves cleanup incomplete and visible."""
+    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    run_git = MagicMock(
+        side_effect=(
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 1, stdout="", stderr="not fully merged"),
+        )
+    )
+    monkeypatch.setattr(tidy_module, "run_git", run_git)
+
+    assert tidy_module._remove_worktree(tmp_path / "123-finished", "123-finished") is False
+    assert "Retained local branch 123-finished" in caplog.text
+    run_git.assert_has_calls(
+        [
+            call(["worktree", "remove", str(tmp_path / "123-finished")]),
+            call(
+                ["branch", "-d", "123-finished"],
+                check=False,
+                log_on_error=False,
+            ),
+        ]
+    )
+
+
+def test_remove_worktree_reports_branch_delete_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A branch-delete exception leaves the removed worktree visible as incomplete."""
+    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    run_git = MagicMock(
+        side_effect=(
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            OSError("branch deletion failed"),
+        )
+    )
+    monkeypatch.setattr(tidy_module, "run_git", run_git)
+
+    assert tidy_module._remove_worktree(tmp_path / "123-finished", "123-finished") is False
+    assert "Retained local branch 123-finished" in caplog.text
+
+
+def test_cleanup_reports_worktree_removal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A worktree removal failure is visible and leaves cleanup incomplete."""
+    worktree_path = tmp_path / "123-finished"
+    worktree_path.mkdir()
+    porcelain = _candidate_worktree_porcelain(
+        tmp_path,
+        worktree_path,
+        "123-finished",
+    )
+    inventories = MagicMock(side_effect=(porcelain, porcelain, porcelain))
+    run_git = MagicMock(side_effect=subprocess.CalledProcessError(1, ["git", "worktree", "remove"]))
+    caplog.set_level("WARNING", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", inventories)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda path: False)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr(tidy_module, "run_git", run_git)
+
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=False) == 1
+    assert "Could not remove worktree" in caplog.text
+    run_git.assert_called_once_with(["worktree", "remove", str(worktree_path)])
+
+
+def test_agent_prompt_directs_temporary_worktree_outside_git_metadata(tmp_path: Path) -> None:
+    """A rebase agent creates its worktree outside Git metadata."""
+    repo_path = tmp_path / "repo"
+    prompt = tidy_module._make_agent_prompt("feature/nested", "main", repo_path, "owner/repo")
+    worktree_line = next(
+        line for line in prompt.splitlines() if line.startswith("- Worktree to create: ")
+    )
+    worktree_path = Path(worktree_line.removeprefix("- Worktree to create: "))
+
+    assert worktree_path.parent == repo_path / "build" / ".worktrees"
+    assert not worktree_path.is_relative_to(repo_path / ".git")
+    assert "/" not in worktree_path.name
+    assert f"git worktree add '{worktree_path}' 'feature/nested'" in prompt
+    assert "git worktree prune" not in prompt
+
+
+def test_rebase_prompt_renders_with_public_context_without_worktree_parent(tmp_path: Path) -> None:
+    """The packaged rebase prompt does not require private builder context."""
+    worktree_path = tmp_path / "repo" / "build" / ".worktrees" / "tidy-agent"
+
+    prompt = tidy_module.PromptCatalog.current().render(
+        "tidy/rebase_fix.j2",
+        branch="feature/nested",
+        trunk="main",
+        repo_path=tmp_path / "repo",
+        repo_slug="owner/repo",
+        worktree_path=worktree_path,
+    )
+
+    assert f"mkdir -p \"$(dirname '{worktree_path}')\"" in prompt
+
+
+def test_agent_prompt_quotes_worktree_commands_for_a_path_with_spaces(tmp_path: Path) -> None:
+    """A rebase prompt preserves a repository path with spaces as one argument."""
+    repo_path = tmp_path / "repo with spaces"
+    prompt = tidy_module._make_agent_prompt("feature/nested", "main", repo_path, "owner/repo")
+    worktree_path = tidy_module._agent_worktree_path(repo_path, "feature/nested")
+
+    assert f"cd '{repo_path}'" in prompt
+    assert f"mkdir -p \"$(dirname '{worktree_path}')\"" in prompt
+    assert f"git worktree add '{worktree_path}' 'feature/nested'" in prompt
 
 
 @pytest.mark.parametrize(
@@ -570,7 +1159,7 @@ class TestMain:
         )
 
         assert tidy_module.main() == 0
-        assert [call.args[0] for call in branch_is_merged.call_args_list] == ["123-finished"]
+        assert {call.args[0] for call in branch_is_merged.call_args_list} == {"123-finished"}
 
     @pytest.mark.parametrize(
         ("failure", "message"),

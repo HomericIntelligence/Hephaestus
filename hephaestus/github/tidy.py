@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +65,16 @@ _WORKTREE_LIST_Z_MIN_GIT = "2.36"
 
 class WorktreeInventoryError(RuntimeError):
     """Raised when Git cannot supply an unambiguous worktree inventory."""
+
+
+@dataclass(frozen=True)
+class WorktreeRecord:
+    """One strict record from Git's worktree porcelain output."""
+
+    path: Path
+    branch: str | None
+    head: str | None
+    attributes: frozenset[str]
 
 
 def _detect_repo_from_remote() -> str | None:
@@ -198,13 +210,18 @@ def _add_inventory_attribute(
     path: Path | None,
     attributes: set[str],
     branch: str | None,
-) -> str | None:
-    """Add a valid record attribute and return its branch value."""
+    head: str | None,
+) -> tuple[str | None, str | None]:
+    """Add a valid record attribute and return its branch and HEAD values."""
     name, value = _inventory_attribute(field)
     if path is None or name in attributes or (name in {"HEAD", "branch"} and not value):
         raise WorktreeInventoryError("Git returned a malformed worktree inventory")
     attributes.add(name)
-    return value if name == "branch" else branch
+    if name == "branch":
+        branch = value
+    elif name == "HEAD":
+        head = value
+    return branch, head
 
 
 def _validate_inventory_record(attributes: set[str]) -> None:
@@ -215,35 +232,78 @@ def _validate_inventory_record(attributes: set[str]) -> None:
         raise WorktreeInventoryError("Git returned a malformed worktree inventory")
 
 
-def _parse_worktree_porcelain(output: str, root: Path) -> list[tuple[Path, str]]:
-    """Return attached, non-primary worktrees from strict NUL output."""
-    worktrees: list[tuple[Path, str]] = []
-    primary: Path | None = None
+def _validate_unique_inventory_records(records: list[WorktreeRecord]) -> None:
+    """Reject records that have duplicate paths or attached branches."""
+    paths: set[Path] = set()
+    branches: set[str] = set()
+    for record in records:
+        if record.path in paths or (record.branch is not None and record.branch in branches):
+            raise WorktreeInventoryError("Git returned a malformed worktree inventory")
+        paths.add(record.path)
+        if record.branch is not None:
+            branches.add(record.branch)
+
+
+def _parse_worktree_records(output: str) -> list[WorktreeRecord]:
+    """Return strict worktree records from NUL-delimited porcelain output."""
+    records: list[WorktreeRecord] = []
     path: Path | None = None
     branch: str | None = None
+    head: str | None = None
     attributes: set[str] = set()
-    records = 0
     for field in [*output.split("\0"), ""]:
         if field.startswith("worktree "):
             path = _inventory_path(field, path)
-            if primary is None:
-                primary = path
             branch = None
+            head = None
             attributes = {"worktree"}
         elif not field:
             if path is not None:
                 _validate_inventory_record(attributes)
-                if branch is not None and path not in {primary, root}:
-                    worktrees.append((path, branch))
-                records += 1
+                records.append(
+                    WorktreeRecord(
+                        path=path,
+                        branch=branch,
+                        head=head,
+                        attributes=frozenset(attributes),
+                    )
+                )
             path = None
             branch = None
+            head = None
             attributes = set()
         else:
-            branch = _add_inventory_attribute(field, path, attributes, branch)
-    if records == 0:
+            branch, head = _add_inventory_attribute(field, path, attributes, branch, head)
+    if not records:
         raise WorktreeInventoryError("Git returned a malformed worktree inventory")
+    _validate_unique_inventory_records(records)
+    return records
+
+
+def _cleanup_candidate_records(records: list[WorktreeRecord], root: Path) -> list[WorktreeRecord]:
+    """Return attached non-primary records that cleanup can consider."""
+    primary = records[0].path
+    return [
+        record
+        for record in records
+        if record.branch is not None
+        and "prunable" not in record.attributes
+        and record.path not in {primary, root}
+    ]
+
+
+def _parse_worktree_porcelain(output: str, root: Path) -> list[tuple[Path, str]]:
+    """Return attached, non-primary worktrees from strict NUL output."""
+    worktrees: list[tuple[Path, str]] = []
+    for record in _cleanup_candidate_records(_parse_worktree_records(output), root):
+        if record.branch is not None:
+            worktrees.append((record.path, record.branch))
     return worktrees
+
+
+def _prunable_worktree_paths(records: list[WorktreeRecord]) -> list[Path]:
+    """Return worktree paths that require separate recovery."""
+    return [record.path for record in records if "prunable" in record.attributes]
 
 
 def _issue_is_closed(issue: int, *, gh_timeout: int = DEFAULT_GH_TIMEOUT) -> bool:
@@ -278,23 +338,202 @@ def _worktree_is_dirty(path: Path) -> bool:
     return bool(run_git(["status", "--porcelain"], cwd=path).stdout.strip())
 
 
-def _worktree_is_locked(path: Path, porcelain: str) -> bool:
-    """Return whether *path* is locked in the supplied worktree inventory."""
-    stanza = False
-    for field in [*porcelain.split("\0"), ""]:
-        if field.startswith("worktree "):
-            stanza = Path(field.removeprefix("worktree ")) == path
-        elif not field:
-            stanza = False
-        elif stanza and field.startswith("locked"):
-            return True
+def _worktree_is_locked(record: WorktreeRecord) -> bool:
+    """Return whether a worktree record has Git's locked attribute."""
+    return "locked" in record.attributes
+
+
+def _git_common_dir(root: Path) -> Path:
+    """Return the common Git directory for a primary or linked worktree."""
+    git_path = root / ".git"
+    if git_path.is_dir() or not git_path.is_file():
+        return git_path.resolve()
+    try:
+        gitdir_text = git_path.read_text(encoding="utf-8").strip()
+        if "\0" in gitdir_text or "\n" in gitdir_text or not gitdir_text.startswith("gitdir: "):
+            raise WorktreeInventoryError("Git returned an invalid worktree gitfile")
+        git_dir = Path(gitdir_text.removeprefix("gitdir: "))
+        if not git_dir.is_absolute():
+            git_dir = root / git_dir
+        if not git_dir.is_dir():
+            raise WorktreeInventoryError("Git returned an invalid worktree gitfile")
+        commondir_path = git_dir / "commondir"
+        if not commondir_path.is_file():
+            if git_dir.parent.name == "worktrees":
+                raise WorktreeInventoryError("Git could not resolve the common Git directory")
+            return git_dir.resolve()
+        common_dir_text = commondir_path.read_text(encoding="utf-8").strip()
+        if not common_dir_text or "\0" in common_dir_text or "\n" in common_dir_text:
+            raise WorktreeInventoryError("Git could not resolve the common Git directory")
+        common_dir = Path(common_dir_text)
+        if not common_dir.is_absolute():
+            common_dir = git_dir / common_dir
+        common_git_dir = common_dir.resolve()
+        if not common_git_dir.is_dir():
+            raise WorktreeInventoryError("Git could not resolve the common Git directory")
+        return common_git_dir
+    except OSError as error:
+        raise WorktreeInventoryError("Git could not resolve the common Git directory") from error
+
+
+def _is_git_metadata_worktree_path(path: Path, common_git_dir: Path) -> bool:
+    """Return whether a raw or resolved path is inside shared Git metadata."""
+    return path.is_relative_to(common_git_dir) or path.resolve().is_relative_to(
+        common_git_dir.resolve()
+    )
+
+
+def _refresh_worktree_candidate(expected: WorktreeRecord, root: Path) -> WorktreeRecord | None:
+    """Return a fresh candidate only when its full record is unchanged."""
+    if not expected.path.is_dir():
+        logger.warning("Skipping missing worktree %s", expected.path)
+        return None
+
+    records = _parse_worktree_records(_worktree_porcelain())
+    current = next(
+        (
+            record
+            for record in _cleanup_candidate_records(records, root)
+            if record.path == expected.path
+        ),
+        None,
+    )
+    if current != expected:
+        logger.warning("Skipping changed worktree %s (branch %s)", expected.path, expected.branch)
+        return None
+    return current
+
+
+def _remove_worktree(path: Path, branch: str) -> bool:
+    """Remove a worktree and return whether its local branch was removed."""
+    try:
+        run_git(["worktree", "remove", str(path)])
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("Could not remove worktree %s: %s", path, error)
+        return False
+    try:
+        result = run_git(["branch", "-d", branch], check=False, log_on_error=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("Worktree removed %s; Retained local branch %s: %s", path, branch, error)
+        return False
+    if result.returncode:
+        logger.warning("Worktree removed %s; Retained local branch %s", path, branch)
+        return False
+    return True
+
+
+def _stale_worktree_reason(
+    branch: str,
+    trunk: str,
+    *,
+    gh_timeout: int,
+) -> str | None:
+    """Return the removal reason for a closed-issue or merged branch."""
+    match = re.match(r"(\d+)", branch)
+    issue = int(match.group(1)) if match else None
+    closed_issue = issue is not None and (
+        _issue_is_closed(issue)
+        if gh_timeout == DEFAULT_GH_TIMEOUT
+        else _issue_is_closed(issue, gh_timeout=gh_timeout)
+    )
+    if closed_issue:
+        return f"issue #{issue} is closed"
+    if _branch_is_merged(branch, trunk):
+        return f"merged into {trunk}"
+    return None
+
+
+def _fresh_stale_worktree_candidate(
+    expected: WorktreeRecord,
+    root: Path,
+    trunk: str,
+    reason: str,
+    *,
+    common_git_dir: Path | None,
+    gh_timeout: int,
+) -> tuple[WorktreeRecord | None, bool]:
+    """Return a clean unchanged candidate and whether inspection is incomplete."""
+    current = _refresh_worktree_candidate(expected, root)
+    if current is None:
+        return None, False
+    if common_git_dir is not None and _is_git_metadata_worktree_path(current.path, common_git_dir):
+        logger.error(
+            "Cannot clean worktree inside Git metadata %s; use the recovery workflow first",
+            current.path,
+        )
+        return None, True
+    try:
+        dirty = _worktree_is_dirty(current.path)
+    except FileNotFoundError:
+        logger.warning("Skipping missing worktree %s", current.path)
+        return None, False
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("Could not inspect worktree %s: %s", current.path, error)
+        return None, True
+    if dirty:
+        logger.warning("Skipping dirty worktree %s (%s)", current.path, reason)
+        return None, False
+    if _worktree_is_locked(current):
+        logger.warning("Skipping locked worktree %s (%s)", current.path, reason)
+        return None, False
+    if (
+        current.branch is None
+        or _stale_worktree_reason(current.branch, trunk, gh_timeout=gh_timeout) != reason
+    ):
+        logger.warning("Skipping changed worktree %s (branch %s)", current.path, current.branch)
+        return None, False
+    return current, False
+
+
+def _cleanup_stale_worktree_candidate(
+    expected: WorktreeRecord,
+    root: Path,
+    trunk: str,
+    reason: str,
+    *,
+    dry_run: bool,
+    common_git_dir: Path | None,
+    gh_timeout: int,
+) -> bool:
+    """Clean one stale worktree and return whether cleanup remains incomplete."""
+    current, incomplete = _fresh_stale_worktree_candidate(
+        expected,
+        root,
+        trunk,
+        reason,
+        common_git_dir=common_git_dir,
+        gh_timeout=gh_timeout,
+    )
+    if current is None:
+        return incomplete
+    if dry_run:
+        logger.info(
+            "Would remove stale worktree %s (branch %s; %s)",
+            current.path,
+            current.branch,
+            reason,
+        )
+        return False
+
+    prompt = f"Remove stale worktree {current.path} (branch {current.branch}; {reason})? [y/N] "
+    if input(prompt).lower() != "y":
+        logger.info("Kept worktree %s", current.path)
+        return False
+
+    current, incomplete = _fresh_stale_worktree_candidate(
+        expected,
+        root,
+        trunk,
+        reason,
+        common_git_dir=common_git_dir,
+        gh_timeout=gh_timeout,
+    )
+    if current is None:
+        return incomplete
+    if current.branch is None or not _remove_worktree(current.path, current.branch):
+        return True
+    logger.info("Removed stale worktree %s", current.path)
     return False
-
-
-def _remove_worktree(path: Path, branch: str) -> None:
-    """Remove a worktree and its local branch after operator confirmation."""
-    run_git(["worktree", "remove", str(path)])
-    run_git(["branch", "-d", branch], check=False, log_on_error=False)
 
 
 def _cleanup_stale_worktrees(
@@ -306,41 +545,59 @@ def _cleanup_stale_worktrees(
 ) -> int:
     """Interactively remove clean worktrees for closed issues or merged branches."""
     porcelain = _worktree_porcelain()
-    candidates = _parse_worktree_porcelain(porcelain, root)
+    records = _parse_worktree_records(porcelain)
+    candidates = _cleanup_candidate_records(records, root)
+    prunable_paths = _prunable_worktree_paths(records)
+    if prunable_paths:
+        for path in prunable_paths:
+            logger.error(
+                "Cannot clean prunable worktree registration %s; use the recovery workflow first",
+                path,
+            )
+        return 1
+
+    common_git_dir = _git_common_dir(root) if candidates else None
     stale_count = 0
-    for path, branch in candidates:
-        match = re.match(r"(\d+)", branch)
-        issue = int(match.group(1)) if match else None
-        closed_issue = issue is not None and (
-            _issue_is_closed(issue)
-            if gh_timeout == DEFAULT_GH_TIMEOUT
-            else _issue_is_closed(issue, gh_timeout=gh_timeout)
-        )
-        merged_branch = _branch_is_merged(branch, trunk)
-        if not closed_issue and not merged_branch:
+    incomplete = False
+    for candidate in candidates:
+        branch = candidate.branch
+        if branch is None:
+            continue
+        if common_git_dir is not None and _is_git_metadata_worktree_path(
+            candidate.path, common_git_dir
+        ):
+            logger.error(
+                "Cannot clean worktree inside Git metadata %s; use the recovery workflow first",
+                candidate.path,
+            )
+            incomplete = True
+            continue
+        if not candidate.path.is_dir():
+            logger.warning("Skipping missing worktree %s", candidate.path)
+            incomplete = True
+            continue
+
+        reason = _stale_worktree_reason(branch, trunk, gh_timeout=gh_timeout)
+        if reason is None:
             continue
 
         stale_count += 1
-        reason = f"issue #{issue} is closed" if closed_issue else f"merged into {trunk}"
-        if _worktree_is_dirty(path):
-            logger.warning("Skipping dirty worktree %s (%s)", path, reason)
-            continue
-        if _worktree_is_locked(path, porcelain):
-            logger.warning("Skipping locked worktree %s (%s)", path, reason)
-            continue
-        if dry_run:
-            logger.info("Would remove stale worktree %s (branch %s; %s)", path, branch, reason)
-            continue
-        prompt = f"Remove stale worktree {path} (branch {branch}; {reason})? [y/N] "
-        if input(prompt).lower() == "y":
-            _remove_worktree(path, branch)
-            logger.info("Removed stale worktree %s", path)
-        else:
-            logger.info("Kept worktree %s", path)
+        incomplete = (
+            _cleanup_stale_worktree_candidate(
+                candidate,
+                root,
+                trunk,
+                reason,
+                dry_run=dry_run,
+                common_git_dir=common_git_dir,
+                gh_timeout=gh_timeout,
+            )
+            or incomplete
+        )
 
-    if stale_count == 0:
+    if stale_count == 0 and not incomplete:
         logger.info("No stale worktrees found.")
-    return 0
+    return int(incomplete)
 
 
 def parse_problem_branches(output: str) -> list[str]:
@@ -414,7 +671,7 @@ def _run_gh_tidy(trunk: str, dry_run: bool) -> tuple[int, str]:
 
 def _make_agent_prompt(branch: str, trunk: str, repo_path: Path, repo_slug: str) -> str:
     """Build the per-branch Myrmidon agent prompt."""
-    worktree_path = repo_path / ".git" / "worktrees" / f"tidy-{branch}"
+    worktree_path = _agent_worktree_path(repo_path, branch)
     return PromptCatalog.current().render(
         "tidy/rebase_fix.j2",
         branch=branch,
@@ -423,6 +680,12 @@ def _make_agent_prompt(branch: str, trunk: str, repo_path: Path, repo_slug: str)
         repo_slug=repo_slug,
         worktree_path=worktree_path,
     )
+
+
+def _agent_worktree_path(repo_path: Path, branch: str) -> Path:
+    """Return a safe single-component temporary path for a rebase agent."""
+    branch_digest = hashlib.sha256(branch.encode("utf-8")).hexdigest()
+    return repo_path / "build" / ".worktrees" / f"tidy-{branch_digest}"
 
 
 def _status_from_agent_text(text: str) -> str | None:
