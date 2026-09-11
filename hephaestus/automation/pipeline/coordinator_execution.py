@@ -264,16 +264,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             self._complete_rate_budget(item, result)
             return
 
-        lightweight_intake_fixture = (
-            isinstance(result.value, str)
-            and not (ct._effective_repo_root(self.config, item.repo) / ".git").exists()
-        )
-        if (
-            isinstance(handle.job, GitJob)
-            and handle.job.op == "prepare_intake"
-            and result.ok
-            and not lightweight_intake_fixture
-        ):
+        if isinstance(handle.job, GitJob) and handle.job.op == "prepare_intake" and result.ok:
             adoption_error = self._adopt_repo_intake(item, result)
             if adoption_error is not None:
                 self._finish(item, passed=False, reason=adoption_error)

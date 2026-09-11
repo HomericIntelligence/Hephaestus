@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from pathlib import Path
 
 import hephaestus.automation.issue_waves as issue_waves_mod
 import hephaestus.automation.pipeline.coordinator_types as ct
@@ -46,7 +45,7 @@ class IssueClassificationCoordinator(_CoordinatorHost):
                     source.wave_lease,
                     facts,
                     entry,
-                    repo_root=Path(str(self._ctx_for_repo(repo).paths.repo_root)),
+                    repo_root=ct._effective_repo_state_root(self.config, repo),
                     org=self.config.org,
                     repo=repo,
                 )
