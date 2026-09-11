@@ -25,6 +25,13 @@ from pathlib import Path
 
 from hephaestus.cli.utils import create_validation_parser, format_output
 
+_UNSUPPORTED_PYTHON_FILE_TYPES = (
+    stat.S_IFIFO,
+    stat.S_IFSOCK,
+    stat.S_IFCHR,
+    stat.S_IFBLK,
+)
+
 
 def is_shadowing_pattern(alias: str, target: str) -> bool:
     """Check if alias name shadows the target name.
@@ -178,6 +185,14 @@ def _record_read_error(result: _BatchResult, path: Path, error: OSError) -> None
     result.read_errors.append(f"Could not read {path}: {error}")
 
 
+def _record_unsupported_python_mode(
+    result: _BatchResult, path: Path, mode: int, *, python_suffix: bool
+) -> None:
+    """Record an unsupported special node that has a Python suffix."""
+    if python_suffix and stat.S_IFMT(mode) in _UNSUPPORTED_PYTHON_FILE_TYPES:
+        result.read_errors.append(f"Could not read {path}: Unsupported Python input type")
+
+
 def _has_python_suffix(name: str) -> bool:
     """Use platform case rules to identify a Python file name."""
     return os.path.normcase(name).endswith(os.path.normcase(".py"))
@@ -211,6 +226,18 @@ def _collect_python_files(directory: Path, result: _BatchResult) -> list[Path]:
                                 continue
                             if stat.S_ISREG(target_mode):
                                 files.append(entry_path)
+                            _record_unsupported_python_mode(
+                                result,
+                                entry_path,
+                                target_mode,
+                                python_suffix=True,
+                            )
+                        _record_unsupported_python_mode(
+                            result,
+                            entry_path,
+                            mode,
+                            python_suffix=_has_python_suffix(entry.name),
+                        )
                     except OSError as error:
                         _record_read_error(result, entry_path, error)
         except OSError as error:
@@ -244,6 +271,7 @@ def _select_path(path: Path, result: _BatchResult) -> list[Path]:
     if stat.S_ISREG(mode) and path.suffix == ".py":
         return [path]
     if not stat.S_ISLNK(mode):
+        _record_unsupported_python_mode(result, path, mode, python_suffix=path.suffix == ".py")
         return []
 
     try:
@@ -257,6 +285,7 @@ def _select_path(path: Path, result: _BatchResult) -> list[Path]:
         return _collect_python_files(path, result)
     if stat.S_ISREG(target_mode) and path.suffix == ".py":
         return [path]
+    _record_unsupported_python_mode(result, path, target_mode, python_suffix=path.suffix == ".py")
     return []
 
 

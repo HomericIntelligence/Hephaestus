@@ -188,6 +188,90 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
 
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            pytest.param(stat.S_IFIFO, id="fifo"),
+            pytest.param(stat.S_IFSOCK, id="socket"),
+            pytest.param(stat.S_IFCHR, id="character-device"),
+            pytest.param(stat.S_IFBLK, id="block-device"),
+        ],
+    )
+    @pytest.mark.parametrize("through_link", [False, True], ids=("direct", "link"))
+    def test_explicit_python_special_node_is_not_opened(
+        self,
+        tmp_path: Path,
+        mode: int,
+        through_link: bool,
+    ) -> None:
+        """Report an explicit unsupported Python input without opening it."""
+        candidate = tmp_path / "input.py"
+        path_status = MagicMock()
+        path_status.st_mode = stat.S_IFLNK if through_link else mode
+        target_status = MagicMock()
+        target_status.st_mode = mode
+
+        def controlled_is_junction(path: Path) -> bool:
+            assert path == candidate
+            return False
+
+        def controlled_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+            assert path == candidate
+            return target_status if follow_symlinks else path_status
+
+        with (
+            patch.object(Path, "is_junction", controlled_is_junction),
+            patch.object(Path, "stat", controlled_stat),
+            patch("builtins.open") as mocked_open,
+        ):
+            exit_code, errors = check_files([candidate])
+
+        assert exit_code == 1
+        assert errors == [f"Could not read {candidate}: Unsupported Python input type"]
+        mocked_open.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            pytest.param(stat.S_IFIFO, id="fifo"),
+            pytest.param(stat.S_IFSOCK, id="socket"),
+            pytest.param(stat.S_IFCHR, id="character-device"),
+            pytest.param(stat.S_IFBLK, id="block-device"),
+        ],
+    )
+    @pytest.mark.parametrize("through_link", [False, True], ids=("direct", "link"))
+    def test_recursive_python_special_node_is_not_opened(
+        self,
+        tmp_path: Path,
+        mode: int,
+        through_link: bool,
+    ) -> None:
+        """Report a recursive unsupported Python input without opening it."""
+        source = tmp_path / "source"
+        source.mkdir()
+        candidate = source / "input.py"
+        entry = MagicMock()
+        entry.path = str(candidate)
+        entry.name = candidate.name
+        entry.is_junction.return_value = False
+        path_status = MagicMock()
+        path_status.st_mode = stat.S_IFLNK if through_link else mode
+        target_status = MagicMock()
+        target_status.st_mode = mode
+        entry.stat.side_effect = [path_status, target_status] if through_link else [path_status]
+        entries = MagicMock()
+        entries.__enter__.return_value = iter([entry])
+
+        with (
+            patch("os.scandir", return_value=entries),
+            patch("builtins.open") as mocked_open,
+        ):
+            exit_code, errors = check_files([source])
+
+        assert exit_code == 1
+        assert errors == [f"Could not read {candidate}: Unsupported Python input type"]
+        mocked_open.assert_not_called()
+
     def test_reports_nested_search_error_and_continues_inputs(self, tmp_path: Path) -> None:
         """Report an inaccessible subtree and scan a later input."""
         source = tmp_path / "source"
