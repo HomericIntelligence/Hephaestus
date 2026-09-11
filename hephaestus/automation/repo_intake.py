@@ -240,9 +240,9 @@ class RepoIntakeManager:
     def _prepare_locked(self) -> RepoIntakeReceipt:
         """Prepare the intake worktree while the common metadata lock is held."""
         self._validate_origin()
-        self._validate_state_paths()
-        old = self._read_receipt()
         records = self._worktree_records()
+        self._validate_state_paths(records)
+        old = self._read_receipt()
         record = self._validate_existing(old, records)
         default_branch = self._read_default_branch()
         caller_head = self._head(self.caller_root)
@@ -325,7 +325,15 @@ class RepoIntakeManager:
                 log_errors=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            label = command[1] if len(command) > 1 else command[0]
+            label = next(
+                (
+                    argument
+                    for argument in command[1:]
+                    if argument
+                    in {"fetch", "remote", "rev-parse", "status", "symbolic-ref", "worktree"}
+                ),
+                command[1] if len(command) > 1 else command[0],
+            )
             raise RepoIntakeError(f"repository-intake {label} failed") from exc
 
     def _validate_origin(self) -> None:
@@ -344,7 +352,7 @@ class RepoIntakeManager:
                 f"checkout has unexpected origin; expected origin {self.repository}"
             )
 
-    def _validate_state_paths(self) -> None:
+    def _validate_state_paths(self, records: tuple[_WorktreeRecord, ...]) -> None:
         """Reject symlinked or non-directory intake state containers."""
         if self.state_parent.is_symlink() or (
             self.state_parent.exists() and not self.state_parent.is_dir()
@@ -358,6 +366,18 @@ class RepoIntakeManager:
             raise RepoIntakeError(f"repository-intake receipt path is unsafe: {self.receipt_path}")
         if self.worktree_path.is_symlink():
             raise RepoIntakeError(f"repository-intake worktree is symlinked: {self.worktree_path}")
+        protected_roots = (self.caller_root, *(record.path for record in records))
+        state_paths = (self.state_parent, self.state_dir, self.receipt_path, self.worktree_path)
+        for state_path in state_paths:
+            for protected_root in protected_roots:
+                if self._same_path(protected_root, self.worktree_path):
+                    # Receipt validation below decides whether this exact
+                    # registration is the owned intake or foreign state.
+                    continue
+                if self._path_is_within(state_path, protected_root):
+                    raise RepoIntakeError(
+                        f"repository-intake state overlaps a registered worktree: {state_path}"
+                    )
         self.state_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.state_dir.mkdir(mode=0o700, exist_ok=True)
         if self.state_parent.stat().st_mode & 0o077 or self.state_dir.stat().st_mode & 0o077:
@@ -442,6 +462,14 @@ class RepoIntakeManager:
             return left.resolve() == right.resolve()
         except (OSError, RuntimeError):
             return left.absolute() == right.absolute()
+
+    @staticmethod
+    def _path_is_within(candidate: Path, root: Path) -> bool:
+        """Return whether a state path is equal to or below a protected root."""
+        try:
+            return candidate.resolve(strict=False).is_relative_to(root.resolve(strict=False))
+        except (OSError, RuntimeError) as exc:
+            raise RepoIntakeError("repository-intake path containment is unavailable") from exc
 
     def _validate_existing(
         self,
