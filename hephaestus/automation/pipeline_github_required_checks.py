@@ -20,8 +20,10 @@ from .pipeline_github_contract import _PipelineGitHubHost
 logger = logging.getLogger(__name__)
 
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_GITHUB_TIMESTAMP_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
+)
 _CHECK_RUNS_PAGE_SIZE = 100
-# Limit one exact-head traversal to 2,000 Check Runs.
 _CHECK_RUNS_MAX_TOTAL_COUNT = 2_000
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 _CHECK_FAILURE_CONCLUSIONS = frozenset(
@@ -105,15 +107,15 @@ def _check_run_page(payload: object, head_sha: str) -> tuple[int, list[object]] 
 
 def _check_run_completion_time(value: object) -> tuple[str, datetime] | None:
     """Return one raw completion time and its normalized UTC instant."""
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or _GITHUB_TIMESTAMP_RE.fullmatch(value) is None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.utcoffset() is None:
+            return None
+        return value, parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None
-    return value, parsed.astimezone(UTC)
 
 
 def _validated_check_run(

@@ -1124,9 +1124,20 @@ def _check_run(
         ("2026-08-29T11:59:59Z", False),
         ("2026-09-05T12:00:01Z", False),
         ("not-a-timestamp", False),
+        ("2026-09-05Q12:00:00Z", False),
+        ("0001-01-01T00:00:00+23:59", False),
         (None, False),
     ],
-    ids=("inside", "boundary", "expired", "future", "malformed", "missing"),
+    ids=(
+        "inside",
+        "boundary",
+        "expired",
+        "future",
+        "malformed",
+        "separator",
+        "overflow",
+        "missing",
+    ),
 )
 def test_required_check_run_evidence_enforces_seven_day_freshness(
     command_runner: MagicMock,
