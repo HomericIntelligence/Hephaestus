@@ -4038,7 +4038,7 @@ class TestExactHeadChecks:
             {
                 "total_count": 2,
                 "check_runs": [
-                    self._check_run(head, check_run_id=41, app_id=17, conclusion="failure"),
+                    self._check_run(head, check_run_id=41, app_id=17),
                     self._check_run(head, check_run_id=42, app_id=18),
                 ],
             }
@@ -4115,6 +4115,197 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
 
+    @pytest.mark.parametrize("reverse", [False, True], ids=("ordered", "reversed"))
+    def test_current_failure_with_lower_id_supersedes_older_success(
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
+        reverse: bool,
+    ) -> None:
+        """Completion time, not ID or response order, selects the current run."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        check_runs = [
+            self._check_run(
+                head,
+                check_run_id=42,
+                completed_at="2026-09-05T11:59:00Z",
+            ),
+            self._check_run(
+                head,
+                check_run_id=41,
+                conclusion="failure",
+                completed_at="2026-09-05T12:00:00Z",
+            ),
+        ]
+        if reverse:
+            check_runs.reverse()
+        response = self._json_response({"total_count": 2, "check_runs": check_runs})
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+
+    def test_fresh_success_supersedes_expired_failure(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        """Age applies after the current completed run is selected."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = self._json_response(
+            {
+                "total_count": 2,
+                "check_runs": [
+                    self._check_run(
+                        head,
+                        check_run_id=41,
+                        conclusion="failure",
+                        completed_at="2026-08-28T12:00:00Z",
+                    ),
+                    self._check_run(
+                        head,
+                        check_run_id=42,
+                        completed_at="2026-09-05T12:00:00Z",
+                    ),
+                ],
+            }
+        )
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("status", True),
+            ("conclusion", True),
+            ("conclusion", "unknown"),
+        ],
+        ids=("status-type", "conclusion-type", "conclusion-value"),
+    )
+    def test_malformed_superseded_run_fails_closed(
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
+        field: str,
+        value: object,
+    ) -> None:
+        """Malformed matching evidence fails before current-run selection."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        malformed = self._check_run(
+            head,
+            check_run_id=41,
+            conclusion="failure",
+            completed_at="2026-09-05T11:59:00Z",
+        )
+        malformed[field] = value
+        response = self._json_response(
+            {
+                "total_count": 2,
+                "check_runs": [
+                    malformed,
+                    self._check_run(head, check_run_id=42),
+                ],
+            }
+        )
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+
+    @pytest.mark.parametrize("status", ["queued", "in_progress"])
+    def test_noncompleted_superseded_run_fails_closed(
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
+        status: str,
+    ) -> None:
+        """A matching noncompleted run makes current selection unsafe."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = self._json_response(
+            {
+                "total_count": 2,
+                "check_runs": [
+                    self._check_run(
+                        head,
+                        check_run_id=41,
+                        status=status,
+                        conclusion="",
+                        completed_at="2026-09-05T11:59:00Z",
+                    ),
+                    self._check_run(head, check_run_id=42),
+                ],
+            }
+        )
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+
+    def test_equal_completion_instants_are_ambiguous(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        """Different timestamps for one completion instant cannot select a run."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = self._json_response(
+            {
+                "total_count": 2,
+                "check_runs": [
+                    self._check_run(
+                        head,
+                        check_run_id=41,
+                        completed_at="2026-09-05T12:00:00Z",
+                    ),
+                    self._check_run(
+                        head,
+                        check_run_id=42,
+                        completed_at="2026-09-05T08:00:00-04:00",
+                    ),
+                ],
+            }
+        )
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+
     def test_accepts_only_complete_successful_runs_for_requested_head(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
@@ -4168,7 +4359,7 @@ class TestExactHeadChecks:
                 {
                     "total_count": 2,
                     "check_runs": [
-                        self._check_run(head),
+                        self._check_run(head, completed_at="2026-09-05T11:59:00Z"),
                         self._check_run(head, check_run_id=2),
                     ],
                 }
@@ -4200,7 +4391,12 @@ class TestExactHeadChecks:
             {
                 "total_count": 2,
                 "check_runs": [
-                    self._check_run(head, check_run_id=41, conclusion=old_conclusion),
+                    self._check_run(
+                        head,
+                        check_run_id=41,
+                        conclusion=old_conclusion,
+                        completed_at="2026-09-05T11:59:00Z",
+                    ),
                     self._check_run(head, check_run_id=42),
                 ],
             }
@@ -4243,7 +4439,7 @@ class TestExactHeadChecks:
                 {
                     "total_count": 2,
                     "check_runs": [
-                        self._check_run(head),
+                        self._check_run(head, completed_at="2026-09-05T11:59:00Z"),
                         self._check_run(
                             returned_head,
                             check_run_id=2,
@@ -4287,6 +4483,28 @@ class TestExactHeadChecks:
                     ],
                 }
             ),
+        )
+        command_runner.side_effect = MagicMock(side_effect=[first, second])
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+
+    def test_rejects_completion_time_change_between_evidence_reads(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        """A completion-time change prevents a stable Check Run snapshot."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first = self._json_response(
+            {
+                "total_count": 1,
+                "check_runs": [self._check_run(head, completed_at="2026-09-05T11:59:00Z")],
+            }
+        )
+        second = self._json_response(
+            {
+                "total_count": 1,
+                "check_runs": [self._check_run(head)],
+            }
         )
         command_runner.side_effect = MagicMock(side_effect=[first, second])
 

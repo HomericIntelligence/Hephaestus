@@ -24,6 +24,18 @@ _CHECK_RUNS_PAGE_SIZE = 100
 # Limit one exact-head traversal to 2,000 Check Runs.
 _CHECK_RUNS_MAX_TOTAL_COUNT = 2_000
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+_CHECK_CONCLUSIONS = frozenset(
+    {
+        "action_required",
+        "cancelled",
+        "failure",
+        "neutral",
+        "skipped",
+        "stale",
+        "success",
+        "timed_out",
+    }
+)
 _RequiredCheck = tuple[str, int | None]
 
 
@@ -97,11 +109,53 @@ def _check_run_page(payload: object, head_sha: str) -> tuple[int, list[object]] 
     return total_count, check_runs
 
 
+def _check_run_completion_time(value: object) -> tuple[str, datetime] | None:
+    """Return one raw completion time and its normalized UTC instant."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return value, parsed.astimezone(UTC)
+
+
+def _validated_check_run(
+    check_run: dict[str, object], head_sha: str
+) -> tuple[int, int, str, str, str, datetime] | None:
+    """Return validated identity and terminal evidence for one matching run."""
+    try:
+        app_id = _check_run_app_id(check_run)
+    except ValueError:
+        logger.warning("Check Run for %s has no valid app identity", head_sha)
+        return None
+    check_run_id = check_run.get("id")
+    status = check_run.get("status")
+    conclusion = check_run.get("conclusion")
+    completion_time = _check_run_completion_time(check_run.get("completed_at"))
+    if (
+        not isinstance(check_run_id, int)
+        or isinstance(check_run_id, bool)
+        or check_run_id <= 0
+        or not isinstance(status, str)
+        or status != "completed"
+        or not isinstance(conclusion, str)
+        or conclusion not in _CHECK_CONCLUSIONS
+        or completion_time is None
+        or check_run.get("head_sha") != head_sha
+    ):
+        logger.warning("Check Run for %s has malformed terminal evidence", head_sha)
+        return None
+    raw_completed_at, completed_at = completion_time
+    return check_run_id, app_id, status, conclusion, raw_completed_at, completed_at
+
+
 def _check_run_snapshot(
     check_runs: list[object],
     head_sha: str,
     required_checks: frozenset[_RequiredCheck],
-    now_utc: datetime,
 ) -> tuple[object, ...] | None:
     """Return stable identity and status data for a Check Runs traversal."""
     snapshot: list[tuple[int, str, int, str, str, object, str, frozenset[_RequiredCheck]]] = []
@@ -114,30 +168,21 @@ def _check_run_snapshot(
             return None
         if not matches:
             continue
-        try:
-            app_id = _check_run_app_id(check_run)
-        except ValueError:
-            logger.warning("Check Run for %s has no valid app identity", head_sha)
+        validated = _validated_check_run(check_run, head_sha)
+        if validated is None:
             return None
-        check_run_id = check_run.get("id")
-        if not isinstance(check_run_id, int) or isinstance(check_run_id, bool) or check_run_id <= 0:
-            logger.warning("Check Run for %s has no valid identity", head_sha)
-            return None
+        check_run_id, app_id, status, conclusion, completed_at, _completed_at_utc = validated
         name = check_run.get("name")
         if not isinstance(name, str):
             logger.warning("Check Run for %s has no valid name", head_sha)
-            return None
-        completed_at = _current_evidence_timestamp(check_run.get("completed_at"), now_utc)
-        if completed_at is None:
-            logger.warning("Check Run for %s has no current completion time", head_sha)
             return None
         snapshot.append(
             (
                 check_run_id,
                 name,
                 app_id,
-                str(check_run.get("status") or "").lower(),
-                str(check_run.get("conclusion") or "").lower(),
+                status,
+                conclusion,
                 check_run.get("head_sha"),
                 completed_at,
                 matches,
@@ -153,7 +198,10 @@ def _passing_check_run_requirements(
     now_utc: datetime,
 ) -> frozenset[_RequiredCheck] | None:
     """Return requirements proved by passing exact-head Check Runs."""
-    current_runs: dict[_RequiredCheck, dict[int, tuple[int, dict[str, object]]]] = {}
+    current_runs: dict[
+        _RequiredCheck,
+        dict[int, tuple[datetime, int, dict[str, object]]],
+    ] = {}
     seen_ids: set[int] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
@@ -163,34 +211,34 @@ def _passing_check_run_requirements(
             return None
         if not matches:
             continue
-        try:
-            app_id = _check_run_app_id(check_run)
-        except ValueError:
+        validated = _validated_check_run(check_run, head_sha)
+        if validated is None:
             return None
-        check_run_id = check_run.get("id")
-        if (
-            not isinstance(check_run_id, int)
-            or isinstance(check_run_id, bool)
-            or check_run_id <= 0
-            or check_run_id in seen_ids
-        ):
+        check_run_id, app_id, _status, _conclusion, _raw_completed_at, completed_at = validated
+        if check_run_id in seen_ids:
             logger.warning("Check Run for %s has no unambiguous identity", head_sha)
             return None
         seen_ids.add(check_run_id)
-        if check_run.get("head_sha") != head_sha:
-            logger.warning("Check Run does not match reviewed head %s", head_sha)
-            return None
         for requirement in matches:
             runs_by_app = current_runs.setdefault(requirement, {})
             current = runs_by_app.get(app_id)
-            if current is None or check_run_id > current[0]:
-                runs_by_app[app_id] = (check_run_id, check_run)
+            if current is not None and completed_at == current[0]:
+                logger.warning(
+                    "Required Check Run context %s has equal completion times",
+                    requirement[0],
+                )
+                return None
+            if current is None or completed_at > current[0]:
+                runs_by_app[app_id] = (completed_at, check_run_id, check_run)
 
     return _passing_current_check_runs(current_runs, now_utc)
 
 
 def _passing_current_check_runs(
-    current_runs: dict[_RequiredCheck, dict[int, tuple[int, dict[str, object]]]],
+    current_runs: dict[
+        _RequiredCheck,
+        dict[int, tuple[datetime, int, dict[str, object]]],
+    ],
     now_utc: datetime,
 ) -> frozenset[_RequiredCheck] | None:
     """Return passing requirements from unambiguous current Check Runs."""
@@ -202,12 +250,10 @@ def _passing_current_check_runs(
                 requirement[0],
             )
             return None
-        (_check_run_id, check_run) = next(iter(runs_by_app.values()))
-        status = str(check_run.get("status") or "").lower()
-        conclusion = str(check_run.get("conclusion") or "").lower()
+        (_completed_at, _check_run_id, check_run) = next(iter(runs_by_app.values()))
+        conclusion = check_run.get("conclusion")
         if (
-            status != "completed"
-            or conclusion not in _CHECK_SUCCESS_CONCLUSIONS
+            conclusion not in _CHECK_SUCCESS_CONCLUSIONS
             or _current_evidence_timestamp(check_run.get("completed_at"), now_utc) is None
         ):
             return None
@@ -257,7 +303,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if not required_checks or first is None:
             return False
-        first_snapshot = _check_run_snapshot(first, head_sha, required_checks, now_utc)
+        first_snapshot = _check_run_snapshot(first, head_sha, required_checks)
         if first_snapshot is None:
             return False
         try:
@@ -276,7 +322,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             return False
         if (
             second is None
-            or _check_run_snapshot(second, head_sha, required_checks, now_utc) != first_snapshot
+            or _check_run_snapshot(second, head_sha, required_checks) != first_snapshot
         ):
             logger.warning("Check Runs changed while reading %s", head_sha)
             return False
