@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   validate-exact-head:
-    name: Complete-normal receipt at 569e5ae3
+    name: Complete-normal receipt at 7ed6827f
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     steps:
@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-          ref: 569e5ae3fe3b531d277475c39998cd958a9f2328
+          ref: 7ed6827fe13f34c5a11f27c8fbbe724639c9a9d5
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           enable-cache: true
@@ -37,15 +37,15 @@ jobs:
           EVENT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
-          EXPECTED_EVIDENCE_BRANCH: 3111-full-suite-evidence
-          EXPECTED_HEAD: 569e5ae3fe3b531d277475c39998cd958a9f2328
+          EXPECTED_EVIDENCE_BRANCH: 3111-full-suite-evidence-2
+          EXPECTED_HEAD: 7ed6827fe13f34c5a11f27c8fbbe724639c9a9d5
           GH_TOKEN: ${{ github.token }}
           TARGET_PR: "3113"
           EXACT_COMMAND: >-
             uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers
             -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
         run: |
-          receipt="$RUNNER_TEMP/pr3113-complete-normal-569e5ae3.txt"
+          receipt="$RUNNER_TEMP/pr3113-complete-normal-7ed6827f.txt"
           {
             echo "workflow: $GITHUB_WORKFLOW"
             echo "workflow_ref: $GITHUB_WORKFLOW_REF"
@@ -90,7 +90,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pr3113-complete-normal-569e5ae3
-          path: ${{ runner.temp }}/pr3113-complete-normal-569e5ae3.txt
+          name: pr3113-complete-normal-7ed6827f
+          path: ${{ runner.temp }}/pr3113-complete-normal-7ed6827f.txt
           if-no-files-found: error
           retention-days: 14
