@@ -25,11 +25,10 @@ from pathlib import Path
 
 from hephaestus.cli.utils import create_validation_parser, format_output
 
-_UNSUPPORTED_PYTHON_FILE_TYPES = (
-    stat.S_IFIFO,
-    stat.S_IFSOCK,
-    stat.S_IFCHR,
-    stat.S_IFBLK,
+_HANDLED_PYTHON_FILE_TYPES = (
+    stat.S_IFDIR,
+    stat.S_IFREG,
+    stat.S_IFLNK,
 )
 
 
@@ -188,8 +187,8 @@ def _record_read_error(result: _BatchResult, path: Path, error: OSError) -> None
 def _record_unsupported_python_mode(
     result: _BatchResult, path: Path, mode: int, *, python_suffix: bool
 ) -> None:
-    """Record an unsupported special node that has a Python suffix."""
-    if python_suffix and stat.S_IFMT(mode) in _UNSUPPORTED_PYTHON_FILE_TYPES:
+    """Record an unsupported node that has a Python suffix."""
+    if python_suffix and stat.S_IFMT(mode) not in _HANDLED_PYTHON_FILE_TYPES:
         result.read_errors.append(f"Could not read {path}: Unsupported Python input type")
 
 

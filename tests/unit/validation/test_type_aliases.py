@@ -22,6 +22,8 @@ from hephaestus.validation.type_aliases import (
     main,
 )
 
+_UNLISTED_FILE_TYPE = getattr(stat, "S_IFWHT", 0o160000)
+
 
 class TestIsShadowingPattern:
     """Tests for is_shadowing_pattern()."""
@@ -245,6 +247,7 @@ class TestCheckFiles:
             pytest.param(stat.S_IFSOCK, id="socket"),
             pytest.param(stat.S_IFCHR, id="character-device"),
             pytest.param(stat.S_IFBLK, id="block-device"),
+            pytest.param(_UNLISTED_FILE_TYPE, id="unlisted"),
         ],
     )
     @pytest.mark.parametrize("through_link", [False, True], ids=("direct", "link"))
@@ -289,6 +292,7 @@ class TestCheckFiles:
             pytest.param(stat.S_IFSOCK, id="socket"),
             pytest.param(stat.S_IFCHR, id="character-device"),
             pytest.param(stat.S_IFBLK, id="block-device"),
+            pytest.param(_UNLISTED_FILE_TYPE, id="unlisted"),
         ],
     )
     @pytest.mark.parametrize("through_link", [False, True], ids=("direct", "link"))
@@ -322,6 +326,46 @@ class TestCheckFiles:
 
         assert exit_code == 1
         assert errors == [f"Could not read {candidate}: Unsupported Python input type"]
+        mocked_open.assert_not_called()
+
+    def test_unlisted_python_mode_json_is_incomplete(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Report an unlisted Python input type in JSON without opening it."""
+        candidate = tmp_path / "input.py"
+        path_status = MagicMock()
+        path_status.st_mode = _UNLISTED_FILE_TYPE
+
+        def controlled_is_junction(path: Path) -> bool:
+            assert path == candidate
+            return False
+
+        def controlled_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+            assert path == candidate
+            return path_status
+
+        monkeypatch.setattr("sys.argv", ["check-type-aliases", "--json", str(candidate)])
+        with (
+            patch.object(Path, "is_junction", controlled_is_junction),
+            patch.object(Path, "stat", controlled_stat),
+            patch("builtins.open") as mocked_open,
+        ):
+            exit_code = main()
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        expected = f"Could not read {candidate}: Unsupported Python input type"
+        assert exit_code == payload["exit_code"] == 1
+        assert payload["passed"] is False
+        assert payload["scan_complete"] is False
+        assert payload["read_error_count"] == 1
+        assert payload["read_errors"] == [expected]
+        assert payload["violation_count"] == 0
+        assert payload["violations"] == []
+        assert captured.err == ""
         mocked_open.assert_not_called()
 
     def test_reports_nested_search_error_and_continues_inputs(self, tmp_path: Path) -> None:
