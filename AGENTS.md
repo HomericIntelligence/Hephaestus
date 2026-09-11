@@ -320,23 +320,46 @@ separate direction to do so.
 For a manual contribution, use this final-rebase sequence:
 
 1. Use a test-only subagent to run focused tests during implementation.
-2. Run
-   `git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main`, and
-   then rebase on `origin/main`.
-3. If the rebase or conflict resolution changes a file, use a test-only
-   subagent to run each affected test again.
-4. After the final rebase, use a test-only subagent to run
-   `uv run --locked pytest --override-ini="addopts=" -v --strict-markers`.
-   Record the command, branch head, result, and test
-   summary.
-5. If the branch changes after this verification, use a test-only subagent to
-   run the full locked suite again.
+2. Configure `upstream` with the canonical
+   `https://github.com/HomericIntelligence/Hephaestus.git` URL. Verify the URL.
+   Then run these commands:
 
-A pre-push hook can supply step 4 only when it runs the exact locked command on
+   ```bash
+   test "$(git remote get-url upstream)" = "https://github.com/HomericIntelligence/Hephaestus.git"
+   git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
+   ```
+
+   If a command fails, stop.
+3. Run the signed rebase. Then verify the signature of each new commit:
+
+   ```bash
+   git rebase -S upstream/main
+   git rev-list --reverse upstream/main..HEAD | while IFS= read -r commit; do
+       git verify-commit "$commit" || exit 1
+   done
+   ```
+4. If the rebase or conflict resolution changes a file, use a test-only
+   subagent to run each affected test again.
+5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
+   Record `git rev-parse HEAD`.
+6. Use a test-only subagent to run this command:
+
+   ```bash
+   uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
+     -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
+   ```
+
+7. Record `git rev-parse HEAD` again. Require the same value and an empty
+   `git status --porcelain=v1 --untracked-files=all` result. Record the command,
+   result, and test summary.
+8. If the branch changes after this verification, repeat the final-rebase
+   sequence and test run.
+
+A pre-push hook can supply step 6 only when it runs the exact locked command on
 the final rebased head and records the result. A hook that does not run this
-command does not supply full-suite evidence. The current pre-push hook does not
-run the Python suite and cannot supply this evidence. Keep the test-only and
-no-edit requirements for all delegated runs.
+command does not supply complete normal-test evidence. The current pre-push
+hook does not run the Python suite and cannot supply this evidence. Keep the
+test-only and no-edit requirements for all delegated runs. See ADR-0051.
 
 ### Skill Catalog
 
@@ -507,9 +530,9 @@ in [Delegated Verification](#delegated-verification). The environment setup
 commands below prepare a new environment. They do not supply change-verification
 evidence. Required CI/CD supplies separate head-bound evidence.
 
-The automation loop uses the rebase policy in ADR-0048. It prepares the branch
-before implementation and does not do a routine final rebase. An operator can
-request the explicit `--rebase` path.
+The manual sequence uses ADR-0051. The automation loop uses the rebase policy
+in ADR-0048. It prepares the branch before implementation and does not do a
+routine final rebase. An operator can request the explicit `--rebase` path.
 
 ```bash
 # Run all unit tests
@@ -521,8 +544,9 @@ uv run pytest tests/unit/utils/test_general_utils.py -v
 # Run with coverage
 uv run pytest tests/unit --cov=hephaestus --cov-report=html
 
-# Run the full locked local suite after the final rebase
-uv run --locked pytest --override-ini="addopts=" -v --strict-markers
+# Run the complete normal local selection after the final rebase
+uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
+  -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
 ```
 
 ## Environment Setup
@@ -568,8 +592,8 @@ uv run mypy hephaestus/ scripts/ tests/
 ### Pre-commit Hooks
 
 Pre-commit hooks automatically check code quality and run the shared fast test
-selection. They do not supply the required full locked suite evidence. Use the
-delegated final-rebase sequence to produce that evidence. Required CI/CD
+selection. They do not supply the required complete normal-test evidence. Use
+the delegated final-rebase sequence to produce that evidence. Required CI/CD
 supplies separate test evidence for the pushed head.
 
 ```bash
