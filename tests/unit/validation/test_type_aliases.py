@@ -177,6 +177,8 @@ class TestCheckFiles:
         assert bool(errors) == bool(expected_exit_code)
         if errors:
             assert str(candidate) in errors[0]
+            assert "DomainResult" in errors[0]
+            assert "Could not read" not in errors[0]
 
     def test_accepts_file_paths(self, tmp_path: Path) -> None:
         """Individual file paths work."""
@@ -225,6 +227,8 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
         assert str(child) in errors[0]
+        assert "DomainResult" in errors[0]
+        assert "Could not read" not in errors[0]
         assert capsys.readouterr().err == ""
 
     def test_reports_entry_classification_error(self, tmp_path: Path) -> None:
@@ -276,6 +280,8 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
         assert str(linked / "hidden.py") in errors[0]
+        assert "DomainResult" in errors[0]
+        assert "Could not read" not in errors[0]
 
     def test_explicit_file_symlink_is_scanned(self, tmp_path: Path) -> None:
         """Scan a regular Python file that an explicit link selects."""
@@ -289,6 +295,8 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
         assert str(linked) in errors[0]
+        assert "DomainResult" in errors[0]
+        assert "Could not read" not in errors[0]
 
     def test_broken_explicit_python_symlink_is_read_error(self, tmp_path: Path) -> None:
         """Report a broken Python file link as an incomplete scan."""
@@ -314,6 +322,8 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
         assert str(source / "linked.py") in errors[0]
+        assert "DomainResult" in errors[0]
+        assert "Could not read" not in errors[0]
 
     def test_broken_recursive_python_symlink_is_read_error(self, tmp_path: Path) -> None:
         """Report a broken Python file link found during recursion."""
@@ -365,23 +375,37 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
         assert str(child) in errors[0]
+        assert "DomainResult" in errors[0]
+        assert "Could not read" not in errors[0]
 
-    def test_nested_junction_is_not_followed(self, tmp_path: Path) -> None:
-        """Do not follow a junction found during recursive discovery."""
+    def test_nested_junction_is_scanned(self, tmp_path: Path) -> None:
+        """Scan a junction found during recursive discovery."""
         source = tmp_path / "source"
         source.mkdir()
         junction = source / "junction"
+        junction.mkdir()
+        child = junction / "child.py"
+        child.write_text("Result = DomainResult\n", encoding="utf-8")
         entry = MagicMock()
         entry.path = str(junction)
         entry.is_junction.return_value = True
         entries = MagicMock()
         entries.__enter__.return_value = iter([entry])
+        real_scandir = os.scandir
 
-        with patch("os.scandir", return_value=entries):
+        def controlled_scandir(path: Path) -> Iterator[os.DirEntry[str]]:
+            if Path(path) == source:
+                return entries
+            return real_scandir(path)
+
+        with patch("os.scandir", side_effect=controlled_scandir):
             exit_code, errors = check_files([source])
 
-        assert exit_code == 0
-        assert errors == []
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert str(child) in errors[0]
+        assert "DomainResult" in errors[0]
+        assert "Could not read" not in errors[0]
         entry.stat.assert_not_called()
 
 
@@ -602,8 +626,15 @@ def test_partial_read_mixed_inputs(
         assert mocked.call_count == 2
     assert code == 1
     assert len(errors) == 3
-    assert any(str(first) in item and str(error) in item for item in errors)
-    assert any(str(later) in item and "TaskRunner" in item for item in errors)
+    first_findings = [item for item in errors if str(first) in item and "DomainResult" in item]
+    first_read_errors = [item for item in errors if str(first) in item and str(error) in item]
+    later_findings = [item for item in errors if str(later) in item and "TaskRunner" in item]
+    assert len(first_findings) == 1
+    assert "Could not read" not in first_findings[0]
+    assert len(first_read_errors) == 1
+    assert first_read_errors[0].startswith(f"Could not read {first}:")
+    assert len(later_findings) == 1
+    assert "Could not read" not in later_findings[0]
 
 
 def test_earlier_finding_survives_later_read_error(tmp_path: Path) -> None:

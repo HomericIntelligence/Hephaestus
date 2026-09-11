@@ -196,6 +196,7 @@ def _collect_python_files(directory: Path, result: _BatchResult) -> list[Path]:
                     entry_path = Path(entry.path)
                     try:
                         if entry.is_junction():
+                            pending.append(entry_path)
                             continue
                         mode = entry.stat(follow_symlinks=False).st_mode
                         if stat.S_ISDIR(mode):
