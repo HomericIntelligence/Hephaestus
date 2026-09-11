@@ -900,6 +900,13 @@ def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_p
             ("Glob", "Grep", "Read"),
         ),
         (
+            AgentOperation.REBASE_CONFLICT,
+            "workspace-write",
+            "Read,Write,Edit,Glob,Grep",
+            "workspace-write",
+            ("Edit", "Glob", "Grep", "Read", "Write"),
+        ),
+        (
             AgentOperation.ADDRESS_REVIEW,
             "workspace-write",
             "Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
@@ -11665,6 +11672,182 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == "rebase conflict resolution required: agent made no file changes"
         run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("content", "expected_detail"),
+        [
+            (
+                b"<<<<<<< HEAD\n" + (b"a" * 4001) + b"\n=======\ntheirs\n>>>>>>> topic\n",
+                "conflict block exceeds 4000 characters",
+            ),
+            (
+                b"<<<<<<< HEAD\nsk_live_12345678901234567890\n=======\ntheirs\n>>>>>>> topic\n",
+                "conflict source requires redaction",
+            ),
+            (
+                b"<<<<<<< HEAD\nours\n=======\n\xff\n>>>>>>> topic\n",
+                "conflict source is not valid UTF-8",
+            ),
+            (
+                b"<<<<<<< HEAD\nours\n=======\ntheirs\n",
+                "conflict markers are malformed",
+            ),
+        ],
+    )
+    def test_conflict_receipt_rejects_unsafe_context_without_retaining_source(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        content: bytes,
+        expected_detail: str,
+    ) -> None:
+        """Unsafe conflict source cannot enter a receipt or agent prompt."""
+        (tmp_path / "x.py").write_bytes(content)
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
+                return MagicMock(stdout="x.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z"]:
+                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "rebase_conflict_context_unavailable"},
+            error=f"rebase conflict context unavailable: {expected_detail}",
+        )
+        assert content.decode(errors="replace") not in str(result)
+
+    def test_conflict_receipt_uses_index_stages_when_markers_are_absent(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A marker-free textual conflict gets complete base, ours, and theirs context."""
+        (tmp_path / "x.py").write_text("working tree content\n", encoding="utf-8")
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
+                return MagicMock(stdout="x.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z"]:
+                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "show", ":1:x.py"]:
+                return MagicMock(stdout="base content\n")
+            if argv == ["git", "show", ":2:x.py"]:
+                return MagicMock(stdout="ours content\n")
+            if argv == ["git", "show", ":3:x.py"]:
+                raise subprocess.CalledProcessError(128, argv)
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert isinstance(result, dict)
+        assert result["conflict_context_version"] == 1
+        assert result["conflict_hunks"] == {
+            "x.py": ("Base:\nbase content\n\nOurs:\nours content\n\nTheirs:\n_(absent)_\n")
+        }
+
+    def test_conflict_receipt_rejects_invalid_index_stage_text(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Invalid UTF-8 in a marker-free index stage stops before agent dispatch."""
+        (tmp_path / "x.py").write_text("working tree content\n", encoding="utf-8")
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
+                return MagicMock(stdout="x.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z"]:
+                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "show", ":1:x.py"]:
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "rebase_conflict_context_unavailable"},
+            error="rebase conflict context unavailable: conflict source is not valid UTF-8",
+        )
+
+    def test_conflict_receipt_rejects_context_over_total_limit(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Many valid blocks cannot exceed the total prompt-context limit."""
+        paths = tuple(f"conflict_{index}.py" for index in range(5))
+        block = "<<<<<<< HEAD\n" + ("a" * 3200) + "\n=======\ntheirs\n>>>>>>> topic\n"
+        for path in paths:
+            (tmp_path / path).write_text(block, encoding="utf-8")
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
+                return MagicMock(stdout="\0".join(paths) + "\0")
+            if argv == ["git", "ls-files", "--stage", "-z"]:
+                return MagicMock(stdout="100644 deadbeef 1\tconflict_0.py\0")
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "rebase_conflict_context_unavailable"},
+            error=(
+                "rebase conflict context unavailable: "
+                "total conflict context exceeds 16000 characters"
+            ),
+        )
 
     @pytest.mark.parametrize(
         ("content", "classification", "expected_ok", "error"),

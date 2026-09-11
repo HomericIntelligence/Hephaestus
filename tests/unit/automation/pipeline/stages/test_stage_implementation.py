@@ -78,7 +78,11 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_implementation_prompt,
     build_test_fix_prompt,
 )
-from hephaestus.automation.pipeline.worker_pool import WorkerPool, _codex_implementation_grants
+from hephaestus.automation.pipeline.worker_pool import (
+    WorkerPool,
+    _codex_implementation_grants,
+    _validate_source_operation_job,
+)
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.implementation import get_rebase_conflict_prompt
@@ -617,6 +621,22 @@ class TestComposedPromptBuilders:
         assert "classification=no_edit" in prompt
         assert "Implement GitHub issue" not in prompt
         assert "Do not run Git commands" in prompt
+
+    @pytest.mark.parametrize(
+        ("paths", "hunks"),
+        [
+            ((), {}),
+            (("conflict.py",), {}),
+            (("conflict.py",), {"conflict.py": ""}),
+            (("conflict.py",), {"conflict.py": "valid", "extra.py": "unexpected"}),
+        ],
+    )
+    def test_rebase_conflict_prompt_rejects_incomplete_context(
+        self, paths: tuple[str, ...], hunks: dict[str, str]
+    ) -> None:
+        """The prompt builder cannot replace required host context with a placeholder."""
+        with pytest.raises(ValueError, match="complete conflict context is required"):
+            get_rebase_conflict_prompt(conflict_paths=paths, conflict_hunks=hunks)
 
 
 class TestImplementationStageOnEnter:
@@ -1316,6 +1336,7 @@ class TestGate:
                 "conflict_paths": ("hephaestus/example.py",),
                 "conflict_snapshot": {"hephaestus/example.py": "before"},
                 "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "conflict_context_version": 1,
                 "conflict_hunks": {
                     "hephaestus/example.py": (
                         "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
@@ -1379,6 +1400,12 @@ class TestGate:
             {
                 "rebase_conflict": True,
                 "rebase_conflict_paths": ("hephaestus/example.py",),
+                "rebase_conflict_context_version": 1,
+                "rebase_conflict_hunks": {
+                    "hephaestus/example.py": (
+                        "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+                    )
+                },
             }
         )
         item.attempts["implement"] = ctx.budget("implement")
@@ -1399,6 +1426,12 @@ class TestGate:
             {
                 "rebase_conflict": True,
                 "rebase_conflict_paths": ("hephaestus/example.py",),
+                "rebase_conflict_context_version": 1,
+                "rebase_conflict_hunks": {
+                    "hephaestus/example.py": (
+                        "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+                    )
+                },
             }
         )
         _prepared_writer(item)
@@ -1435,6 +1468,12 @@ class TestGate:
                     "conflict_paths": ("hephaestus/example.py",),
                     "conflict_snapshot": {"hephaestus/example.py": "after first pass"},
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
+                    "conflict_hunks": {
+                        "hephaestus/example.py": (
+                            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+                        )
+                    },
                     "conflict_index_snapshot": "2" * 64,
                     "paused_head_sha": "d" * 40,
                     "base_sha": "b" * 40,
@@ -1567,6 +1606,7 @@ class TestGate:
                     "conflict_paths": ("hephaestus/example.py",),
                     "conflict_snapshot": {"hephaestus/example.py": "after"},
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
                     "conflict_hunks": {"hephaestus/example.py": "resolved"},
                     "conflict_index_snapshot": "1" * 64,
                     "paused_head_sha": "c" * 40,
@@ -1615,6 +1655,131 @@ class TestGate:
         assert "rebase_conflict_agent_complete" not in item.payload
         assert item.payload["rebase_conflict_agent_summary"] == "No files changed."
 
+    def test_missing_conflict_context_uses_host_refresh_before_agent(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A legacy receipt cannot send placeholder context to an agent."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+        binding = _prepared_writer(item)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "validate_rebase_conflict"
+        assert result.job.workspace == binding
+        assert result.on_done_state == "REBASE_CONFLICT_REFRESH_WAIT"
+        assert item.attempts.get("rebase_conflict", 0) == 0
+
+    def test_legacy_conflict_refresh_supplies_context_without_consuming_turn(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A valid legacy receipt gets current host context before the first turn."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+        _prepared_writer(item)
+        refresh = stage.step(item, ctx)
+        assert isinstance(refresh, JobRequest)
+
+        item.state = refresh.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase conflict resolution required: agent made no file changes",
+                value={
+                    "conflict_paths": ("conflict.py",),
+                    "conflict_snapshot": {"conflict.py": "before"},
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
+                    "conflict_hunks": {
+                        "conflict.py": "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n"
+                    },
+                    "conflict_index_snapshot": "1" * 64,
+                    "paused_head_sha": "c" * 40,
+                    "base_sha": "b" * 40,
+                    "expected_remote_sha": "a" * 40,
+                    "conflict_resolution": "no_edit",
+                },
+            ),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == Continue(next_state="REBASE_CONFLICT_WAIT")
+        assert item.attempts.get("rebase_conflict", 0) == 0
+        item.state = "REBASE_CONFLICT_WAIT"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        prompt = request.job.prompt_builder(**request.job.prompt_kwargs)
+        assert "<<<<<<< HEAD" in prompt
+
+    def test_unsafe_conflict_refresh_fails_before_agent(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An unsafe legacy context terminates before an agent gets source text."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+        _prepared_writer(item)
+        refresh = stage.step(item, ctx)
+        assert isinstance(refresh, JobRequest)
+
+        item.state = refresh.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase conflict context unavailable: conflict source requires redaction",
+                value={"failure_kind": "rebase_conflict_context_unavailable"},
+            ),
+            ctx,
+        )
+
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert item.attempts.get("rebase_conflict", 0) == 0
+
     def test_noop_conflict_turn_retries_with_diagnosis_and_then_exhausts(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1626,6 +1791,7 @@ class TestGate:
             {
                 "rebase_conflict": True,
                 "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_context_version": 1,
                 "rebase_conflict_hunks": {
                     "conflict.py": "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
                 },
@@ -1663,6 +1829,7 @@ class TestGate:
                     "conflict_paths": ("conflict.py",),
                     "conflict_snapshot": {"conflict.py": "before"},
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
                     "conflict_hunks": {
                         "conflict.py": ("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n")
                     },
@@ -1699,6 +1866,7 @@ class TestGate:
                     "conflict_paths": ("conflict.py",),
                     "conflict_snapshot": {"conflict.py": "before"},
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
                     "conflict_hunks": {
                         "conflict.py": ("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n")
                     },
@@ -7977,6 +8145,10 @@ def test_dirty_agent_job_keeps_current_source_authority(
             "worktree_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
             "rebase_conflict": operation == "rebase-conflict",
             "rebase_conflict_paths": ("a.py",),
+            "rebase_conflict_context_version": 1,
+            "rebase_conflict_hunks": {
+                "a.py": "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+            },
             "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
             "rebase_paused_head_sha": "b" * 40,
         }
@@ -7994,6 +8166,7 @@ def test_dirty_agent_job_keeps_current_source_authority(
     assert result.job.source_operation.kind == operation
     if operation != "inspect":
         assert result.job.source_operation.allowed_paths == ("a.py",)
+    _validate_source_operation_job(result.job)
 
 
 def test_failed_implementation_reconciles_source_before_another_turn(

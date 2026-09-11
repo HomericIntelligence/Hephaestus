@@ -261,6 +261,8 @@ logger = logging.getLogger(__name__)
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _CONFLICT_HUNK_MAX = 4000
+_CONFLICT_CONTEXT_MAX = 16000
+_CONFLICT_CONTEXT_VERSION = 1
 _CONFLICT_RESOLUTION_OUTCOMES = frozenset(
     {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
 )
@@ -832,7 +834,7 @@ def _validate_source_operation_job(job: AgentJob) -> None:
     request = job.execution_request
     expected_operation, tools = {
         "inspect": (AgentOperation.IMPLEMENT_INSPECT, "Read,Glob,Grep"),
-        "rebase-conflict": (AgentOperation.IMPLEMENT, "Read,Write,Edit,Glob,Grep"),
+        "rebase-conflict": (AgentOperation.REBASE_CONFLICT, "Read,Write,Edit,Glob,Grep"),
         "test-fix": (AgentOperation.TEST_FIX, "Read,Write,Edit,Glob,Grep,Bash"),
     }[operation.kind]
     if (
@@ -952,6 +954,10 @@ class _HostVerificationBoundaryError(RuntimeError):
 
 class _RebaseSigningEnvironmentError(RuntimeError):
     """Raised when a policy rebase cannot obtain the validated signing bridge."""
+
+
+class _RebaseConflictContextError(RuntimeError):
+    """Raised when conflict context is incomplete or unsafe to retain."""
 
 
 class _RemoteGitAuthenticationError(RuntimeError):
@@ -7091,11 +7097,27 @@ class WorkerPool:
             content_snapshot = _dirty_worktree_content_snapshot(
                 cwd, timeout=timeout, shutdown=self._shutdown
             )
-            hunks = {path: self._conflict_path_hunk(cwd, path) for path in paths}
+            hunks: dict[str, str] = {}
+            context_size = 0
+            for path in paths:
+                context = self._conflict_path_hunk(cwd, path, timeout=timeout)
+                context_size += len(context)
+                if context_size > _CONFLICT_CONTEXT_MAX:
+                    raise _RebaseConflictContextError(
+                        f"total conflict context exceeds {_CONFLICT_CONTEXT_MAX} characters"
+                    )
+                hunks[path] = context
+        except _RebaseConflictContextError as exc:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "rebase_conflict_context_unavailable"},
+                error=f"rebase conflict context unavailable: {exc}",
+            )
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             return JobResult(ok=False, error=f"cannot capture paused rebase: {exc}")
         return {
             "rebased": False,
+            "conflict_context_version": _CONFLICT_CONTEXT_VERSION,
             "conflict_paths": paths,
             "conflict_snapshot": snapshot,
             "content_snapshot": content_snapshot,
@@ -7115,38 +7137,100 @@ class WorkerPool:
         return hashlib.sha256(target.read_bytes()).hexdigest()
 
     @staticmethod
-    def _conflict_path_hunk(cwd: Path, path: str) -> str:
-        """Return bounded conflict hunks with small surrounding context."""
+    def _conflict_marker_blocks(lines: list[str]) -> list[str]:
+        """Return complete conflict-marker blocks or reject malformed markers."""
+        blocks: list[str] = []
+        start: int | None = None
+        separator_seen = False
+        for index, line in enumerate(lines):
+            if line.startswith("<<<<<<<"):
+                if start is not None:
+                    raise _RebaseConflictContextError("conflict markers are malformed")
+                start = index
+                separator_seen = False
+                continue
+            if line.startswith("======="):
+                if start is None or separator_seen:
+                    raise _RebaseConflictContextError("conflict markers are malformed")
+                separator_seen = True
+                continue
+            if not line.startswith(">>>>>>>"):
+                continue
+            if start is None or not separator_seen:
+                raise _RebaseConflictContextError("conflict markers are malformed")
+            block = "".join(lines[start : index + 1])
+            if len(block) > _CONFLICT_HUNK_MAX:
+                raise _RebaseConflictContextError(
+                    f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
+                )
+            blocks.append(block)
+            start = None
+            separator_seen = False
+        if start is not None or separator_seen:
+            raise _RebaseConflictContextError("conflict markers are malformed")
+        return blocks
+
+    def _conflict_path_hunk(self, cwd: Path, path: str, *, timeout: int) -> str:
+        """Return complete validated context for one conflict path."""
         target = cwd / path
         try:
-            lines = target.read_bytes().decode(errors="replace").splitlines(keepends=True)
-        except OSError:
-            return "_(conflict context unavailable)_"
-        marker_lines = [
-            index
-            for index, line in enumerate(lines)
-            if line.startswith(("<<<<<<<", "=======", ">>>>>>>"))
-        ]
-        if not marker_lines:
-            return "_(conflict markers no longer present)_"
+            raw = target.read_bytes()
+        except OSError as exc:
+            raise _RebaseConflictContextError("conflict source cannot be read") from exc
+        if b"\0" in raw:
+            raise _RebaseConflictContextError("conflict source is binary")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
+        lines = text.splitlines(keepends=True)
+        blocks = self._conflict_marker_blocks(lines)
+        context = (
+            "\n...\n".join(blocks)
+            if blocks
+            else self._marker_free_conflict_context(cwd, path, timeout=timeout)
+        )
+        if not context:
+            raise _RebaseConflictContextError("conflict context is incomplete")
+        if redact_diagnostic_text(context) != context:
+            raise _RebaseConflictContextError("conflict source requires redaction")
+        return context
 
-        chunks: list[str] = []
-        index = 0
-        while index < len(marker_lines):
-            start_marker = marker_lines[index]
-            end_marker = start_marker
-            while index < len(marker_lines):
-                end_marker = marker_lines[index]
-                index += 1
-                if lines[end_marker].startswith(">>>>>>>"):
-                    break
-            start = max(0, start_marker - 2)
-            end = min(len(lines), end_marker + 3)
-            chunks.append("".join(lines[start:end]))
-        context = "\n...\n".join(chunks)
-        if len(context) <= _CONFLICT_HUNK_MAX:
-            return context
-        return f"{context[:_CONFLICT_HUNK_MAX]}\n...[truncated]"
+    @staticmethod
+    def _marker_free_conflict_context(cwd: Path, path: str, *, timeout: int) -> str:
+        """Return base, ours, and theirs text for a marker-free conflict."""
+        parts: list[str] = []
+        present = False
+        for stage, label in ((1, "Base"), (2, "Ours"), (3, "Theirs")):
+            try:
+                result = git_utils.run(
+                    ["git", "show", f":{stage}:{path}"],
+                    cwd=cwd,
+                    timeout=timeout,
+                )
+            except subprocess.CalledProcessError as exc:
+                if exc.returncode != 128:
+                    raise _RebaseConflictContextError(
+                        "conflict index context cannot be read"
+                    ) from exc
+                value = "_(absent)_\n"
+            except UnicodeDecodeError as exc:
+                raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise _RebaseConflictContextError("conflict index context cannot be read") from exc
+            else:
+                value = result.stdout
+                if "\0" in value:
+                    raise _RebaseConflictContextError("conflict source is binary")
+                if len(value) > _CONFLICT_HUNK_MAX:
+                    raise _RebaseConflictContextError(
+                        f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
+                    )
+                present = True
+            parts.append(f"{label}:\n{value}")
+        if not present:
+            raise _RebaseConflictContextError("conflict index context is incomplete")
+        return "\n".join(parts)
 
     @staticmethod
     def _annotate_rebase_policy_failure(
