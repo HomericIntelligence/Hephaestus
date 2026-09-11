@@ -88,6 +88,16 @@ def _worktree_identity(path: Path) -> Path:
         ) from error
 
 
+def _resolves_within_root(path: Path, root: Path) -> bool:
+    """Return whether a worktree path resolves inside the repository root."""
+    return _worktree_identity(path).is_relative_to(_worktree_identity(root))
+
+
+def _project_path_escapes_root(path: Path, root: Path) -> bool:
+    """Return whether a path below the repository root resolves outside it."""
+    return path.absolute().is_relative_to(root.absolute()) and not _resolves_within_root(path, root)
+
+
 def _detect_repo_from_remote() -> str | None:
     """Return the GitHub repository name from the origin remote, if available."""
     try:
@@ -391,10 +401,22 @@ def _git_common_dir(root: Path) -> Path:
         raise WorktreeInventoryError("Git could not resolve the common Git directory") from error
 
 
+def _has_git_worktree_metadata_ancestor(path: Path) -> bool:
+    """Return whether a path is below a Git worktree metadata directory."""
+    return any(
+        parent == ".git" and child == "worktrees"
+        for parent, child in zip(path.parts, path.parts[1:], strict=False)
+    )
+
+
 def _is_git_metadata_worktree_path(path: Path, common_git_dir: Path) -> bool:
-    """Return whether a raw or resolved path is inside shared Git metadata."""
-    return path.is_relative_to(common_git_dir) or _worktree_identity(path).is_relative_to(
-        _worktree_identity(common_git_dir)
+    """Return whether a raw or resolved path is inside Git worktree metadata."""
+    identity = _worktree_identity(path)
+    return (
+        path.is_relative_to(common_git_dir)
+        or identity.is_relative_to(_worktree_identity(common_git_dir))
+        or _has_git_worktree_metadata_ancestor(path)
+        or _has_git_worktree_metadata_ancestor(identity)
     )
 
 
@@ -426,8 +448,27 @@ def _remove_worktree(path: Path, branch: str, expected_head: str, trunk: str) ->
     except (OSError, subprocess.SubprocessError) as error:
         logger.warning("Could not remove worktree %s: %s", path, error)
         return False
+    trunk_ref = f"refs/heads/{trunk}"
     try:
-        inspected_head_merged = _branch_is_merged(expected_head, trunk)
+        trunk_result = run_git(
+            ["rev-parse", "--verify", trunk_ref],
+            check=False,
+            log_on_error=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("Worktree removed %s; Retained local branch %s: %s", path, branch, error)
+        return False
+    trunk_head = trunk_result.stdout.strip()
+    if trunk_result.returncode or not trunk_head:
+        logger.warning(
+            "Worktree removed %s; Retained local branch %s because trunk %s could not be resolved",
+            path,
+            branch,
+            trunk,
+        )
+        return False
+    try:
+        inspected_head_merged = _branch_is_merged(expected_head, trunk_head)
     except (OSError, subprocess.SubprocessError) as error:
         logger.warning("Worktree removed %s; Retained local branch %s: %s", path, branch, error)
         return False
@@ -442,7 +483,19 @@ def _remove_worktree(path: Path, branch: str, expected_head: str, trunk: str) ->
         return False
     try:
         result = run_git(
-            ["update-ref", "-d", f"refs/heads/{branch}", expected_head],
+            ["update-ref", "--stdin", "-z"],
+            input_text="\0".join(
+                (
+                    "start",
+                    f"verify {trunk_ref}",
+                    trunk_head,
+                    f"delete refs/heads/{branch}",
+                    expected_head,
+                    "prepare",
+                    "commit",
+                    "",
+                )
+            ),
             check=False,
             log_on_error=False,
         )
@@ -488,6 +541,13 @@ def _fresh_stale_worktree_candidate(
     """Return a clean unchanged candidate and whether inspection is incomplete."""
     current = _refresh_worktree_candidate(expected, root)
     if current is None:
+        if _project_path_escapes_root(expected.path, root):
+            logger.error(
+                "Cannot clean worktree that escapes the repository root %s; "
+                "use the recovery workflow first",
+                expected.path,
+            )
+            return None, True
         if common_git_dir is not None and _is_git_metadata_worktree_path(
             expected.path, common_git_dir
         ):
@@ -497,6 +557,13 @@ def _fresh_stale_worktree_candidate(
             )
             return None, True
         return None, False
+    if _project_path_escapes_root(current.path, root):
+        logger.error(
+            "Cannot clean worktree that escapes the repository root %s; "
+            "use the recovery workflow first",
+            current.path,
+        )
+        return None, True
     if common_git_dir is not None and _is_git_metadata_worktree_path(current.path, common_git_dir):
         logger.error(
             "Cannot clean worktree inside Git metadata %s; use the recovery workflow first",
@@ -606,6 +673,14 @@ def _cleanup_stale_worktrees(
     for candidate in candidates:
         branch = candidate.branch
         if branch is None:
+            continue
+        if _project_path_escapes_root(candidate.path, root):
+            logger.error(
+                "Cannot clean worktree that escapes the repository root %s; "
+                "use the recovery workflow first",
+                candidate.path,
+            )
+            incomplete = True
             continue
         if common_git_dir is not None and _is_git_metadata_worktree_path(
             candidate.path, common_git_dir
@@ -730,6 +805,8 @@ def _agent_worktree_path(repo_path: Path, branch: str) -> Path:
     """Return a safe single-component temporary path for a rebase agent."""
     branch_digest = hashlib.sha256(branch.encode("utf-8")).hexdigest()
     worktree_path = repo_path / "build" / ".worktrees" / f"tidy-{branch_digest}"
+    if not _resolves_within_root(worktree_path, repo_path):
+        raise WorktreeInventoryError("Cannot create an agent worktree outside the repository root")
     if _is_git_metadata_worktree_path(worktree_path, _git_common_dir(repo_path)):
         raise WorktreeInventoryError("Cannot create an agent worktree inside Git metadata")
     return worktree_path

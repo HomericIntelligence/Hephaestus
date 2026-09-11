@@ -56,13 +56,11 @@ def slugify(text: str) -> str:
 
 
 def strip_null_bytes(text: str) -> str:
-    r"""Remove NUL (``\x00``) bytes from text destined for a subprocess.
+    r"""Remove NUL (``\x00``) bytes from external plain text.
 
-    :func:`subprocess.run` raises ``ValueError: embedded null byte`` if any argv
-    element (or text passed via stdin) contains a NUL. Agent output and malformed
-    GitHub issue bodies can carry stray NULs, which would otherwise permanently
-    strand the affected work item in the automation loop. Strip them defensively
-    at the invoke/data boundary.
+    An argv element cannot contain a NUL. Agent output and malformed GitHub issue
+    bodies can carry stray NULs, which can permanently strand an affected work
+    item in the automation loop. Remove them at the input and data boundary.
 
     Args:
         text: Text that may contain embedded NUL bytes.
