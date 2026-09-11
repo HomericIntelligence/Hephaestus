@@ -159,23 +159,26 @@ def test_graceful_coordinator_signal_does_not_rewrite_completed_result(
         pool.shutdown(mark_interrupted=False)
 
 
-@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, GeneratorExit])
-def test_host_started_control_exception_is_interrupted_without_shutdown(
+@pytest.mark.parametrize(
+    "error_type",
+    [RuntimeError, KeyboardInterrupt, SystemExit, GeneratorExit],
+)
+def test_host_started_exception_is_interrupted_without_shutdown(
     learning_request: AthenaSkillRequest,
     error_type: type[BaseException],
 ) -> None:
-    """Keep an unknown host delivery resumable after a control exception."""
+    """Keep an unknown host delivery resumable after an exception."""
     auxiliary = importlib.import_module("hephaestus.automation.pipeline.auxiliary_worker_pool")
     forced = threading.Event()
     completions = CompletionQueue(maxsize=1)
 
-    class ControlExceptionHost(_Host):
+    class ExceptionHost(_Host):
         def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
             self.started.set()
             self.calls.append(request)
             raise error_type("host stopped")
 
-    host = ControlExceptionHost()
+    host = ExceptionHost()
     pool = auxiliary.AuxiliaryWorkerPool(
         size=1,
         shutdown=forced,
@@ -192,6 +195,41 @@ def test_host_started_control_exception_is_interrupted_without_shutdown(
         assert result.error == f"{error_type.__name__}: host stopped"
         assert len(host.calls) == 1
         assert host.calls[0].workspace == learning_request.workspace
+        assert not forced.is_set()
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+
+def test_typed_host_failure_remains_retryable(
+    learning_request: AthenaSkillRequest,
+) -> None:
+    """Keep a typed host failure separate from an unknown delivery."""
+    auxiliary = importlib.import_module("hephaestus.automation.pipeline.auxiliary_worker_pool")
+    forced = threading.Event()
+    completions = CompletionQueue(maxsize=1)
+
+    class FailingHost(_Host):
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            self.started.set()
+            self.calls.append(request)
+            return AthenaSkillResult(kind=request.kind, error="delivery rejected")
+
+    host = FailingHost()
+    pool = auxiliary.AuxiliaryWorkerPool(
+        size=1,
+        shutdown=forced,
+        completion_q=completions,
+        athena_skill_executor=host,
+    )
+    try:
+        handle = pool.submit(AthenaSkillJob(request=learning_request), "DONE")
+        done, result = completions.get(timeout=2)
+
+        assert done is handle
+        assert not result.ok
+        assert not result.interrupted
+        assert result.error == "delivery rejected"
+        assert isinstance(result.value, AthenaSkillResult)
         assert not forced.is_set()
     finally:
         pool.shutdown(mark_interrupted=False)

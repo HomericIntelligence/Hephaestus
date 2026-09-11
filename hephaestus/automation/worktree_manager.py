@@ -38,11 +38,12 @@ from typing import Any
 
 from hephaestus.automation.git_runtime import (
     current_operation_shutdown,
+    operation_deadline,
     operation_file_lock,
     remaining_operation_timeout,
 )
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
-from hephaestus.config.child_environments import build_python_phase_env
+from hephaestus.config.child_environments import read_approved_parent_env
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
@@ -1482,6 +1483,22 @@ class WorktreeManager:
                 **_timeout_kw(timeout),
             )
 
+    def _prune_stopped_worktree_registration(self) -> None:
+        """Prune a registration after a staged removal stops."""
+        try:
+            with operation_deadline(None, shutdown=threading.Event()):
+                run(
+                    ["git", "worktree", "prune", "--expire", "now"],
+                    cwd=self.repo_root,
+                    check=False,
+                    timeout=1,
+                )
+        except Exception as cleanup_error:
+            logger.debug(
+                "Could not prune the removed worktree metadata after stop: %s",
+                cleanup_error,
+            )
+
     def _remove_worktree_path_forcefully(
         self,
         worktree_path: Path,
@@ -1504,11 +1521,16 @@ class WorktreeManager:
 
         operation_timeout = remaining_operation_timeout(timeout)
         shutdown = current_operation_shutdown()
+        staged_path: Path | None = None
         if worktree_path.exists():
             try:
                 if operation_timeout is None and shutdown is None:
                     shutil.rmtree(worktree_path)
                 else:
+                    staged_path = worktree_path.with_name(
+                        f".{worktree_path.name}.removing-{secrets.token_hex(16)}"
+                    )
+                    worktree_path.rename(staged_path)
 
                     def _remaining_timeout() -> int | float:
                         remaining = remaining_operation_timeout(timeout)
@@ -1519,12 +1541,13 @@ class WorktreeManager:
                     run_subprocess(
                         [
                             sys.executable,
+                            "-I",
                             "-c",
                             "import shutil, sys; shutil.rmtree(sys.argv[1])",
-                            str(worktree_path),
+                            str(staged_path),
                         ],
                         cwd=self.repo_root,
-                        env=build_python_phase_env(self.repo_root),
+                        env=read_approved_parent_env(),
                         timeout=timeout,
                         check=True,
                         log_on_error=False,
@@ -1533,6 +1556,8 @@ class WorktreeManager:
                         remaining_timeout=_remaining_timeout,
                     )
             except (InterruptedError, subprocess.TimeoutExpired):
+                if staged_path is not None:
+                    self._prune_stopped_worktree_registration()
                 raise
             except Exception as e:
                 logger.warning(

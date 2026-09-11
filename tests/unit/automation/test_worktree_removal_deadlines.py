@@ -170,7 +170,7 @@ def test_worktree_removal_preserves_prune_stop(
 def test_worktree_removal_fallback_stops_during_directory_deletion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A cancellation during fallback deletion preserves the worktree path."""
+    """A cancellation during fallback deletion preserves the path for recovery."""
     repo = tmp_path / "repository"
     repo.mkdir()
     worktree_path = repo / "build" / ".worktrees" / "writer"
@@ -216,13 +216,130 @@ def test_worktree_removal_fallback_stops_during_directory_deletion(
         stop_thread.join(timeout=5.0)
     assert not stop_thread.is_alive()
 
-    assert git_commands == [["git", "worktree", "remove", "--force", str(worktree_path)]]
+    assert git_commands == [
+        ["git", "worktree", "remove", "--force", str(worktree_path)],
+        ["git", "worktree", "prune", "--expire", "now"],
+    ]
     assert len(fallback_calls) == 1
     command, options = fallback_calls[0]
-    assert command[0:2] == [sys.executable, "-c"]
-    assert command[-1] == str(worktree_path)
+    assert command[0:3] == [sys.executable, "-I", "-c"]
+    assert command[-1] != str(worktree_path)
+    assert Path(command[-1]).is_dir()
     assert options["track_process_group"] is True
     assert options["shutdown"] is shutdown
     assert callable(options["remaining_timeout"])
-    assert worktree_path.exists()
-    assert (worktree_path / "tracked.txt").read_text(encoding="utf-8") == "preserve\n"
+    assert not worktree_path.exists()
+
+
+def test_worktree_removal_partial_fallback_keeps_predecessor_recoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stopped fallback must leave the predecessor available for recovery."""
+    repo, first, second = _repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    _git(repo, "init", "--bare", str(remote))
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "origin", f"{second}:refs/heads/adopted-writer")
+    source = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source.prepare(42, SourceLane.IMPLEMENTATION, first)
+    manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=source.base_dir,
+        remote_git_env=build_git_child_env(),
+        remote_git_config=("-c", "protocol.file.allow=always"),
+    )
+    shutdown = threading.Event()
+    fallback_started = threading.Event()
+    fallback_released = threading.Event()
+    fallback_targets: list[Path] = []
+    real_run = git_runtime.run
+
+    def fake_git_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[:4] == ["git", "worktree", "remove", "--force"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="removal failed")
+        return real_run(cmd, **kwargs)
+
+    def partially_delete_then_stop(
+        cmd: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        target = Path(cmd[-1])
+        fallback_targets.append(target)
+        fallback_started.set()
+        if not fallback_released.wait(timeout=5.0):
+            raise AssertionError("fallback deletion did not receive the stop request")
+        (target / "tracked.txt").unlink()
+        raise InterruptedError("directory deletion cancelled after partial deletion")
+
+    monkeypatch.setattr(worktree_manager, "run", fake_git_run)
+    monkeypatch.setattr(
+        worktree_manager, "run_subprocess", partially_delete_then_stop, raising=False
+    )
+
+    def request_shutdown() -> None:
+        if not fallback_started.wait(timeout=5.0):
+            raise AssertionError("fallback deletion did not start")
+        shutdown.set()
+        fallback_released.set()
+
+    stop_thread = threading.Thread(target=request_shutdown)
+    stop_thread.start()
+    try:
+        with pytest.raises((SourceWorkspaceError, InterruptedError, subprocess.TimeoutExpired)):
+            with source.implementation_writer_handoff(
+                42, deadline=_PreparationDeadline(time.monotonic() + 60.0, time.monotonic, shutdown)
+            ) as handoff:
+                source.authorize_adopted_implementation_writer_transition(
+                    42, branch="adopted-writer", expected_head=second, handoff=handoff
+                )
+                manager.create_worktree(
+                    42,
+                    "adopted-writer",
+                    source_lane="impl",
+                    implementation_adoption_head=second,
+                    implementation_writer_handoff=handoff,
+                )
+    finally:
+        fallback_released.set()
+        stop_thread.join(timeout=5.0)
+    assert not stop_thread.is_alive()
+    assert len(fallback_targets) == 1
+    assert fallback_targets[0] != predecessor.cwd
+    assert fallback_targets[0].is_dir()
+    assert not (fallback_targets[0] / "tracked.txt").exists()
+    assert not predecessor.cwd.exists()
+
+    with source.implementation_writer_handoff(42):
+        pass
+
+    assert predecessor.cwd.exists()
+    assert (predecessor.cwd / "tracked.txt").read_text(encoding="utf-8") == "first\n"
+    assert _git(predecessor.cwd, "rev-parse", "HEAD") == first
+    assert not source._transition_path(42).exists()
+
+
+def test_worktree_removal_fallback_ignores_repository_shutil_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback child must import only the standard-library shutil module."""
+    repo = tmp_path / "repository"
+    repo.mkdir()
+    marker = repo / "shutil-imported.txt"
+    (repo / "shutil.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    worktree_path = repo / "build" / ".worktrees" / "writer"
+    worktree_path.mkdir(parents=True)
+    (worktree_path / "tracked.txt").write_text("remove\n", encoding="utf-8")
+    manager = WorktreeManager(repo_root=repo)
+
+    def failed_git_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="not a worktree")
+
+    monkeypatch.setattr(worktree_manager, "run", failed_git_run)
+    manager._remove_worktree_path_forcefully(worktree_path, timeout=60)
+
+    assert not marker.exists()
+    assert not worktree_path.exists()
