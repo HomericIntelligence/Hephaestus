@@ -4829,6 +4829,152 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("app", {"id": "malformed"}),
+            ("status", ["completed"]),
+            ("conclusion", {"value": "success"}),
+            ("completed_at", ["2026-09-05T12:00:00Z"]),
+        ],
+    )
+    def test_stable_malformed_optional_result_fields_do_not_block_success(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        field: str,
+        value: object,
+    ) -> None:
+        """Stable raw optional fields do not revoke required evidence."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        optional = self._check_run(head, check_run_id=2, name="optional-ci")
+        optional[field] = value
+        runs = {
+            "total_count": 2,
+            "check_runs": [self._check_run(head), optional],
+        }
+        command_runner.side_effect = [
+            self._json_response(runs),
+            self._json_response(runs),
+            self._empty_status_response(head),
+            self._empty_status_response(head),
+        ]
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("app", {"id": "malformed"}),
+            ("status", ["completed"]),
+            ("conclusion", {"value": "success"}),
+            ("completed_at", ["2026-09-05T12:00:00Z"]),
+        ],
+    )
+    def test_malformed_matching_result_fields_fail_after_stable_snapshot(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        field: str,
+        value: object,
+    ) -> None:
+        """Malformed result fields fail when their run matches a requirement."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        check_run = self._check_run(head)
+        check_run[field] = value
+        runs = self._json_response({"total_count": 1, "check_runs": [check_run]})
+        command_runner.side_effect = [runs, runs]
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        assert command_runner.call_count == 2
+
+    def test_optional_missing_and_null_app_have_distinct_snapshots(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """A missing optional field differs from a present null field."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first_optional = self._check_run(head, check_run_id=2, name="optional-ci")
+        first_optional.pop("app")
+        second_optional = {**first_optional, "app": None}
+        command_runner.side_effect = [
+            self._json_response(
+                {"total_count": 2, "check_runs": [self._check_run(head), first_optional]}
+            ),
+            self._json_response(
+                {"total_count": 2, "check_runs": [self._check_run(head), second_optional]}
+            ),
+        ]
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        assert command_runner.call_count == 2
+
+    @pytest.mark.parametrize(
+        ("field", "first_value", "second_value"),
+        [
+            ("status", True, 1),
+            (
+                "app",
+                {"id": "malformed", "metadata": {"value": 1}},
+                {"id": "malformed", "metadata": {"value": 2}},
+            ),
+            ("conclusion", ["a", "b"], ["b", "a"]),
+        ],
+    )
+    def test_optional_raw_field_change_invalidates_snapshot(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        field: str,
+        first_value: object,
+        second_value: object,
+    ) -> None:
+        """Canonical optional fields retain JSON type and ordered arrays."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first_optional = self._check_run(head, check_run_id=2, name="optional-ci")
+        second_optional = self._check_run(head, check_run_id=2, name="optional-ci")
+        first_optional[field] = first_value
+        second_optional[field] = second_value
+        command_runner.side_effect = [
+            self._json_response(
+                {"total_count": 2, "check_runs": [self._check_run(head), first_optional]}
+            ),
+            self._json_response(
+                {"total_count": 2, "check_runs": [self._check_run(head), second_optional]}
+            ),
+        ]
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        assert command_runner.call_count == 2
+
+    def test_optional_object_key_order_is_stable(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """Object key order does not change the canonical raw snapshot."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        first_optional = self._check_run(head, check_run_id=2, name="optional-ci")
+        second_optional = self._check_run(head, check_run_id=2, name="optional-ci")
+        first_optional["app"] = {"id": "malformed", "metadata": {"a": 1, "b": 2}}
+        second_optional["app"] = {"metadata": {"b": 2, "a": 1}, "id": "malformed"}
+        first = self._json_response(
+            {"total_count": 2, "check_runs": [self._check_run(head), first_optional]}
+        )
+        second = self._json_response(
+            {"total_count": 2, "check_runs": [self._check_run(head), second_optional]}
+        )
+        command_runner.side_effect = [
+            first,
+            second,
+            self._empty_status_response(head),
+            self._empty_status_response(head),
+        ]
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+
     def test_unrelated_check_run_change_invalidates_snapshot(
         self, adapter: PipelineGitHub, command_runner: MagicMock
     ) -> None:
@@ -4855,20 +5001,17 @@ class TestExactHeadChecks:
         assert self._passes(adapter, head, self._policy("required-ci")) is False
         assert command_runner.call_count == 2
 
-    def test_unknown_unrelated_check_run_status_fails_closed(
+    def test_unknown_required_check_run_status_fails_closed(
         self, adapter: PipelineGitHub, command_runner: MagicMock
     ) -> None:
-        """An undocumented Check Run status invalidates the full snapshot."""
+        """An undocumented status cannot supply required evidence."""
         adapter.repo = "repo"
         head = "a" * 40
         runs = {
-            "total_count": 2,
+            "total_count": 1,
             "check_runs": [
-                self._check_run(head),
                 self._check_run(
                     head,
-                    check_run_id=2,
-                    name="optional-ci",
                     status="unknown",
                     conclusion=None,
                     completed_at=None,
@@ -4883,7 +5026,7 @@ class TestExactHeadChecks:
         ]
 
         assert self._passes(adapter, head, self._policy("required-ci")) is False
-        assert command_runner.call_count == 1
+        assert command_runner.call_count == 2
 
     def test_rejects_truncated_check_suite_inventory(
         self, adapter: PipelineGitHub, command_runner: MagicMock

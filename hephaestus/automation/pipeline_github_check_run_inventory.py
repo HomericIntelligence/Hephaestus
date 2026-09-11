@@ -16,6 +16,23 @@ _MAX_CHECK_SUITES = 1_000
 _MAX_CHECK_RUNS = 2_000
 
 
+def canonical_json_field(record: dict[str, object], field: str) -> tuple[bool, str] | None:
+    """Return a stable JSON value that keeps field presence distinct."""
+    if field not in record:
+        return False, ""
+    try:
+        encoded = json.dumps(
+            record[field],
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        return None
+    return True, encoded
+
+
 def _collection_page(payload: object, key: str) -> tuple[int, list[object]] | None:
     """Validate one bounded GitHub collection page."""
     if not isinstance(payload, dict):

@@ -10,6 +10,7 @@ from threading import Event
 
 from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_check_run_inventory import (
+    canonical_json_field,
     check_runs_for_head,
     check_suite_ids_for_head,
 )
@@ -30,7 +31,6 @@ _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 _CHECK_CONCLUSIONS = _CHECK_SUCCESS_CONCLUSIONS | frozenset(
     {"action_required", "cancelled", "failure", "stale", "startup_failure", "timed_out"}
 )
-_ACTIVE_CHECK_STATUSES = frozenset({"in_progress", "pending", "queued", "requested", "waiting"})
 _RequiredCheck = tuple[str, int | None]
 _CheckRunCandidate = tuple[datetime, int, dict[str, object]]
 _CheckRunGroups = dict[_RequiredCheck, dict[int, list[_CheckRunCandidate]]]
@@ -136,7 +136,7 @@ def _check_run_snapshot(
     head_sha: str,
 ) -> tuple[object, ...] | None:
     """Return canonical identity and status data for all returned Check Runs."""
-    snapshot: list[tuple[int, int, str, str, int | None, str, str | None, str | None]] = []
+    snapshot: list[tuple[object, ...]] = []
     for check_run in check_runs:
         if not isinstance(check_run, dict):
             logger.warning("Check Run for %s is not an object", head_sha)
@@ -145,21 +145,6 @@ def _check_run_snapshot(
         check_suite = check_run.get("check_suite")
         check_suite_id = check_suite.get("id") if isinstance(check_suite, dict) else None
         name = check_run.get("name")
-        status = check_run.get("status")
-        conclusion = check_run.get("conclusion")
-        completed_at = check_run.get("completed_at")
-        app = check_run.get("app")
-        if "app" not in check_run or (app is not None and not isinstance(app, dict)):
-            logger.warning("Check Run for %s has no valid app identity", head_sha)
-            return None
-        try:
-            app_id = None if app is None else _valid_app_id(app.get("id"))
-        except ValueError:
-            logger.warning("Check Run for %s has no valid app identity", head_sha)
-            return None
-        if app is not None and app_id is None:
-            logger.warning("Check Run for %s has no valid app identity", head_sha)
-            return None
         if (
             not isinstance(check_run_id, int)
             or isinstance(check_run_id, bool)
@@ -170,29 +155,15 @@ def _check_run_snapshot(
             or check_run.get("head_sha") != head_sha
             or not isinstance(name, str)
             or not name
-            or not isinstance(status, str)
         ):
             logger.warning("Check Run for %s has malformed snapshot identity", head_sha)
             return None
-        raw_completed_at: str | None
-        if status == "completed":
-            parsed_completion = _check_run_completion_time(completed_at)
-            if (
-                not isinstance(conclusion, str)
-                or conclusion not in _CHECK_CONCLUSIONS
-                or parsed_completion is None
-            ):
-                logger.warning("Check Run for %s has malformed terminal evidence", head_sha)
-                return None
-            raw_completed_at = parsed_completion[0]
-        elif status in _ACTIVE_CHECK_STATUSES:
-            if conclusion is not None or completed_at is not None:
-                logger.warning("Check Run for %s has contradictory active evidence", head_sha)
-                return None
-            conclusion = None
-            raw_completed_at = None
-        else:
-            logger.warning("Check Run for %s has an unknown status", head_sha)
+        raw_fields = tuple(
+            canonical_json_field(check_run, field)
+            for field in ("app", "status", "conclusion", "completed_at")
+        )
+        if any(value is None for value in raw_fields):
+            logger.warning("Check Run for %s has a non-JSON snapshot field", head_sha)
             return None
         snapshot.append(
             (
@@ -200,10 +171,7 @@ def _check_run_snapshot(
                 check_run_id,
                 head_sha,
                 name,
-                app_id,
-                status,
-                conclusion,
-                raw_completed_at,
+                *raw_fields,
             )
         )
     return tuple(sorted(snapshot))
