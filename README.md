@@ -317,7 +317,7 @@ remaining narrowly approved runtime variables and the deny-by-default policy.
 
 Run any command with `--help` to see full usage.
 
-The 54 console scripts are declared in `[project.scripts]` in
+The console scripts are declared in `[project.scripts]` in
 [`pyproject.toml`](pyproject.toml).
 
 ### Automation
@@ -332,11 +332,16 @@ evidence and never falls back after failure. See
 | Command | Description |
 |---|---|
 | `hephaestus-automation-loop` | Run all six main queues and the auxiliary learning and cleanup queues |
+| `hephaestus-fleet-worker` | Run the private Codex worker and inspect Fleet execution receipts |
 | `hephaestus-plan-issues` | Run `planning → plan_review` through the same coordinator |
 | `hephaestus-implement-issues` | Run `implementation → pr_review → merge_wait` through the same coordinator |
 | `hephaestus-review-prs` | Run the `pr_review` scope through the same coordinator |
 | `hephaestus-install-pi-plugins` | Install and check the pinned Pi packages; provider admission remains required |
 | `hephaestus-ensure-state-labels` | Create the required planning and repository labels |
+
+The [Fleet worker contract](docs/fleet-worker.md) describes the separate
+app-server adapter, private attachment, and recovery limits. Fleet does not
+change the existing queue's label or publication authority.
 
 The four queue commands use one parser in `pipeline_cli.py`. The full loop
 accepts `--stages` with contiguous main stage names in queue order. Learning

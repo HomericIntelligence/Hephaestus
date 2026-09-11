@@ -91,7 +91,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-The 54 console scripts registered in `[project.scripts]` are classified into one
+The console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
 The installed script inventory is `[project.scripts]` in `pyproject.toml`.
@@ -118,6 +118,7 @@ inventory or table before commit.
 
 | CLI | Tier | Notes |
 |-----|------|-------|
+| `hephaestus-fleet-worker` | Provisional | Private Codex runtime, receipts, and allocation-local attachment |
 | `hephaestus-automation-loop` | Provisional | Dispatches to `hephaestus.automation` (provisional subpackage) |
 | `hephaestus-install-pi-plugins` | Provisional | Installs and verifies the pinned Pi package/capability contract |
 | `hephaestus-plan-issues` | Provisional | Queue scope: planning and plan review |

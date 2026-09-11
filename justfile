@@ -164,3 +164,7 @@ ci-consistency:
 # Run all locally executable CI checks
 ci-all:
     ./scripts/run_ci_local.sh all
+
+# Measure an isolated Linux worker with fixed commands and empty authentication storage.
+fleet-linux-probe root codex_bin:
+    uv run --no-sync python tests/integration/fleet_linux_probe.py --root {{quote(root)}} --codex-bin {{quote(codex_bin)}}
