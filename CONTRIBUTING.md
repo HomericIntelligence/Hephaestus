@@ -118,6 +118,7 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
    ```bash
    git remote set-url upstream https://github.com/HomericIntelligence/Hephaestus.git
    ```
+
 4. Bootstrap the project (installs deps, the editable package, and pre-commit
    hooks in one step): `just bootstrap`
 

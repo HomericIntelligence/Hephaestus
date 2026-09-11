@@ -338,6 +338,7 @@ For a manual contribution, use this final-rebase sequence:
        git verify-commit "$commit" || exit 1
    done
    ```
+
 4. If the rebase or conflict resolution changes a file, use a test-only
    subagent to run each affected test again.
 5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
