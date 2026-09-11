@@ -2399,7 +2399,6 @@ class TestWorkerPoolSubmitComplete:
             auth_status_timeout=10,
             pi_isolation_adapter="package:factory",
             pi_dir=Path("/private/pi-agent"),
-            remaining_timeout=ANY,
             shutdown=ANY,
         )
 
@@ -2590,6 +2589,7 @@ class TestWorkerPoolSubmitComplete:
             sandbox="workspace-write",
             approval="never",
             process_tracker=subprocess_registry.track_process_group,
+            remaining_timeout=ANY,
             execution_request=None,
             resume_binding=None,
             disable_pi_automation=False,
@@ -16728,8 +16728,9 @@ class TestShutdownReapsSubprocess:
                 model: str,
                 session_id: str | None,
                 process_tracker: agent_runtime.ProcessTracker | None,
+                remaining_timeout: agent_runtime.RemainingTimeout | None,
             ) -> AgentRunResult:
-                del policy, environment, prompt, model, session_id
+                del policy, environment, prompt, model, session_id, remaining_timeout
                 assert process_tracker is not None
                 process = subprocess.Popen(
                     sleeper,

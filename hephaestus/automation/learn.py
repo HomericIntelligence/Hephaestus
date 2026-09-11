@@ -195,6 +195,7 @@ def compact_agent_session(
             disable_pi_automation=disable_pi_automation,
             pi_dir=pi_dir,
             process_tracker=subprocess_registry.track_process_group,
+            remaining_timeout=remaining_timeout,
             **resume_options,
         )
     except (

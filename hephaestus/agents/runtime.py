@@ -84,6 +84,7 @@ LOG = logging.getLogger(__name__)
 
 AgentName = Literal["claude", "codex", "pi", "opencode"]
 ProcessTracker = Callable[[int], contextlib.AbstractContextManager[None]]
+RemainingTimeout = Callable[[], int]
 SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 SubprocessCommand = SubprocessCommandPart | Sequence[SubprocessCommandPart]
 AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi", "opencode")
@@ -231,6 +232,14 @@ class _CodexReasoningEffortRejectedError(AgentExecutionError):
     """Codex rejected the reasoning effort before it emitted output or work."""
 
 
+class _CodexOperationDeadlineExpiredError(Exception):
+    """Keep an operation deadline separate from a Codex wrapper timeout."""
+
+    def __init__(self, error: subprocess.TimeoutExpired) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
 class PiAutomationDisabledError(AgentExecutionError):
     """The operator disabled Pi automation before any provider process started."""
 
@@ -267,8 +276,19 @@ class PiIsolationAdapter(Protocol):
         model: str,
         session_id: str | None,
         process_tracker: ProcessTracker | None,
+        remaining_timeout: RemainingTimeout | None,
     ) -> AgentRunResult:
-        """Start Pi with external constraints and host-owned process tracking."""
+        """Start Pi with external constraints and checked process tracking.
+
+        When ``remaining_timeout`` is not ``None``, call it immediately before
+        process creation and use its result to decrease ``timeout``. Enter
+        ``process_tracker`` immediately after process creation. Then, call
+        ``remaining_timeout`` again and decrease the process wait limit. If
+        this call raises an exception, terminate the process group and reap
+        the direct child before you re-raise the exception. One-shot and
+        start-new operations supply ``None``. Do not call the value when it is
+        ``None``.
+        """
         raise NotImplementedError
 
 
@@ -348,6 +368,7 @@ def _supports_pi_isolation_adapter_invoke_contract(adapter: object) -> bool:
             model="",
             session_id=None,
             process_tracker=None,
+            remaining_timeout=None,
         )
     except Exception:
         return False
@@ -4532,21 +4553,43 @@ def resume_codex_session(
     approval: str = "never",
     execution_request: ExecutionRequest | None = None,
     process_tracker: ProcessTracker | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
     _final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Resume a persisted Codex exec session and capture its latest output."""
-    return _run_codex_session_with_effort_fallback(
-        prompt=prompt,
-        cwd=cwd,
-        timeout=timeout,
-        model=model,
-        sandbox=sandbox,
-        approval=approval,
-        execution_request=execution_request,
-        resume_id=session_id,
-        process_tracker=process_tracker,
-        final_message_grace_seconds=_final_message_grace_seconds,
-    )
+    deadline_boundary = _codex_deadline_boundary(remaining_timeout)
+    try:
+        return _run_codex_session_with_effort_fallback(
+            prompt=prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+            execution_request=execution_request,
+            resume_id=session_id,
+            process_tracker=process_tracker,
+            remaining_timeout=deadline_boundary,
+            final_message_grace_seconds=_final_message_grace_seconds,
+        )
+    except _CodexOperationDeadlineExpiredError as exc:
+        raise exc.error from exc
+
+
+def _codex_deadline_boundary(
+    remaining_timeout: RemainingTimeout | None,
+) -> RemainingTimeout | None:
+    """Mark an external deadline so Codex cannot recover it as wrapper output."""
+    if remaining_timeout is None:
+        return None
+
+    def checked() -> int:
+        try:
+            return remaining_timeout()
+        except subprocess.TimeoutExpired as exc:
+            raise _CodexOperationDeadlineExpiredError(exc) from exc
+
+    return checked
 
 
 def _run_codex_session_with_effort_fallback(
@@ -4560,6 +4603,7 @@ def _run_codex_session_with_effort_fallback(
     execution_request: ExecutionRequest | None = None,
     resume_id: str | None = None,
     process_tracker: ProcessTracker | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
     final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Run Codex and retry one rejected explicit effort with its default."""
@@ -4567,6 +4611,8 @@ def _run_codex_session_with_effort_fallback(
 
     def execute(selected_model: str) -> AgentRunResult:
         remaining = deadline - time.monotonic()
+        if remaining_timeout is not None:
+            remaining = min(remaining, float(remaining_timeout()))
         if remaining <= 0:
             raise subprocess.TimeoutExpired(["codex", "exec"], timeout)
         cmd = _codex_base_cmd(
@@ -4578,6 +4624,8 @@ def _run_codex_session_with_effort_fallback(
             resume_id=resume_id,
         )
         remaining = deadline - time.monotonic()
+        if remaining_timeout is not None:
+            remaining = min(remaining, float(remaining_timeout()))
         if remaining <= 0:
             raise subprocess.TimeoutExpired(cmd, timeout)
         return _run_codex_command(
@@ -4586,6 +4634,7 @@ def _run_codex_session_with_effort_fallback(
             cwd=cwd,
             timeout=min(float(timeout), remaining),
             process_tracker=process_tracker,
+            remaining_timeout=remaining_timeout,
             final_message_grace_seconds=final_message_grace_seconds,
         )
 
@@ -4610,6 +4659,7 @@ def _run_codex_command(
     cwd: Path,
     timeout: float,
     process_tracker: ProcessTracker | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
     final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Execute Codex with JSON events and return final text plus session id."""
@@ -4627,6 +4677,7 @@ def _run_codex_command(
                 env=env,
                 output_path=Path(output_file.name),
                 process_tracker=process_tracker,
+                remaining_timeout=remaining_timeout,
                 final_message_grace_seconds=final_message_grace_seconds,
             )
         except subprocess.CalledProcessError as exc:
@@ -4761,6 +4812,7 @@ def _run_opencode_command(
     cwd: Path,
     timeout: int,
     process_tracker: ProcessTracker | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
 ) -> AgentRunResult:
     """Execute OpenCode with JSON events and return final text plus session id.
 
@@ -4771,6 +4823,9 @@ def _run_opencode_command(
     on a non-zero exit and defensively on an exit-0 stream that reports an
     error without one.
     """
+    env = _platform_child_env()
+    if remaining_timeout is not None:
+        timeout = min(timeout, remaining_timeout())
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -4779,21 +4834,26 @@ def _run_opencode_command(
         cwd=cwd,
         text=True,
         start_new_session=True,
-        env=_platform_child_env(),
+        env=env,
     )
     tracker = process_tracker(proc.pid) if process_tracker is not None else contextlib.nullcontext()
+    wait_timeout = float(timeout)
+    started_check_complete = False
     try:
         with tracker:
+            wait_timeout = _checked_started_process_timeout(proc, wait_timeout, remaining_timeout)
+            started_check_complete = True
             # Strip NUL bytes: proc.communicate(input=...) marshals text stdin
             # and would raise ``ValueError: embedded null byte`` on a stray NUL
             # before OpenCode runs (#1661) — the same guard the Claude/Codex
             # paths apply.
             stdout_text, stderr_text = proc.communicate(
                 input=strip_null_bytes(prompt),
-                timeout=timeout,
+                timeout=wait_timeout,
             )
     except subprocess.TimeoutExpired:
-        _terminate_process_group(proc)
+        if started_check_complete:
+            _terminate_process_group(proc)
         raise
     diagnostic = _opencode_failure_diagnostic(stdout_text, stderr_text)
     if proc.returncode != 0 or diagnostic is not None:
@@ -4905,6 +4965,7 @@ def resume_opencode_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
 ) -> AgentRunResult:
     """Resume an OpenCode session by id via ``--session``.
 
@@ -4921,6 +4982,7 @@ def resume_opencode_session(
         cwd=cwd,
         timeout=timeout,
         process_tracker=process_tracker,
+        remaining_timeout=remaining_timeout,
     )
 
 
@@ -5355,6 +5417,7 @@ def _run_pi_with_policy(
     lifecycle: SessionLifecycle,
     session_id: str | None = None,
     process_tracker: ProcessTracker | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
     pi_dir: Path | None = None,
 ) -> AgentRunResult:
     """Run Pi through the verified OS-isolation adapter for ``policy``.
@@ -5420,6 +5483,7 @@ def _run_pi_with_policy(
                 model=selection.reference,
                 session_id=session_id,
                 process_tracker=process_tracker,
+                remaining_timeout=remaining_timeout,
             )
     except subprocess.CalledProcessError as exc:
         failure = subprocess.CalledProcessError(
@@ -5436,8 +5500,7 @@ def _run_pi_with_policy(
             stderr=_redact_pi_exception_output(exc.stderr, tokens),
         )
     except Exception as exc:
-        detail = redact_pi_private_values(str(exc), tokens)
-        failure = AgentExecutionError(f"Pi isolation adapter invocation failed: {detail}")
+        failure = _pi_adapter_invocation_failure(exc, tokens)
     if failure is not None:
         raise failure
     if result is None:
@@ -5453,6 +5516,17 @@ def _run_pi_with_policy(
         session_binding=result.session_binding,
         observed_skill_invocations=observed,
     )
+
+
+def _pi_adapter_invocation_failure(
+    exc: Exception,
+    tokens: tuple[str, ...],
+) -> BaseException:
+    """Preserve cancellation and redact other Pi adapter failures."""
+    if isinstance(exc, InterruptedError):
+        return exc
+    detail = redact_pi_private_values(str(exc), tokens)
+    return AgentExecutionError(f"Pi isolation adapter invocation failed: {detail}")
 
 
 def _redact_pi_exception_output(
@@ -5647,6 +5721,7 @@ def resume_agent_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
     execution_request: ExecutionRequest | None = None,
     resume_binding: AgentSessionBinding | None = None,
     disable_pi_automation: bool = False,
@@ -5686,6 +5761,7 @@ def resume_agent_session(
             approval=approval,
             execution_request=execution_request,
             process_tracker=process_tracker,
+            remaining_timeout=remaining_timeout,
         )
     if is_opencode(agent):
         return resume_opencode_session(
@@ -5697,6 +5773,7 @@ def resume_agent_session(
             sandbox=sandbox,
             approval=approval,
             process_tracker=process_tracker,
+            remaining_timeout=remaining_timeout,
         )
     if is_pi(agent):
         if execution_request is None or resume_binding is None:
@@ -5712,6 +5789,7 @@ def resume_agent_session(
             lifecycle=execution_request.lifecycle,
             session_id=resume_binding.session_id,
             process_tracker=process_tracker,
+            remaining_timeout=remaining_timeout,
             pi_dir=pi_dir,
         )
         return AgentRunResult(
@@ -5739,9 +5817,12 @@ def _communicate_codex_process(
     env: dict[str, str],
     output_path: Path,
     process_tracker: ProcessTracker | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
     final_message_grace_seconds: float | None = None,
 ) -> tuple[str, str]:
     """Run Codex and recover when a completed final message leaves the wrapper alive."""
+    if remaining_timeout is not None:
+        timeout = min(timeout, float(remaining_timeout()))
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -5753,54 +5834,80 @@ def _communicate_codex_process(
         start_new_session=True,
     )
     tracker = process_tracker(proc.pid) if process_tracker is not None else contextlib.nullcontext()
-    with tracker:
-        started_at = time.monotonic()
-        final_seen_at: float | None = None
-        # Strip NUL bytes: proc.communicate(input=...) marshals text stdin and would
-        # raise ``ValueError: embedded null byte`` on a stray NUL, before Codex runs
-        # (#1661) — the same crash the Claude path guards against.
-        input_text: str | None = strip_null_bytes(prompt)
-        grace_seconds = (
-            _codex_final_message_grace_seconds()
-            if final_message_grace_seconds is None
-            else final_message_grace_seconds
-        )
+    started_check_complete = False
+    try:
+        with tracker:
+            timeout = _checked_started_process_timeout(proc, timeout, remaining_timeout)
+            started_check_complete = True
+            started_at = time.monotonic()
+            final_seen_at: float | None = None
+            # Strip NUL bytes: proc.communicate(input=...) marshals text stdin and would
+            # raise ``ValueError: embedded null byte`` on a stray NUL, before Codex runs
+            # (#1661) — the same crash the Claude path guards against.
+            input_text: str | None = strip_null_bytes(prompt)
+            grace_seconds = (
+                _codex_final_message_grace_seconds()
+                if final_message_grace_seconds is None
+                else final_message_grace_seconds
+            )
 
-        while True:
-            elapsed = time.monotonic() - started_at
-            remaining = timeout - elapsed
-            if remaining <= 0:
-                stdout_text, stderr_text = _terminate_process_group(proc)
-                last_message = _read_text_file(output_path).strip()
-                if last_message:
-                    return stdout_text, stderr_text or f"Codex wrapper timed out after {timeout}s"
-                raise subprocess.TimeoutExpired(
-                    cmd, timeout, output=stdout_text, stderr=stderr_text
-                )
-
-            try:
-                stdout_text, stderr_text = proc.communicate(
-                    input=input_text,
-                    timeout=min(1.0, remaining),
-                )
-                if proc.returncode:
-                    raise subprocess.CalledProcessError(
-                        proc.returncode,
-                        cmd,
-                        output=stdout_text,
-                        stderr=stderr_text,
-                    )
-                return stdout_text or "", stderr_text or ""
-            except subprocess.TimeoutExpired:
-                input_text = None
-                if _read_text_file(output_path).strip():
-                    final_seen_at = final_seen_at or time.monotonic()
-                    if time.monotonic() - final_seen_at >= grace_seconds:
-                        stdout_text, stderr_text = _terminate_process_group(proc)
+            while True:
+                elapsed = time.monotonic() - started_at
+                remaining = timeout - elapsed
+                if remaining <= 0:
+                    stdout_text, stderr_text = _terminate_process_group(proc)
+                    last_message = _read_text_file(output_path).strip()
+                    if last_message:
                         return (
                             stdout_text,
-                            stderr_text or "Codex wrapper terminated after final message",
+                            stderr_text or f"Codex wrapper timed out after {timeout}s",
                         )
+                    raise subprocess.TimeoutExpired(
+                        cmd, timeout, output=stdout_text, stderr=stderr_text
+                    )
+
+                try:
+                    stdout_text, stderr_text = proc.communicate(
+                        input=input_text,
+                        timeout=min(1.0, remaining),
+                    )
+                    if proc.returncode:
+                        raise subprocess.CalledProcessError(
+                            proc.returncode,
+                            cmd,
+                            output=stdout_text,
+                            stderr=stderr_text,
+                        )
+                    return stdout_text or "", stderr_text or ""
+                except subprocess.TimeoutExpired:
+                    input_text = None
+                    if _read_text_file(output_path).strip():
+                        final_seen_at = final_seen_at or time.monotonic()
+                        if time.monotonic() - final_seen_at >= grace_seconds:
+                            stdout_text, stderr_text = _terminate_process_group(proc)
+                            return (
+                                stdout_text,
+                                stderr_text or "Codex wrapper terminated after final message",
+                            )
+    except BaseException:
+        if started_check_complete and proc.poll() is None:
+            _terminate_process_group(proc)
+        raise
+
+
+def _checked_started_process_timeout(
+    proc: subprocess.Popen[str],
+    timeout: int | float,
+    remaining_timeout: RemainingTimeout | None,
+) -> float:
+    """Check cancellation after process start and stop a raced child."""
+    if remaining_timeout is None:
+        return float(timeout)
+    try:
+        return min(float(timeout), float(remaining_timeout()))
+    except BaseException:
+        _terminate_process_group(proc)
+        raise
 
 
 def _terminate_process_group(proc: subprocess.Popen[str]) -> tuple[str, str]:

@@ -231,6 +231,7 @@ class TestCompactAgentSession:
     """Provider-neutral compaction preserves direct-runner context."""
 
     def test_codex_compact_resumes_the_persisted_session(self, tmp_path: Path) -> None:
+        remaining_timeout = MagicMock(return_value=60)
         with patch("hephaestus.automation.learn.resume_agent_session") as resume:
             compacted = compact_agent_session(
                 repo="test-repo",
@@ -242,6 +243,7 @@ class TestCompactAgentSession:
                 timeout=60,
                 model="gpt-5.6",
                 sandbox="read-only",
+                remaining_timeout=remaining_timeout,
             )
 
         assert compacted is True
@@ -257,6 +259,7 @@ class TestCompactAgentSession:
             disable_pi_automation=False,
             pi_dir=None,
             process_tracker=subprocess_registry.track_process_group,
+            remaining_timeout=remaining_timeout,
         )
 
     def test_direct_compact_without_a_session_is_a_safe_noop(self, tmp_path: Path) -> None:
@@ -275,6 +278,7 @@ class TestCompactAgentSession:
     def test_pi_compact_uses_the_selected_pi_configuration(self, tmp_path: Path) -> None:
         """Pi compaction must reuse the admitted directory and adapter."""
         pi_dir = tmp_path / "pi-agent"
+        remaining_timeout = MagicMock(return_value=1200)
         with (
             patch("hephaestus.automation.learn.resolve_agent", return_value="pi") as resolve,
             patch(
@@ -292,6 +296,7 @@ class TestCompactAgentSession:
                 cwd=tmp_path,
                 pi_dir=pi_dir,
                 pi_isolation_adapter="package:factory",
+                remaining_timeout=remaining_timeout,
             )
 
         assert compacted is True
@@ -305,3 +310,4 @@ class TestCompactAgentSession:
             model_references=("",),
         )
         assert resume.call_args.kwargs["pi_dir"] == pi_dir
+        assert resume.call_args.kwargs["remaining_timeout"] is remaining_timeout

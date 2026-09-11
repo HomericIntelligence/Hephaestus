@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 import sys
@@ -29,6 +30,48 @@ from hephaestus.agents.pi_session import (
     create_pi_binding,
     validate_pi_binding,
 )
+
+
+def test_pi_isolation_adapter_has_a_checked_process_start_boundary() -> None:
+    """The public adapter contract receives the operation deadline callback."""
+    parameters = inspect.signature(agent_runtime.PiIsolationAdapter.invoke).parameters
+
+    assert tuple(parameters) == (
+        "self",
+        "policy",
+        "command",
+        "environment",
+        "prompt",
+        "cwd",
+        "timeout",
+        "model",
+        "session_id",
+        "process_tracker",
+        "remaining_timeout",
+    )
+
+
+def test_pi_isolation_adapter_rejects_the_previous_invoke_contract() -> None:
+    """An adapter without the checked process-start callback is invalid."""
+
+    class PreviousAdapter:
+        def invoke(
+            self,
+            *,
+            policy: ExecutionPolicy,
+            command: list[str],
+            environment: dict[str, str],
+            prompt: str,
+            cwd: Path,
+            timeout: int,
+            model: str,
+            session_id: str | None,
+            process_tracker: agent_runtime.ProcessTracker | None,
+        ) -> agent_runtime.AgentRunResult:
+            raise AssertionError("an invalid adapter must not run")
+
+    supported = agent_runtime._supports_pi_isolation_adapter_invoke_contract(PreviousAdapter())
+    assert supported is False
 
 
 def test_pr_review_one_shot_uses_the_read_only_review_policy() -> None:
