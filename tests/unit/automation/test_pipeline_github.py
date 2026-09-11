@@ -4028,6 +4028,58 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci", app_id=17)) is True
 
+    def test_unpinned_required_context_rejects_matching_runs_from_multiple_apps(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        """Multiple Apps cannot prove one unbound required context."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = self._json_response(
+            {
+                "total_count": 2,
+                "check_runs": [
+                    self._check_run(head, check_run_id=41, app_id=17, conclusion="failure"),
+                    self._check_run(head, check_run_id=42, app_id=18),
+                ],
+            }
+        )
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=None)) is False
+
+    def test_pinned_required_context_ignores_same_name_run_from_another_app(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        """An unrelated App cannot change one App-bound requirement."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        response = self._json_response(
+            {
+                "total_count": 2,
+                "check_runs": [
+                    self._check_run(head, check_run_id=41, app_id=17),
+                    self._check_run(head, check_run_id=42, app_id=18, conclusion="failure"),
+                ],
+            }
+        )
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci", app_id=17)) is True
+
     def test_optional_failed_run_does_not_block_successful_required_run(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:

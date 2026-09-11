@@ -153,7 +153,7 @@ def _passing_check_run_requirements(
     now_utc: datetime,
 ) -> frozenset[_RequiredCheck] | None:
     """Return requirements proved by passing exact-head Check Runs."""
-    current_runs: dict[_RequiredCheck, tuple[int, dict[str, object]]] = {}
+    current_runs: dict[_RequiredCheck, dict[int, tuple[int, dict[str, object]]]] = {}
     seen_ids: set[int] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
@@ -164,7 +164,7 @@ def _passing_check_run_requirements(
         if not matches:
             continue
         try:
-            _check_run_app_id(check_run)
+            app_id = _check_run_app_id(check_run)
         except ValueError:
             return None
         check_run_id = check_run.get("id")
@@ -181,12 +181,28 @@ def _passing_check_run_requirements(
             logger.warning("Check Run does not match reviewed head %s", head_sha)
             return None
         for requirement in matches:
-            current = current_runs.get(requirement)
+            runs_by_app = current_runs.setdefault(requirement, {})
+            current = runs_by_app.get(app_id)
             if current is None or check_run_id > current[0]:
-                current_runs[requirement] = (check_run_id, check_run)
+                runs_by_app[app_id] = (check_run_id, check_run)
 
+    return _passing_current_check_runs(current_runs, now_utc)
+
+
+def _passing_current_check_runs(
+    current_runs: dict[_RequiredCheck, dict[int, tuple[int, dict[str, object]]]],
+    now_utc: datetime,
+) -> frozenset[_RequiredCheck] | None:
+    """Return passing requirements from unambiguous current Check Runs."""
     matched_checks: set[_RequiredCheck] = set()
-    for requirement, (_check_run_id, check_run) in current_runs.items():
+    for requirement, runs_by_app in current_runs.items():
+        if requirement[1] is None and len(runs_by_app) != 1:
+            logger.warning(
+                "Required Check Run context %s has multiple application identities",
+                requirement[0],
+            )
+            return None
+        (_check_run_id, check_run) = next(iter(runs_by_app.values()))
         status = str(check_run.get("status") or "").lower()
         conclusion = str(check_run.get("conclusion") or "").lower()
         if (
