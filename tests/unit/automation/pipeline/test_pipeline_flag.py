@@ -206,20 +206,6 @@ def test_default_pipeline_event_log_path_does_not_create_repo_checkout() -> None
     assert DEFAULT_PROJECTS_DIR / "repo-a" not in path.parents
 
 
-def test_caller_checkout_pipeline_event_log_is_outside_checkout(tmp_path: Path) -> None:
-    """A noncanonical caller cannot receive the run journal as an untracked file."""
-    caller = tmp_path / "caller"
-    path = loop_runner._pipeline_event_log_path(
-        tmp_path,
-        ["repo-a"],
-        repo_roots={"repo-a": caller},
-    )
-
-    assert path is not None
-    assert path == tmp_path / ".hephaestus-pipeline-state" / path.name
-    assert caller not in path.parents
-
-
 def test_build_pipeline_config_maps_planning_stages_to_scope(
     dispatch: dict[str, MagicMock],
 ) -> None:

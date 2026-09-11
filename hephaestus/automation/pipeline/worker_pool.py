@@ -186,8 +186,8 @@ from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
-from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
+from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
