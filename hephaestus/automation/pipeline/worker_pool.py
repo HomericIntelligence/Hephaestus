@@ -263,7 +263,10 @@ _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _CONFLICT_HUNK_MAX = 4000
 _CONFLICT_CONTEXT_MAX = 16000
 _CONFLICT_CONTEXT_VERSION = 1
-_CONFLICT_INDEX_MAX_BYTES = 64 * 1024
+_CONFLICT_PATHS_MAX_BYTES = 64 * 1024
+# The current repository index is approximately 100 KiB. A conflicted path can
+# have three stage records, so keep a fixed limit with repository-scale margin.
+_CONFLICT_INDEX_MAX_BYTES = 1024 * 1024
 _CONFLICT_FILE_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
 _CONFLICT_RESOLUTION_OUTCOMES = frozenset(
     {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
@@ -6730,6 +6733,7 @@ class WorkerPool:
             cwd,
             remote="origin",
             base_branch="main",
+            expected_repo=job.transport_repository,
             expected_remote_sha=expected,
             timeout=job.timeout_s,
             base_sha=base_sha,
@@ -7157,7 +7161,7 @@ class WorkerPool:
             ("git", "diff", "--name-only", "--diff-filter=U", "-z"),
             cwd=cwd,
             timeout=timeout,
-            max_bytes=_CONFLICT_INDEX_MAX_BYTES,
+            max_bytes=_CONFLICT_PATHS_MAX_BYTES,
             retain_text=True,
             shutdown=self._shutdown,
         )
@@ -7173,23 +7177,20 @@ class WorkerPool:
             cwd=cwd,
             timeout=timeout,
             max_bytes=_CONFLICT_INDEX_MAX_BYTES,
-            retain_text=True,
+            retain_text=False,
             shutdown=self._shutdown,
         )
-        if not index_result.text:
+        if index_result.byte_count == 0:
             return JobResult(ok=False, error="paused rebase conflict index invalid")
-        try:
-            index_bytes = index_result.text.encode("utf-8")
-        except UnicodeEncodeError:
-            return JobResult(ok=False, error="paused rebase conflict index invalid")
-        return paths, hashlib.sha256(index_bytes).hexdigest()
+        return paths, index_result.sha256
 
-    @staticmethod
     def _conflict_receipt_revisions(
+        self,
         cwd: Path,
         *,
         remote: str,
         base_branch: str,
+        expected_repo: str,
         timeout: int,
         base_sha: str | None,
     ) -> tuple[str, str] | JobResult:
@@ -7201,11 +7202,15 @@ class WorkerPool:
         ).stdout.strip()
         if not _is_full_commit_sha(paused_head_sha):
             return JobResult(ok=False, error="paused rebase head invalid")
-        observed_base_sha = git_utils.run(
-            ["git", "rev-parse", f"{remote}/{base_branch}"],
-            cwd=cwd,
+        observed_base_sha = self._read_remote_branch_head(
+            cwd,
+            remote=remote,
+            branch=base_branch,
+            expected_repo=expected_repo,
             timeout=timeout,
-        ).stdout.strip()
+        )
+        if isinstance(observed_base_sha, JobResult):
+            return observed_base_sha
         if not _is_full_commit_sha(observed_base_sha):
             return JobResult(ok=False, error="paused rebase base head invalid")
         if base_sha is not None and observed_base_sha != base_sha:
@@ -7240,6 +7245,7 @@ class WorkerPool:
         *,
         remote: str,
         base_branch: str,
+        expected_repo: str,
         expected_remote_sha: str,
         timeout: int,
         base_sha: str | None = None,
@@ -7254,6 +7260,7 @@ class WorkerPool:
                 cwd,
                 remote=remote,
                 base_branch=base_branch,
+                expected_repo=expected_repo,
                 timeout=timeout,
                 base_sha=base_sha,
             )
@@ -7611,6 +7618,7 @@ class WorkerPool:
         edits = self._validate_rebase_conflict_edits(
             cwd,
             remote=remote,
+            expected_repo=job.transport_repository,
             paths=paths,
             snapshot=snapshot,
             index_snapshot=index_snapshot,
@@ -7624,6 +7632,7 @@ class WorkerPool:
         continued = self._continue_rebase_process(
             cwd,
             remote=remote,
+            expected_repo=job.transport_repository,
             base_sha=base_sha,
             expected_remote_sha=expected_remote_sha,
             paths=paths,
@@ -7720,6 +7729,7 @@ class WorkerPool:
         classification = self._classify_rebase_conflict_edits(
             cwd,
             remote=remote,
+            expected_repo=job.transport_repository,
             paths=paths,
             snapshot=snapshot,
             index_snapshot=index_snapshot,
@@ -7786,6 +7796,7 @@ class WorkerPool:
         cwd: Path,
         *,
         remote: str,
+        expected_repo: str,
         paths: tuple[str, ...],
         snapshot: dict[str, object],
         index_snapshot: str,
@@ -7799,6 +7810,7 @@ class WorkerPool:
             cwd,
             remote=remote,
             base_branch="main",
+            expected_repo=expected_repo,
             expected_remote_sha=expected_remote_sha,
             timeout=timeout,
             base_sha=base_sha,
@@ -7872,6 +7884,7 @@ class WorkerPool:
         cwd: Path,
         *,
         remote: str,
+        expected_repo: str,
         paths: tuple[str, ...],
         snapshot: dict[str, object],
         index_snapshot: str,
@@ -7884,6 +7897,7 @@ class WorkerPool:
         classification = self._classify_rebase_conflict_edits(
             cwd,
             remote=remote,
+            expected_repo=expected_repo,
             paths=paths,
             snapshot=snapshot,
             index_snapshot=index_snapshot,
@@ -7928,6 +7942,7 @@ class WorkerPool:
         cwd: Path,
         *,
         remote: str,
+        expected_repo: str,
         base_sha: str,
         expected_remote_sha: str,
         paths: tuple[str, ...],
@@ -7961,6 +7976,7 @@ class WorkerPool:
                     cwd,
                     remote=remote,
                     base_branch="main",
+                    expected_repo=expected_repo,
                     expected_remote_sha=expected_remote_sha,
                     timeout=timeout,
                     base_sha=base_sha,

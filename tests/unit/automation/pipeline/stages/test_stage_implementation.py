@@ -590,6 +590,15 @@ class TestComposedPromptBuilders:
         assert "## Prior Learnings from Team Knowledge Base" in prompt
         assert prompt.endswith("Use the retry helper.")
 
+    def test_ordinary_implementation_prompt_rejects_legacy_conflict_inputs(self) -> None:
+        """Conflict context cannot use the ordinary implementation prompt."""
+        with pytest.raises(TypeError):
+            cast(Any, build_implementation_prompt)(
+                42,
+                rebase_conflict=True,
+                rebase_conflict_paths=("x.py",),
+            )
+
     def test_stage_contract_does_not_make_implementation_go_a_merge_boundary(self) -> None:
         """The module contract must describe the bootstrap containment semantics."""
         contract = implementation_module.__doc__ or ""

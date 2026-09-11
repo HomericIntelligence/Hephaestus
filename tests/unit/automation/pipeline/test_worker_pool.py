@@ -11614,6 +11614,7 @@ class TestGitOps:
                     binding.cwd,
                     remote="origin",
                     base_branch="main",
+                    expected_repo="test/repo",
                     expected_remote_sha=writer_head,
                     timeout=60,
                 )
@@ -11739,19 +11740,26 @@ class TestGitOps:
 
         assert limits == [4000]
 
-    def test_conflict_receipt_bounds_conflict_path_and_index_capture(
+    def test_conflict_receipt_streams_repository_scale_index_snapshot(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """Conflict path and index listings use their bounded capture limit."""
+        """A repository-scale index is hashed without retained output."""
         limits: list[int] = []
+        retained: list[bool] = []
+        index_digest = "2" * 64
+        (tmp_path / "x.py").write_text(
+            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n",
+            encoding="utf-8",
+        )
 
         def bounded(argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
             limits.append(cast(int, kwargs["max_bytes"]))
-            text = "x.py\0" if argv[1] == "diff" else "100644 deadbeef 1\tx.py\0"
+            retained.append(cast(bool, kwargs["retain_text"]))
+            text = "x.py\0" if argv[1] == "diff" else ""
             return _BoundedGitOutput(
                 text=text,
-                sha256=hashlib.sha256(text.encode()).hexdigest(),
-                byte_count=len(text.encode()),
+                sha256=(hashlib.sha256(text.encode()).hexdigest() if text else index_digest),
+                byte_count=(len(text.encode()) if text else 96 * 1024),
             )
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -11764,18 +11772,23 @@ class TestGitOps:
         with (
             patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
-            pool._conflict_receipt(
+            result = pool._conflict_receipt(
                 tmp_path,
                 remote="origin",
                 base_branch="main",
+                expected_repo="test/repo",
                 expected_remote_sha="a" * 40,
                 timeout=60,
                 base_sha="b" * 40,
             )
 
-        assert limits == [64 * 1024, 64 * 1024]
+        assert isinstance(result, dict)
+        assert result["conflict_index_snapshot"] == index_digest
+        assert limits == [64 * 1024, 1024 * 1024]
+        assert retained == [True, False]
 
     @pytest.mark.parametrize("path_kind", ["file_symlink", "parent_symlink"])
     def test_conflict_context_rejects_symlinked_paths(
@@ -11802,43 +11815,26 @@ class TestGitOps:
     def test_conflict_receipt_rejects_changed_remote_base(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """A conflict receipt cannot use a remote base different from its pin."""
+        """A live remote base change is detected when the local ref is unchanged."""
         captured_base = "b" * 40
         current_base = "d" * 40
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
-            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
-                return MagicMock(stdout="x.py\0")
-            if argv == ["git", "ls-files", "--stage", "-z"]:
-                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
             if argv == ["git", "rev-parse", "HEAD"]:
                 return MagicMock(stdout=("c" * 40) + "\n")
             if argv == ["git", "rev-parse", "origin/main"]:
-                return MagicMock(stdout=current_base + "\n")
+                return MagicMock(stdout=captured_base + "\n")
             raise AssertionError(f"unexpected Git command: {argv!r}")
 
-        def bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
-            if argv == ("git", "diff", "--name-only", "--diff-filter=U", "-z"):
-                text = "x.py\0"
-            elif argv == ("git", "ls-files", "--stage", "-z"):
-                text = "100644 deadbeef 1\tx.py\0"
-            else:
-                raise AssertionError(f"unexpected bounded Git command: {argv!r}")
-            return _BoundedGitOutput(
-                text=text,
-                sha256=hashlib.sha256(text.encode()).hexdigest(),
-                byte_count=len(text.encode()),
-            )
-
         with (
-            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value=current_base),
         ):
-            result = pool._conflict_receipt(
+            result = pool._conflict_receipt_revisions(
                 tmp_path,
                 remote="origin",
                 base_branch="main",
-                expected_remote_sha="a" * 40,
+                expected_repo="test/repo",
                 timeout=60,
                 base_sha=captured_base,
             )
@@ -11943,12 +11939,14 @@ class TestGitOps:
         with (
             patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
             result = pool._conflict_receipt(
                 tmp_path,
                 remote="origin",
                 base_branch="main",
+                expected_repo="test/repo",
                 expected_remote_sha="a" * 40,
                 timeout=60,
                 base_sha="b" * 40,
@@ -11996,12 +11994,14 @@ class TestGitOps:
         with (
             patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
             result = pool._conflict_receipt(
                 tmp_path,
                 remote="origin",
                 base_branch="main",
+                expected_repo="test/repo",
                 expected_remote_sha="a" * 40,
                 timeout=60,
                 base_sha="b" * 40,
@@ -12044,12 +12044,14 @@ class TestGitOps:
         with (
             patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
             result = pool._conflict_receipt(
                 tmp_path,
                 remote="origin",
                 base_branch="main",
+                expected_repo="test/repo",
                 expected_remote_sha="a" * 40,
                 timeout=60,
                 base_sha="b" * 40,
@@ -12093,12 +12095,14 @@ class TestGitOps:
         with (
             patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
             result = pool._conflict_receipt(
                 tmp_path,
                 remote="origin",
                 base_branch="main",
+                expected_repo="test/repo",
                 expected_remote_sha="a" * 40,
                 timeout=60,
                 base_sha="b" * 40,
@@ -12710,6 +12714,7 @@ class TestGitOps:
             result = pool._continue_rebase_process(
                 tmp_path,
                 remote="origin",
+                expected_repo="test/repo",
                 base_sha="b" * 40,
                 expected_remote_sha="a" * 40,
                 paths=("x.py",),

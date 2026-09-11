@@ -78,7 +78,6 @@ NON_AGENT_DIRECTION_TEMPLATES = (
     "fleet_sync/untrusted_notice.j2",
     "implementation/advise_append.j2",
     "implementation/advise_prepend.j2",
-    "implementation/rebase_conflict_append.j2",
     "implementation/test_failure_review.j2",
     "planning/amend_feedback.j2",
     "pr_review/description.j2",

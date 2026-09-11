@@ -3,7 +3,7 @@
 import pytest
 
 from hephaestus.automation.pipeline.coordinator_runtime import CoordinatorRuntime
-from hephaestus.automation.pipeline.jobs import JobResult
+from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 
 
 def test_github_failure_has_specific_durable_error_class() -> None:
@@ -206,10 +206,26 @@ def test_rebase_conflict_event_keeps_bounded_classification_and_summary() -> Non
         },
     )
 
-    fields = CoordinatorRuntime._job_result_event_fields(result)
+    fields = CoordinatorRuntime._job_result_event_fields(
+        result,
+        job=GitJob(repo="test/repo", op="validate_rebase_conflict", timeout_s=60),
+    )
 
     assert fields["rebase_conflict_resolution"] == "no_edit"
     summary = fields["rebase_conflict_agent_summary"]
     assert secret not in summary
     assert "redacted" in summary
     assert len(summary) <= 500
+
+
+def test_unrelated_job_cannot_emit_rebase_conflict_audit_fields() -> None:
+    """Only a host conflict-validation job owns conflict audit fields."""
+    result = JobResult(
+        ok=True,
+        value={"conflict_resolution": "resolved_content", "agent_summary": "done"},
+    )
+
+    fields = CoordinatorRuntime._job_result_event_fields(result, job=object())
+
+    assert "rebase_conflict_resolution" not in fields
+    assert "rebase_conflict_agent_summary" not in fields

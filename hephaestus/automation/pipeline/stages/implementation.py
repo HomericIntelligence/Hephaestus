@@ -1374,8 +1374,6 @@ def build_implementation_prompt(
     branch_name: str = "",
     worktree_path: str = "",
     advise_findings: str = "",
-    rebase_conflict: bool = False,
-    rebase_conflict_paths: tuple[str, ...] = (),
 ) -> str:
     """Compose the implementation prompt with the advise-findings block.
 
@@ -1392,9 +1390,6 @@ def build_implementation_prompt(
         branch_name: Feature branch the worktree is on.
         worktree_path: Worktree the implementer works in.
         advise_findings: Advise-step findings; empty string means no block.
-        rebase_conflict: Whether the host's mechanical rebase found conflicts
-            whose file contents the implementation agent must resolve.
-        rebase_conflict_paths: Host-validated paths the agent may edit.
 
     Returns:
         The full implementer prompt, with the findings block appended when
@@ -1408,23 +1403,12 @@ def build_implementation_prompt(
         branch_name=branch_name,
         worktree_path=worktree_path,
     )
-    if not advise_findings and not rebase_conflict:
+    if not advise_findings:
         return prompt
-    blocks: list[str] = [prompt]
-    if advise_findings:
-        blocks.append(
-            PromptCatalog.current().render(
-                "implementation/advise_append.j2", advise_findings=advise_findings
-            )
-        )
-    if rebase_conflict:
-        blocks.append(
-            PromptCatalog.current().render(
-                "implementation/rebase_conflict_append.j2",
-                conflict_paths=rebase_conflict_paths,
-            )
-        )
-    return "".join(blocks)
+    return prompt + PromptCatalog.current().render(
+        "implementation/advise_append.j2",
+        advise_findings=advise_findings,
+    )
 
 
 def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: str) -> str:
