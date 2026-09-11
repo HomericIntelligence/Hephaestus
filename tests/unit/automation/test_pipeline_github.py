@@ -3552,6 +3552,7 @@ class TestExactHeadChecks:
         conclusion: str = "success",
         app_id: int = 1,
         completed_at: object = "2026-09-05T12:00:00Z",
+        check_suite_id: object = 1,
     ) -> dict[str, object]:
         """Build one exact-head Check Run response entry."""
         check_run: dict[str, object] = {
@@ -3561,6 +3562,7 @@ class TestExactHeadChecks:
             "status": status,
             "conclusion": conclusion,
             "completed_at": completed_at,
+            "check_suite": {"id": check_suite_id},
         }
         check_run["app"] = {"id": app_id}
         return check_run
@@ -4707,7 +4709,7 @@ class TestExactHeadChecks:
                 return self._json_response({"total_count": 1001, "check_suites": suites})
             if "/check-suites/" in endpoint and "/check-runs?" in endpoint:
                 suite_id = int(endpoint.split("/check-suites/", 1)[1].split("/", 1)[0])
-                runs = [self._check_run(head)] if suite_id == 1001 else []
+                runs = [self._check_run(head, check_suite_id=1001)] if suite_id == 1001 else []
                 return self._json_response({"total_count": len(runs), "check_runs": runs})
             if f"/commits/{head}/status?" in endpoint:
                 return self._empty_status_response(head)
@@ -4842,6 +4844,37 @@ class TestExactHeadChecks:
             )
             is False
         )
+        command_runner.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("case", "check_suite"),
+        [
+            ("missing", None),
+            ("malformed", "not-an-object"),
+            ("boolean", {"id": True}),
+            ("nonpositive", {"id": 0}),
+            ("mismatched", {"id": 2}),
+        ],
+    )
+    def test_rejects_check_run_without_matching_suite_identity(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        case: str,
+        check_suite: object,
+    ) -> None:
+        """Each Check Run must identify the suite that supplied it."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        check_run = self._check_run(head)
+        if case == "missing":
+            check_run.pop("check_suite")
+        else:
+            check_run["check_suite"] = check_suite
+        response = self._json_response({"total_count": 1, "check_runs": [check_run]})
+        command_runner.side_effect = lambda *_args, **_kwargs: response
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is False
         command_runner.assert_called_once()
 
     def test_rejects_check_run_totals_above_the_safety_ceiling(

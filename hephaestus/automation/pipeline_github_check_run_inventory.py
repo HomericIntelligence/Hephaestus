@@ -198,12 +198,18 @@ def check_runs_for_suites(
                 logger.warning("Check Run inventory has invalid identity for %s", head_sha)
                 return None
             check_run_id = check_run.get("id")
+            check_suite = check_run.get("check_suite")
+            check_suite_id = check_suite.get("id") if isinstance(check_suite, dict) else None
             if (
                 not isinstance(check_run_id, int)
                 or isinstance(check_run_id, bool)
                 or check_run_id <= 0
                 or check_run_id in check_run_ids
                 or check_run.get("head_sha") != head_sha
+                or not isinstance(check_suite_id, int)
+                or isinstance(check_suite_id, bool)
+                or check_suite_id <= 0
+                or check_suite_id != suite_id
             ):
                 logger.warning("Check Run inventory has invalid identity for %s", head_sha)
                 return None

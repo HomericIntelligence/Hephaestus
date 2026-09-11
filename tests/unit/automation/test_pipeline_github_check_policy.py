@@ -1121,6 +1121,7 @@ def _check_run(
     app_id: int | None,
     conclusion: str = "success",
     completed_at: object = "2026-09-05T12:00:00Z",
+    check_suite_id: object = 1,
 ) -> dict[str, object]:
     return {
         "id": run_id,
@@ -1130,6 +1131,7 @@ def _check_run(
         "conclusion": conclusion,
         "completed_at": completed_at,
         "app": None if app_id is None else {"id": app_id},
+        "check_suite": {"id": check_suite_id},
     }
 
 
