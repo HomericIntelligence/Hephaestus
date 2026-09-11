@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import sys
+import time
 
 import pytest
 
@@ -144,6 +145,33 @@ def test_engine_distinguishes_absent_from_unavailable(engine_process):
     (private / "exists-code").write_text("125")
     with pytest.raises(RuntimeError, match="engine_command_failed"):
         engine.exists("b" * 64)
+
+
+def test_engine_stops_a_command_when_output_exceeds_the_capture_limit(tmp_path):
+    """Stop an engine command before excess output can consume host memory."""
+    from hephaestus.automation import fleet_podman
+
+    executable = tmp_path / "podman"
+    sentinel = tmp_path / "continued-after-overflow"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, sys, time\n"
+        "os.write(1, b'x' * (1024 * 1024 + 1))\n"
+        "time.sleep(3)\n"
+        f"pathlib.Path({str(sentinel)!r}).write_text('continued')\n"
+    )
+    executable.chmod(0o700)
+    engine = object.__new__(fleet_podman.PodmanEngine)
+    engine.executable = executable
+    engine.socket_path = tmp_path / "unused.sock"
+    engine.environment = {}
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="engine_response_limit"):
+        engine.exists("b" * 64)
+
+    assert time.monotonic() - started < 2
+    assert not sentinel.exists()
 
 
 def test_engine_identity_binds_executable_and_socket_replacement(engine_process):

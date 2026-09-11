@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.pi_plugins import ProcessResult, run_bounded_command
 from hephaestus.automation.fleet_containment import TOOL_ENVIRONMENT, ContainerSpec
 
 _PROC = Path("/proc")
@@ -92,19 +93,13 @@ class PodmanEngine:
             *arguments,
         ]
 
-    def _run(self, *arguments: str) -> subprocess.CompletedProcess[bytes]:
-        try:
-            result = subprocess.run(
-                self._argv(*arguments),
-                env=self.environment,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=15,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("engine_command_timeout") from error
-        if len(result.stdout) > 1024 * 1024 or len(result.stderr) > 1024 * 1024:
+    def _run(self, *arguments: str) -> ProcessResult:
+        result = run_bounded_command(
+            tuple(self._argv(*arguments)), env=self.environment, timeout=15
+        )
+        if result.timed_out:
+            raise RuntimeError("engine_command_timeout")
+        if result.output_overflow:
             raise RuntimeError("engine_response_limit")
         return result
 
@@ -153,7 +148,7 @@ class PodmanEngine:
         result = self._run(*arguments, spec.image_digest, "exec-server", "--listen", "stdio")
         if result.returncode:
             raise RuntimeError("engine_command_failed")
-        return _container_id(result.stdout.decode().strip())
+        return _container_id(result.stdout.strip())
 
     def inspect(self, container_id: str) -> dict[str, Any]:
         """Return actual engine state for one full container identity."""
