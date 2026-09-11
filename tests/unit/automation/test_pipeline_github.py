@@ -4188,6 +4188,46 @@ class TestExactHeadChecks:
 
         assert self._passes(adapter, head, self._policy("required-ci")) is True
 
+    @pytest.mark.parametrize("reverse", [False, True], ids=("ordered", "reversed"))
+    def test_older_equal_completion_tie_does_not_hide_unique_current_success(
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
+        reverse: bool,
+    ) -> None:
+        """Only a tie at the maximum completion instant is ambiguous."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        check_runs = [
+            self._check_run(
+                head,
+                check_run_id=41,
+                conclusion="failure",
+                completed_at="2026-09-05T11:59:00Z",
+            ),
+            self._check_run(
+                head,
+                check_run_id=42,
+                conclusion="cancelled",
+                completed_at="2026-09-05T11:59:00Z",
+            ),
+            self._check_run(head, check_run_id=43),
+        ]
+        if reverse:
+            check_runs.reverse()
+        response = self._json_response({"total_count": 3, "check_runs": check_runs})
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
+
+        assert self._passes(adapter, head, self._policy("required-ci")) is True
+
     @pytest.mark.parametrize(
         ("field", "value"),
         [

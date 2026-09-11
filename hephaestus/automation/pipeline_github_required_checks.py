@@ -37,6 +37,8 @@ _CHECK_CONCLUSIONS = frozenset(
     }
 )
 _RequiredCheck = tuple[str, int | None]
+_CheckRunCandidate = tuple[datetime, int, dict[str, object]]
+_CheckRunGroups = dict[_RequiredCheck, dict[int, list[_CheckRunCandidate]]]
 
 
 def _status_evidence_now_utc() -> datetime:
@@ -198,10 +200,7 @@ def _passing_check_run_requirements(
     now_utc: datetime,
 ) -> frozenset[_RequiredCheck] | None:
     """Return requirements proved by passing exact-head Check Runs."""
-    current_runs: dict[
-        _RequiredCheck,
-        dict[int, tuple[datetime, int, dict[str, object]]],
-    ] = {}
+    candidate_runs: _CheckRunGroups = {}
     seen_ids: set[int] = set()
     for check_run in check_runs:
         if not isinstance(check_run, dict):
@@ -220,25 +219,26 @@ def _passing_check_run_requirements(
             return None
         seen_ids.add(check_run_id)
         for requirement in matches:
-            runs_by_app = current_runs.setdefault(requirement, {})
-            current = runs_by_app.get(app_id)
-            if current is not None and completed_at == current[0]:
-                logger.warning(
-                    "Required Check Run context %s has equal completion times",
-                    requirement[0],
-                )
-                return None
-            if current is None or completed_at > current[0]:
-                runs_by_app[app_id] = (completed_at, check_run_id, check_run)
+            runs_by_app = candidate_runs.setdefault(requirement, {})
+            runs_by_app.setdefault(app_id, []).append((completed_at, check_run_id, check_run))
 
-    return _passing_current_check_runs(current_runs, now_utc)
+    return _passing_current_check_runs(candidate_runs, now_utc)
+
+
+def _unique_current_check_run(
+    candidates: list[_CheckRunCandidate], context: str
+) -> dict[str, object] | None:
+    """Return the only run at the maximum completion instant."""
+    maximum_completed_at = max(completed_at for completed_at, _run_id, _run in candidates)
+    current = [candidate for candidate in candidates if candidate[0] == maximum_completed_at]
+    if len(current) != 1:
+        logger.warning("Required Check Run context %s has equal current completion times", context)
+        return None
+    return current[0][2]
 
 
 def _passing_current_check_runs(
-    current_runs: dict[
-        _RequiredCheck,
-        dict[int, tuple[datetime, int, dict[str, object]]],
-    ],
+    current_runs: _CheckRunGroups,
     now_utc: datetime,
 ) -> frozenset[_RequiredCheck] | None:
     """Return passing requirements from unambiguous current Check Runs."""
@@ -250,7 +250,9 @@ def _passing_current_check_runs(
                 requirement[0],
             )
             return None
-        (_completed_at, _check_run_id, check_run) = next(iter(runs_by_app.values()))
+        check_run = _unique_current_check_run(next(iter(runs_by_app.values())), requirement[0])
+        if check_run is None:
+            return None
         conclusion = check_run.get("conclusion")
         if (
             conclusion not in _CHECK_SUCCESS_CONCLUSIONS
