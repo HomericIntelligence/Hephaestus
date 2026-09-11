@@ -20,6 +20,7 @@ from hephaestus.automation.source_worktree import (
     _PreparationDeadline,
 )
 from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.config.child_environments import build_git_child_env
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -64,7 +65,7 @@ def test_adoption_stop_preserves_predecessor_and_transition(
     manager = WorktreeManager(
         repo_root=repo,
         base_dir=source.base_dir,
-        remote_git_env={},
+        remote_git_env=build_git_child_env(),
         remote_git_config=("-c", "protocol.file.allow=always"),
     )
     receipt = source._receipt_path(42, SourceLane.IMPLEMENTATION)
