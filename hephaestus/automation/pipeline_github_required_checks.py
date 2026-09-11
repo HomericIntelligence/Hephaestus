@@ -24,18 +24,10 @@ _CHECK_RUNS_PAGE_SIZE = 100
 # Limit one exact-head traversal to 2,000 Check Runs.
 _CHECK_RUNS_MAX_TOTAL_COUNT = 2_000
 _CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
-_CHECK_CONCLUSIONS = frozenset(
-    {
-        "action_required",
-        "cancelled",
-        "failure",
-        "neutral",
-        "skipped",
-        "stale",
-        "success",
-        "timed_out",
-    }
+_CHECK_FAILURE_CONCLUSIONS = frozenset(
+    {"action_required", "cancelled", "failure", "stale", "timed_out"}
 )
+_CHECK_CONCLUSIONS = _CHECK_SUCCESS_CONCLUSIONS | _CHECK_FAILURE_CONCLUSIONS
 _RequiredCheck = tuple[str, int | None]
 _CheckRunCandidate = tuple[datetime, int, dict[str, object]]
 _CheckRunGroups = dict[_RequiredCheck, dict[int, list[_CheckRunCandidate]]]
