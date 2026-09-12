@@ -104,6 +104,7 @@ class TestPRStatus:
     def test_all_statuses_defined(self) -> None:
         """All expected PR status values are accessible."""
         assert PRStatus.READY is not None
+        assert PRStatus.WAITING is not None
         assert PRStatus.OUTDATED is not None
         assert PRStatus.CONFLICTED is not None
         assert PRStatus.FAILING is not None
@@ -113,6 +114,7 @@ class TestPRStatus:
         """All PR status values are distinct."""
         statuses = [
             PRStatus.READY,
+            PRStatus.WAITING,
             PRStatus.OUTDATED,
             PRStatus.CONFLICTED,
             PRStatus.FAILING,
@@ -2029,6 +2031,24 @@ class TestProcessRepoRoutes:
         assert counts["skipped"] == 2
         ensure.assert_not_called()
 
+    def test_process_repo_waits_for_behind_pr_without_clone_or_rebase(self, tmp_path: Path) -> None:
+        """A PR that waits for its base does not cause local Git work."""
+        prs = [_pr(7, PRStatus.WAITING)]
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
+
+        with (
+            patch.object(fleet_coordinator, "list_prs", return_value=prs),
+            patch.object(fleet_coordinator, "ensure_repo_clone") as ensure,
+            patch.object(fleet_coordinator, "rebase_and_resign") as rebase,
+        ):
+            counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
+
+        assert counts["rebased"] == 0
+        assert counts["skipped"] == 1
+        assert counts["failed"] == 0
+        ensure.assert_not_called()
+        rebase.assert_not_called()
+
     def test_process_repo_records_list_prs_failure(self, tmp_path: Path) -> None:
         """Repository listing failures are surfaced in the failed count."""
         args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
@@ -2423,14 +2443,7 @@ class TestListPrs:
 
 
 class TestPrClassification:
-    """Regression tests for #1029: stale-failing PRs must be rebased, not skipped.
-
-    A FAILING classification (skip) must require the branch to be up to date with
-    its base (mergeStateStatus CLEAN). A PR that is BEHIND or BLOCKED with a red
-    CI result has stale checks (ran against an old base, often a failure already
-    fixed on main) and must classify as OUTDATED so it gets rebased and re-run —
-    otherwise a fix landing on main strands the entire queue as FAILING.
-    """
+    """Regression tests for pull-request readiness classification."""
 
     def _classify(self, monkeypatch, *, mergeable: str, state: str, ci: str):
         """Run list_prs with a single stubbed PR and return its PRStatus."""
@@ -2458,6 +2471,8 @@ class TestPrClassification:
                 rollup = [{"conclusion": "FAILURE", "state": "FAILURE"}]
             elif ci == "SUCCESS":
                 rollup = [{"conclusion": "SUCCESS", "state": "SUCCESS"}]
+            elif ci == "PENDING":
+                rollup = [{"conclusion": "IN_PROGRESS", "state": "IN_PROGRESS"}]
             return MagicMock(stdout=json.dumps({"statusCheckRollup": rollup}))
 
         monkeypatch.setattr(fleet_pr_api, "_gh", fake_gh)
@@ -2470,11 +2485,12 @@ class TestPrClassification:
             == PRStatus.OUTDATED
         )
 
-    def test_behind_failing_is_outdated(self, monkeypatch) -> None:
-        """BEHIND with red CI = stale failure → rebase (OUTDATED)."""
+    @pytest.mark.parametrize("ci", ["FAILURE", "SUCCESS", "PENDING", "UNKNOWN"])
+    def test_behind_is_waiting(self, monkeypatch: pytest.MonkeyPatch, ci: str) -> None:
+        """A BEHIND result waits and does not depend on the CI result."""
         assert (
-            self._classify(monkeypatch, mergeable="MERGEABLE", state="BEHIND", ci="FAILURE")
-            == PRStatus.OUTDATED
+            self._classify(monkeypatch, mergeable="MERGEABLE", state="BEHIND", ci=ci)
+            == PRStatus.WAITING
         )
 
     def test_clean_failing_is_failing(self, monkeypatch) -> None:

@@ -131,10 +131,10 @@ def list_prs(
 
         if mergeable == "CONFLICTING":
             status = PRStatus.CONFLICTED
+        elif merge_state == "BEHIND":
+            status = PRStatus.WAITING
         elif ci == "FAILURE" and merge_state == "CLEAN":
             status = PRStatus.FAILING
-        elif merge_state == "BEHIND":
-            status = PRStatus.OUTDATED
         elif merge_state == "CLEAN" and ci == "SUCCESS":
             status = PRStatus.READY
         elif merge_state in ("BLOCKED", "DIRTY"):

@@ -75,6 +75,7 @@ def _status_label(status: PRStatus) -> str:
     """Return the stable display label for a PR status."""
     return {
         PRStatus.READY: "READY",
+        PRStatus.WAITING: "WAITING",
         PRStatus.OUTDATED: "OUTDATED",
         PRStatus.CONFLICTED: "CONFLICTED",
         PRStatus.FAILING: "FAILING",
@@ -159,6 +160,9 @@ def _process_pr(
 
     if pr.status == PRStatus.READY:
         logger.info("  %s Skipping (the queue owns PR merges)", symbols.arrow)
+        counts["skipped"] += 1
+    elif pr.status == PRStatus.WAITING:
+        logger.info("  %s Waiting (the base branch advanced)", symbols.arrow)
         counts["skipped"] += 1
     elif pr.status == PRStatus.OUTDATED:
         resign_values = _resign_args(args)
