@@ -1405,6 +1405,9 @@ def _read_dirty_direct_state(
     issue_pr = github.find_pr_for_issue(request.issue_number)
     comments = github.issue_comments(request.issue_number)
     issue = github.gh_issue_json(request.issue_number)
+    issue_number = issue.get("number")
+    if type(issue_number) is not int or issue_number != request.issue_number:
+        raise RuntimeError("dirty direct issue identity evidence is incomplete")
     labels = issue.get("labels")
     if not isinstance(labels, list) or not all(
         isinstance(label, dict) and isinstance(label.get("name"), str) for label in labels

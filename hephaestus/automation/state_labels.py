@@ -3,8 +3,9 @@
 The automation pipeline uses four mutually-exclusive ``state:*`` labels as the
 single source of truth for an issue's plan-review status. This module is the
 authoritative definition of those labels, the PR-scoped implementation-review
-labels, and the small helpers that interpret them; the reviewer, planner,
-implementer, and the org-wide provisioning script all import from here.
+labels, the independent implementation-intervention latch, and the small
+helpers that interpret them; the reviewer, planner, implementer, and the
+org-wide provisioning script all import from here.
 
 State machine
 -------------
@@ -33,6 +34,10 @@ appears during a concurrent transition, exclusive-state confirmation fails and
 automation stops until an external actor resolves the block. An authenticated
 Athena finalized-plan body is that external resolution: planning may atomically
 replace the stale latch with exclusive ``state:plan-go``.
+
+``state:implementation-blocked`` is a separate human-intervention latch. It
+can coexist with ``state:plan-go`` and prevents implementation until a human
+deliberately changes the issue state.
 """
 
 from __future__ import annotations
@@ -52,6 +57,11 @@ STATE_PLAN_BLOCKED = "state:plan-blocked"
 #: an approved issue can become externally blocked after planning, and no
 #: implementation or remediation agent may run until the hold is removed.
 STATE_BLOCKED = "state:blocked"
+
+#: Human-intervention latch for an implementation run that produced no commit.
+#: This is independent of the plan state so an approved ``state:plan-go``
+#: decision remains visible during recovery.
+STATE_IMPLEMENTATION_BLOCKED = "state:implementation-blocked"
 
 # Durable evidence that Hephaestus has observed and verified the exact Athena
 # finalization marker in the current issue body. This is metadata, not a plan
@@ -146,6 +156,10 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_BLOCKED: {
         "color": "000000",  # black — external progress hold
         "description": "Automation is stopped pending an external dependency or operator action.",
+    },
+    STATE_IMPLEMENTATION_BLOCKED: {
+        "color": "5319e7",
+        "description": "No implementation commit; human direction is required before recovery.",
     },
     STATE_IMPLEMENTATION_NO_GO: {
         "color": "d93f0b",  # red — blocked

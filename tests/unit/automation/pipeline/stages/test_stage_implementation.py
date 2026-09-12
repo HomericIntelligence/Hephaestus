@@ -98,6 +98,7 @@ from hephaestus.automation.review_journal import PlanDiscoveryResult
 from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
+    STATE_IMPLEMENTATION_BLOCKED,
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
@@ -126,6 +127,55 @@ class _PlannedWriterGitHub(FakeStageGitHub):
     def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
         """Return an approved scope with one source file."""
         return PlanDiscoveryResult.found(_WRITER_PLAN)
+
+
+class _NoCommitPublicationGitHub(FakeStageGitHub):
+    """Inject one no-commit publication failure at the GitHub boundary."""
+
+    def __init__(self, failure: str) -> None:
+        super().__init__(labels=[STATE_PLAN_GO])
+        self.failure = failure
+        self.label_reads = 0
+
+    def add_labels(self, issue_number: int, labels: list[str]) -> None:
+        if self.failure == "label_add":
+            raise RuntimeError("label write failed")
+        super().add_labels(issue_number, labels)
+
+    def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+        self.label_reads += 1
+        if self.failure == "label_read" and self.label_reads == 2:
+            raise RuntimeError("label read failed")
+        result = super().gh_issue_json(issue_number)
+        if self.label_reads == 1:
+            if self.failure == "missing_labels":
+                result.pop("labels")
+            elif self.failure == "malformed_labels":
+                result["labels"] = STATE_PLAN_GO
+            elif self.failure == "wrong_issue":
+                result["number"] = issue_number + 1
+            elif self.failure == "closed_issue":
+                result["state"] = "CLOSED"
+        if self.failure == "label_missing" and self.label_reads == 2:
+            result["labels"] = [{"name": STATE_PLAN_GO}]
+        return result
+
+    def upsert_issue_comment(
+        self,
+        issue_number: int,
+        marker: str,
+        body: str,
+        *,
+        legacy_marker: str | None = None,
+    ) -> None:
+        if self.failure == "comment_add":
+            raise RuntimeError("comment write failed")
+        super().upsert_issue_comment(issue_number, marker, body, legacy_marker=legacy_marker)
+
+    def issue_comments(self, issue_number: int) -> list[Any]:
+        if self.failure == "comment_read":
+            raise RuntimeError("comment read failed")
+        return super().issue_comments(issue_number)
 
 
 def _writer_binding(
@@ -6644,7 +6694,7 @@ class TestCommitPushAndPrCreate:
         "summary",
         ["Blocked: athena:skill-advisor is unavailable", "Already implemented"],
     )
-    def test_no_commits_fails_with_agent_explanation_without_skip(
+    def test_no_commits_requires_direction_without_skip(
         self, make_ctx: Any, make_work_item: Any, summary: str
     ) -> None:
         """An agent explanation cannot authorize an issue-level skip."""
@@ -6661,10 +6711,9 @@ class TestCommitPushAndPrCreate:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(
-            Disposition.FINISH_FAIL, f"implementation_no_changes: {summary}"
-        )
-        assert github.mutation_log == []
+        assert result == StageOutcome(Disposition.BLOCKED, "no commits; human direction required")
+        assert github.labels[9] == {STATE_IMPLEMENTATION_BLOCKED}
+        assert summary in github.comments[9][0]
 
     @pytest.mark.parametrize("summary", [None, "", "  "])
     def test_no_commits_reports_missing_agent_summary(
@@ -6680,16 +6729,17 @@ class TestCommitPushAndPrCreate:
         item.payload["no_commits"] = True
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "implementation_no_changes: no agent summary returned"
+            Disposition.BLOCKED, "no commits; human direction required"
         )
-        assert github.mutation_log == []
+        assert github.labels[9] == {STATE_IMPLEMENTATION_BLOCKED}
 
     def test_no_commits_bounds_and_redacts_agent_summary(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Terminal diagnostics must not publish credentials or unbounded output."""
         stage = ImplementationStage()
-        ctx = make_ctx()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
         secret = "ghp_" + "a" * 36
         item = make_work_item(
             issue=9,
@@ -6700,12 +6750,144 @@ class TestCommitPushAndPrCreate:
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition is Disposition.FINISH_FAIL
-        assert result.note.startswith("implementation_no_changes: <redacted>")
-        assert len(result.note) <= len("implementation_no_changes: ") + 2000
-        assert secret not in result.note
+        assert result.disposition is Disposition.BLOCKED
+        assert secret not in github.comments[9][0]
+        assert "<redacted>" in github.comments[9][0]
+        assert len(github.comments[9][0]) < 6_000
         assert secret not in caplog.text
-        assert result.note in caplog.text
+
+    def test_no_commit_block_confirms_latch_before_comment(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The routing latch must exist before the fallible audit comment."""
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        item = make_work_item(
+            issue=9,
+            state="PR_CREATE",
+            payload={"no_commits": True, "implement_summary": "No files changed."},
+        )
+
+        result = ImplementationStage._record_no_commit_block(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.BLOCKED, "no commits; human direction required")
+        assert github.mutation_log == [
+            ("gh_issue_add_labels", (9, (STATE_IMPLEMENTATION_BLOCKED,))),
+            (
+                "gh_issue_upsert_comment",
+                (9, implementation_module.IMPLEMENTATION_BLOCKED_COMMENT_MARKER),
+            ),
+        ]
+        assert github.labels[9] == {STATE_PLAN_GO, STATE_IMPLEMENTATION_BLOCKED}
+
+    @pytest.mark.parametrize(
+        ("failure", "expected_note"),
+        [
+            ("label_add", "implementation_block_label_failed"),
+            ("label_read", "implementation_block_readback_failed"),
+            ("label_missing", "implementation_block_label_unconfirmed"),
+            ("comment_add", "implementation_block_comment_failed"),
+            ("comment_read", "implementation_block_readback_failed"),
+            ("missing_labels", "implementation_block_readback_failed"),
+            ("malformed_labels", "implementation_block_readback_failed"),
+            ("wrong_issue", "implementation_block_readback_failed"),
+            ("closed_issue", "implementation_block_readback_failed"),
+        ],
+    )
+    def test_no_commit_block_fails_closed_for_publication_errors(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        failure: str,
+        expected_note: str,
+    ) -> None:
+        """A partial publication must stop with one stable recovery reason."""
+        github = _NoCommitPublicationGitHub(failure)
+        item = make_work_item(
+            issue=9,
+            state="PR_CREATE",
+            payload={"no_commits": True, "implement_summary": "No files changed."},
+        )
+
+        result = ImplementationStage._record_no_commit_block(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, expected_note)
+        assert item.payload["no_commits"] is True
+        if failure in {"comment_add", "comment_read"}:
+            assert STATE_IMPLEMENTATION_BLOCKED in github.labels[9]
+        else:
+            assert github.comments.get(9, []) == []
+        if failure in {"missing_labels", "malformed_labels", "wrong_issue", "closed_issue"}:
+            assert github.mutation_log == []
+
+    @pytest.mark.parametrize(
+        ("final_labels", "expected_note"),
+        [
+            ([STATE_IMPLEMENTATION_BLOCKED], "implementation_block_plan_go_lost"),
+            (
+                [STATE_PLAN_GO, STATE_IMPLEMENTATION_BLOCKED, STATE_SKIP],
+                "implementation_block_conflicting_skip",
+            ),
+        ],
+    )
+    def test_no_commit_block_rejects_concurrent_state_change(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        final_labels: list[str],
+        expected_note: str,
+    ) -> None:
+        """The final readback must preserve plan approval and reject skip."""
+
+        class RacingGitHub(FakeStageGitHub):
+            label_reads = 0
+
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                self.label_reads += 1
+                result = super().gh_issue_json(issue_number)
+                if self.label_reads == 3:
+                    result["labels"] = [{"name": label} for label in final_labels]
+                return result
+
+        github = RacingGitHub(labels=[STATE_PLAN_GO])
+        item = make_work_item(
+            issue=9,
+            state="PR_CREATE",
+            payload={"no_commits": True, "implement_summary": "No files changed."},
+        )
+
+        result = ImplementationStage._record_no_commit_block(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, expected_note)
+        assert item.payload["no_commits"] is True
+
+    def test_no_commit_comment_uses_only_the_bounded_agent_summary(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The public comment must exclude transport errors and use a fixed fallback."""
+        fallback_item = make_work_item(issue=9, payload={"no_commits": True})
+        fallback = implementation_module._implementation_blocked_comment(fallback_item)
+        assert implementation_module.IMPLEMENTATION_BLOCKED_SUMMARY_MAX == 2_000
+        assert "No bounded implementation summary was available from the agent result." in fallback
+
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.payload["implement_summary"] = "No files changed."
+        ImplementationStage().on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="RuntimeError: no commits between main and head; token=secret",
+            ),
+            make_ctx(github=github),
+        )
+
+        result = ImplementationStage._record_no_commit_block(item, make_ctx(github=github))
+
+        assert result.disposition is Disposition.BLOCKED
+        comment = github.comments[9][0]
+        assert "No files changed." in comment
+        assert "RuntimeError" not in comment
+        assert "token=secret" not in comment
 
     def test_no_commits_with_externally_armed_pr_blocks_without_skip_label(
         self, make_ctx: Any, make_work_item: Any
@@ -6741,7 +6923,7 @@ class TestCommitPushAndPrCreate:
         assert item.payload["no_commits"] is True
         assert github.mutation_log == []
 
-    def test_no_commits_with_confirmed_unarmed_pr_fails_without_skip_label(
+    def test_no_commits_with_confirmed_unarmed_pr_requires_direction(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A retained unarmed PR does not make an empty implementation complete."""
@@ -6751,14 +6933,14 @@ class TestCommitPushAndPrCreate:
         item = make_work_item(issue=9, pr=1001, state="PR_CREATE", payload={"no_commits": True})
 
         assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "implementation_no_changes: no agent summary returned"
+            Disposition.BLOCKED, "no commits; human direction required"
         )
-        assert github.mutation_log == []
+        assert github.labels[9] == {STATE_IMPLEMENTATION_BLOCKED}
 
-    def test_satisfied_dependencies_preserve_no_commit_failure(
+    def test_satisfied_dependencies_preserve_no_commit_block(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A completed dependency retains the current terminal no-work result."""
+        """A completed dependency retains the human-direction requirement."""
         github = FakeStageGitHub(
             issue_body="Depends on #10",
             dependency_fact_batches=[(DependencyFact(10, "Issue", "CLOSED"),)],
@@ -6770,12 +6952,11 @@ class TestCommitPushAndPrCreate:
         )
 
         assert ImplementationStage().step(item, make_ctx(github=github)) == StageOutcome(
-            Disposition.FINISH_FAIL,
-            "implementation_no_changes: No change was necessary.",
+            Disposition.BLOCKED, "no commits; human direction required"
         )
         assert "no_commits" not in item.payload
         assert github.dependency_fact_requests == [(10,)]
-        assert github.mutation_log == []
+        assert github.labels[9] == {STATE_IMPLEMENTATION_BLOCKED}
 
     def test_unreadable_dependencies_keep_no_commit_result_resumable(
         self, make_ctx: Any, make_work_item: Any

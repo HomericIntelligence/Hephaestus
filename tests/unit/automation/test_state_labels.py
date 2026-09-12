@@ -15,6 +15,8 @@ from hephaestus.automation.state_labels import (
     ALL_STATE_LABELS,
     ATHENA_FINALIZED_PLAN_LABEL,
     EPIC_LABELS,
+    STATE_BLOCKED,
+    STATE_IMPLEMENTATION_BLOCKED,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_LABEL_SPECS,
@@ -69,6 +71,10 @@ class TestLabelVocabulary:
         assert set(ALL_STATE_LABELS) <= set(STATE_LABEL_SPECS.keys())
         assert set(ALL_IMPLEMENTATION_STATE_LABELS) <= set(STATE_LABEL_SPECS.keys())
         assert STATE_SKIP in STATE_LABEL_SPECS
+        assert STATE_IMPLEMENTATION_BLOCKED in STATE_LABEL_SPECS
+        assert getattr(state_labels, "STATE_IMPLEMENTATION_BLOCKED", None) == (
+            STATE_IMPLEMENTATION_BLOCKED
+        )
         for spec in STATE_LABEL_SPECS.values():
             assert "color" in spec
             assert "description" in spec
@@ -85,6 +91,12 @@ class TestLabelVocabulary:
         """``state:skip`` is an override, not a plan-state label."""
         assert STATE_SKIP not in ALL_STATE_LABELS
         assert STATE_SKIP.startswith("state:")
+
+    def test_implementation_blocked_is_independent_of_plan_state(self) -> None:
+        """The human implementation latch preserves the approved plan state."""
+        assert STATE_IMPLEMENTATION_BLOCKED not in ALL_STATE_LABELS
+        assert STATE_IMPLEMENTATION_BLOCKED.startswith("state:")
+        assert STATE_IMPLEMENTATION_BLOCKED != STATE_BLOCKED
 
     def test_finalized_plan_label_is_evidence_not_a_third_plan_state(self) -> None:
         """Finalization survives restarts without expanding the state machine."""

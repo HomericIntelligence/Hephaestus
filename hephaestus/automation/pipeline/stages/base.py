@@ -907,10 +907,11 @@ def _is_confirmed_open_unarmed(pr_state: dict[str, Any] | None) -> bool:
 def write_skip_label(issue_number: int, ctx: StageContext, reason: str) -> None:
     """Durably apply ``state:skip`` and log its reason, non-fatally.
 
-    Single home for the exhaustion/no-commits skip write (previously
-    duplicated across the implementation and pr_review stages). The label is
-    the durable state authority; the reason belongs in structured run logs so
-    automation does not add a third canonical comment to the linked issue.
+    Single home for the exhaustion skip write (previously duplicated across
+    the implementation and pr_review stages). The label is the durable state
+    authority; the reason belongs in structured run logs so automation does not
+    add a third canonical comment to the linked issue. No-commit implementation
+    runs use their own human-intervention comment and latch.
 
     Args:
         issue_number: GitHub issue number.

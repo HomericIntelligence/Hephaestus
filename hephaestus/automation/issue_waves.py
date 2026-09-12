@@ -28,6 +28,7 @@ from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
     ATHENA_FINALIZED_PLAN_LABEL,
+    STATE_IMPLEMENTATION_BLOCKED,
     STATE_SKIP,
 )
 from hephaestus.io.utils import write_secure
@@ -277,6 +278,7 @@ def non_code_intent_skip_is_applied(
         and set(intent.extra_labels).issubset(label_set)
         and not label_set.intersection(ALL_STATE_LABELS)
         and not label_set.intersection(ALL_IMPLEMENTATION_STATE_LABELS)
+        and STATE_IMPLEMENTATION_BLOCKED not in label_set
         and ATHENA_FINALIZED_PLAN_LABEL not in label_set
     )
 
@@ -1246,6 +1248,7 @@ class IssueWaveStore:
                 bool(getattr(facts, "is_epic", False))
                 or "state:skip" in labels
                 or "state:plan-blocked" in labels
+                or STATE_IMPLEMENTATION_BLOCKED in labels
             ):
                 raise IssueWaveBlockedError(
                     f"issue #{receipt.issue_number} has an external skip/block override"

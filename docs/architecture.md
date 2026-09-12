@@ -628,9 +628,9 @@ value would be a static `TypeError` and a safe routing table edit.
 ### State-label vocabulary
 
 Defined in [`state_labels.py`](../hephaestus/automation/state_labels.py) and
-imported throughout the pipeline. Seven labels: four mutually exclusive
-planning states, two mutually exclusive implementation-review states, and one
-absolute operator state:
+imported throughout the pipeline. Nine labels: four mutually exclusive
+planning states, two mutually exclusive implementation-review states, two
+independent blocked states, and one absolute operator state:
 
 | Label | Group | Authoritative stage |
 |--------------------------------|--------------|---------------------------------|
@@ -640,6 +640,8 @@ absolute operator state:
 | `state:plan-blocked` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:implementation-no-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) |
 | `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) — automated implementation eligibility |
+| `state:blocked` | independent latch | external dependency or operator action |
+| `state:implementation-blocked` | independent latch | [`implementation._record_no_commit_block`](../hephaestus/automation/pipeline/stages/implementation.py) |
 | `state:skip` | absolute | operator / confirmed semantic disposition in [`planning`](../hephaestus/automation/pipeline/stages/planning.py) / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) |
 
 Every **stage-issued** `state:skip` write uses the label as its durable
@@ -1064,12 +1066,22 @@ Implementation converts an approved plan into a published pull request. It may
 adopt an existing pull request, but it cannot approve its own work or authorize
 a merge.
 
-An ordinary implementation with no commits is incomplete work. It returns
-`implementation_no_changes` with a bounded, redacted agent summary. If the
-agent supplied no summary, the result states that explicitly. A normal process
-exit or a claim that work is already complete does not prove implementation.
-This result does not apply `state:skip`. Existing PR remediation can still
-complete its validated reply-only path.
+An ordinary implementation with no commits is incomplete work. The host first
+adds and confirms `state:implementation-blocked`. It then writes and confirms
+one marker-owned comment with the bounded, redacted implementation-agent
+summary. The comment uses a fixed fallback when the agent supplied no usable
+summary. It does not include raw process, test, rebase, remediation, or
+transport output. A normal process exit or a claim that work is already
+complete does not prove implementation.
+
+The latch is independent of the planning labels. The transition preserves an
+existing `state:plan-go` label and rejects a concurrent `state:skip` label. A
+failed label or comment write, an unclear readback, a lost plan approval, or a
+conflicting skip stops the item without rollback. The host clears its local
+no-commit marker only after the final state readback succeeds. A restart cannot
+seed another implementation while the latch remains. A human must select the
+next action and remove the latch. Existing PR remediation can still complete
+its validated reply-only path.
 
 For an unchanged direct writer, the host releases the unused remote branch
 reservation once. It verifies the local worktree and ownership receipt without
@@ -1783,6 +1795,8 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 | No PR, at-or-past `state:plan-go` | `IMPLEMENTATION` |
 | No PR, `state:plan-no-go` | `PLANNING` (amend path) |
 | No PR, `state:plan-blocked` | excluded until an external actor resolves the block; an authenticated Athena-finalized body is the sole automatic exception |
+| `state:blocked` | excluded until an external dependency or operator hold is resolved |
+| `state:implementation-blocked` | excluded until a human selects the no-commit recovery action |
 | No state label / `state:needs-plan` | `PLANNING` |
 
 Seeding is read-only. Explicit tracker labels are semantic candidates rather
