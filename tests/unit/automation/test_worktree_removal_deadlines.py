@@ -169,6 +169,115 @@ def test_worktree_removal_preserves_prune_stop(
     ]
 
 
+@pytest.mark.parametrize("stop", ["deadline", "cancellation"])
+def test_absent_worktree_removal_preserves_prune_stop_and_tracking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    """An absent worktree keeps its tracking entry when prune stops."""
+    repo, _, _ = _repository(tmp_path)
+    manager = WorktreeManager(repo_root=repo)
+    path = manager.base_dir / "absent-writer"
+    manager.worktrees[42] = path
+    stop_error = (
+        subprocess.TimeoutExpired("git worktree prune", 0)
+        if stop == "deadline"
+        else InterruptedError("Git operation cancelled")
+    )
+    commands: list[list[str]] = []
+    timeouts: list[int | None] = []
+
+    def stop_prune(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        timeouts.append(kwargs.get("timeout"))
+        if len(commands) == 1:
+            raise stop_error
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(worktree_manager, "run", stop_prune)
+
+    with pytest.raises(type(stop_error)) as raised:
+        manager.remove_worktree(42, timeout=17)
+
+    assert raised.value is stop_error
+    assert manager.worktrees[42] == path
+
+    manager.remove_worktree(42, timeout=17)
+
+    assert 42 not in manager.worktrees
+    assert commands == [
+        ["git", "worktree", "prune"],
+        ["git", "worktree", "prune"],
+    ]
+    assert timeouts == [17, 17]
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancellation"])
+def test_cleanup_all_preserves_absent_worktrees_when_prune_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    """A cleanup stop keeps all entries and prevents later removal attempts."""
+    repo, _, _ = _repository(tmp_path)
+    manager = WorktreeManager(repo_root=repo)
+    first_path = manager.base_dir / "absent-first"
+    second_path = manager.base_dir / "absent-second"
+    manager.worktrees[41] = first_path
+    manager.worktrees[42] = second_path
+    stop_error = (
+        subprocess.TimeoutExpired("git worktree prune", 0)
+        if stop == "deadline"
+        else InterruptedError("Git operation cancelled")
+    )
+    commands: list[list[str]] = []
+    timeouts: list[int | None] = []
+
+    def stop_first_prune(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        timeouts.append(kwargs.get("timeout"))
+        if len(commands) == 1:
+            raise stop_error
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(worktree_manager, "run", stop_first_prune)
+
+    with pytest.raises(type(stop_error)) as raised:
+        manager.cleanup_all(timeout=17)
+
+    assert raised.value is stop_error
+    assert manager.worktrees == {41: first_path, 42: second_path}
+    assert commands == [["git", "worktree", "prune"]]
+    assert timeouts == [17]
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancellation"])
+def test_prune_worktrees_preserves_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    """A direct prune returns its original stop cause to the caller."""
+    repo, _, _ = _repository(tmp_path)
+    manager = WorktreeManager(repo_root=repo)
+    stop_error = (
+        subprocess.TimeoutExpired("git worktree prune", 0)
+        if stop == "deadline"
+        else InterruptedError("Git operation cancelled")
+    )
+    commands: list[list[str]] = []
+    timeouts: list[int | None] = []
+
+    def stop_prune(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        timeouts.append(kwargs.get("timeout"))
+        raise stop_error
+
+    monkeypatch.setattr(worktree_manager, "run", stop_prune)
+
+    with pytest.raises(type(stop_error)) as raised:
+        manager.prune_worktrees(timeout=17)
+
+    assert raised.value is stop_error
+    assert commands == [["git", "worktree", "prune"]]
+    assert timeouts == [17]
+
+
 def test_worktree_removal_fallback_stops_during_directory_deletion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

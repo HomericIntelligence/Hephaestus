@@ -24,7 +24,6 @@ that runs the automation. Recovery procedure for a force-killed loop:
     git -C <repo> worktree remove build/.worktrees/auto-N-review
 """
 
-import contextlib
 import logging
 import secrets
 import shutil
@@ -2138,14 +2137,18 @@ class WorktreeManager:
                     issue_number,
                     worktree_path,
                 )
-                del self.worktrees[issue_number]
-                with contextlib.suppress(Exception):
+                try:
                     run(
                         ["git", "worktree", "prune"],
                         cwd=self.repo_root,
                         check=False,
                         **_timeout_kw(timeout),
                     )
+                except (InterruptedError, subprocess.TimeoutExpired):
+                    raise
+                except Exception:
+                    pass
+                del self.worktrees[issue_number]
                 return
 
             self._cleanup_automation_prompt_artifacts(worktree_path)
@@ -2223,6 +2226,8 @@ class WorktreeManager:
                 self.remove_worktree(issue_num, force=force, timeout=timeout)
                 if path is not None:
                     removed_paths.add(path)
+            except (InterruptedError, subprocess.TimeoutExpired):
+                raise
             except WorktreeDirtyError as e:
                 logger.info("Preserved dirty worktree for issue #%s at %s", e.issue_number, e.path)
                 self.preserved.append((e.issue_number, e.path))
@@ -2237,6 +2242,8 @@ class WorktreeManager:
         try:
             run(["git", "worktree", "prune"], cwd=self.repo_root, **_timeout_kw(timeout))
             logger.info("Pruned stale worktrees")
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
         except Exception as e:
             logger.error("Failed to prune worktrees: %s", e)
 
