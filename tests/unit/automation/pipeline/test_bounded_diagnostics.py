@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ def _coordinator(tmp_path: Path) -> Coordinator:
         repos=["repo-a"],
         projects_dir=tmp_path,
         metrics_port=9123,
+        event_log_path=tmp_path / "events.jsonl",
         event_log_capacity=3,
         terminal_detail_capacity=2,
         rate_guard_enabled=False,
@@ -56,6 +58,46 @@ def _finished_item(issue: int, *, passed: bool) -> WorkItem:
     )
 
 
+def _finding_record(issue: int) -> dict[str, object]:
+    """Build one complete review-finding record with a private body."""
+    return {
+        "finding_id": f"{issue:064x}",
+        "source_head": "a" * 40,
+        "severity": "major",
+        "body": f"private body {issue}",
+        "evidence": f"private evidence {issue}",
+        "original_anchor": {"path": f"file-{issue}.py", "line": issue, "side": "RIGHT"},
+        "final_anchor": {"path": f"file-{issue}.py", "line": issue, "side": "RIGHT"},
+        "status": "published",
+        "surface": "inline",
+        "reason": None,
+    }
+
+
+def test_terminal_finding_events_stream_before_item_detail_eviction(tmp_path: Path) -> None:
+    """JSONL keeps bounded finding identities after terminal details roll over."""
+    coordinator = _coordinator(tmp_path)
+    event_log_path = tmp_path / "events.jsonl"
+
+    for issue in range(1, 5):
+        item = _finished_item(issue, passed=True)
+        item.payload["review_finding_records"] = [_finding_record(issue)]
+        coordinator.items.append(item)
+        coordinator._record_terminal_result(item)
+
+    assert [item.issue for item in coordinator.items] == [3, 4]
+    records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+    finding_events = [record for record in records if record["event"] == "review_finding_outcome"]
+    assert [event["fields"][0]["finding_id"] for event in finding_events] == [
+        f"{issue:064x}" for issue in range(1, 5)
+    ]
+    assert [event["fields"][0]["original_anchor"]["path"] for event in finding_events] == [
+        f"file-{issue}.py" for issue in range(1, 5)
+    ]
+    assert all("body" not in event["fields"][0] for event in finding_events)
+    assert all("evidence" not in event["fields"][0] for event in finding_events)
+
+
 def test_coordinator_bounds_diagnostics_and_keeps_full_terminal_aggregates(
     tmp_path: Path,
 ) -> None:
@@ -73,6 +115,17 @@ def test_coordinator_bounds_diagnostics_and_keeps_full_terminal_aggregates(
 
     for issue in range(1, 5):
         item = _finished_item(issue, passed=issue != 2)
+        record = _finding_record(issue)
+        if issue == 4:
+            record.update(
+                {
+                    "final_anchor": None,
+                    "status": "not_publishable",
+                    "surface": "not_publishable",
+                    "reason": "line_not_in_diff",
+                }
+            )
+        item.payload["review_finding_records"] = [record]
         assert coordinator._push_item(item, StageName.FINISHED, enter=True)
         coordinator._drain_queues()
 
@@ -84,6 +137,10 @@ def test_coordinator_bounds_diagnostics_and_keeps_full_terminal_aggregates(
     assert [result.reason for result in coordinator.ledger] == ["ok", "ok"]
     assert coordinator._terminal_summary.total == 4
     assert coordinator._terminal_summary.dispositions == {"fail": 1, "pass": 3}
+    assert coordinator._terminal_summary.review_finding_outcomes == {
+        "not_publishable": 1,
+        "published": 3,
+    }
     assert coordinator._exit_code() == 1
 
 

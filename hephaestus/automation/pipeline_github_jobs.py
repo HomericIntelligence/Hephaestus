@@ -952,6 +952,10 @@ class PipelineGitHubJobRunner:
         github: Any,
     ) -> PrReviewReconciled:
         """Run fresh receipt reconciliation, publication, and late-thread readback."""
+        from hephaestus.automation.github_api.diff import _validate_comments_to_diff
+        from hephaestus.automation.implementation_go_audit_receipt import (
+            normalize_review_finding_records,
+        )
         from hephaestus.automation.pipeline.stages.pr_review_threads import (
             _durable_thread_id,
             _is_postable_finding,
@@ -960,7 +964,6 @@ class PipelineGitHubJobRunner:
             _validation_receipt_fingerprints,
             _without_duplicate_live_findings,
         )
-        from hephaestus.automation.prompts.pr_review import BLOCKING_SEVERITIES
 
         def receipt(
             action: str,
@@ -992,11 +995,16 @@ class PipelineGitHubJobRunner:
             if (
                 not isinstance(finding, dict)
                 or not isinstance(path, str)
-                or not path
                 or (line is not None and (not isinstance(line, int) or isinstance(line, bool)))
                 or not isinstance(side, str)
                 or not isinstance(reason, str)
-                or reason not in ("anchor_not_in_reviewed_diff", "reviewed_diff_unavailable")
+                or reason
+                not in (
+                    "reviewed_diff_unavailable",
+                    "path_not_in_diff",
+                    "line_not_in_diff",
+                    "unsupported_side",
+                )
                 or not isinstance(finding_id, str)
                 or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None
             ):
@@ -1087,14 +1095,41 @@ class PipelineGitHubJobRunner:
             isinstance(finding, dict) for finding in raw_findings
         ):
             return receipt("audit_failure")
-        findings = _without_duplicate_live_findings(raw_findings, live_by_id)
-        findings = [
-            finding
-            for finding in findings
-            if str(finding.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
-        ]
-        if any(not _is_postable_finding(finding) for finding in findings):
+        raw_records = request.finding_records.thaw()
+        try:
+            finding_records = normalize_review_finding_records(raw_records)
+        except ValueError:
             return receipt("audit_failure")
+        inline_records = {
+            str(record["finding_id"]): record
+            for record in finding_records
+            if record["surface"] == "inline"
+        }
+        finding_ids = [str(finding.get("finding_id") or "") for finding in raw_findings]
+        if (
+            len(set(finding_ids)) != len(finding_ids)
+            or not set(finding_ids).issubset(inline_records)
+            or any(not _is_postable_finding(finding) for finding in raw_findings)
+        ):
+            return receipt("audit_failure")
+        validation = _validate_comments_to_diff(
+            raw_findings,
+            request.review_diff,
+            preserve_finding_ids=True,
+        )
+        if validation.corrections or len(validation.valid) != len(raw_findings):
+            return receipt("audit_failure")
+        findings = _without_duplicate_live_findings(list(validation.valid), live_by_id)
+        prepublication_records = tuple(
+            record
+            for record in finding_records
+            if not (record["surface"] == "inline" and record["status"] == "published")
+        )
+        github.persist_review_finding_journal(
+            request.pr_number,
+            request.reviewed_head_sha,
+            prepublication_records,
+        )
         publication = (
             github.post_review_threads(
                 request.pr_number,
@@ -1120,6 +1155,12 @@ class PipelineGitHubJobRunner:
                 "audit_failure",
                 corrections=corrections,
                 unpublishable=unpublishable,
+            )
+        if prepublication_records != finding_records:
+            github.persist_review_finding_journal(
+                request.pr_number,
+                request.reviewed_head_sha,
+                finding_records,
             )
         live_threads = github.list_unresolved_review_threads(request.pr_number)
         remediation_threads = _normalize_remediation_threads(live_threads)

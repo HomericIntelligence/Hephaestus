@@ -1421,6 +1421,12 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                 threads,
                 review_diff,
             )
+            if validation.corrections:
+                return ReviewPublicationResult(
+                    [],
+                    corrections=validation.corrections,
+                    unpublishable=validation.corrections,
+                )
             threads = list(validation.valid)
             if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
                 return ReviewPublicationResult(

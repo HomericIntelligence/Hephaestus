@@ -36,6 +36,7 @@ from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.github_api.graphql import GraphQLSpec
 from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
+    render_review_finding_journal,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
@@ -6418,6 +6419,105 @@ class TestMutatorMapping:
 
         delete.assert_called_once_with(12)
 
+    def test_review_finding_journal_persist_requires_exact_readback(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The adapter confirms the actor-owned journal before review publication."""
+        head = "a" * 40
+        records = (
+            {
+                "finding_id": "f" * 64,
+                "source_head": head,
+                "severity": "minor",
+                "body": "Retain this finding.",
+                "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
+                "final_anchor": None,
+                "status": "corrected",
+                "surface": "audit",
+                "reason": "line_not_in_diff",
+            },
+        )
+        marker, body = render_review_finding_journal(5, head, records)
+        upsert = MagicMock()
+        monkeypatch.setattr(adapter, "upsert_issue_comment", upsert)
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(return_value=[{"body": body, "databaseId": 12, "viewerDidAuthor": True}]),
+        )
+
+        adapter.persist_review_finding_journal(5, head, records)
+
+        upsert.assert_called_once_with(5, marker, body)
+        journal = adapter.pending_review_finding_journal(5)
+        assert journal is not None
+        assert journal.finding_records == records
+
+    def test_review_finding_journal_read_rejects_ambiguous_owned_records(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two actor-owned finding journals cannot become restart authority."""
+        record = {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "minor",
+            "body": "Retain this finding.",
+            "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "corrected",
+            "surface": "audit",
+            "reason": "line_not_in_diff",
+        }
+        _marker_a, body_a = render_review_finding_journal(5, "a" * 40, (record,))
+        _marker_b, body_b = render_review_finding_journal(5, "b" * 40, (record,))
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                return_value=[
+                    {"body": body_a, "databaseId": 12, "viewerDidAuthor": True},
+                    {"body": body_b, "databaseId": 13, "viewerDidAuthor": True},
+                ]
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="finding journals are ambiguous"):
+            adapter.pending_review_finding_journal(5)
+
+    def test_review_finding_journal_cleanup_preserves_ambiguous_records(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cleanup does not delete evidence when owned journals are ambiguous."""
+        record = {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "minor",
+            "body": "Retain this finding.",
+            "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "corrected",
+            "surface": "audit",
+            "reason": "line_not_in_diff",
+        }
+        _marker, body = render_review_finding_journal(5, "a" * 40, (record,))
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                return_value=[
+                    {"body": body, "databaseId": 12, "viewerDidAuthor": True},
+                    {"body": body, "databaseId": 13, "viewerDidAuthor": True},
+                ]
+            ),
+        )
+        delete = MagicMock()
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
+
+        with pytest.raises(RuntimeError, match="finding journals are ambiguous"):
+            adapter.clear_review_finding_journal(5, "a" * 40)
+
+        delete.assert_not_called()
+
 
 def test_mark_go_uses_adapter_labels_and_readback(
     adapter: PipelineGitHub,
@@ -8483,10 +8583,10 @@ class TestRepoScoping:
             }
         ]
 
-    def test_repo_scoped_review_post_preserves_valid_findings_and_returns_correction(
+    def test_repo_scoped_review_post_rejects_the_complete_batch_before_writing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
-        """An invalid anchor must not discard a valid finding or its evidence."""
+        """One invalid anchor stops the full review batch before publication."""
         calls: list[list[str]] = []
         review_payloads: list[dict[str, object]] = []
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
@@ -8538,20 +8638,17 @@ class TestRepoScoping:
             review_diff=diff,
         )
 
-        assert len(result) == 1
-        assert result[0]["id"] == "thread-valid"
+        assert result == []
         assert len(result.corrections) == 1
         correction = result.corrections[0]
         assert correction.path == "a.py"
         assert correction.line == 2
         assert correction.side == "RIGHT"
-        assert correction.reason == "anchor_not_in_reviewed_diff"
+        assert correction.reason == "line_not_in_diff"
         assert correction.finding["body"] == "stale"
         assert correction.finding["evidence"] == "descriptor state is not propagated"
-        assert len(review_payloads) == 1
-        assert [comment["line"] for comment in review_payloads[0]["comments"]] == [1]
-        assert len(calls) == 1
-        assert calls[0][:3] == ["api", "-X", "POST"]
+        assert review_payloads == []
+        assert calls == []
 
     def test_repo_scoped_review_post_reports_all_invalid_findings_without_writing(
         self, tmp_path: Path, command_runner: MagicMock
@@ -8644,10 +8741,10 @@ class TestRepoScoping:
             review_diff=snapshot_diff,
         )
 
-        assert len(result) == 1
+        assert result == []
         assert result.corrections[0].path == "b.py"
-        assert result.corrections[0].reason == "anchor_not_in_reviewed_diff"
-        assert [comment["path"] for comment in review_payloads[0]["comments"]] == ["a.py"]
+        assert result.corrections[0].reason == "path_not_in_diff"
+        assert review_payloads == []
 
     def test_repo_scoped_review_post_reports_missing_snapshot_as_unpublishable(
         self, tmp_path: Path, command_runner: MagicMock

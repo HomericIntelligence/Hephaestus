@@ -13,6 +13,7 @@ from hephaestus.automation.pipeline.stages.planning import build_plan_prompt
 from hephaestus.automation.prompts import (
     get_address_review_prompt,
     get_plan_prompt,
+    get_review_anchor_correction_prompt,
 )
 from hephaestus.automation.requirements_recovery import (
     build_recovery_prompt,
@@ -68,6 +69,7 @@ COMPLETE_AGENT_PROMPTS = (
     "pr_management/pr_message.j2",
     "pr_review/analysis.j2",
     "pr_review/analysis_opencode.j2",
+    "pr_review/anchor_correction.j2",
     "pr_review/validation.j2",
     "tidy/rebase_fix.j2",
 )
@@ -307,6 +309,23 @@ def test_production_prompt_builders_keep_the_writing_standard(tmp_path: Path) ->
     )
 
     assert all(WRITING_STANDARD_SENTINEL in prompt for prompt in prompts)
+
+
+def test_anchor_correction_builder_keeps_complete_policy_with_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production correction builder keeps the complete packaged directive."""
+    override = tmp_path / "pr_review" / "anchor_correction.j2"
+    override.parent.mkdir(parents=True)
+    override.write_text("HARNESS CORRECTION\n", encoding="utf-8")
+    catalog = PromptCatalog(override_root=tmp_path)
+    monkeypatch.setattr(PromptCatalog, "current", classmethod(lambda cls: catalog))
+
+    rendered = get_review_anchor_correction_prompt(1, 2, "[]", "diff")
+    directive = PromptCatalog().render("shared/writing_standard.j2").strip()
+
+    assert rendered.startswith(directive)
+    assert "HARNESS CORRECTION" in rendered
 
 
 def test_fleet_conflict_builder_keeps_the_writing_standard(tmp_path: Path) -> None:

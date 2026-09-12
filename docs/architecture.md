@@ -1269,6 +1269,27 @@ later branch push does not invalidate that posted review; only the final
 `state:implementation-go` transition requires the reviewed head to still be
 the current open, unarmed PR head.
 
+The host validates each finding against the complete immutable diff before it
+selects a publication surface. It gives each finding a stable SHA-256 ID. If an
+anchor is not valid, the host sends one bounded correction request to the same
+reviewer session. The request uses `REVIEW_VALIDATE` with read-only
+`Read,Glob,Grep` tools. The reviewer can change only the anchor or the surface.
+The host keeps the finding body, evidence, severity, ID, and source scope. It
+validates a corrected inline anchor against the same diff. It then sends all
+valid blocking findings in one GitHub review request.
+
+Before that GitHub review request, the host writes one actor-owned finding
+journal for the exact reviewed head. This first write does not mark an inline
+finding as published. After GitHub confirms the review request, the host writes
+the published inline outcomes to the journal. The journal also records
+corrected and not-publishable outcomes, the original and final anchors, and the
+typed failure reason. Restart seeding keeps these bounded records for a new
+review. A final public GO audit includes the retained records. Only a confirmed
+public-audit readback permits deletion of the finding journal. A
+critical or major finding that has no publishable surface causes a verified
+`state:implementation-no-go` transition and the terminal
+`review_finding_not_publishable` result.
+
 For the registered host-verification plan, macOS uses `sandbox-exec` plus
 disposable, quota-backed disk images. Linux uses a local Pyxis/Enroot squashfs
 image. A separate host-owned authority binds the expected digest, committed
@@ -1340,8 +1361,13 @@ stateDiagram-v2
     Checkout --> Review: clean checkout matches snapshot head, no fixed check required
     Checkout --> Failed: checkout or head drift; cleanup then a later loop gets a new snapshot
     Review --> Validate: review produced
+    Validate --> CorrectAnchor: one or more anchors are invalid
+    CorrectAnchor --> Validate: one bounded read-only correction
     Review --> Implementation: invalid output requires fresh implementation context
-    Validate --> Post: findings normalized
+    Validate --> Journal: all findings normalized
+    Journal --> Post: exact-head finding record has exact readback
+    Journal --> Failed: finding record is not durable
+    Post --> Failed: blocking finding has no publishable surface; durable no-go
     Post --> Implementation: any open review thread, after durable no-go and checkout cleanup
     Post --> Evaluate: no open review thread
     Evaluate --> Implementation: a late open thread, after durable no-go and checkout cleanup
@@ -1356,8 +1382,23 @@ Architectural contract:
 
 - Every implementation review is posted to the pull request.
 - The initial review fetches and verifies one detached checkout of `H`, then
-  submits all inline findings in one GitHub review request. It neither rebases
+  validates all severities before it selects inline or audit publication. It
+  uses one bounded correction request for invalid anchors, then submits all
+  valid blocking inline findings in one GitHub review request. It neither rebases
   nor pushes the PR branch, and its checkout is removed before it exits.
+- A correction response has exactly one result for each host finding ID. Only
+  `minor` and `nitpick` findings can use the audit surface. A missing, duplicate,
+  unknown, malformed, or still-invalid result becomes not publishable. The host
+  does not start a second correction request.
+- The exact-head finding journal is durable before an inline review write. Its
+  first state does not claim that an unconfirmed inline finding is published.
+  A confirmed review write promotes that finding to the published state. The
+  journal has bounded record and aggregate sizes. Restart recovery and cleanup
+  reject malformed or ambiguous actor-owned journals. Terminal aggregates count
+  all finding outcomes before the coordinator removes old item details. The
+  diagnostic JSONL stream records each finding ID, outcome, and anchor before
+  that removal. It does not record the finding body or evidence, and it is not
+  restart authority.
 - Actionable findings use durable inline threads. Severity describes newly
   posted findings only; it never makes an existing unresolved thread advisory.
 - Prior rounds remain visible in the PR timeline.
@@ -1513,6 +1554,9 @@ Architectural contract:
   audit and must bind the reviewed head before publication can resume.
   Same-process publication retries reuse that audit. Restart obtains fresh
   source, verification, and review evidence.
+- A finding journal preserves review outcomes, but it does not restore review
+  authority. A new head keeps prior finding source heads as audit history. A
+  fresh review remains necessary for the current head.
 - PR review owns reviewer compaction only. Implementation owns writer
   compaction, commit, push, and reply delivery. The removed writer wait states
   have no dispatch path in PR review.

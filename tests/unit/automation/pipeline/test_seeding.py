@@ -16,7 +16,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import state_labels
-from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
+from hephaestus.automation.implementation_go_audit_receipt import (
+    PendingImplementationGoAudit,
+    PendingReviewFindingJournal,
+)
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
@@ -635,6 +638,7 @@ class TestSeedIssueFetchLayer:
                 ),
             ),
             patch.object(github, "pending_implementation_go_audit", return_value=None),
+            patch.object(github, "pending_review_finding_journal", return_value=None),
             patch.object(github, "read_review_rebase_record", return_value=None),
         ):
             return seed_issue_from_github(issue, github)
@@ -863,6 +867,36 @@ class TestSeedIssueFetchLayer:
         assert entry.stage is StageName.PR_REVIEW
         assert entry.pending_implementation_go_audit is not None
         assert entry.pending_implementation_go_audit.audit.valid is False
+
+    def test_finding_journal_is_recovered_for_the_next_review(self) -> None:
+        """Restart seeding keeps exact finding outcomes for the next audit."""
+        record = {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "minor",
+            "body": "Keep this advisory.",
+            "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "published",
+            "surface": "audit",
+            "reason": None,
+        }
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=44,
+            pr_impl_state=(False, True),
+        )
+        github.pending_finding_journals[44] = PendingReviewFindingJournal(
+            pr_number=44,
+            head_sha="a" * 40,
+            finding_records=(record,),
+        )
+
+        entry = seed_entry_from_facts(seed_issue_from_github(102, github))
+
+        assert entry.stage is StageName.PR_REVIEW
+        assert entry.pending_review_finding_journal is not None
+        assert entry.pending_review_finding_journal.finding_records == (record,)
 
 
 class TestSeedIssueEpicDetection:

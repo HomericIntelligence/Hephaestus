@@ -404,6 +404,7 @@ class ReconcilePrReviewRequest:
     resolved_thread_ids: tuple[str, ...]
     feedback: FrozenJson
     findings: FrozenJson
+    finding_records: FrozenJson
     review_diff: str
     deadline_s: float
     issue_number: int | None = None
@@ -428,6 +429,7 @@ class ReconcilePrReviewRequest:
             raise ValueError("resolved_thread_ids must be a tuple of non-empty strings")
         _json_root(self.feedback, dict, "feedback")
         _json_root(self.findings, list, "findings")
+        _json_root(self.finding_records, list, "finding_records")
         if not isinstance(self.review_diff, str):
             raise ValueError("review_diff must be a string")
         _deadline(self.deadline_s)

@@ -561,6 +561,37 @@ def get_review_validation_prompt(
     )
 
 
+def get_review_anchor_correction_prompt(
+    pr_number: int,
+    issue_number: int,
+    invalid_findings_json: str,
+    diff_text: str,
+    review_context_kind: str = "issue",
+) -> str:
+    """Get one bounded prompt that corrects invalid review anchors."""
+    fenced = fence_content()
+    rendered = PromptCatalog.current().render(
+        "pr_review/anchor_correction.j2",
+        pr_number=pr_number,
+        issue_number=issue_number,
+        review_context_kind=review_context_kind,
+        invalid_findings_block=fenced.fence("ANCHOR_CORRECTIONS", invalid_findings_json),
+        diff_block=fenced.fence("PR_DIFF", diff_text),
+        untrusted_notice=fenced.untrusted_notice,
+        terse_output_directive=get_terse_output_directive(
+            terminal_output_contract=(
+                "Return exactly one JSON object with a `corrections` array and no prose."
+            )
+        ),
+    )
+    if len(rendered) > MAX_PR_REVIEW_RENDERED_CHARS:
+        raise PrReviewPromptSizeError(_prompt_limit_error(MAX_PR_REVIEW_RENDERED_CHARS))
+    return rendered
+
+
+build_bounded_review_anchor_correction_prompt = get_review_anchor_correction_prompt
+
+
 def _render_review_validation_prompt(
     *,
     pr_number: int,

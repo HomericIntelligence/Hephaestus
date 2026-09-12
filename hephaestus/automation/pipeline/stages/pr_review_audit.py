@@ -2,6 +2,9 @@
 
 # This mixin consumes the shared PR-review stage namespace by design.
 # ruff: noqa: F403, F405
+from hephaestus.automation.implementation_go_audit_receipt import (
+    normalize_review_finding_records,
+)
 from hephaestus.automation.review_audit import is_clean_go_review
 
 from .pr_review_threads import *
@@ -15,11 +18,18 @@ class PrReviewAudit:
         """Require active review evidence before a publication retry can advance."""
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = item.payload.get("pending_implementation_go_audit_head")
+        finding_records = item.payload.get("pending_implementation_go_audit_findings", [])
+        try:
+            normalize_review_finding_records(finding_records)
+            records_are_valid = True
+        except ValueError:
+            records_are_valid = False
         if (
             is_clean_go_review(audit)
             and item.payload.get("review_audit") is audit
             and is_full_commit_sha(head_sha)
             and item.payload.get("reviewed_pr_head_sha") == head_sha
+            and records_are_valid
         ):
             return None
         # Keep the durable record. A new review can replace or reconcile it,
@@ -27,6 +37,7 @@ class PrReviewAudit:
         for key in (
             "pending_implementation_go_audit",
             "pending_implementation_go_audit_head",
+            "pending_implementation_go_audit_findings",
             "pending_implementation_go_label_confirmed",
             "implementation_go_audit_retries",
         ):
@@ -51,6 +62,15 @@ class PrReviewAudit:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         item.payload["pending_implementation_go_audit"] = audit
         item.payload["pending_implementation_go_audit_head"] = head_sha
+        try:
+            item.payload["pending_implementation_go_audit_findings"] = [
+                dict(record)
+                for record in normalize_review_finding_records(
+                    item.payload.get("review_finding_records", [])
+                )
+            ]
+        except ValueError:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         return self._go_audit_receipt(item, ctx)
 
     @staticmethod
@@ -74,10 +94,16 @@ class PrReviewAudit:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = str(item.payload.get("pending_implementation_go_audit_head") or "")
+        finding_records = item.payload.get("pending_implementation_go_audit_findings", [])
         if not is_clean_go_review(audit) or not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         try:
-            ctx.github.persist_pending_implementation_go_audit(item.pr, head_sha, audit)
+            ctx.github.persist_pending_implementation_go_audit(
+                item.pr,
+                head_sha,
+                audit,
+                finding_records=finding_records,
+            )
         except Exception as error:
             logger.warning(
                 "pr_review:%d: failed to persist implementation-go audit receipt (%s)",
@@ -96,6 +122,7 @@ class PrReviewAudit:
             # head, while transport retries deliberately retain those facts.
             item.payload.pop("pending_implementation_go_audit", None)
             item.payload.pop("pending_implementation_go_audit_head", None)
+            item.payload.pop("pending_implementation_go_audit_findings", None)
             item.payload.pop("pending_implementation_go_label_confirmed", None)
         return outcome  # type: ignore[no-any-return]
 
@@ -107,10 +134,17 @@ class PrReviewAudit:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = str(item.payload.get("pending_implementation_go_audit_head") or "")
+        finding_records = item.payload.get("pending_implementation_go_audit_findings", [])
         if not is_clean_go_review(audit) or not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         try:
-            ctx.github.publish_implementation_go_audit(item.pr, head_sha, audit)
+            ctx.github.publish_implementation_go_audit(
+                item.pr,
+                head_sha,
+                audit,
+                finding_records=finding_records,
+            )
+            ctx.github.clear_review_finding_journal(item.pr, head_sha)
             ctx.github.clear_pending_implementation_go_audit(item.pr, head_sha)
         except Exception as error:
             logger.warning(
@@ -125,6 +159,7 @@ class PrReviewAudit:
         item.payload.pop("implementation_go_audit_retries", None)
         item.payload.pop("pending_implementation_go_audit", None)
         item.payload.pop("pending_implementation_go_audit_head", None)
+        item.payload.pop("pending_implementation_go_audit_findings", None)
         return self._cleanup_review_worktree_then(  # type: ignore[attr-defined,no-any-return]
             item,
             StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending"),

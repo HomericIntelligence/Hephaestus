@@ -36,7 +36,10 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Literal
 
-from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
+from hephaestus.automation.implementation_go_audit_receipt import (
+    PendingImplementationGoAudit,
+    PendingReviewFindingJournal,
+)
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
@@ -89,6 +92,24 @@ def read_pending_implementation_go_audit(
     if receipt is not None and not isinstance(receipt, PendingImplementationGoAudit):
         raise IssueClassificationError("pending implementation-go audit receipt has invalid type")
     return receipt
+
+
+def read_pending_review_finding_journal(
+    github: Any, pr_number: int
+) -> PendingReviewFindingJournal | None:
+    """Read and validate the actor-owned finding journal."""
+    reader = getattr(github, "pending_review_finding_journal", None)
+    if reader is None:
+        return None
+    try:
+        journal = reader(pr_number)
+    except (ValueError, RuntimeError) as error:
+        raise IssueClassificationError(f"review finding recovery blocked: {error}") from error
+    if journal is not None and (
+        not isinstance(journal, PendingReviewFindingJournal) or journal.pr_number != pr_number
+    ):
+        raise IssueClassificationError("review finding journal is invalid")
+    return journal
 
 
 def read_review_rebase_record(github: Any, pr_number: int) -> RebaseReviewRecord | None:
@@ -180,6 +201,7 @@ class IssueFacts:
     pr_has_implementation_go: bool = False
     pr_has_implementation_no_go: bool = False
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
+    pending_review_finding_journal: PendingReviewFindingJournal | None = None
     pending_implementation_go_label_confirmed: bool = False
     pending_review_rebase_record: RebaseReviewRecord | None = None
     body: str = ""
@@ -231,6 +253,7 @@ class SeedEntry:
     pr_description: str = ""
     passed: bool = True
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
+    pending_review_finding_journal: PendingReviewFindingJournal | None = None
     pending_implementation_go_label_confirmed: bool = False
     pending_review_rebase_record: RebaseReviewRecord | None = None
     non_code: bool = False
@@ -502,6 +525,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     pr_has_implementation_go = False
     pr_has_implementation_no_go = False
     pending_implementation_go_audit = None
+    pending_review_finding_journal = None
     pending_review_rebase_record = None
     pr_number: int | None = github.find_pr_for_issue(issue_number)
     if pr_number is not None:
@@ -510,6 +534,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
             github.pr_has_implementation_state_label(pr_number)
         )
         pending_implementation_go_audit = read_pending_implementation_go_audit(github, pr_number)
+        pending_review_finding_journal = read_pending_review_finding_journal(github, pr_number)
         pending_review_rebase_record = read_review_rebase_record(github, pr_number)
         if pending_review_rebase_record is not None and (
             pending_review_rebase_record.issue_number != issue_number
@@ -533,6 +558,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
         pending_implementation_go_audit=pending_implementation_go_audit,
+        pending_review_finding_journal=pending_review_finding_journal,
         pending_review_rebase_record=pending_review_rebase_record,
         authority_sanitized=issue_data.get("authoritySanitized") is True,
     )
@@ -550,6 +576,7 @@ def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
         issue_title=facts.title,
         issue_body=facts.body,
         pending_implementation_go_audit=facts.pending_implementation_go_audit,
+        pending_review_finding_journal=facts.pending_review_finding_journal,
         pending_review_rebase_record=facts.pending_review_rebase_record,
         pending_implementation_go_label_confirmed=bool(
             facts.pending_implementation_go_audit is not None and facts.pr_has_implementation_go

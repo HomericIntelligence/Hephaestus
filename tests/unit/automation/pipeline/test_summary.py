@@ -257,6 +257,29 @@ class TestPrintSummaryRows:
         assert "'requirements-recovered': 1" in caplog.text
         assert "'obsolete-skipped': 1" in caplog.text
 
+    def test_finding_outcomes_are_run_wide_aggregate_counts(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The terminal aggregate keeps each finding outcome after item eviction."""
+        item = _item(9, StageName.FINISHED, passed=False, reason="review failed")
+        item.payload["review_finding_records"] = [
+            {"finding_id": "a" * 64, "status": "published"},
+            {"finding_id": "b" * 64, "status": "corrected"},
+            {"finding_id": "c" * 64, "status": "not_publishable"},
+        ]
+        aggregate = TerminalSummary()
+        aggregate.record(item)
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False, terminal_summary=aggregate)
+
+        assert aggregate.review_finding_outcomes == {
+            "corrected": 1,
+            "not_publishable": 1,
+            "published": 1,
+        }
+        assert "review-finding outcomes:" in caplog.text
+
     def test_summary_uses_latest_logical_item_for_aggregates(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -323,13 +346,42 @@ class TestPrintSummaryRows:
     def test_review_publication_summary_identifies_each_outcome(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Review publication rows identify published and unavailable anchors."""
+        """Review publication rows identify each outcome without review text."""
         item = _item(10, StageName.PR_REVIEW)
         item.payload["review_publication_summary"] = {
-            "published": [{"path": "a.py", "line": 11, "side": "RIGHT"}],
-            "corrected": [{"finding": {"path": "b.py", "line": 22, "side": "RIGHT"}}],
+            "published": [
+                {
+                    "finding_id": "a" * 64,
+                    "body": "private published body",
+                    "original_anchor": {"path": "a.py", "line": 11, "side": "RIGHT"},
+                    "final_anchor": {"path": "a.py", "line": 11, "side": "RIGHT"},
+                    "reason": None,
+                }
+            ],
+            "corrected": [
+                {
+                    "finding_id": "b" * 64,
+                    "body": "private corrected body",
+                    "original_anchor": {"path": "b.py", "line": 99, "side": "RIGHT"},
+                    "final_anchor": {"path": "b.py", "line": 22, "side": "RIGHT"},
+                    "reason": "line_not_in_diff",
+                },
+                {
+                    "finding_id": "d" * 64,
+                    "body": "private audit body",
+                    "original_anchor": {"path": "d.py", "line": 44, "side": "RIGHT"},
+                    "final_anchor": None,
+                    "reason": "line_not_in_diff",
+                },
+            ],
             "could_not_publish": [
-                {"path": "c.py", "line": 33, "side": "RIGHT", "reason": "stale_diff"}
+                {
+                    "finding_id": "c" * 64,
+                    "body": "private unavailable body",
+                    "original_anchor": {"path": "c.py", "line": 33, "side": "RIGHT"},
+                    "final_anchor": None,
+                    "reason": "line_not_in_diff",
+                }
             ],
         }
 
@@ -337,9 +389,11 @@ class TestPrintSummaryRows:
             print_summary([item], _stats(), [], json_out=False)
 
         assert "review-publication" in caplog.text
-        assert "a.py:11:RIGHT" in caplog.text
-        assert "b.py:22:RIGHT" in caplog.text
-        assert "c.py:33:RIGHT [stale_diff]" in caplog.text
+        assert f"{'a' * 64} original=a.py:11:RIGHT final=a.py:11:RIGHT" in caplog.text
+        assert f"{'b' * 64} original=b.py:99:RIGHT final=b.py:22:RIGHT" in caplog.text
+        assert f"{'d' * 64} original=d.py:44:RIGHT final=-" in caplog.text
+        assert f"{'c' * 64} original=c.py:33:RIGHT final=-" in caplog.text
+        assert "private" not in caplog.text
 
     def test_preserved_footer_present(self, caplog: pytest.LogCaptureFixture) -> None:
         """The preserved-worktree footer prints via the shared helper."""
@@ -413,10 +467,24 @@ class TestJsonEnvelope:
     ) -> None:
         item = _item(10, StageName.PR_REVIEW, pr=1010)
         item.payload["review_publication_summary"] = {
-            "published": [{"path": "a.py", "line": 11, "side": "RIGHT"}],
+            "published": [
+                {
+                    "finding_id": "a" * 64,
+                    "body": "private published body",
+                    "original_anchor": {"path": "a.py", "line": 11, "side": "RIGHT"},
+                    "final_anchor": {"path": "a.py", "line": 11, "side": "RIGHT"},
+                    "reason": None,
+                }
+            ],
             "corrected": [],
             "could_not_publish": [
-                {"path": "b.py", "line": 22, "side": "RIGHT", "reason": "stale_diff"}
+                {
+                    "finding_id": "b" * 64,
+                    "body": "private unavailable body",
+                    "original_anchor": {"path": "b.py", "line": 22, "side": "RIGHT"},
+                    "final_anchor": None,
+                    "reason": "line_not_in_diff",
+                }
             ],
         }
 
@@ -428,10 +496,29 @@ class TestJsonEnvelope:
                 "repo": "repo-a",
                 "issue": 10,
                 "pr": 1010,
-                "published": ["a.py:11:RIGHT"],
-                "could_not_publish": ["b.py:22:RIGHT [stale_diff]"],
+                "published": [f"{'a' * 64} original=a.py:11:RIGHT final=a.py:11:RIGHT"],
+                "could_not_publish": [
+                    f"{'b' * 64} original=b.py:22:RIGHT final=- [line_not_in_diff]"
+                ],
             }
         ]
+        assert "private" not in json.dumps(envelope)
+
+    def test_json_envelope_includes_cumulative_finding_outcomes(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Machine output includes the run-wide finding counters."""
+        item = _item(11, StageName.FINISHED, passed=True, reason="ok")
+        item.payload["review_finding_records"] = [
+            {"finding_id": "a" * 64, "status": "corrected"},
+        ]
+        aggregate = TerminalSummary()
+        aggregate.record(item)
+
+        print_summary([item], _stats(), [], json_out=True, terminal_summary=aggregate)
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["review_finding_outcomes"] == {"corrected": 1}
 
     @pytest.mark.parametrize(
         ("exit_code", "expected_message"),

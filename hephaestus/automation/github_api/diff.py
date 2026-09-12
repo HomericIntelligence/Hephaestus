@@ -12,7 +12,31 @@ import hephaestus.automation.github_api as _api
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
-ReviewAnchorCorrectionReason = Literal["anchor_not_in_reviewed_diff", "reviewed_diff_unavailable"]
+ReviewAnchorCorrectionReason = Literal[
+    "reviewed_diff_unavailable",
+    "path_not_in_diff",
+    "line_not_in_diff",
+    "unsupported_side",
+]
+
+MAX_REVIEW_FINDINGS = 64
+MAX_REVIEW_FINDING_PATH_CHARS = 4_096
+MAX_REVIEW_FINDING_BODY_CHARS = 16_384
+MAX_REVIEW_FINDING_EVIDENCE_CHARS = 16_384
+MAX_REVIEW_FINDING_AGGREGATE_CHARS = 256_000
+
+
+def _validate_finding_bounds(finding: dict[str, Any]) -> None:
+    """Reject one finding that exceeds the review transport limits."""
+    path = finding.get("path")
+    body = finding.get("body")
+    evidence = finding.get("evidence")
+    if isinstance(path, str) and len(path) > MAX_REVIEW_FINDING_PATH_CHARS:
+        raise ValueError("review finding path exceeds its size limit")
+    if isinstance(body, str) and len(body) > MAX_REVIEW_FINDING_BODY_CHARS:
+        raise ValueError("review finding body exceeds its size limit")
+    if isinstance(evidence, str) and len(evidence) > MAX_REVIEW_FINDING_EVIDENCE_CHARS:
+        raise ValueError("review finding evidence exceeds its size limit")
 
 
 def _review_finding_id(finding: dict[str, Any]) -> str:
@@ -24,6 +48,7 @@ def _review_finding_id(finding: dict[str, Any]) -> str:
         "side": str(finding.get("side") or "RIGHT").strip().upper(),
         "severity": str(finding.get("severity") or "").strip().lower(),
         "body": str(finding.get("body") or "").strip(),
+        "evidence": str(finding.get("evidence") or "").strip(),
         "scope_retraction_paths": (
             [str(path).strip() for path in scope_paths]
             if isinstance(scope_paths, (list, tuple))
@@ -61,11 +86,14 @@ class ReviewAnchorCorrection:
         if not isinstance(self.side, str) or not self.side:
             raise ValueError("side must be a non-empty string")
         if not isinstance(self.reason, str) or self.reason not in {
-            "anchor_not_in_reviewed_diff",
             "reviewed_diff_unavailable",
+            "path_not_in_diff",
+            "line_not_in_diff",
+            "unsupported_side",
         }:
             raise ValueError("reason must be a supported anchor-correction reason")
         finding = dict(self.finding)
+        _validate_finding_bounds(finding)
         finding["finding_id"] = finding_id
         object.__setattr__(self, "finding", finding)
         object.__setattr__(self, "finding_id", finding_id)
@@ -142,7 +170,11 @@ def _valid_review_positions(diff_text: str) -> dict[str, set[tuple[int, str]]]:
 
 
 def _validate_comments_to_diff(
-    comments: list[dict[str, Any]], diff_text: str, *, fail_open_empty: bool = False
+    comments: list[dict[str, Any]],
+    diff_text: str,
+    *,
+    fail_open_empty: bool = False,
+    preserve_finding_ids: bool = False,
 ) -> ReviewCommentValidation:
     """Validate every comment against one immutable unified diff.
 
@@ -157,6 +189,17 @@ def _validate_comments_to_diff(
         Valid comments and typed correction records for invalid comments.
 
     """
+    if len(comments) > MAX_REVIEW_FINDINGS:
+        raise ValueError("review finding count exceeds its limit")
+    for comment in comments:
+        _validate_finding_bounds(comment)
+    aggregate_size = len(
+        json.dumps(
+            comments, allow_nan=False, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+    )
+    if aggregate_size > MAX_REVIEW_FINDING_AGGREGATE_CHARS:
+        raise ValueError("review findings exceed their aggregate size limit")
     if not diff_text.strip() and fail_open_empty:
         return ReviewCommentValidation(tuple(comments), ())
 
@@ -164,6 +207,18 @@ def _validate_comments_to_diff(
     valid: list[dict[str, Any]] = []
     corrections: list[ReviewAnchorCorrection] = []
     for comment in comments:
+        finding = dict(comment)
+        supplied_id = finding.get("finding_id")
+        if preserve_finding_ids:
+            if (
+                not isinstance(supplied_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", supplied_id) is None
+            ):
+                raise ValueError("trusted review finding ID is invalid")
+            finding_id = supplied_id
+        else:
+            finding_id = _review_finding_id(finding)
+        finding["finding_id"] = finding_id
         path_value = comment.get("path")
         path = path_value.strip() if isinstance(path_value, str) else str(path_value or "")
         line_value = comment.get("line")
@@ -172,20 +227,24 @@ def _validate_comments_to_diff(
         )
         side_value = comment.get("side", "RIGHT")
         side = side_value if isinstance(side_value, str) else str(side_value or "")
-        if path in valid_positions and (line, side) in valid_positions[path]:
-            valid.append(comment)
+        if side == "RIGHT" and path in valid_positions and (line, side) in valid_positions[path]:
+            valid.append(finding)
             continue
+        if not diff_text.strip():
+            reason: ReviewAnchorCorrectionReason = "reviewed_diff_unavailable"
+        elif side != "RIGHT":
+            reason = "unsupported_side"
+        elif path not in valid_positions:
+            reason = "path_not_in_diff"
+        else:
+            reason = "line_not_in_diff"
         corrections.append(
             ReviewAnchorCorrection(
-                finding=dict(comment),
+                finding=finding,
                 path=path,
                 line=line,
                 side=side,
-                reason=(
-                    "reviewed_diff_unavailable"
-                    if not diff_text.strip()
-                    else "anchor_not_in_reviewed_diff"
-                ),
+                reason=reason,
             )
         )
         _api.logger.warning(

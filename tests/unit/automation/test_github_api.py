@@ -4470,7 +4470,7 @@ class TestValidReviewPositions:
         assert correction.path == "mod.py"
         assert correction.line == 500
         assert correction.side == "RIGHT"
-        assert correction.reason == "anchor_not_in_reviewed_diff"
+        assert correction.reason == "line_not_in_diff"
         assert correction.finding["evidence"] == "the state is not carried into the worker"
 
     def test_validation_gives_distinct_ids_to_same_content_at_different_anchors(self) -> None:
