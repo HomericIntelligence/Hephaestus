@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import socket
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 import pytest
 
@@ -15,39 +17,40 @@ pytestmark = pytest.mark.precommit
 
 
 @pytest.fixture
-def engine_process(tmp_path, monkeypatch):
+def engine_process(monkeypatch):
     """Replace only Podman with an executable that records exact arguments and environment."""
     from hephaestus.automation import fleet_podman
 
-    private = tmp_path / "engine"
-    private.mkdir(mode=0o700)
-    executable = private / "podman"
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, pathlib, sys\n"
-        "root = pathlib.Path(__file__).parent\n"
-        "with (root / 'calls.jsonl').open('a') as stream:\n"
-        " stream.write(json.dumps({'argv':sys.argv[1:],'env':dict(os.environ)})+'\\n')\n"
-        "args=sys.argv[1:]\n"
-        "if 'create' in args: print('b'*64)\n"
-        "elif 'inspect' in args: print(json.dumps([{'Id':'b'*64}]))\n"
-        "elif 'exists' in args: sys.exit(int((root / 'exists-code').read_text()))\n"
-        "elif 'start' in args: sys.stdout.write(sys.stdin.readline()); sys.stdout.flush()\n"
-    )
-    executable.chmod(0o700)
-    (private / "exists-code").write_text("0")
-    home = private / "home"
-    home.mkdir(mode=0o700)
-    with socket.socket(socket.AF_UNIX) as connection:
-        socket_path = private / "engine.sock"
-        connection.bind(str(socket_path))
-        socket_path.chmod(0o600)
-        monkeypatch.setenv("CONTAINER_HOST", "unix:///untrusted.sock")
-        monkeypatch.setenv("AGAMEMNON_API_KEY", "synthetic-only")
-        monkeypatch.setenv("HTTP_PROXY", "http://synthetic.invalid")
-        engine = fleet_podman.PodmanEngine(executable, socket_path, home)
-        yield engine, private
-        engine.close()
+    with tempfile.TemporaryDirectory(prefix="hephaestus-podman-", dir="/tmp") as directory:
+        private = Path(directory) / "engine"
+        private.mkdir(mode=0o700)
+        executable = private / "podman"
+        executable.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "root = pathlib.Path(__file__).parent\n"
+            "with (root / 'calls.jsonl').open('a') as stream:\n"
+            " stream.write(json.dumps({'argv':sys.argv[1:],'env':dict(os.environ)})+'\\n')\n"
+            "args=sys.argv[1:]\n"
+            "if 'create' in args: print('b'*64)\n"
+            "elif 'inspect' in args: print(json.dumps([{'Id':'b'*64}]))\n"
+            "elif 'exists' in args: sys.exit(int((root / 'exists-code').read_text()))\n"
+            "elif 'start' in args: sys.stdout.write(sys.stdin.readline()); sys.stdout.flush()\n"
+        )
+        executable.chmod(0o700)
+        (private / "exists-code").write_text("0")
+        home = private / "home"
+        home.mkdir(mode=0o700)
+        with socket.socket(socket.AF_UNIX) as connection:
+            socket_path = private / "engine.sock"
+            connection.bind(str(socket_path))
+            socket_path.chmod(0o600)
+            monkeypatch.setenv("CONTAINER_HOST", "unix:///untrusted.sock")
+            monkeypatch.setenv("AGAMEMNON_API_KEY", "synthetic-only")
+            monkeypatch.setenv("HTTP_PROXY", "http://synthetic.invalid")
+            engine = fleet_podman.PodmanEngine(executable, socket_path, home)
+            yield engine, private
+            engine.close()
 
 
 def test_explicit_engine_context_and_finite_container_environment(engine_process, tmp_path):
