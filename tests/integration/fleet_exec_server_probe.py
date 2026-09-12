@@ -16,6 +16,8 @@ import time
 import uuid
 from pathlib import Path
 
+from hephaestus.automation.fleet_provider import read_provider_version
+
 
 class ProbeConnection:
     """Exchange bounded JSON lines with one contained exec-server process."""
@@ -253,16 +255,10 @@ def run_probe(executable: Path, workspace: Path, forbidden: list[Path]) -> dict:
             "serverStderr": connection.diagnostics,
             "authorizesAdmission": False,
         }
-    version = (
-        subprocess.run(
-            [str(executable), "--version"],
-            capture_output=True,
-            timeout=5,
-            check=True,
-            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
-        )
-        .stdout.decode()
-        .strip()
+    version = read_provider_version(
+        (str(executable),),
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        timeout=5,
     )
     return {
         "schema": "hi/fleet/exec-server-probe/v1",

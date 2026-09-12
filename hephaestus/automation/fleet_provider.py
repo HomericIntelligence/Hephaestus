@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.codex_isolation import CODEX_VERSION_OUTPUT
+from hephaestus.agents.pi_plugins import run_bounded_command
 from hephaestus.automation.fleet_isolation import provider_environment
 
 LIVE_ACTIVITY_METHODS = frozenset(
@@ -38,6 +39,21 @@ class ProviderError(RuntimeError):
         """Keep optional RPC diagnostics private while the public message stays bounded."""
         super().__init__(code)
         self.rpc_error = rpc_error
+
+
+def read_provider_version(command: tuple[str, ...], *, env: dict[str, str], timeout: float) -> str:
+    """Return the pinned provider version through a bounded process boundary."""
+    result = run_bounded_command((*command, "--version"), env=env, timeout=timeout)
+    if result.timed_out:
+        raise ProviderError("provider_version_timeout")
+    if result.output_overflow:
+        raise ProviderError("provider_version_response_limit")
+    if result.returncode != 0:
+        raise ProviderError("provider_version_command_failed")
+    version = result.stdout.strip()
+    if version != CODEX_VERSION_OUTPUT:
+        raise ProviderError("provider_version_mismatch")
+    return version
 
 
 class CodexAppServer:
@@ -73,15 +89,7 @@ class CodexAppServer:
             raise RuntimeError("another authentication owner is active") from error
         self._owner_fd = owner_fd
         env = provider_environment(self.codex_home)
-        version = subprocess.run(
-            [*self.command, "--version"],
-            env=env,
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-        if version.stdout.decode().strip() != CODEX_VERSION_OUTPUT:
-            raise ProviderError("provider_version_mismatch")
+        read_provider_version(tuple(self.command), env=env, timeout=10)
         self.process = subprocess.Popen(
             [
                 *self.command,

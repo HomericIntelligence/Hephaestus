@@ -14,6 +14,7 @@ from typing import Any
 
 from hephaestus.automation.fleet_request_evidence import read_request_evidence
 from hephaestus.automation.fleet_worker import FleetWorker
+from hephaestus.cli.utils import add_json_arg, add_version_arg
 
 _MAX_MESSAGE = 1024 * 1024
 
@@ -110,6 +111,8 @@ def serve(worker: FleetWorker) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run a private worker or attach through an existing authenticated transport."""
     parser = argparse.ArgumentParser(description=__doc__)
+    add_json_arg(parser)
+    add_version_arg(parser)
     subcommands = parser.add_subparsers(dest="operation", required=True)
     serving = subcommands.add_parser("serve")
     for name in ("state-dir", "workspace-root", "codex-home"):
@@ -129,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.operation == "serve":
         options = vars(args).copy()
         options.pop("operation")
+        options.pop("json")
         options["provider_command"] = [options.pop("codex_bin")]
         worker = FleetWorker(**options)
         try:
