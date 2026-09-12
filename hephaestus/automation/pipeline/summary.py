@@ -19,6 +19,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from hephaestus.automation.github_api.diff import normalize_review_finding_compacted_outcomes
 from hephaestus.automation.pipeline.work_item import ItemKind, PreservedWorktree, WorkItem
 from hephaestus.cli.utils import emit_json_status
 
@@ -86,6 +87,15 @@ def _review_finding_outcomes(item: WorkItem) -> Counter[str]:
             continue
         seen.add(finding_id)
         outcomes[status] += 1
+    try:
+        compacted = normalize_review_finding_compacted_outcomes(
+            item.payload.get("review_finding_compacted_outcomes"),
+            retained_finding_ids=seen,
+        )
+    except ValueError:
+        return outcomes
+    counts = compacted["counts"]
+    outcomes.update({outcome: count for outcome, count in counts.items() if count})
     return outcomes
 
 

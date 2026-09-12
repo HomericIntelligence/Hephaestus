@@ -1393,11 +1393,26 @@ Architectural contract:
 - The exact-head finding journal is durable before an inline review write. Its
   first state does not claim that an unconfirmed inline finding is published.
   A confirmed review write promotes that finding to the published state. The
-  journal has bounded record and aggregate sizes. Restart recovery and cleanup
-  reject malformed or ambiguous actor-owned journals. Terminal aggregates count
-  all finding outcomes before the coordinator removes old item details. The
-  diagnostic JSONL stream records each finding ID, outcome, and anchor before
-  that removal. It does not record the finding body or evidence, and it is not
+  journal keeps a bounded set of full records. It compacts the oldest terminal
+  records into bounded identities and exact outcome counts when this set is
+  full. A compact identity keeps the first source head, outcome, and blocking
+  class. A repeated finding keeps this first-source value. A separate optional
+  publication head binds a pending write to the head that owns that write.
+  Legacy records use the source head for both values. Before a broad review,
+  the host reserves 64 identities, 24,000 bytes
+  of new record data, and 39,000 characters in public output for that review. It
+  includes the compact envelope in this capacity check. Before another broad
+  review, the host uses a publication-only operation to reconcile a
+  current-head pending record before it routes existing threads. It promotes a
+  visible actor-owned thread or retries the saved exact anchor if the thread is
+  absent. This operation does not read or change implementation-response
+  receipts. Normal response validation resumes after publication recovery. The
+  host removes old-head pending records from the effective history.
+  Restart recovery and cleanup reject malformed or ambiguous actor-owned
+  journals. Terminal aggregates count all retained and compacted outcomes before
+  the coordinator removes old item details. The diagnostic JSONL stream records
+  anchors for full records. It records the bounded identity fields for compacted
+  records. It does not record the finding body or evidence, and it is not
   restart authority.
 - Actionable findings use durable inline threads. Severity describes newly
   posted findings only; it never makes an existing unresolved thread advisory.

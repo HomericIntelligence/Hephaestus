@@ -5,11 +5,15 @@ from __future__ import annotations
 import base64
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from html import escape
 
 from hephaestus.automation.github_api.diff import (
+    empty_review_finding_compacted_outcomes,
+    normalize_review_finding_collection,
     normalize_review_finding_records as normalize_review_finding_records,
+    review_finding_collection_payload,
 )
 from hephaestus.automation.review_audit import (
     MAX_RAW_FEEDBACK_CHARS,
@@ -48,6 +52,9 @@ class PendingImplementationGoAudit:
     head_sha: str
     audit: ReviewAudit
     finding_records: tuple[dict[str, object], ...] = ()
+    compacted_outcomes: Mapping[str, object] = field(
+        default_factory=empty_review_finding_compacted_outcomes
+    )
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,9 @@ class PendingReviewFindingJournal:
     pr_number: int
     head_sha: str
     finding_records: tuple[dict[str, object], ...]
+    compacted_outcomes: Mapping[str, object] = field(
+        default_factory=empty_review_finding_compacted_outcomes
+    )
 
 
 def _full_sha(value: object) -> bool:
@@ -66,15 +76,27 @@ def _full_sha(value: object) -> bool:
 
 
 def render_review_finding_journal(
-    pr_number: int, head_sha: str, records: object
+    pr_number: int,
+    head_sha: str,
+    records: object,
+    *,
+    compacted_outcomes: object = None,
 ) -> tuple[str, str]:
     """Render one versioned exact-head finding journal."""
     if pr_number <= 0 or not _full_sha(head_sha):
         raise ValueError("review finding journal identity is invalid")
-    normalized = normalize_review_finding_records(records)
+    normalized, compacted = normalize_review_finding_collection(
+        records,
+        compacted_outcomes=compacted_outcomes,
+    )
     marker = f"<!-- hephaestus-review-findings:pr={pr_number}:head={head_sha} -->"
     payload = json.dumps(
-        {"format": 1, "pr_number": pr_number, "head_sha": head_sha, "findings": normalized},
+        {
+            "format": 2,
+            "pr_number": pr_number,
+            "head_sha": head_sha,
+            "collection": review_finding_collection_payload(normalized, compacted),
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -101,14 +123,27 @@ def parse_review_finding_journal(body: str) -> PendingReviewFindingJournal | Non
     head_sha = match.group("head")
     if (
         not isinstance(payload, dict)
-        or set(payload) != {"format", "pr_number", "head_sha", "findings"}
-        or payload.get("format") != 1
         or payload.get("pr_number") != pr_number
         or payload.get("head_sha") != head_sha
     ):
         raise ValueError("review finding journal payload is invalid")
-    records = normalize_review_finding_records(payload.get("findings"))
-    return PendingReviewFindingJournal(pr_number, head_sha, records)
+    if payload.get("format") == 1 and set(payload) == {
+        "format",
+        "pr_number",
+        "head_sha",
+        "findings",
+    }:
+        records, compacted = normalize_review_finding_collection(payload.get("findings"))
+    elif payload.get("format") == 2 and set(payload) == {
+        "format",
+        "pr_number",
+        "head_sha",
+        "collection",
+    }:
+        records, compacted = normalize_review_finding_collection(payload.get("collection"))
+    else:
+        raise ValueError("review finding journal payload is invalid")
+    return PendingReviewFindingJournal(pr_number, head_sha, records, compacted)
 
 
 class LegacyPendingImplementationGoAuditError(ValueError):
@@ -127,6 +162,7 @@ def render_pending_implementation_go_audit(
     audit: ReviewAudit,
     *,
     finding_records: object = (),
+    compacted_outcomes: object = None,
 ) -> tuple[str, str]:
     """Render an actor-owned machine journal before the GO label write."""
     if (
@@ -140,17 +176,23 @@ def render_pending_implementation_go_audit(
     if not is_clean_go_review(audit) or audit.grade is None:
         raise ValueError("pending implementation-go audit must have a clean GO verdict")
     marker = f"<!-- hephaestus-implementation-go-audit-pending:pr={pr_number}:head={head_sha} -->"
-    normalized_records = normalize_review_finding_records(finding_records)
+    normalized_records, compacted = normalize_review_finding_collection(
+        finding_records,
+        compacted_outcomes=compacted_outcomes,
+    )
     payload = json.dumps(
         {
-            "format": 3,
+            "format": 4,
             "pr_number": pr_number,
             "head_sha": head_sha,
             "grade": audit.grade,
             "verdict": audit.verdict,
             "summary": audit.summary,
             "raw_feedback": audit.raw_feedback,
-            "finding_records": normalized_records,
+            "finding_collection": review_finding_collection_payload(
+                normalized_records,
+                compacted,
+            ),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -162,7 +204,9 @@ def render_pending_implementation_go_audit(
     return marker, body
 
 
-def parse_pending_implementation_go_audit(body: str) -> PendingImplementationGoAudit | None:
+def parse_pending_implementation_go_audit(
+    body: str,
+) -> PendingImplementationGoAudit | None:
     """Parse one exact machine journal, rejecting malformed owned records."""
     marker, separator, payload_line = body.partition("\n")
     match = _PENDING_MARKER_RE.fullmatch(marker)
@@ -178,8 +222,26 @@ def parse_pending_implementation_go_audit(body: str) -> PendingImplementationGoA
     head_sha = match.group("head")
     if isinstance(payload, dict) and payload.get("format") == 1:
         raise LegacyPendingImplementationGoAuditError(pr_number, head_sha)
-    if not isinstance(payload, dict) or payload.get("format") not in {2, 3}:
+    if not isinstance(payload, dict) or payload.get("format") not in {2, 3, 4}:
         raise ValueError("pending implementation-go audit journal format is invalid")
+    common_keys = {
+        "format",
+        "pr_number",
+        "head_sha",
+        "grade",
+        "verdict",
+        "summary",
+        "raw_feedback",
+    }
+    expected_keys = (
+        common_keys | {"finding_collection"}
+        if payload.get("format") == 4
+        else common_keys | {"finding_records"}
+        if payload.get("format") == 3
+        else common_keys
+    )
+    if set(payload) != expected_keys:
+        raise ValueError("pending implementation-go audit journal payload is invalid")
     grade = payload.get("grade")
     verdict = payload.get("verdict")
     summary = payload.get("summary")
@@ -196,11 +258,16 @@ def parse_pending_implementation_go_audit(body: str) -> PendingImplementationGoA
         or len(raw_feedback) > MAX_RAW_FEEDBACK_CHARS
     ):
         raise ValueError("pending implementation-go audit journal payload is invalid")
-    finding_records = (
-        normalize_review_finding_records(payload.get("finding_records"))
-        if payload.get("format") == 3
-        else ()
-    )
+    if payload.get("format") == 4:
+        finding_records, compacted = normalize_review_finding_collection(
+            payload.get("finding_collection")
+        )
+    elif payload.get("format") == 3:
+        finding_records, compacted = normalize_review_finding_collection(
+            payload.get("finding_records")
+        )
+    else:
+        finding_records, compacted = (), empty_review_finding_compacted_outcomes()
     return PendingImplementationGoAudit(
         pr_number=pr_number,
         head_sha=head_sha,
@@ -213,13 +280,18 @@ def parse_pending_implementation_go_audit(body: str) -> PendingImplementationGoA
             verdict="GO",
         ),
         finding_records=finding_records,
+        compacted_outcomes=compacted,
     )
 
 
-def parse_published_implementation_go_audit(body: str) -> PendingImplementationGoAudit | None:
+def parse_published_implementation_go_audit(
+    body: str,
+) -> PendingImplementationGoAudit | None:
     """Recover the bounded audit from its deterministic public rendering."""
     base_body = body
     finding_records: tuple[dict[str, object], ...] = ()
+    compacted_outcomes = empty_review_finding_compacted_outcomes()
+    legacy_public_payload = False
     section = "\n\n## Retained review findings\n"
     if section in body:
         base_body, _separator, suffix = body.partition(section)
@@ -232,7 +304,11 @@ def parse_published_implementation_go_audit(body: str) -> PendingImplementationG
         encoded = payload_line.removeprefix(_PUBLIC_FINDING_PAYLOAD_PREFIX).removesuffix(" -->")
         try:
             decoded = base64.urlsafe_b64decode(encoded.encode("ascii"))
-            finding_records = normalize_review_finding_records(json.loads(decoded))
+            decoded_payload = json.loads(decoded)
+            legacy_public_payload = isinstance(decoded_payload, list)
+            finding_records, compacted_outcomes = normalize_review_finding_collection(
+                decoded_payload
+            )
         except (ValueError, UnicodeError, json.JSONDecodeError):
             return None
     match = _PUBLIC_AUDIT_RE.fullmatch(base_body)
@@ -250,18 +326,31 @@ def parse_published_implementation_go_audit(body: str) -> PendingImplementationG
             verdict="GO",
         ),
         finding_records=finding_records,
+        compacted_outcomes=compacted_outcomes,
     )
-    if finding_records:
+    if finding_records or compacted_outcomes["identities"]:
+        counts = compacted_outcomes["counts"]
         lines = ["## Retained review findings"]
+        if not legacy_public_payload and compacted_outcomes["identities"]:
+            lines.append(
+                "Earlier outcomes: "
+                f"published {counts['published']}, corrected {counts['corrected']}, "
+                f"not publishable {counts['not_publishable']}"
+            )
         for record in finding_records:
             lines.append(
                 "- "
                 f"`{record['status']}` `{record['severity']}` from "
                 f"`{record['source_head']}`: {escape(str(record['body']), quote=False)}"
             )
+        encoded_payload: object = (
+            finding_records
+            if legacy_public_payload
+            else review_finding_collection_payload(finding_records, compacted_outcomes)
+        )
         encoded = base64.urlsafe_b64encode(
             json.dumps(
-                finding_records,
+                encoded_payload,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),

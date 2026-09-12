@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Literal, cast
 
-from hephaestus.automation.github_api.diff import normalize_review_finding_records
+from hephaestus.automation.github_api.diff import (
+    normalize_review_finding_collection,
+    review_finding_collection_payload,
+)
 
 if TYPE_CHECKING:
     from hephaestus.automation.github_api.diff import ReviewAnchorCorrection
@@ -406,6 +409,7 @@ def render_implementation_go_audit(
     pr_number: int,
     head_sha: str,
     finding_records: object = (),
+    compacted_outcomes: object = None,
 ) -> tuple[str, str]:
     """Render one public, idempotent audit comment for an approved PR head."""
     if not is_clean_go_review(audit):
@@ -416,11 +420,21 @@ def render_implementation_go_audit(
         raise ValueError("head_sha must be a full commit SHA")
     marker = f"<!-- hephaestus-implementation-go-audit:pr={pr_number}:head={head_sha} -->"
     body = f"{marker}\n\n{render_review_audit(audit)}\n\nReviewed head: `{head_sha}`."
-    if finding_records:
+    records, compacted = normalize_review_finding_collection(
+        finding_records,
+        compacted_outcomes=compacted_outcomes,
+    )
+    if records or compacted["identities"]:
         import base64
 
-        records = normalize_review_finding_records(finding_records)
+        counts = compacted["counts"]
         lines = ["## Retained review findings"]
+        if compacted["identities"]:
+            lines.append(
+                "Earlier outcomes: "
+                f"published {counts['published']}, corrected {counts['corrected']}, "
+                f"not publishable {counts['not_publishable']}"
+            )
         for record in records:
             lines.append(
                 "- "
@@ -428,9 +442,12 @@ def render_implementation_go_audit(
                 f"`{record['source_head']}`: {escape(str(record['body']), quote=False)}"
             )
         encoded = base64.urlsafe_b64encode(
-            json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
+            json.dumps(
+                review_finding_collection_payload(records, compacted),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
         ).decode("ascii")
         body = (
             f"{body}\n\n" + "\n".join(lines) + "\n\n"

@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
 
 from hephaestus.automation import implementation_go_audit_receipt as audit_receipts
+from hephaestus.automation.github_api.diff import (
+    empty_review_finding_compacted_outcomes,
+    normalize_review_finding_collection,
+    normalize_review_finding_records,
+    review_finding_collection_payload,
+)
 from hephaestus.automation.implementation_go_audit_receipt import (
     LegacyPendingImplementationGoAuditError,
     PendingImplementationGoAudit,
@@ -57,6 +64,176 @@ def test_review_finding_journal_round_trip_is_exact_head_and_versioned() -> None
     assert journal.pr_number == 7
     assert journal.head_sha == "a" * 40
     assert journal.finding_records == records
+
+
+def test_review_finding_journal_preserves_separate_publication_head() -> None:
+    """The journal keeps first-source provenance and pending publication identity."""
+    record = {**_finding_record(status="published"), "publication_head": "b" * 40}
+
+    _marker, body = audit_receipts.render_review_finding_journal(7, "b" * 40, (record,))
+    journal = audit_receipts.parse_review_finding_journal(body)
+    payload = json.loads(body.split("\n", 1)[1].removeprefix("<!-- ").removesuffix(" -->"))
+
+    assert journal is not None
+    assert journal.finding_records == (record,)
+    assert payload["collection"]["format"] == 2
+
+
+def test_review_finding_journal_round_trip_preserves_compacted_outcomes() -> None:
+    """The versioned journal preserves bounded identities for compacted outcomes."""
+    compacted = {
+        "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
+        "identities": [["e" * 64, "9" * 40, "p", "a"]],
+    }
+
+    _marker, body = audit_receipts.render_review_finding_journal(
+        7,
+        "a" * 40,
+        (_finding_record(status="corrected"),),
+        compacted_outcomes=compacted,
+    )
+    journal = audit_receipts.parse_review_finding_journal(body)
+
+    assert journal is not None
+    assert journal.compacted_outcomes == compacted
+
+
+def test_pending_and_public_audits_preserve_compacted_outcomes() -> None:
+    """GO audit recovery keeps compacted identities through public publication."""
+    records = (_finding_record(status="corrected"),)
+    compacted = {
+        "counts": {"corrected": 0, "not_publishable": 1, "published": 0},
+        "identities": [["e" * 64, "9" * 40, "n", "a"]],
+    }
+
+    _pending_marker, pending_body = render_pending_implementation_go_audit(
+        7,
+        "b" * 40,
+        _clean_audit(),
+        finding_records=records,
+        compacted_outcomes=compacted,
+    )
+    pending = parse_pending_implementation_go_audit(pending_body)
+    _public_marker, public_body = render_implementation_go_audit(
+        _clean_audit(),
+        pr_number=7,
+        head_sha="b" * 40,
+        finding_records=records,
+        compacted_outcomes=compacted,
+    )
+    public = parse_published_implementation_go_audit(public_body)
+
+    assert pending is not None
+    assert pending.compacted_outcomes == compacted
+    assert public is not None
+    assert public.compacted_outcomes == compacted
+    assert "Earlier outcomes: published 0, corrected 0, not publishable 1" in public_body
+
+
+@pytest.mark.parametrize(
+    "compacted",
+    [
+        {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 2},
+            "identities": [["e" * 64, "9" * 40, "p", "a"]],
+        },
+        {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
+            "identities": [["f" * 64, "9" * 40, "p", "a"]],
+        },
+        {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
+            "identities": [["e" * 64, "9" * 40, "pending", "a"]],
+        },
+    ],
+    ids=("count-mismatch", "retained-duplicate", "pending-identity"),
+)
+def test_review_finding_collection_rejects_invalid_compacted_state(
+    compacted: dict[str, object],
+) -> None:
+    """A journal rejects inexact, duplicate, or pending compact identities."""
+    with pytest.raises(ValueError, match="review finding"):
+        audit_receipts.render_review_finding_journal(
+            7,
+            "a" * 40,
+            (_finding_record(status="corrected"),),
+            compacted_outcomes=compacted,
+        )
+
+
+def test_legacy_review_finding_payloads_normalize_without_compacted_state() -> None:
+    """Old journal and public payloads remain valid with empty compacted history."""
+    record = _finding_record(status="corrected")
+    journal_marker = f"<!-- hephaestus-review-findings:pr=7:head={'a' * 40} -->"
+    journal_payload = json.dumps(
+        {
+            "format": 1,
+            "pr_number": 7,
+            "head_sha": "a" * 40,
+            "findings": [record],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    journal = audit_receipts.parse_review_finding_journal(
+        f"{journal_marker}\n<!-- {journal_payload} -->"
+    )
+    _base_marker, base_body = render_implementation_go_audit(
+        _clean_audit(), pr_number=7, head_sha="a" * 40
+    )
+    encoded = base64.urlsafe_b64encode(
+        json.dumps([record], sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    public_body = (
+        f"{base_body}\n\n## Retained review findings\n"
+        f"- `corrected` `minor` from `{'a' * 40}`: Preserve this advisory finding.\n\n"
+        f"<!-- hephaestus-review-finding-records:{encoded} -->"
+    )
+    public = parse_published_implementation_go_audit(public_body)
+
+    assert journal is not None
+    assert journal.compacted_outcomes == {
+        "counts": {"corrected": 0, "not_publishable": 0, "published": 0},
+        "identities": [],
+    }
+    assert public is not None
+    assert public.compacted_outcomes == journal.compacted_outcomes
+
+
+def test_legacy_list_keeps_its_original_public_rendering_boundary() -> None:
+    """A valid legacy list remains readable when envelope metadata would exceed its limit."""
+    low = 1
+    high = 16_384
+    largest_legacy: dict[str, object] | None = None
+    while low <= high:
+        size = (low + high) // 2
+        candidate = {
+            **_finding_record(status="corrected"),
+            "body": "<" * size,
+            "evidence": "e" * 1_000,
+        }
+        try:
+            normalize_review_finding_records([candidate])
+        except ValueError:
+            high = size - 1
+        else:
+            largest_legacy = candidate
+            low = size + 1
+
+    assert largest_legacy is not None
+    records, compacted = normalize_review_finding_collection([largest_legacy])
+    assert records == (largest_legacy,)
+    assert compacted == empty_review_finding_compacted_outcomes()
+    with pytest.raises(ValueError, match="public rendering"):
+        review_finding_collection_payload([largest_legacy])
+    compact_payload = review_finding_collection_payload(
+        [],
+        {
+            "counts": {"corrected": 1, "not_publishable": 0, "published": 0},
+            "identities": [["f" * 64, "a" * 40, "c", "a"]],
+        },
+    )
+    assert compact_payload["findings"] == []
 
 
 def test_review_finding_journal_rejects_oversized_or_unknown_records() -> None:
@@ -337,7 +514,7 @@ def test_pending_parser_rejects_adjacent_overlong_identity(head_sha: str) -> Non
     [
         [],
         {},
-        {"format": 4},
+        {"format": 5},
         {
             "format": 2,
             "pr_number": 8,
@@ -438,7 +615,7 @@ def test_pending_parser_rejects_adjacent_overlong_identity(head_sha: str) -> Non
 def test_pending_parser_rejects_invalid_payload_fields(payload: object) -> None:
     """Each identity, verdict, and size field is validated before recovery."""
     message = (
-        "journal format is invalid" if payload in ([], {}, {"format": 4}) else "payload is invalid"
+        "journal format is invalid" if payload in ([], {}, {"format": 5}) else "payload is invalid"
     )
     with pytest.raises(ValueError, match=message):
         parse_pending_implementation_go_audit(_pending_body_with_payload(payload))

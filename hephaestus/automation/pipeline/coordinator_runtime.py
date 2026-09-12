@@ -17,8 +17,11 @@ from hephaestus.automation.direct_review_recovery import (
     is_inspection_only_detached_push_failure,
     list_direct_review_recovery_paths,
 )
-from hephaestus.automation.implementation_go_audit_receipt import (
-    normalize_review_finding_records,
+from hephaestus.automation.github_api.diff import (
+    compact_terminal_review_finding_collection,
+    empty_review_finding_compacted_outcomes,
+    normalize_review_finding_collection,
+    normalize_review_finding_compacted_outcomes,
 )
 from hephaestus.automation.issue_waves import IssueWaveError, IssueWaveStore
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
@@ -145,10 +148,27 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _record_review_finding_events(self, item: ct.WorkItem) -> None:
         """Stream bounded finding identities without review text."""
+        raw_records = item.payload.get("review_finding_records", [])
+        raw_compacted = item.payload.get(
+            "review_finding_compacted_outcomes",
+            empty_review_finding_compacted_outcomes(),
+        )
         try:
-            records = normalize_review_finding_records(
-                item.payload.get("review_finding_records", [])
+            validated_compacted = normalize_review_finding_compacted_outcomes(raw_compacted)
+            has_compacted_history = bool(validated_compacted["identities"])
+            legacy_records, legacy_compacted = normalize_review_finding_collection(
+                raw_records,
+                compacted_outcomes=validated_compacted if has_compacted_history else None,
             )
+            if not has_compacted_history and any(
+                record["status"] == "pending" for record in legacy_records
+            ):
+                records, compacted = legacy_records, legacy_compacted
+            else:
+                records, compacted = compact_terminal_review_finding_collection(
+                    legacy_records,
+                    validated_compacted,
+                )
         except ValueError:
             logger.warning(
                 "terminal:%s: invalid review finding records; "
@@ -171,6 +191,23 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     "original_anchor": record["original_anchor"],
                     "final_anchor": record["final_anchor"],
                     "reason": record["reason"],
+                },
+            )
+        for identity in compacted["identities"]:
+            self._record_event(
+                "review_finding_compacted_outcome",
+                {
+                    "repo": item.repo,
+                    "issue": item.issue,
+                    "pr": item.pr,
+                    "finding_id": identity[0],
+                    "source_head": identity[1],
+                    "outcome": {
+                        "c": "corrected",
+                        "n": "not_publishable",
+                        "p": "published",
+                    }[identity[2]],
+                    "blocking": identity[3] == "b",
                 },
             )
 

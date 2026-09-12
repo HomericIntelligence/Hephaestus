@@ -2,8 +2,11 @@
 
 # This mixin consumes the shared PR-review stage namespace by design.
 # ruff: noqa: F403, F405
-from hephaestus.automation.implementation_go_audit_receipt import (
-    normalize_review_finding_records,
+from hephaestus.automation.github_api.diff import (
+    ReviewFindingCompactedOutcomes,
+    empty_review_finding_compacted_outcomes,
+    normalize_review_finding_collection,
+    review_finding_collection_payload,
 )
 from hephaestus.automation.review_audit import is_clean_go_review
 
@@ -19,8 +22,15 @@ class PrReviewAudit:
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = item.payload.get("pending_implementation_go_audit_head")
         finding_records = item.payload.get("pending_implementation_go_audit_findings", [])
+        compacted_outcomes = item.payload.get(
+            "pending_implementation_go_audit_compacted_outcomes",
+            empty_review_finding_compacted_outcomes(),
+        )
         try:
-            normalize_review_finding_records(finding_records)
+            normalize_review_finding_collection(
+                finding_records,
+                compacted_outcomes=compacted_outcomes,
+            )
             records_are_valid = True
         except ValueError:
             records_are_valid = False
@@ -38,6 +48,7 @@ class PrReviewAudit:
             "pending_implementation_go_audit",
             "pending_implementation_go_audit_head",
             "pending_implementation_go_audit_findings",
+            "pending_implementation_go_audit_compacted_outcomes",
             "pending_implementation_go_label_confirmed",
             "implementation_go_audit_retries",
         ):
@@ -63,12 +74,17 @@ class PrReviewAudit:
         item.payload["pending_implementation_go_audit"] = audit
         item.payload["pending_implementation_go_audit_head"] = head_sha
         try:
+            records, compacted = normalize_review_finding_collection(
+                item.payload.get("review_finding_records", []),
+                compacted_outcomes=item.payload.get(
+                    "review_finding_compacted_outcomes",
+                    empty_review_finding_compacted_outcomes(),
+                ),
+            )
             item.payload["pending_implementation_go_audit_findings"] = [
-                dict(record)
-                for record in normalize_review_finding_records(
-                    item.payload.get("review_finding_records", [])
-                )
+                dict(record) for record in records
             ]
+            item.payload["pending_implementation_go_audit_compacted_outcomes"] = compacted
         except ValueError:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         return self._go_audit_receipt(item, ctx)
@@ -86,6 +102,27 @@ class PrReviewAudit:
         item.payload["retry_delay_s"] = float(2 ** (retries - 1))
         return StageOutcome(Disposition.RETRY, reason)
 
+    @staticmethod
+    def _restore_pending_go_finding_history(
+        item: WorkItem,
+    ) -> tuple[list[dict[str, object]], ReviewFindingCompactedOutcomes]:
+        """Restore normalized pending audit history to the terminal payload."""
+        records, compacted = normalize_review_finding_collection(
+            item.payload.get("pending_implementation_go_audit_findings", []),
+            compacted_outcomes=item.payload.get(
+                "pending_implementation_go_audit_compacted_outcomes",
+                empty_review_finding_compacted_outcomes(),
+            ),
+        )
+        restored_records = [dict(record) for record in records]
+        item.payload["review_finding_records"] = restored_records
+        item.payload["review_finding_compacted_outcomes"] = compacted
+        item.payload["carried_review_finding_records"] = [
+            dict(record) for record in restored_records
+        ]
+        item.payload["carried_review_finding_compacted_outcomes"] = compacted
+        return restored_records, compacted
+
     def _go_audit_receipt(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Persist the exact-head audit before applying the GO label."""
         if recovery := self._require_current_audit(item):
@@ -94,15 +131,20 @@ class PrReviewAudit:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = str(item.payload.get("pending_implementation_go_audit_head") or "")
-        finding_records = item.payload.get("pending_implementation_go_audit_findings", [])
         if not is_clean_go_review(audit) or not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         try:
+            finding_records, compacted_outcomes = self._restore_pending_go_finding_history(item)
+            history = (
+                review_finding_collection_payload(finding_records, compacted_outcomes)
+                if compacted_outcomes.get("identities")
+                else finding_records
+            )
             ctx.github.persist_pending_implementation_go_audit(
                 item.pr,
                 head_sha,
                 audit,
-                finding_records=finding_records,
+                finding_records=history,
             )
         except Exception as error:
             logger.warning(
@@ -123,6 +165,7 @@ class PrReviewAudit:
             item.payload.pop("pending_implementation_go_audit", None)
             item.payload.pop("pending_implementation_go_audit_head", None)
             item.payload.pop("pending_implementation_go_audit_findings", None)
+            item.payload.pop("pending_implementation_go_audit_compacted_outcomes", None)
             item.payload.pop("pending_implementation_go_label_confirmed", None)
         return outcome  # type: ignore[no-any-return]
 
@@ -134,15 +177,20 @@ class PrReviewAudit:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = str(item.payload.get("pending_implementation_go_audit_head") or "")
-        finding_records = item.payload.get("pending_implementation_go_audit_findings", [])
         if not is_clean_go_review(audit) or not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         try:
+            finding_records, compacted_outcomes = self._restore_pending_go_finding_history(item)
+            history = (
+                review_finding_collection_payload(finding_records, compacted_outcomes)
+                if compacted_outcomes.get("identities")
+                else finding_records
+            )
             ctx.github.publish_implementation_go_audit(
                 item.pr,
                 head_sha,
                 audit,
-                finding_records=finding_records,
+                finding_records=history,
             )
             ctx.github.clear_review_finding_journal(item.pr, head_sha)
             ctx.github.clear_pending_implementation_go_audit(item.pr, head_sha)
@@ -160,6 +208,7 @@ class PrReviewAudit:
         item.payload.pop("pending_implementation_go_audit", None)
         item.payload.pop("pending_implementation_go_audit_head", None)
         item.payload.pop("pending_implementation_go_audit_findings", None)
+        item.payload.pop("pending_implementation_go_audit_compacted_outcomes", None)
         return self._cleanup_review_worktree_then(  # type: ignore[attr-defined,no-any-return]
             item,
             StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending"),
