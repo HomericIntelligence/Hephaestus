@@ -3617,10 +3617,47 @@ class TestWorkerPoolSubmitComplete:
         assert f'  (literal "{Path("/tmp").resolve()}")' not in profile
         assert f'(allow file-read-metadata (literal "{Path("/tmp").resolve()}"))' in profile
         assert f'(allow file-read-metadata (path-ancestors "{source.resolve()}"))' in profile
+        assert f'(allow file-read-data (path-ancestors "{scratch.resolve()}"))' in profile
         assert source_entry in profile
         assert f"(allow file-write* {source_entry})" not in profile
         assert f"(allow file-write* {scratch_entry})" in profile
         assert f"(allow file-write* {pi_smoke_logs_entry})" in profile
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
+    def test_immutable_host_allows_descriptor_walk_to_scratch(
+        self, pool: WorkerPool
+    ) -> None:
+        """A secure path walker can open the exact scratch ancestor chain."""
+        checkout = Path.cwd().resolve()
+        head = _git(checkout, "rev-parse", "HEAD")
+        checkout_before = _immutable_runner_checkout_state(checkout)
+        denied_checkout_file = checkout / "pyproject.toml"
+        program = (
+            "import os, pytest; from pathlib import Path; "
+            "from hephaestus.automation.pipeline.codex_worktree_boundary "
+            "import _open_no_follow_path; "
+            "target = Path(os.environ['TMPDIR']) / 'descriptor-walk'; "
+            "target.mkdir(); "
+            "descriptor = _open_no_follow_path(target, directory=True); "
+            "os.close(descriptor); "
+            f"denied = Path({str(denied_checkout_file)!r}); "
+            "exec(\"with pytest.raises(PermissionError):\\n    denied.read_text()\")"
+        )
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=checkout,
+            argv=("uv", "run", "python", "-c", program),
+            timeout_s=60,
+            expected_head_sha=head,
+            immutable_source=True,
+        )
+
+        result = pool._run_build_test(job)
+
+        assert result.ok is True, (result.error, result.stdout_tail, result.stderr_tail)
+        assert result.value["head_sha"] == head
+        assert result.value["immutable_source"] is True
+        assert _immutable_runner_checkout_state(checkout) == checkout_before
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
     def test_immutable_trusted_runner_preserves_native_fallback(
