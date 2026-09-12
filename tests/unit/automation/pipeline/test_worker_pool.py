@@ -3624,9 +3624,7 @@ class TestWorkerPoolSubmitComplete:
         assert f"(allow file-write* {pi_smoke_logs_entry})" in profile
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
-    def test_immutable_host_allows_descriptor_walk_to_scratch(
-        self, pool: WorkerPool
-    ) -> None:
+    def test_immutable_host_allows_descriptor_walk_to_scratch(self, pool: WorkerPool) -> None:
         """A secure path walker can open the exact scratch ancestor chain."""
         checkout = Path.cwd().resolve()
         head = _git(checkout, "rev-parse", "HEAD")
@@ -3641,7 +3639,7 @@ class TestWorkerPoolSubmitComplete:
             "descriptor = _open_no_follow_path(target, directory=True); "
             "os.close(descriptor); "
             f"denied = Path({str(denied_checkout_file)!r}); "
-            "exec(\"with pytest.raises(PermissionError):\\n    denied.read_text()\")"
+            'exec("with pytest.raises(PermissionError):\\n    denied.read_text()")'
         )
         job = BuildTestJob(
             repo="test/repo",
