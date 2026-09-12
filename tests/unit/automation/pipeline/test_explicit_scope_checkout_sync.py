@@ -886,7 +886,7 @@ def test_direct_scope_repository_contention_exhaustion_is_repository_busy(
     monkeypatch.setattr(coordinator, "_timer_park", park_and_advance)
 
     assert coordinator.run() == 1
-    assert timer_delays == [5.0]
+    assert timer_delays == [4.75]
     assert len(coordinator.ledger) == 1
     assert coordinator.ledger[0].reason.startswith("repository_busy:")
 

@@ -360,8 +360,8 @@ class TestOnEnterAndCloneStates:
         now[0] += 5.0
         retry = stage.step(repo_item, ctx)
         assert isinstance(retry, JobRequest)
-        assert retry.job.repository_lock_wait_timeout_s == 5.0
-        assert repo_item.payload[CHECKOUT_CONTENTION_STARTED_KEY] == 100.25
+        assert retry.job.repository_lock_wait_timeout_s == 4.75
+        assert repo_item.payload[CHECKOUT_CONTENTION_STARTED_KEY] == 100.0
         assert repo_item.payload[CHECKOUT_CONTENTION_WAIT_KEY] == 0.25
 
     def test_contention_timeout_retains_structured_diagnostics(
@@ -392,7 +392,33 @@ class TestOnEnterAndCloneStates:
         assert retained["lock_path"] == diagnostic["lock_path"]
         assert retained["holder_metadata"] == {"pid": 7}
         assert retained["retry_count"] == 1
+        assert retained["first_wait_s"] == 1.5
         assert retained["cumulative_wait_s"] == 1.5
+
+    def test_contention_retains_first_wait_across_retries(
+        self, repo_item: WorkItem, repo_ctx: Any
+    ) -> None:
+        """The first lock wait remains available after a later retry."""
+        repo_item.state = "CLONE_WAIT"
+        stage = RepoStage()
+        stage.step(repo_item, repo_ctx)
+
+        stage.on_job_done(
+            repo_item,
+            JobResult(ok=False, error="lock_timeout", value={"attempt_wait_s": 1.5}),
+            repo_ctx,
+        )
+        stage.step(repo_item, repo_ctx)
+        stage.step(repo_item, repo_ctx)
+        stage.on_job_done(
+            repo_item,
+            JobResult(ok=False, error="lock_timeout", value={"attempt_wait_s": 2.0}),
+            repo_ctx,
+        )
+
+        retained = repo_item.payload[CHECKOUT_CONTENTION_RESULT_KEY]
+        assert retained["first_wait_s"] == 1.5
+        assert retained["cumulative_wait_s"] == 3.5
 
     def test_lock_contention_expiry_returns_repository_busy(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
@@ -426,9 +452,9 @@ class TestOnEnterAndCloneStates:
 
         assert isinstance(parked, StageOutcome)
         assert parked.disposition is Disposition.RETRY
-        assert repo_item.payload["retry_delay_s"] == 1.25
+        assert repo_item.payload["retry_delay_s"] == 1.0
 
-        now[0] += 1.25
+        now[0] += 1.0
         outcome = stage.step(repo_item, ctx)
 
         assert isinstance(outcome, StageOutcome)

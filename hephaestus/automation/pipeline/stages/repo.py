@@ -104,6 +104,7 @@ CHECKOUT_CONTENTION_STARTED_KEY = "checkout_contention_started_s"
 CHECKOUT_CONTENTION_ATTEMPTS_KEY = "checkout_contention_attempts"
 CHECKOUT_CONTENTION_RESULT_KEY = "checkout_contention_result"
 CHECKOUT_CONTENTION_WAIT_KEY = "checkout_contention_wait_s"
+CHECKOUT_CONTENTION_FIRST_WAIT_KEY = "checkout_contention_first_wait_s"
 CHECKOUT_CONTENTION_PENDING_KEY = "checkout_contention_pending"
 _LOCK_RESULT_FIELDS = frozenset(
     {
@@ -131,6 +132,7 @@ def _clear_checkout_contention(item: WorkItem) -> None:
         CHECKOUT_CONTENTION_ATTEMPTS_KEY,
         CHECKOUT_CONTENTION_RESULT_KEY,
         CHECKOUT_CONTENTION_WAIT_KEY,
+        CHECKOUT_CONTENTION_FIRST_WAIT_KEY,
         CHECKOUT_CONTENTION_PENDING_KEY,
         "retry_delay_s",
     ):
@@ -676,9 +678,10 @@ class RepoStage(Stage):
                 and math.isfinite(float(raw_attempt_wait))
                 else 0.0
             )
+            observed_s = ctx.now()
             item.payload.setdefault(
                 CHECKOUT_CONTENTION_STARTED_KEY,
-                ctx.now(),
+                observed_s - attempt_wait_s,
             )
             item.payload[CHECKOUT_CONTENTION_ATTEMPTS_KEY] = (
                 int(item.payload.get(CHECKOUT_CONTENTION_ATTEMPTS_KEY, 0)) + 1
@@ -691,9 +694,11 @@ class RepoStage(Stage):
             item.payload[CHECKOUT_CONTENTION_WAIT_KEY] = (
                 float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0)) + attempt_wait_s
             )
+            item.payload.setdefault(CHECKOUT_CONTENTION_FIRST_WAIT_KEY, attempt_wait_s)
             contention["cumulative_wait_s"] = float(
                 item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0)
             )
+            contention["first_wait_s"] = float(item.payload[CHECKOUT_CONTENTION_FIRST_WAIT_KEY])
             contention["retry_count"] = item.payload[CHECKOUT_CONTENTION_ATTEMPTS_KEY]
             item.payload[CHECKOUT_CONTENTION_RESULT_KEY] = contention
             item.payload[CHECKOUT_CONTENTION_PENDING_KEY] = True
