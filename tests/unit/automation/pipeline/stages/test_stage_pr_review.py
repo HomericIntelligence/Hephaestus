@@ -7308,6 +7308,70 @@ class TestAuditPublication:
         ]
         assert journal.finding_records[1]["evidence"] == "preserve this evidence"
 
+    def test_audit_anchor_correction_is_recorded_as_not_publishable(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An audit selection has no durable non-inline publication surface."""
+        invalid = {
+            "path": "a.py",
+            "line": 99,
+            "side": "RIGHT",
+            "severity": "minor",
+            "body": "invalid minor anchor",
+            "evidence": "keep the advisory evidence",
+        }
+        item = make_work_item(issue=50, pr=1001, state="VALIDATE_WAIT")
+        item.worktree = "/tmp/review-worktree"
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "pr_diff": (
+                    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+                ),
+                "review_audit": ReviewAudit(
+                    grade="C",
+                    verdict="NOGO",
+                    summary="Needs work",
+                    findings=(invalid,),
+                    raw_feedback="",
+                    valid=True,
+                ),
+                "review_threads": [invalid],
+            }
+        )
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub())
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        correction = item.payload["review_anchor_corrections"][0]
+        response = json.dumps(
+            {"corrections": [{"finding_id": correction["finding_id"], "surface": "audit"}]}
+        )
+        stage.on_job_done(item, JobResult(ok=True, value=response), ctx)
+        item.state = request.on_done_state
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="VALIDATE_WAIT")
+        assert item.payload["review_advisory_findings"] == []
+        assert item.payload["review_not_publishable_findings"] == [
+            {**invalid, "finding_id": correction["finding_id"]}
+        ]
+        assert item.payload["review_finding_records"] == [
+            {
+                "finding_id": correction["finding_id"],
+                "source_head": "a" * 40,
+                "severity": "minor",
+                "body": "invalid minor anchor",
+                "evidence": "keep the advisory evidence",
+                "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
+                "final_anchor": None,
+                "status": "not_publishable",
+                "surface": "not_publishable",
+                "reason": "line_not_in_diff",
+            }
+        ]
+
     def test_malformed_correction_does_not_start_a_second_correction(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

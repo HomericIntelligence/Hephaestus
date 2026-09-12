@@ -79,7 +79,10 @@ def render_review_finding_journal(
         sort_keys=True,
         separators=(",", ":"),
     )
-    return marker, f"{marker}\n<!-- {payload} -->"
+    body = f"{marker}\n<!-- {payload} -->"
+    if len(body) > 65_536:
+        raise ValueError("review finding journal exceeds the GitHub comment size limit")
+    return marker, body
 
 
 def parse_review_finding_journal(body: str) -> PendingReviewFindingJournal | None:
@@ -149,10 +152,14 @@ def render_pending_implementation_go_audit(
             "raw_feedback": audit.raw_feedback,
             "finding_records": normalized_records,
         },
+        ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
-    return marker, f"{marker}\n<!-- {payload} -->"
+    body = f"{marker}\n<!-- {payload} -->"
+    if len(body) > 65_536:
+        raise ValueError("pending implementation-go audit exceeds the GitHub comment size limit")
+    return marker, body
 
 
 def parse_pending_implementation_go_audit(body: str) -> PendingImplementationGoAudit | None:

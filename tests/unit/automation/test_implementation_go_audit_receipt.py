@@ -84,7 +84,7 @@ def test_pending_go_receipt_preserves_cumulative_finding_records() -> None:
 
 
 def test_public_go_audit_renders_retained_advisory_source_head() -> None:
-    """The public audit shows retained advisory evidence and its source head."""
+    """The public audit shows retained advisory metadata and its source head."""
     records = (_finding_record(status="corrected"),)
 
     _marker, body = render_implementation_go_audit(
@@ -97,6 +97,74 @@ def test_public_go_audit_renders_retained_advisory_source_head() -> None:
     receipt = parse_published_implementation_go_audit(body)
     assert receipt is not None
     assert receipt.finding_records == records
+
+
+def test_review_finding_records_fit_all_github_comment_renderings() -> None:
+    """The aggregate bound leaves room for the public base64 audit payload."""
+    records = (
+        {
+            **_finding_record(status="corrected"),
+            "body": "x" * 16_384,
+            "evidence": "y" * 12_000,
+        },
+    )
+
+    _journal_marker, journal = audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+    _pending_marker, pending = render_pending_implementation_go_audit(
+        7, "a" * 40, _clean_audit(), finding_records=records
+    )
+    _audit_marker, public = render_implementation_go_audit(
+        _clean_audit(), pr_number=7, head_sha="a" * 40, finding_records=records
+    )
+
+    assert len(journal) <= 65_536
+    assert len(pending) <= 65_536
+    assert len(public) <= 65_536
+
+
+def test_review_finding_journal_rejects_oversized_utf8_aggregate() -> None:
+    """The aggregate limit counts encoded bytes before base64 expansion."""
+    records = (
+        {
+            **_finding_record(status="corrected"),
+            "body": "é" * 8_000,
+            "evidence": "é" * 8_000,
+        },
+    )
+
+    with pytest.raises(ValueError, match="aggregate size limit"):
+        audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+
+
+def test_review_finding_renderers_accept_bounded_utf8_records() -> None:
+    """A valid multibyte record fits each GitHub comment rendering."""
+    records = ({**_finding_record(status="corrected"), "body": "🙂" * 7_000},)
+
+    _journal_marker, journal = audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+    _pending_marker, pending = render_pending_implementation_go_audit(
+        7, "a" * 40, _clean_audit(), finding_records=records
+    )
+    _audit_marker, public = render_implementation_go_audit(
+        _clean_audit(), pr_number=7, head_sha="a" * 40, finding_records=records
+    )
+
+    assert len(journal) <= 65_536
+    assert len(pending) <= 65_536
+    assert len(public) <= 65_536
+
+
+def test_review_finding_records_reject_oversized_visible_rendering() -> None:
+    """HTML escaping cannot make an accepted public audit exceed its limit."""
+    records = (
+        {
+            **_finding_record(status="corrected"),
+            "body": "&" * 12_000,
+            "evidence": "y" * 12_000,
+        },
+    )
+
+    with pytest.raises(ValueError, match="public rendering limit"):
+        audit_receipts.render_review_finding_journal(7, "a" * 40, records)
 
 
 def test_public_go_audit_with_escaped_summary_round_trips_retained_findings() -> None:

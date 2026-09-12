@@ -436,4 +436,6 @@ def render_implementation_go_audit(
             f"{body}\n\n" + "\n".join(lines) + "\n\n"
             f"<!-- hephaestus-review-finding-records:{encoded} -->"
         )
+    if len(body) > 65_536:
+        raise ValueError("implementation-go audit exceeds the GitHub comment size limit")
     return marker, body

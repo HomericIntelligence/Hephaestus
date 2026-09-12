@@ -948,7 +948,10 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 for finding in parsed.inline_findings
                 if str(finding.get("finding_id") or "") in invalid_ids
             )
-            advisory.extend(dict(finding) for finding in parsed.audit_findings)
+            # This review path has no durable non-inline publication surface.
+            # Keep an audit selection as a bounded, not-publishable finding
+            # until a supported surface exists.
+            not_publishable.extend(dict(finding) for finding in parsed.audit_findings)
             not_publishable.extend(dict(finding) for finding in parsed.not_publishable_findings)
             corrected = [dict(finding) for finding in corrected_validation.valid]
         item.payload["review_threads"] = valid
@@ -961,11 +964,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 initial_valid=initial_valid,
                 corrections=corrections,
                 corrected_inline=corrected,
-                corrected_audit=(
-                    [dict(finding) for finding in parsed.audit_findings]
-                    if parsed is not None
-                    else []
-                ),
+                corrected_audit=[],
                 not_publishable=not_publishable,
             )
             item.payload["review_finding_records"] = _carry_review_finding_records(

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from html import escape
 from typing import Any, Literal
 
 import hephaestus.automation.github_api as _api
@@ -23,7 +24,11 @@ MAX_REVIEW_FINDINGS = 64
 MAX_REVIEW_FINDING_PATH_CHARS = 4_096
 MAX_REVIEW_FINDING_BODY_CHARS = 16_384
 MAX_REVIEW_FINDING_EVIDENCE_CHARS = 16_384
-MAX_REVIEW_FINDING_AGGREGATE_CHARS = 256_000
+# GitHub limits an issue-comment body to 65,536 characters. The public audit
+# also contains a base64 form of this collection and a short visible summary.
+# This byte limit keeps all supported renderings below that transport limit.
+MAX_REVIEW_FINDING_AGGREGATE_BYTES = 30_000
+MAX_REVIEW_FINDING_PUBLIC_SECTION_CHARS = 60_000
 _FINDING_REASONS = frozenset(
     {
         "reviewed_diff_unavailable",
@@ -146,8 +151,24 @@ def normalize_review_finding_records(
         normalized.append(value)
         ids.add(finding_id)
     encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    if len(encoded) > MAX_REVIEW_FINDING_AGGREGATE_CHARS:
+    encoded_bytes = encoded.encode("utf-8")
+    if len(encoded_bytes) > MAX_REVIEW_FINDING_AGGREGATE_BYTES:
         raise ValueError("review finding records exceed their aggregate size limit")
+    visible_lines = ["## Retained review findings"]
+    visible_lines.extend(
+        "- "
+        f"`{record['status']}` `{record['severity']}` from "
+        f"`{record['source_head']}`: {escape(str(record['body']), quote=False)}"
+        for record in normalized
+    )
+    encoded_payload_chars = ((len(encoded_bytes) + 2) // 3) * 4
+    public_section_chars = (
+        len("\n\n" + "\n".join(visible_lines) + "\n\n")
+        + len("<!-- hephaestus-review-finding-records: -->")
+        + encoded_payload_chars
+    )
+    if public_section_chars > MAX_REVIEW_FINDING_PUBLIC_SECTION_CHARS:
+        raise ValueError("review finding records exceed their public rendering limit")
     return tuple(normalized)
 
 
@@ -321,9 +342,9 @@ def _validate_comments_to_diff(
     aggregate_size = len(
         json.dumps(
             comments, allow_nan=False, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
+        ).encode("utf-8")
     )
-    if aggregate_size > MAX_REVIEW_FINDING_AGGREGATE_CHARS:
+    if aggregate_size > MAX_REVIEW_FINDING_AGGREGATE_BYTES:
         raise ValueError("review findings exceed their aggregate size limit")
     if not diff_text.strip() and fail_open_empty:
         return ReviewCommentValidation(tuple(comments), ())
