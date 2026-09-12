@@ -3113,21 +3113,22 @@ def _repository_git_root(
     )
 
 
-def _open_registered_repository_admin(
+def _validate_registered_repository_admin(
     registry_fd: int,
     root: _RepositoryGitRootBinding,
-) -> int | None:
-    """Reopen and verify the linked repository root administration directory."""
+) -> None:
+    """Verify the linked repository root administration directory."""
     if root.intake_admin_name is None:
-        return None
+        return
     descriptor, identity = _open_directory_at_no_follow(
         registry_fd,
         root.intake_admin_name,
     )
-    if identity != root.intake_admin_identity:
+    try:
+        if identity != root.intake_admin_identity:
+            raise RuntimeError("repository root admin directory changed")
+    finally:
         os.close(descriptor)
-        raise RuntimeError("repository root admin directory changed")
-    return descriptor
 
 
 def _portable_read_branch_ref(common_dir: Path, branch_ref: str) -> str:
@@ -3282,9 +3283,7 @@ def _linked_worktree_git_env(
         common_identity = root.common_identity
         registry_fd, registry_identity = _open_directory_at_no_follow(common_fd, "worktrees")
         descriptors.append(registry_fd)
-        intake_admin_fd = _open_registered_repository_admin(registry_fd, root)
-        if intake_admin_fd is not None:
-            descriptors.append(intake_admin_fd)
+        _validate_registered_repository_admin(registry_fd, root)
         pointer, marker_identity = _read_bounded_git_pointer_at(worktree_fd, ".git")
         prefix = "gitdir: "
         if not pointer.startswith(prefix):
