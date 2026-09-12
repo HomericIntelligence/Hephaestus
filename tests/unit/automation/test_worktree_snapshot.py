@@ -1,17 +1,55 @@
 """Tests for the shared dirty worktree content identity."""
 
 import os
+import stat
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation import git_utils
+from hephaestus.automation import git_utils, worktree_snapshot
 from hephaestus.automation.worktree_snapshot import _path_content_identity, _run_bounded_git_output
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+        Path("/Applications/Xcode.app/Contents/Developer/usr/bin/git"),
+    ),
+)
+def test_snapshot_trusts_exact_apple_developer_git(candidate: Path) -> None:
+    """A nested host check keeps the outer verifier's approved Apple Git."""
+    mode = stat.S_IFREG | 0o755
+    with (
+        patch.object(worktree_snapshot.shutil, "which", return_value=str(candidate)),
+        patch.object(worktree_snapshot, "_TRUSTED_GIT_CANDIDATES", ()),
+        patch.object(Path, "is_symlink", return_value=False),
+        patch.object(Path, "stat", return_value=SimpleNamespace(st_mode=mode)),
+        patch.object(Path, "is_file", return_value=True),
+        patch.object(worktree_snapshot.os, "access", return_value=True),
+    ):
+        assert worktree_snapshot._trusted_git_executable() == str(candidate)
+
+
+def test_snapshot_rejects_other_apple_developer_git_path() -> None:
+    """A similar Apple path outside the two fixed directories stays untrusted."""
+    candidate = Path("/Library/Developer/Other/usr/bin/git")
+    mode = stat.S_IFREG | 0o755
+    with (
+        patch.object(worktree_snapshot.shutil, "which", return_value=str(candidate)),
+        patch.object(worktree_snapshot, "_TRUSTED_GIT_CANDIDATES", ()),
+        patch.object(Path, "is_symlink", return_value=False),
+        patch.object(Path, "stat", return_value=SimpleNamespace(st_mode=mode)),
+        patch.object(Path, "is_file", return_value=True),
+        patch.object(worktree_snapshot.os, "access", return_value=True),
+    ):
+        assert worktree_snapshot._trusted_git_executable() is None
 
 
 def test_content_hash_uses_the_remaining_operation_deadline(tmp_path: Path) -> None:
