@@ -11632,12 +11632,15 @@ class TestGitOps:
         assert receipt["conflict_paths"] == ("tracked.txt",)
         assert " 0\thost-staged.py\0" in index_state
         assert all(f" {stage}\ttracked.txt\0" in index_state for stage in (1, 2, 3))
+        index_digest = hashlib.sha256(index_state.encode()).hexdigest()
+        ignored_digest = pool._conflict_ignored_content_snapshot(binding.cwd, timeout=60)
         assert (
-            receipt["conflict_index_snapshot"] == hashlib.sha256(index_state.encode()).hexdigest()
+            receipt["conflict_index_snapshot"]
+            == hashlib.sha256(f"{index_digest}\0{ignored_digest}".encode()).hexdigest()
         )
         content_snapshot = receipt["content_snapshot"]
         assert isinstance(content_snapshot, dict)
-        assert content_snapshot["index_sha256"] == receipt["conflict_index_snapshot"]
+        assert content_snapshot["index_sha256"] == index_digest
         assert receipt["paused_head_sha"] == base
         assert receipt["base_sha"] == base
         assert receipt["expected_remote_sha"] == writer_head
@@ -11730,8 +11733,15 @@ class TestGitOps:
         """Each marker-free index stage uses the per-stage context limit."""
         limits: list[int] = []
 
-        def bounded(_argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
+        def bounded(argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
             limits.append(cast(int, kwargs["max_bytes"]))
+            if argv[1:3] == ("ls-files", "--stage"):
+                text = f"100644 {'a' * 40} 2\tx.py\0"
+                return _BoundedGitOutput(
+                    text=text,
+                    sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    byte_count=len(text),
+                )
             return _BoundedGitOutput(
                 text="x" * 4001,
                 sha256="0" * 64,
@@ -11745,7 +11755,54 @@ class TestGitOps:
         ):
             pool._marker_free_conflict_context(tmp_path, "x.py", timeout=60)
 
-        assert limits == [4000]
+        assert limits == [16000, 4000]
+
+    def test_marker_free_context_rejects_a_present_stage_read_failure(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A corrupt present stage cannot be reported as absent."""
+
+        def bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            if argv[1:3] == ("ls-files", "--stage"):
+                text = f"100644 {'a' * 40} 2\tx.py\0"
+                return _BoundedGitOutput(
+                    text=text,
+                    sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    byte_count=len(text),
+                )
+            raise subprocess.CalledProcessError(128, argv, stderr="missing object")
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
+            pytest.raises(_RebaseConflictContextError, match="cannot be read"),
+        ):
+            pool._marker_free_conflict_context(tmp_path, "x.py", timeout=60)
+
+    def test_marker_free_context_carries_worker_cancellation(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Each bounded index read remains in the worker cancellation scope."""
+        shutdowns: list[object] = []
+
+        def bounded(argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
+            shutdowns.append(kwargs.get("shutdown"))
+            if argv[1:3] == ("ls-files", "--stage"):
+                text = f"100644 {'a' * 40} 2\tx.py\0"
+            else:
+                if argv[2] != ":2:x.py":
+                    raise subprocess.CalledProcessError(128, argv, stderr="absent stage")
+                text = "content\n"
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text),
+            )
+
+        with patch(f"{_WP}._run_bounded_git_output", side_effect=bounded):
+            pool._marker_free_conflict_context(tmp_path, "x.py", timeout=60)
+
+        assert shutdowns
+        assert all(shutdown is pool._shutdown for shutdown in shutdowns)
 
     def test_conflict_receipt_streams_repository_scale_index_snapshot(
         self, pool: WorkerPool, tmp_path: Path
@@ -11754,6 +11811,7 @@ class TestGitOps:
         limits: list[int] = []
         retained: list[bool] = []
         index_digest = "2" * 64
+        ignored_digest = "3" * 64
         (tmp_path / "x.py").write_text(
             "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n",
             encoding="utf-8",
@@ -11780,6 +11838,11 @@ class TestGitOps:
             patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
             patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
+            patch.object(
+                pool,
+                "_conflict_ignored_content_snapshot",
+                return_value=ignored_digest,
+            ),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
         ):
             result = pool._conflict_receipt(
@@ -11793,7 +11856,10 @@ class TestGitOps:
             )
 
         assert isinstance(result, dict)
-        assert result["conflict_index_snapshot"] == index_digest
+        assert (
+            result["conflict_index_snapshot"]
+            == hashlib.sha256(f"{index_digest}\0{ignored_digest}".encode()).hexdigest()
+        )
         assert limits == [64 * 1024, 1024 * 1024]
         assert retained == [True, False]
 
@@ -12574,6 +12640,102 @@ class TestGitOps:
             )
 
         assert result is None
+
+    def test_conflict_ignored_snapshot_distinguishes_agent_changes_from_preexisting_files(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An unchanged ignored artifact is allowed, but an agent change is not."""
+        _git(tmp_path, "init", "-b", "main")
+        _git(tmp_path, "config", "user.email", "test@example.invalid")
+        _git(tmp_path, "config", "user.name", "Test User")
+        (tmp_path / ".gitignore").write_text("outside.log\n", encoding="utf-8")
+        _git(tmp_path, "add", ".gitignore")
+        _git(tmp_path, "commit", "-m", "base")
+        ignored = tmp_path / "outside.log"
+        ignored.write_text("preexisting\n", encoding="utf-8")
+
+        before = pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
+        unchanged = pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
+        ignored.write_text("agent output\n", encoding="utf-8")
+        changed = pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
+
+        assert unchanged == before
+        assert changed != before
+
+    def test_conflict_ignored_snapshot_is_bounded_and_cancellable(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Ignored-file provenance uses bounded reads in the worker stop scope."""
+        paths = "cache/output.bin\0"
+        bounded = _BoundedGitOutput(
+            text=paths,
+            sha256=hashlib.sha256(paths.encode()).hexdigest(),
+            byte_count=len(paths),
+        )
+        with (
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded) as capture,
+            patch(f"{_WP}._path_content_identity", return_value="a" * 64) as identity,
+        ):
+            result = pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
+
+        assert result == "a" * 64
+        assert capture.call_args.kwargs["max_bytes"] == 1024 * 1024
+        assert capture.call_args.kwargs["shutdown"] is pool._shutdown
+        assert identity.call_args.kwargs["remaining_content_bytes"] == [8 * 1024 * 1024]
+        assert identity.call_args.kwargs["shutdown"] is pool._shutdown
+
+    def test_conflict_ignored_snapshot_rejects_too_many_files(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An ignored tree cannot exceed the fixed file-count limit."""
+        paths = "".join(f"cache/{index}\0" for index in range(513))
+        bounded = _BoundedGitOutput(
+            text=paths,
+            sha256=hashlib.sha256(paths.encode()).hexdigest(),
+            byte_count=len(paths),
+        )
+        with (
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(_GitInspectionResourceLimitError, match="file limit"),
+        ):
+            pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
+
+    def test_residual_marker_check_uses_the_secure_bounded_reader(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The final marker check cannot follow or read an unsafe path."""
+        (tmp_path / "x.py").write_text("resolved\n", encoding="utf-8")
+        current_receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
+        }
+        with (
+            patch.object(pool, "_conflict_receipt", return_value=current_receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
+            patch(
+                f"{_WP}._read_bounded_conflict_file",
+                side_effect=_RebaseConflictContextError("unsafe path"),
+            ) as secure_read,
+        ):
+            result = pool._classify_rebase_conflict_edits(
+                tmp_path,
+                remote="origin",
+                expected_repo="test/repo",
+                paths=("x.py",),
+                snapshot={"x.py": "before"},
+                index_snapshot="1" * 64,
+                paused_head_sha="c" * 40,
+                base_sha="b" * 40,
+                expected_remote_sha="a" * 40,
+                timeout=60,
+            )
+
+        secure_read.assert_called_once_with(tmp_path, "x.py")
+        assert result.ok is False
+        assert result.error == "rebase conflict context unavailable: unsafe path"
 
     def test_continue_rebase_rejects_mutated_conflict_index(
         self, pool: WorkerPool, tmp_path: Path

@@ -267,6 +267,10 @@ _CONFLICT_PATHS_MAX_BYTES = 64 * 1024
 # The current repository index is approximately 100 KiB. A conflicted path can
 # have three stage records, so keep a fixed limit with repository-scale margin.
 _CONFLICT_INDEX_MAX_BYTES = 1024 * 1024
+_CONFLICT_PATH_INDEX_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
+_CONFLICT_IGNORED_PATHS_MAX_BYTES = 1024 * 1024
+_CONFLICT_IGNORED_CONTENT_MAX_BYTES = 8 * 1024 * 1024
+_CONFLICT_IGNORED_FILE_MAX = 512
 _CONFLICT_FILE_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
 _CONFLICT_RESOLUTION_OUTCOMES = frozenset(
     {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
@@ -7182,7 +7186,32 @@ class WorkerPool:
         )
         if index_result.byte_count == 0:
             return JobResult(ok=False, error="paused rebase conflict index invalid")
-        return paths, index_result.sha256
+        ignored_snapshot = self._conflict_ignored_content_snapshot(cwd, timeout=timeout)
+        host_state = hashlib.sha256(
+            f"{index_result.sha256}\0{ignored_snapshot}".encode()
+        ).hexdigest()
+        return paths, host_state
+
+    def _conflict_ignored_content_snapshot(self, cwd: Path, *, timeout: int) -> str:
+        """Return a bounded content identity for ignored worktree files."""
+        ignored_paths = _run_bounded_git_output(
+            ("git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
+            cwd=cwd,
+            timeout=timeout,
+            max_bytes=_CONFLICT_IGNORED_PATHS_MAX_BYTES,
+            retain_text=True,
+            shutdown=self._shutdown,
+        )
+        paths = tuple(path for path in ignored_paths.text.split("\0") if path)
+        if len(paths) > _CONFLICT_IGNORED_FILE_MAX:
+            raise _GitInspectionResourceLimitError("ignored worktree file limit exceeded")
+        return _path_content_identity(
+            cwd,
+            ignored_paths.text,
+            remaining_content_bytes=[_CONFLICT_IGNORED_CONTENT_MAX_BYTES],
+            timeout=timeout,
+            shutdown=self._shutdown,
+        )
 
     def _conflict_receipt_revisions(
         self,
@@ -7367,51 +7396,105 @@ class WorkerPool:
             raise _RebaseConflictContextError("conflict source requires redaction")
         return context
 
-    @staticmethod
-    def _marker_free_conflict_context(cwd: Path, path: str, *, timeout: int) -> str:
-        """Return base, ours, and theirs text for a marker-free conflict."""
-        parts: list[str] = []
-        present = False
-        for stage, label in ((1, "Base"), (2, "Ours"), (3, "Theirs")):
-            try:
-                result = _run_bounded_git_output(
-                    ("git", "show", f":{stage}:{path}"),
-                    cwd=cwd,
-                    timeout=timeout,
-                    max_bytes=_CONFLICT_HUNK_MAX,
-                    retain_text=True,
-                )
-            except subprocess.CalledProcessError as exc:
-                if exc.returncode != 128:
-                    raise _RebaseConflictContextError(
-                        "conflict index context cannot be read"
-                    ) from exc
-                value = "_(absent)_\n"
-            except UnicodeDecodeError as exc:
-                raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
-            except _GitInspectionResourceLimitError as exc:
-                raise _RebaseConflictContextError(
-                    f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
-                ) from exc
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise _RebaseConflictContextError("conflict index context cannot be read") from exc
-            else:
-                value = result.text
-                try:
-                    value.encode("utf-8")
-                except UnicodeEncodeError as exc:
-                    raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
-                if "\0" in value:
-                    raise _RebaseConflictContextError("conflict source is binary")
-                if len(value) > _CONFLICT_HUNK_MAX:
-                    raise _RebaseConflictContextError(
-                        f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
-                    )
-                present = True
-            parts.append(f"{label}:\n{value}")
-        if not present:
+    def _conflict_index_stages(self, cwd: Path, path: str, *, timeout: int) -> set[int]:
+        """Return the proven unmerged index stages for one conflict path."""
+        index = _run_bounded_git_output(
+            ("git", "ls-files", "--stage", "-z", "--", path),
+            cwd=cwd,
+            timeout=timeout,
+            max_bytes=_CONFLICT_PATH_INDEX_MAX_BYTES,
+            retain_text=True,
+            shutdown=self._shutdown,
+        )
+        stages: set[int] = set()
+        for record in (value for value in index.text.split("\0") if value):
+            metadata, separator, record_path = record.partition("\t")
+            fields = metadata.split()
+            if (
+                separator != "\t"
+                or record_path != path
+                or len(fields) != 3
+                or fields[2] not in {"1", "2", "3"}
+            ):
+                raise _RebaseConflictContextError("conflict index context is invalid")
+            stages.add(int(fields[2]))
+        if not stages:
             raise _RebaseConflictContextError("conflict index context is incomplete")
+        return stages
+
+    def _conflict_index_stage_text(
+        self,
+        cwd: Path,
+        path: str,
+        *,
+        stage: int,
+        stages: set[int],
+        timeout: int,
+    ) -> str:
+        """Return one bounded stage or its proven absence marker."""
+        try:
+            result = _run_bounded_git_output(
+                ("git", "show", f":{stage}:{path}"),
+                cwd=cwd,
+                timeout=timeout,
+                max_bytes=_CONFLICT_HUNK_MAX,
+                retain_text=True,
+                shutdown=self._shutdown,
+            )
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 128 or stage in stages:
+                raise _RebaseConflictContextError("conflict index context cannot be read") from exc
+            return "_(absent)_\n"
+        except UnicodeDecodeError as exc:
+            raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
+        except _GitInspectionResourceLimitError as exc:
+            raise _RebaseConflictContextError(
+                f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
+            ) from exc
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise _RebaseConflictContextError("conflict index context cannot be read") from exc
+        if stage not in stages:
+            raise _RebaseConflictContextError("conflict index changed during capture")
+        value = result.text
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
+        if "\0" in value:
+            raise _RebaseConflictContextError("conflict source is binary")
+        if len(value) > _CONFLICT_HUNK_MAX:
+            raise _RebaseConflictContextError(
+                f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
+            )
+        return value
+
+    def _marker_free_conflict_context(self, cwd: Path, path: str, *, timeout: int) -> str:
+        """Return base, ours, and theirs text for a marker-free conflict."""
+        stages = self._conflict_index_stages(cwd, path, timeout=timeout)
+        parts: list[str] = []
+        for stage, label in ((1, "Base"), (2, "Ours"), (3, "Theirs")):
+            value = self._conflict_index_stage_text(
+                cwd,
+                path,
+                stage=stage,
+                stages=stages,
+                timeout=timeout,
+            )
+            parts.append(f"{label}:\n{value}")
         return "\n".join(parts)
+
+    @staticmethod
+    def _conflict_paths_have_markers(cwd: Path, paths: tuple[str, ...]) -> bool:
+        """Return whether a bounded secure conflict-path read finds markers."""
+        marker = re.compile(rb"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
+        for path in paths:
+            try:
+                raw = _read_bounded_conflict_file(cwd, path)
+            except FileNotFoundError:
+                continue
+            if marker.search(raw):
+                return True
+        return False
 
     @staticmethod
     def _annotate_rebase_policy_failure(
@@ -7867,10 +7950,11 @@ class WorkerPool:
                 value=current_receipt,
                 error="rebase conflict resolution required: agent made no file changes",
             )
-        marker = re.compile(rb"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
-        if any(
-            (cwd / path).is_file() and marker.search((cwd / path).read_bytes()) for path in paths
-        ):
+        try:
+            residual_markers = self._conflict_paths_have_markers(cwd, paths)
+        except _RebaseConflictContextError as exc:
+            return JobResult(ok=False, error=f"rebase conflict context unavailable: {exc}")
+        if residual_markers:
             current_receipt["conflict_resolution"] = "residual_markers"
             return JobResult(
                 ok=False,
