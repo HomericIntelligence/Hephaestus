@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import re
+from typing import Any
 
 _DURABLE_FAILURE_KINDS = frozenset(
     {
@@ -22,12 +24,16 @@ _DURABLE_FAILURE_KINDS = frozenset(
         "validation_runner",
         "runner",
         "timeout",
+        "lock_timeout",
+        "repository_busy",
         "source_workspace_ownership",
     }
 )
 
 _DURABLE_ERROR_CLASSES = {
     "circuit_open": "circuit_open",
+    "lock_timeout": "lock_timeout",
+    "repository_busy": "repository_busy",
     "review-session-lost": "session_lost",
 }
 _DURABLE_ERROR_PREFIXES = (
@@ -56,3 +62,73 @@ def durable_error_class(error: str) -> str | None:
         if error.startswith(prefix):
             return error_class
     return None
+
+
+def _bounded_lock_holder(value: object) -> dict[str, Any] | None:
+    """Return validated holder fields that are safe for one event record."""
+    if not isinstance(value, dict):
+        return None
+    holder: dict[str, Any] = {}
+    pid = value.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        holder["pid"] = pid
+    for key, limit in (
+        ("run_identity", 128),
+        ("repository", 256),
+        ("operation", 128),
+    ):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and 0 < len(candidate) <= limit:
+            holder[key] = candidate
+    acquired_at = value.get("acquired_at_unix_s")
+    if (
+        isinstance(acquired_at, (int, float))
+        and not isinstance(acquired_at, bool)
+        and math.isfinite(float(acquired_at))
+    ):
+        holder["acquired_at_unix_s"] = float(acquired_at)
+    return holder or None
+
+
+def repository_contention_event_fields(value: object) -> dict[str, Any] | None:
+    """Return validated checkout-contention fields for one event record."""
+    if not isinstance(value, dict):
+        return None
+    contention: dict[str, Any] = {}
+    for key, limit in (
+        ("repository", 256),
+        ("operation", 128),
+        ("lock_layer", 32),
+        ("lock_path", 1024),
+        ("run_identity", 128),
+        ("holder_metadata_status", 32),
+    ):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and len(candidate) <= limit:
+            if key == "lock_layer" and candidate not in {"in_process", "advisory"}:
+                continue
+            if key == "holder_metadata_status" and candidate not in {
+                "unavailable",
+                "unverified",
+            }:
+                continue
+            contention[key] = candidate
+    for key in ("configured_lock_wait_s", "attempt_wait_s"):
+        candidate = value.get(key)
+        if (
+            candidate is None
+            or isinstance(candidate, bool)
+            or not isinstance(candidate, (int, float))
+            or not math.isfinite(float(candidate))
+            or float(candidate) < 0
+        ):
+            continue
+        contention[key] = round(float(candidate), 3)
+    if value.get("holder_metadata_advisory") is True:
+        contention["holder_metadata_advisory"] = True
+    if value.get("holder_metadata_stale") is True:
+        contention["holder_metadata_stale"] = True
+    holder = _bounded_lock_holder(value.get("holder_metadata"))
+    if holder is not None:
+        contention["holder_metadata"] = holder
+    return contention or None

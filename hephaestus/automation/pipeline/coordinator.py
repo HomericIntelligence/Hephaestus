@@ -1,5 +1,6 @@
 """Assemble the queue coordinator and its two worker lanes."""
 
+import inspect
 import logging
 import queue as queue_mod
 import threading
@@ -139,6 +140,9 @@ class Coordinator(
                 if pipeline_requires_athena_executor(config)
                 else None
             )
+            run_identity_options: dict[str, ct.Any] = {}
+            if "run_identity" in inspect.signature(WorkerPool).parameters:
+                run_identity_options["run_identity"] = config.run_identity
             pool = WorkerPool(
                 size=work_window,
                 shutdown=self._worker_shutdown,
@@ -159,6 +163,7 @@ class Coordinator(
                 host_verification_pyxis_authority=config.host_verification_pyxis_authority,
                 host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
                 podman_machine=config.podman_machine,
+                **run_identity_options,
             )
             from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 

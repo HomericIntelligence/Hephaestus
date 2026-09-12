@@ -94,6 +94,12 @@ Secret or sensitive entries approve only the named transport boundary; they do
 not authorize logging, persistence, wildcard token names, or propagation to a
 different child.
 
+Repository checkout commands use two separate positive timeout options.
+`--repository-lock-wait-timeout` limits one repository-lock admission attempt
+and defaults to 120 seconds. `--repository-contention-timeout` limits all lock
+waits and timer backoff for one checkout and defaults to 600 seconds. Both
+options use seconds. Neither option reduces the Git network-operation time.
+
 ## Removed configuration and replacements
 
 | Removed surface | Explicit replacement |

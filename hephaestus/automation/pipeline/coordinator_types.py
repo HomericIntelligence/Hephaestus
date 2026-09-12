@@ -79,6 +79,7 @@ from dataclasses import dataclass as dataclass, field as field
 from pathlib import Path as Path
 from threading import Event
 from typing import TYPE_CHECKING, Any as Any
+from uuid import uuid4 as uuid4
 
 from jinja2 import TemplateNotFound as TemplateNotFound
 
@@ -339,6 +340,10 @@ class PipelineConfig:
     # Re-adoption is idempotent only for the exact verified receipt. Retain its
     # closed representation so a later discovery pass cannot change identity.
     repo_intake_receipts: dict[str, dict[str, object]] = field(default_factory=dict)
+    # Keep new fields appended so positional callers remain compatible.
+    repository_lock_wait_timeout: int = 120
+    repository_contention_timeout: int = 600
+    run_identity: str = field(default_factory=lambda: uuid4().hex)
 
     @property
     def enable_advise(self) -> bool:

@@ -109,6 +109,26 @@ def test_coordinator_uses_independent_main_and_learning_capacities(
     assert coordinator.pool.podman_machine is None
 
 
+def test_coordinator_passes_run_identity_only_to_a_supporting_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Production-capable workers receive the immutable run identity."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_mod
+
+    class RunIdentityPool(_RecordingWorkerPool):
+        def __init__(self, *, run_identity: str, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.run_identity = run_identity
+
+    monkeypatch.setattr(worker_pool_mod, "WorkerPool", RunIdentityPool)
+    config = _config(tmp_path)
+
+    coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
+
+    assert isinstance(coordinator.pool, RunIdentityPool)
+    assert coordinator.pool.run_identity == config.run_identity
+
+
 def test_coordinator_passes_extra_gh_root_to_worker_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -31,7 +31,11 @@ from .diagnostics import (
     redact_bounded_diagnostic_tails,
     redact_diagnostic_text,
 )
-from .job_failures import durable_error_class, is_durable_failure_kind
+from .job_failures import (
+    durable_error_class,
+    is_durable_failure_kind,
+    repository_contention_event_fields,
+)
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
@@ -288,6 +292,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     "max_workers": self.config.max_workers,
                     "package_version": self.config.package_version,
                     "source_revision": self.config.source_revision,
+                    "run_identity": self.config.run_identity,
                 },
             )
             self._loops_run = 1
@@ -755,6 +760,10 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
         if diagnostics:
             fields["diagnostics"] = diagnostics
+        if result.error == "lock_timeout":
+            lock_contention = repository_contention_event_fields(value)
+            if lock_contention is not None:
+                fields["lock_contention"] = lock_contention
         if isinstance(value, dict) and value.get("failure_kind") == "source_workspace_ownership":
             recovery = bounded_source_workspace_recovery(value.get("source_workspace_recovery"))
             if recovery is not None:

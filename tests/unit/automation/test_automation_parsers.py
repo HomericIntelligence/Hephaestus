@@ -416,6 +416,42 @@ def test_pre_pr_tests_help_describes_the_test_gate() -> None:
     assert "Hephaestus" in action.help
 
 
+@pytest.mark.parametrize("profile", ["full", "planning", "implementation", "review"])
+def test_repository_contention_options_have_bounded_defaults(profile: str) -> None:
+    """Every queue command supplies the checkout admission timeout pair."""
+    args = pipeline_cli.parse_args([], profile=profile)
+    assert args.repository_lock_wait_timeout == 120
+    assert args.repository_contention_timeout == 600
+
+
+def test_repository_contention_options_transport_explicit_values_to_config() -> None:
+    """Explicit repository wait limits reach the pipeline configuration."""
+    args = pipeline_cli.parse_args(
+        [
+            "--repository-lock-wait-timeout",
+            "17",
+            "--repository-contention-timeout",
+            "91",
+        ]
+    )
+
+    config = pipeline_cli.build_config(args, "org", ["repo-a"])
+
+    assert config.repository_lock_wait_timeout == 17
+    assert config.repository_contention_timeout == 91
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--repository-lock-wait-timeout", "--repository-contention-timeout"],
+)
+def test_repository_contention_options_require_positive_seconds(flag: str) -> None:
+    """A repository wait option rejects a zero or negative value."""
+    with pytest.raises(SystemExit) as error:
+        pipeline_cli.parse_args([flag, "0"])
+    assert error.value.code == 2
+
+
 def test_build_automation_parser_does_not_add_throttle_by_default() -> None:
     """The shared helper adds throttle flags only when requested."""
     flags = build_automation_parser("demo")._option_string_actions

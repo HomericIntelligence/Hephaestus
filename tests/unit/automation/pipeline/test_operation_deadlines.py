@@ -5,6 +5,8 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +23,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     RecoverRemediationReplyJournalRequest,
 )
+from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.review_journal import CommentJournalReadError
@@ -79,6 +82,126 @@ def test_git_job_deadline_includes_repository_lock_admission(tmp_path: Path) -> 
     assert not result.ok
     assert result.error == "lock_timeout"
     dispatch.assert_not_called()
+
+
+def test_checkout_timeout_after_admission_is_not_lock_contention(tmp_path: Path) -> None:
+    """A Git timeout after both repository locks stays an operation timeout."""
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+    )
+    pool._dispatch_git_op = Mock(  # type: ignore[method-assign]
+        side_effect=subprocess.TimeoutExpired("git fetch", 30)
+    )
+    try:
+        result = pool._run_git(
+            GitJob(
+                "repo",
+                "clone",
+                30,
+                repository_lock_wait_timeout_s=5,
+            )
+        )
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.error == "timeout"
+    assert result.value is None
+
+
+def test_checkout_admission_starts_operation_deadline_after_both_repository_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkout operation time starts after both repository locks are held."""
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+    )
+    observed: dict[str, float] = {}
+
+    @contextmanager
+    def repo_lock(
+        repo: str,
+        *,
+        deadline_s: float | None = None,
+        diagnostic_path: Path | None = None,
+    ) -> Iterator[None]:
+        del repo, diagnostic_path
+        observed["in_process"] = float(deadline_s or 0.0)
+        yield
+
+    @contextmanager
+    def advisory_lock(
+        job: GitJob,
+        path: Path,
+        *,
+        timeout_s: float | None = None,
+        deadline_s: float | None = None,
+    ) -> Iterator[None]:
+        del job, path, timeout_s
+        observed["advisory"] = float(deadline_s or 0.0)
+        yield
+
+    @contextmanager
+    def operation_deadline(
+        deadline_s: float | None, *, shutdown: threading.Event | None = None
+    ) -> Iterator[None]:
+        del shutdown
+        observed["operation"] = float(deadline_s or 0.0)
+        yield
+
+    clock = iter((10.0, 20.0))
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.worker_pool.time.monotonic",
+        lambda: next(clock),
+    )
+    monkeypatch.setattr(pool, "_repo_lock", repo_lock)
+    monkeypatch.setattr(pool, "_advisory_repo_lock", advisory_lock)
+    monkeypatch.setattr(git_utils, "operation_deadline", operation_deadline)
+    monkeypatch.setattr(pool, "_dispatch_git_op", lambda _job: JobResult(ok=True))
+    try:
+        result = pool._run_git(
+            GitJob(
+                "repo",
+                "clone",
+                30,
+                repository_lock_wait_timeout_s=5,
+            )
+        )
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.ok
+    assert observed == {"in_process": 15.0, "advisory": 15.0, "operation": 50.0}
+
+
+def test_checkout_interrupt_after_admission_is_not_lock_contention(tmp_path: Path) -> None:
+    """A shutdown from the Git operation stays an interrupted operation."""
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+    )
+    pool._dispatch_git_op = Mock(side_effect=InterruptedError("stop"))  # type: ignore[method-assign]
+    try:
+        result = pool._run_git(
+            GitJob(
+                "repo",
+                "sync_checkout",
+                30,
+                repository_lock_wait_timeout_s=5,
+            )
+        )
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.error == "interrupted"
+    assert result.interrupted
 
 
 def test_repository_lock_wait_ends_on_shutdown(tmp_path: Path) -> None:
