@@ -407,12 +407,16 @@ class TestRunSubprocess:
     )
     def test_output_limit_stops_a_same_group_pipe_holder(self, tmp_path: Path) -> None:
         """Output-limit cleanup stops a descendant that keeps the pipe open."""
-        group_file = tmp_path / "process-group"
+        pid_file = tmp_path / "descendant-pid"
+        heartbeat_file = tmp_path / "descendant-heartbeat"
         descendant = (
-            "import os, signal\n"
-            f"open({str(group_file)!r}, 'w').write(str(os.getpgrp()))\n"
+            "import os, pathlib, signal, time\n"
+            f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            "while True: os.write(1, b'x' * 4096)\n"
+            "while True:\n"
+            f" pathlib.Path({str(heartbeat_file)!r}).write_text(str(time.monotonic_ns()))\n"
+            " try: os.write(1, b'x' * 4096)\n"
+            " except BrokenPipeError: pass\n"
         )
         parent = (
             f"import subprocess, sys\nsubprocess.Popen([sys.executable, '-c', {descendant!r}])\n"
@@ -426,9 +430,49 @@ class TestRunSubprocess:
                 max_output_bytes=8192,
             )
 
-        process_group = int(group_file.read_text())
-        with pytest.raises(ProcessLookupError):
-            os.killpg(process_group, 0)
+        descendant_pid = int(pid_file.read_text())
+        proc_stat = Path(f"/proc/{descendant_pid}/stat")
+        original_start = None
+        if sys.platform == "linux":
+            try:
+                original_fields = proc_stat.read_text().rsplit(")", 1)[1].split()
+            except FileNotFoundError:
+                pass
+            else:
+                original_start = original_fields[19]
+
+        def execution_stopped() -> bool:
+            if original_start is not None:
+                try:
+                    fields = proc_stat.read_text().rsplit(")", 1)[1].split()
+                except FileNotFoundError:
+                    return True
+                return fields[19] != original_start or fields[0] in {"Z", "X"}
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        def emergency_cleanup() -> None:
+            if not execution_stopped():
+                with suppress(ProcessLookupError):
+                    os.kill(descendant_pid, signal.SIGKILL)
+
+        timer = threading.Timer(3, emergency_cleanup)
+        timer.start()
+        try:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and not execution_stopped():
+                time.sleep(0.01)
+            assert execution_stopped()
+            heartbeat = heartbeat_file.read_text()
+            time.sleep(0.05)
+            assert heartbeat_file.read_text() == heartbeat
+        finally:
+            timer.cancel()
+            timer.join()
+            emergency_cleanup()
 
     @pytest.mark.parametrize("invalid_limit", (0, -1, True, 1.5))
     def test_output_limit_rejects_invalid_values(self, invalid_limit: object) -> None:
@@ -776,6 +820,7 @@ class TestRunSubprocessTimeoutLogging:
     ) -> None:
         """A timed-out command returns after a pipe-holding child escapes."""
         child_pid_path = tmp_path / "escaped-child.pid"
+        child_pid_tmp_path = tmp_path / "escaped-child.pid.tmp"
         child_code = (
             "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(4)"
         )
@@ -783,7 +828,9 @@ class TestRunSubprocessTimeoutLogging:
             "import pathlib,subprocess,sys,time; "
             f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}],"
             "start_new_session=True); "
-            f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid)); "
+            f"pid_tmp=pathlib.Path({str(child_pid_tmp_path)!r}); "
+            "pid_tmp.write_text(str(child.pid)); "
+            f"pid_tmp.replace({str(child_pid_path)!r}); "
             "time.sleep(4)"
         )
         started = time.monotonic()
