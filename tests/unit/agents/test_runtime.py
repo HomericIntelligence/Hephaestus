@@ -4914,7 +4914,7 @@ def test_resolve_agent_accepts_explicit_authenticated_opencode() -> None:
     """An explicit --agent opencode resolves after `opencode providers list` exits 0."""
     with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/opencode"):
         with patch(
-            "subprocess.run",
+            "hephaestus.agents.runtime.run_subprocess",
             return_value=subprocess.CompletedProcess(
                 ["opencode", "providers", "list"], 0, stdout="", stderr=""
             ),
@@ -6468,7 +6468,7 @@ def test_resolve_agent_prefers_claude_when_both_are_authenticated() -> None:
             f"/bin/{name}" if name in {"claude", "codex"} else None
         )
 
-        with patch("subprocess.run") as mock_run:
+        with patch("hephaestus.agents.runtime.run_subprocess") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 ["auth", "status"], 0, stdout="logged in", stderr=""
             )
@@ -6482,7 +6482,7 @@ def test_resolve_agent_uses_authenticated_codex_when_claude_absent() -> None:
         mock_which.side_effect = lambda name: "/bin/codex" if name == "codex" else None
 
         with patch(
-            "subprocess.run",
+            "hephaestus.agents.runtime.run_subprocess",
             return_value=subprocess.CompletedProcess(
                 ["codex", "login", "status"], 0, stdout="Logged in using ChatGPT", stderr=""
             ),
@@ -6506,7 +6506,7 @@ def test_resolve_agent_uses_codex_when_only_codex_is_authenticated() -> None:
                 )
             raise AssertionError(f"unexpected command: {cmd}")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("hephaestus.agents.runtime.run_subprocess", side_effect=fake_run):
             assert agent_runtime.resolve_agent(None) == "codex"
 
 
@@ -6516,7 +6516,7 @@ def test_is_agent_authenticated_pi_rejects_missing_model_config(tmp_path: Path) 
         patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/pi"),
         patch("hephaestus.agents.runtime.Path.home", return_value=tmp_path),
         patch(
-            "subprocess.run",
+            "hephaestus.agents.runtime.run_subprocess",
             return_value=subprocess.CompletedProcess(
                 ["pi", "--version"], 0, stdout="pi 1.0.0", stderr=""
             ),
@@ -6530,7 +6530,7 @@ def test_is_agent_authenticated_uses_explicit_status_timeout() -> None:
     with (
         patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/claude"),
         patch(
-            "subprocess.run",
+            "hephaestus.agents.runtime.run_subprocess",
             return_value=subprocess.CompletedProcess(
                 ["claude", "auth", "status"], 0, stdout="", stderr=""
             ),
@@ -6539,6 +6539,25 @@ def test_is_agent_authenticated_uses_explicit_status_timeout() -> None:
         assert agent_runtime.is_agent_authenticated("claude", auth_status_timeout=77)
 
     assert mock_run.call_args.kwargs["timeout"] == 77
+
+
+def test_is_agent_authenticated_propagates_a_cancelled_guarded_probe() -> None:
+    """Keep cancellation distinct when it prevents authentication."""
+    shutdown = threading.Event()
+    shutdown.set()
+    with (
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/codex"),
+        patch("subprocess.Popen") as popen,
+    ):
+        with pytest.raises(InterruptedError, match="cancelled before start"):
+            agent_runtime.is_agent_authenticated(
+                "codex",
+                auth_status_timeout=10,
+                remaining_timeout=lambda: 3,
+                shutdown=shutdown,
+            )
+
+    popen.assert_not_called()
 
 
 def test_resolve_agent_rejects_pi_auto_detection_until_preflight_exists(tmp_path: Path) -> None:
@@ -6675,14 +6694,16 @@ def test_resolve_agent_explicit_rejects_unconfigured_pi(tmp_path: Path) -> None:
 
 def test_resolve_agent_explicit_codex_overrides_claude() -> None:
     """An explicit --agent value wins over auto-detection when authenticated."""
-    with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/codex"):
-        with patch(
-            "subprocess.run",
+    with (
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/codex"),
+        patch(
+            "hephaestus.agents.runtime.run_subprocess",
             return_value=subprocess.CompletedProcess(
                 ["codex", "login", "status"], 0, stdout="Logged in", stderr=""
             ),
-        ):
-            assert agent_runtime.resolve_agent("codex") == "codex"
+        ),
+    ):
+        assert agent_runtime.resolve_agent("codex") == "codex"
 
 
 @pytest.mark.parametrize("reference", ["unknown:high", "terra-lite:high", "gpt-6-astra:max"])
@@ -6713,7 +6734,7 @@ def test_resolve_agent_explicit_rejects_unauthenticated_agent() -> None:
     """An explicit --agent for an installed but unauthenticated CLI should fail."""
     with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/codex"):
         with patch(
-            "subprocess.run",
+            "hephaestus.agents.runtime.run_subprocess",
             return_value=subprocess.CompletedProcess(
                 ["codex", "login", "status"], 1, stdout="", stderr="Not logged in"
             ),
@@ -6737,7 +6758,7 @@ def test_resolve_agent_errors_when_no_provider_is_authenticated() -> None:
         )
 
         with patch(
-            "subprocess.run",
+            "hephaestus.agents.runtime.run_subprocess",
             return_value=subprocess.CompletedProcess(
                 ["auth", "status"], 1, stdout="", stderr="Not logged in"
             ),

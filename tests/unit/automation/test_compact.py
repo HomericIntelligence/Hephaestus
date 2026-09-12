@@ -1,6 +1,7 @@
 """Tests for compact_session helper (#842)."""
 
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -232,7 +233,10 @@ class TestCompactAgentSession:
 
     def test_codex_compact_resumes_the_persisted_session(self, tmp_path: Path) -> None:
         remaining_timeout = MagicMock(return_value=60)
-        with patch("hephaestus.automation.learn.resume_agent_session") as resume:
+        with (
+            patch("hephaestus.automation.learn.resolve_agent", return_value="codex"),
+            patch("hephaestus.automation.learn.resume_agent_session") as resume,
+        ):
             compacted = compact_agent_session(
                 repo="test-repo",
                 issue=42,
@@ -308,6 +312,39 @@ class TestCompactAgentSession:
             pi_isolation_adapter="package:factory",
             pi_dir=pi_dir,
             model_references=("",),
+            remaining_timeout=remaining_timeout,
+            shutdown=None,
         )
         assert resume.call_args.kwargs["pi_dir"] == pi_dir
         assert resume.call_args.kwargs["remaining_timeout"] is remaining_timeout
+
+    def test_compact_bounds_authentication_to_the_remaining_operation_time(
+        self, tmp_path: Path
+    ) -> None:
+        """Keep provider authentication in the current operation budget."""
+        remaining_timeout = MagicMock(return_value=3)
+        shutdown = threading.Event()
+        with (
+            patch("hephaestus.automation.learn.resolve_agent", return_value="codex") as resolve,
+            patch(
+                "hephaestus.automation.learn.agent_compaction_resume",
+                return_value=("codex-session", {}),
+            ),
+            patch("hephaestus.automation.learn.resume_agent_session"),
+        ):
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider="codex",
+                session_agent="pr-reviewer",
+                session_id="codex-session",
+                cwd=tmp_path,
+                auth_status_timeout=10,
+                remaining_timeout=remaining_timeout,
+                shutdown=shutdown,
+            )
+
+        assert compacted is True
+        assert resolve.call_args.kwargs["auth_status_timeout"] == 3
+        assert resolve.call_args.kwargs["remaining_timeout"] is remaining_timeout
+        assert resolve.call_args.kwargs["shutdown"] is shutdown

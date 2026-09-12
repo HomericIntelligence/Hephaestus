@@ -152,6 +152,7 @@ from hephaestus.utils.worktree_identity import source_worktree_name
 WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
+_REAL_IS_AGENT_AUTHENTICATED = agent_runtime.is_agent_authenticated
 _TEST_AGENT_CWD = Path(__file__).resolve().parents[4] / "build" / "worker-pool-tests"
 _DIRTY_CONTENT_SNAPSHOT = {
     "index_sha256": "1" * 64,
@@ -2498,6 +2499,8 @@ class TestWorkerPoolSubmitComplete:
             pi_isolation_adapter=None,
             pi_dir=None,
             model_references=(job.model,),
+            remaining_timeout=ANY,
+            shutdown=ANY,
         )
         assert 0 < mock_session.call_args.kwargs["timeout"] <= job.timeout_s
         mock_session.assert_called_once_with(
@@ -16771,6 +16774,53 @@ class TestOnFutureDone:
 )
 class TestShutdownReapsSubprocess:
     """WorkerPool.shutdown() SIGTERMs in-flight agent process groups (#2059)."""
+
+    def test_shutdown_interrupts_provider_authentication(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pool shutdown stops and reaps an active authentication process."""
+        pid_path = tmp_path / "authentication.pid"
+        child = (
+            "import os,pathlib,time; "
+            f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
+            "time.sleep(5)"
+        )
+        monkeypatch.setitem(
+            agent_runtime.AGENT_AUTH_STATUS_COMMANDS,
+            "claude",
+            ((sys.executable, "-c", child),),
+        )
+        monkeypatch.setattr(
+            agent_runtime,
+            "is_agent_authenticated",
+            _REAL_IS_AGENT_AUTHENTICATED,
+        )
+        monkeypatch.setattr(shutil, "which", lambda _name: sys.executable)
+        job = _agent_job(agent="claude", cwd=tmp_path, timeout_s=10, auth_status_timeout=10)
+
+        with patch(
+            f"{_WP}.claude_invoke.invoke_claude_with_session",
+            return_value=("out", "session"),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            deadline = time.monotonic() + 5
+            while not pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert pid_path.exists(), "authentication process did not start"
+            child_pid = int(pid_path.read_text(encoding="utf-8"))
+
+            started = time.monotonic()
+            pool.shutdown()
+            _handle, result = completion_q.get(timeout=5)
+
+        assert time.monotonic() - started < 3
+        assert result.interrupted is True
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
 
     def test_shutdown_terminates_registered_pi_adapter_subprocess_fast(
         self,
