@@ -145,6 +145,17 @@ excluding ambient GitHub, cloud, and operator-specific variables. The broker
 may inject an API credential from its own reviewed secret store; it must not
 inherit arbitrary host variables. It must also return trusted observed
 skill-call identifiers separately from provider text and requested grants.
+The `invoke()` method receives `remaining_timeout` as a required keyword. Its
+value is a callback for a resume operation and `None` for one-shot and start-new
+operations. The adapter must not call a `None` value. When the callback is not
+`None`, it checks the operation deadline and cancellation state. The adapter
+must call it immediately before it creates the Pi process and use the result to
+decrease the process timeout. The adapter must enter the supplied
+`process_tracker` immediately after it creates the process. Then, it must call
+`remaining_timeout` again and decrease the process wait limit. If the second
+call raises an exception, the adapter must terminate the Pi process group and
+reap its direct child. The adapter must then re-raise the same exception. This
+sequence stops a Pi process that starts at the same time as queue cancellation.
 Hephaestus passes the exact absolute Pi executable proven by preflight,
 disables ambient skills with `--no-skills`, and supplies only allowed,
 preflight-proven Athena directories through repeatable `--skill` arguments.

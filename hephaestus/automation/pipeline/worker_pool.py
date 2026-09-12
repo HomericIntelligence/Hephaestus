@@ -82,7 +82,7 @@ from hephaestus.agents.workspace import (
 )
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
-from hephaestus.automation.git_runtime import current_operation_shutdown
+from hephaestus.automation.git_runtime import current_operation_shutdown, operation_file_lock
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -382,10 +382,15 @@ def _invoke_claude_commit_message(
     pi_dir: Path | None,
 ) -> str:
     """Run a commit-message request from the approved worker adapter."""
-    remaining_s = cast(float, git_utils.remaining_operation_timeout(timeout))
-    if remaining_s < 1:
-        raise subprocess.TimeoutExpired("commit-message operation deadline", 0)
-    timeout = min(timeout, int(remaining_s))
+
+    def remaining_timeout() -> int:
+        """Check the active Git operation before session or provider work."""
+        remaining_s = cast(float, git_utils.remaining_operation_timeout(timeout))
+        if remaining_s < 1:
+            raise subprocess.TimeoutExpired("commit-message operation deadline", 0)
+        return min(timeout, int(remaining_s))
+
+    timeout = remaining_timeout()
     if uses_direct_agent_runner(agent):
         result = run_agent_text(
             agent,
@@ -411,6 +416,7 @@ def _invoke_claude_commit_message(
         model=model,
         cwd=worktree_path,
         timeout=timeout,
+        remaining_timeout=remaining_timeout,
         output_format="text",
         allowed_tools="Read,Glob,Grep",
     )
@@ -4130,7 +4136,7 @@ class WorkerPool:
         elif isinstance(job, GitHubJob):
             result = self._run_github(job)
         elif isinstance(job, CompactJob):
-            result = self._run_compact(job)
+            result = self._run_compact(job, deadline_s=start + job.timeout_s)
         else:
             raise TypeError(f"unknown job type {type(job)}")
         return result
@@ -4958,6 +4964,7 @@ class WorkerPool:
                     require_new_session=job.require_new_session,
                     cwd=cwd,
                     timeout=remaining_timeout(),
+                    remaining_timeout=remaining_timeout,
                     output_format=job.output_format,
                     allowed_tools=scope.allowed_tools,
                     permission_mode=scope.permission_mode,
@@ -4980,6 +4987,7 @@ class WorkerPool:
                     sandbox=job.sandbox,
                     approval="never",
                     process_tracker=subprocess_registry.track_process_group,
+                    remaining_timeout=remaining_timeout,
                     execution_request=job.execution_request,
                     resume_binding=job.resume_binding,
                     disable_pi_automation=job.disable_pi_automation,
@@ -4996,6 +5004,7 @@ class WorkerPool:
                     sandbox=job.sandbox,
                     approval="never",
                     process_tracker=subprocess_registry.track_process_group,
+                    remaining_timeout=remaining_timeout,
                     execution_request=job.execution_request,
                     resume_binding=job.resume_binding,
                     disable_pi_automation=job.disable_pi_automation,
@@ -5053,11 +5062,23 @@ class WorkerPool:
             observed_skill_invocations=observed_skill_invocations,
         )
 
-    @staticmethod
-    def _run_compact(job: CompactJob) -> JobResult:
+    def _run_compact(self, job: CompactJob, *, deadline_s: float) -> JobResult:
         """Compact an agent session without making compaction a hard gate."""
         if job.session_selection_error:
             return JobResult(ok=False, error=job.session_selection_error)
+
+        def remaining_timeout() -> int:
+            """Return checked time for session discovery or provider work."""
+            if self._shutdown.is_set():
+                raise InterruptedError("compact operation cancelled")
+            remaining = deadline_s - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("compact operation deadline", 0)
+            bounded = int(min(float(job.timeout_s), remaining))
+            if bounded <= 0:
+                raise subprocess.TimeoutExpired("compact operation deadline", 0)
+            return bounded
+
         compacted = compact_agent_session(
             repo=job.repo,
             issue=job.issue,
@@ -5074,6 +5095,8 @@ class WorkerPool:
             auth_status_timeout=job.auth_status_timeout,
             pi_isolation_adapter=job.pi_isolation_adapter,
             pi_dir=job.pi_dir,
+            remaining_timeout=remaining_timeout,
+            shutdown=self._shutdown,
         )
         # ``compact_agent_session`` intentionally swallows expected failures; a
         # missing or uncompactable transcript must not stall a review cycle.
@@ -7616,11 +7639,13 @@ class WorkerPool:
             return JobResult(ok=False, error=preflight_error)
 
         metadata_lock = WorktreeManager.git_metadata_lock_path(checkout)
-        with _interruptible_file_lock(
-            metadata_lock,
-            shutdown=self._shutdown,
-            timeout_s=job.timeout_s,
-        ):
+        with ExitStack() as lock_stack:
+            try:
+                lock_stack.enter_context(operation_file_lock(metadata_lock))
+            except subprocess.TimeoutExpired as exc:
+                raise _GitLockTimeoutError from exc
+            except InterruptedError as exc:
+                raise _GitLockInterruptedError from exc
             return self._sync_checkout_locked(
                 checkout=checkout,
                 expected_repo=expected_repo,

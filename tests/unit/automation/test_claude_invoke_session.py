@@ -54,7 +54,7 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
         "hephaestus.automation.agent_config._checkout_identity",
-        lambda cwd: sha256(str(cwd.resolve()).encode()).hexdigest(),
+        lambda cwd, *, remaining_timeout=None: sha256(str(cwd.resolve()).encode()).hexdigest(),
     )
     return tmp_path
 

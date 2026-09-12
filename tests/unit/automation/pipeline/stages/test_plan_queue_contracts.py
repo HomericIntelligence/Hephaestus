@@ -14,8 +14,10 @@ from hephaestus.automation.pipeline.stage_results import Continue
 from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
 from hephaestus.automation.pipeline.stages.planning import PlanningStage
 from hephaestus.automation.plan_review_session import PlanReviewSessionStore
+from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER
 from hephaestus.automation.review_journal import (
     PlanDiscoveryResult,
+    journal_snapshot,
     render_current_plan,
     render_pending_review,
 )
@@ -32,18 +34,90 @@ def _seed_plan(github: FakeStageGitHub, issue: int, plan: str, revision: int = 1
     ]
 
 
-def test_published_plan_must_still_exist_at_handoff(
+@pytest.mark.parametrize("budget", [1, 2, 3])
+@pytest.mark.parametrize("existing_plan", [False, True], ids=["published", "found"])
+def test_missing_plan_readbacks_stop_at_the_plan_budget(
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    budget: int,
+    existing_plan: bool,
+) -> None:
+    """Missing plans use bounded timer retries and retain publication evidence."""
+    github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+    plan = "Candidate plan"
+    if existing_plan:
+        _seed_plan(github, 501, plan)
+    first_lookup = (
+        PlanDiscoveryResult.found(render_current_plan(plan))
+        if existing_plan
+        else PlanDiscoveryResult.absent()
+    )
+    lookups = iter([first_lookup, PlanDiscoveryResult.absent()] * (budget + 1))
+    monkeypatch.setattr(github, "discover_plan", lambda _issue: next(lookups))
+    item = make_work_item(
+        issue=501,
+        state="VERIFY",
+        payload={} if existing_plan else {"plan_text": plan},
+    )
+    ctx = make_ctx(github=github, budget_fn=lambda _name: budget)
+    stage = PlanningStage()
+    outcomes = []
+    delays = []
+    for _attempt in range(budget + 1):
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        outcomes.append(outcome.disposition)
+        assert "plan disappeared before verification" in outcome.note
+        snapshot = journal_snapshot(github.issue_comments(501))
+        assert snapshot.current_plan == plan
+        assert snapshot.revision == 1
+        if not existing_plan:
+            assert item.payload["plan_text"] == plan
+            assert item.payload["plan_revision"] == snapshot.revision
+        if outcome.disposition is not Disposition.RETRY:
+            break
+        delays.append(item.payload.pop("retry_delay_s", None))
+
+    assert outcomes == [Disposition.RETRY] * (budget - 1) + [Disposition.FINISH_FAIL]
+    assert item.attempts["plan"] == budget
+    assert all(isinstance(delay, float) and delay > 0 for delay in delays)
+    plan_writes = [
+        entry
+        for entry in github.mutation_log
+        if entry == ("gh_issue_upsert_comment", (501, PLAN_CANONICAL_MARKER))
+    ]
+    assert len(plan_writes) == (0 if existing_plan else 1)
+
+
+def test_missing_plan_retry_advances_only_after_fresh_confirmation(
     make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A deleted publication cannot advance to plan review."""
+    """A later current plan can complete verification without another publication."""
     github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
-    lookups = iter([PlanDiscoveryResult.absent(), PlanDiscoveryResult.absent()])
+    plan = "Candidate plan"
+    found = PlanDiscoveryResult.found(render_current_plan(plan))
+    lookups = iter([PlanDiscoveryResult.absent(), PlanDiscoveryResult.absent(), found, found])
     monkeypatch.setattr(github, "discover_plan", lambda _issue: next(lookups))
-    item = make_work_item(issue=501, state="VERIFY", payload={"plan_text": "Candidate plan"})
+    item = make_work_item(issue=501, state="VERIFY", payload={"plan_text": plan})
+    ctx = make_ctx(github=github, budget_fn=lambda _name: 2)
+    stage = PlanningStage()
 
-    outcome = PlanningStage().step(item, make_ctx(github=github))
+    first = stage.step(item, ctx)
+    item.payload.pop("retry_delay_s", None)
+    second = stage.step(item, ctx)
 
-    assert outcome == StageOutcome(Disposition.RETRY, "plan disappeared before verification")
+    assert isinstance(first, StageOutcome)
+    assert first.disposition is Disposition.RETRY
+    assert isinstance(second, StageOutcome)
+    assert second.disposition is Disposition.ADVANCE
+    assert item.attempts["plan"] == 1
+    plan_writes = [
+        entry
+        for entry in github.mutation_log
+        if entry == ("gh_issue_upsert_comment", (501, PLAN_CANONICAL_MARKER))
+    ]
+    assert len(plan_writes) == 1
 
 
 def test_second_plan_lookup_has_the_same_failure_bound(

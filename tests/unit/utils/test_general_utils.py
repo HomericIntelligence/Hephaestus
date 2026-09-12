@@ -508,6 +508,58 @@ class TestInstallPackage:
 class TestRunSubprocessTimeoutLogging:
     """Tests that run_subprocess logs TimeoutExpired correctly (#382/A4-07)."""
 
+    def test_untracked_child_receives_text_input(self) -> None:
+        """The ordinary subprocess path can receive text input."""
+        real_run = subprocess.run
+        with patch("hephaestus.utils.helpers.subprocess.run", wraps=real_run) as run:
+            result = run_subprocess(
+                [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+                env={"PATH": os.defpath},
+                input_text="request",
+            )
+
+        assert result.stdout == "request\n"
+        assert "stdin" not in run.call_args.kwargs
+
+    def test_unsupported_process_group_fallback_receives_text_input(self) -> None:
+        """The process-group fallback can receive text input."""
+        real_run = subprocess.run
+        with (
+            patch("hephaestus.utils.subprocess_registry.supported", return_value=False),
+            patch("hephaestus.utils.helpers.subprocess.run", wraps=real_run) as run,
+        ):
+            result = run_subprocess(
+                [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+                env={"PATH": os.defpath},
+                input_text="request",
+                track_process_group=True,
+            )
+
+        assert result.stdout == "request\n"
+        assert "stdin" not in run.call_args.kwargs
+
+    def test_tracked_child_receives_text_input(self) -> None:
+        """A tracked command can receive text through standard input."""
+        process = MagicMock(pid=123, returncode=0)
+        process.communicate.return_value = ("ok", "")
+        with (
+            patch("hephaestus.utils.subprocess_registry.supported", return_value=True),
+            patch("subprocess.Popen", return_value=process) as popen,
+            patch("hephaestus.utils.subprocess_registry.track_process_group"),
+        ):
+            result = run_subprocess(
+                ["tool"],
+                env={"PATH": os.defpath},
+                input_text="request",
+                timeout=60,
+                track_process_group=True,
+            )
+
+        assert result.stdout == "ok"
+        assert popen.call_args.kwargs["stdin"] is subprocess.PIPE
+        assert process.communicate.call_args.kwargs["input"] == "request"
+        assert 0 < process.communicate.call_args.kwargs["timeout"] <= 60
+
     def test_cancelled_tracked_child_stops_before_start(self) -> None:
         """A cancellation request must prevent child creation."""
         shutdown = threading.Event()
@@ -527,7 +579,10 @@ class TestRunSubprocessTimeoutLogging:
         shutdown = threading.Event()
         process = MagicMock(pid=123)
 
-        def wait_for_cancellation(*, timeout: float | None) -> tuple[str, str]:
+        def wait_for_cancellation(
+            *, input: str | None = None, timeout: float | None
+        ) -> tuple[str, str]:
+            assert input == "request"
             assert timeout is not None and timeout <= 0.1
             shutdown.set()
             raise subprocess.TimeoutExpired(["tool"], timeout)
@@ -546,6 +601,7 @@ class TestRunSubprocessTimeoutLogging:
                 timeout=60,
                 track_process_group=True,
                 shutdown=shutdown,
+                input_text="request",
             )
         stop.assert_called_once_with(process)
 
@@ -601,6 +657,7 @@ class TestRunSubprocessTimeoutLogging:
 
         assert result is completed
         run.assert_called_once()
+        assert run.call_args.kwargs["stdin"] is subprocess.DEVNULL
 
     @pytest.mark.skipif(
         not hasattr(os, "killpg"),

@@ -33,6 +33,7 @@ from hephaestus.agents.codex_isolation import (
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
+    ExecutionPolicy,
     ExecutionPolicyError,
     ExecutionRequest,
     SessionLifecycle,
@@ -780,7 +781,7 @@ def test_codex_delta_scan_does_not_read_unchanged_sparse_file(
     _profile, protected = _sealed_codex_profile(request)
     sparse = Path(request.worktree_path) / "large-existing-object"
     with sparse.open("wb") as stream:
-        stream.truncate(1460 * 1024 * 1024)
+        stream.truncate(2 * 1024 * 1024)
     baseline = agent_runtime._capture_codex_preserved_state(request)
     original_pread = os.pread
     sparse_reads = 0
@@ -2800,6 +2801,96 @@ def test_run_codex_session_tracks_a_dedicated_process_group(tmp_path: Path) -> N
     assert tracker_events == [("enter", 2468), ("exit", 2468)]
 
 
+def test_resume_codex_session_reaps_a_process_that_starts_during_cancellation(
+    tmp_path: Path,
+) -> None:
+    """A cancellation after process start stops and reaps the Codex child."""
+    process: _FakeCodexPopen | None = None
+
+    def remaining_timeout() -> int:
+        if process is not None:
+            raise InterruptedError("compact operation cancelled")
+        return 30
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        nonlocal process
+        process = _FakeCodexPopen(
+            cmd,
+            proc_stdout="",
+            final_message="done",
+            hang=True,
+            **kwargs,
+        )
+        process.pid = 2468  # type: ignore[attr-defined]
+        return process
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        patch(
+            "hephaestus.agents.runtime._terminate_process_group", return_value=("", "")
+        ) as terminate,
+        pytest.raises(InterruptedError, match="compact operation cancelled"),
+    ):
+        agent_runtime.resume_agent_session(
+            "codex",
+            "codex-session",
+            "/compact",
+            cwd=tmp_path,
+            timeout=30,
+            remaining_timeout=remaining_timeout,
+        )
+
+    assert process is not None
+    terminate.assert_called_once_with(process)
+
+
+def test_resume_codex_session_does_not_recover_a_deadline_race_as_success(
+    tmp_path: Path,
+) -> None:
+    """A final-message file cannot hide a deadline that expires after start."""
+    process: _FakeCodexPopen | None = None
+
+    def remaining_timeout() -> int:
+        if process is not None:
+            raise subprocess.TimeoutExpired("compact operation deadline", 0)
+        return 30
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        nonlocal process
+        process = _FakeCodexPopen(
+            cmd,
+            proc_stdout="",
+            final_message="stale final message",
+            hang=True,
+            **kwargs,
+        )
+        process.pid = 2468  # type: ignore[attr-defined]
+        return process
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        patch(
+            "hephaestus.agents.runtime._terminate_process_group", return_value=("", "")
+        ) as terminate,
+        pytest.raises(subprocess.TimeoutExpired, match="compact operation deadline"),
+    ):
+        agent_runtime.resume_agent_session(
+            "codex",
+            "codex-session",
+            "/compact",
+            cwd=tmp_path,
+            timeout=30,
+            remaining_timeout=remaining_timeout,
+        )
+
+    assert process is not None
+    terminate.assert_called_once_with(process)
+
+
 def test_run_codex_session_strips_null_byte_from_stdin(tmp_path: Path) -> None:
     """#1661: a NUL in the prompt must not crash the Codex stdin path."""
     captured_input: list[str | None] = []
@@ -4646,6 +4737,43 @@ def test_run_opencode_session_tracks_a_dedicated_process_group(tmp_path: Path) -
     assert tracker_events == [("enter", 2468), ("exit", 2468)]
 
 
+def test_resume_opencode_session_reaps_a_process_that_starts_during_cancellation(
+    tmp_path: Path,
+) -> None:
+    """A cancellation after process start stops and reaps the OpenCode child."""
+    process: _FakeOpenCodePopen | None = None
+
+    def remaining_timeout() -> int:
+        if process is not None:
+            raise InterruptedError("compact operation cancelled")
+        return 30
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        nonlocal process
+        process = _FakeOpenCodePopen(cmd, proc_stdout="", **kwargs)
+        process.pid = 2468
+        return process
+
+    with (
+        patch("subprocess.Popen", side_effect=fake_popen),
+        patch(
+            "hephaestus.agents.runtime._terminate_process_group", return_value=("", "")
+        ) as terminate,
+        pytest.raises(InterruptedError, match="compact operation cancelled"),
+    ):
+        agent_runtime.resume_agent_session(
+            "opencode",
+            "opencode-session",
+            "/compact",
+            cwd=tmp_path,
+            timeout=30,
+            remaining_timeout=remaining_timeout,
+        )
+
+    assert process is not None
+    terminate.assert_called_once_with(process)
+
+
 def test_run_opencode_session_raises_on_nonzero_exit(tmp_path: Path) -> None:
     """A failed OpenCode run surfaces as CalledProcessError with both streams."""
 
@@ -5494,6 +5622,161 @@ def test_run_agent_text_keeps_a_colon_bearing_pi_model_separate(
     assert commands[0][commands[0].index("--thinking") + 1] == "future-effort"
 
 
+@pytest.mark.parametrize(
+    ("boundary_error", "error_type", "error_match"),
+    [
+        (
+            InterruptedError("compact operation cancelled"),
+            InterruptedError,
+            "compact operation cancelled",
+        ),
+        (
+            subprocess.TimeoutExpired("compact operation deadline", 0),
+            subprocess.TimeoutExpired,
+            "compact operation deadline",
+        ),
+    ],
+    ids=("cancellation", "deadline"),
+)
+def test_resume_pi_session_reaps_a_process_that_starts_at_operation_boundary(
+    tmp_path: Path,
+    boundary_error: BaseException,
+    error_type: type[BaseException],
+    error_match: str,
+) -> None:
+    """A stop boundary after process start stops and reaps the Pi child."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+    from hephaestus.agents.pi_session import create_pi_binding
+
+    executable = tmp_path / "pi"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+    process_started = False
+    received_boundary: agent_runtime.RemainingTimeout | None = None
+    events: list[str] = []
+
+    class FakeProcess:
+        """Record adapter-owned termination and reaping for one child."""
+
+        pid = 2468
+
+        def __init__(self) -> None:
+            self.stopped = False
+            self.reaped = False
+
+        def terminate_group(self) -> None:
+            events.append("terminate")
+            self.stopped = True
+
+        def reap(self) -> None:
+            assert self.stopped is True
+            events.append("reap")
+            self.reaped = True
+
+    process = FakeProcess()
+
+    class StartingAdapter:
+        def invoke(
+            self,
+            *,
+            policy: ExecutionPolicy,
+            command: list[str],
+            environment: dict[str, str],
+            prompt: str,
+            cwd: Path,
+            timeout: int,
+            model: str,
+            session_id: str | None,
+            process_tracker: agent_runtime.ProcessTracker | None,
+            remaining_timeout: agent_runtime.RemainingTimeout | None,
+        ) -> agent_runtime.AgentRunResult:
+            nonlocal process_started, received_boundary
+            del policy, command, environment, prompt, cwd, model, session_id
+            assert remaining_timeout is not None
+            received_boundary = remaining_timeout
+            wait_timeout = min(timeout, remaining_timeout())
+            events.append("spawn")
+            process_started = True
+            assert process_tracker is not None
+            with process_tracker(process.pid):
+                try:
+                    wait_timeout = min(wait_timeout, remaining_timeout())
+                except BaseException:
+                    process.terminate_group()
+                    process.reap()
+                    raise
+                del wait_timeout
+            raise AssertionError("cancellation check did not stop Pi")
+
+    @contextmanager
+    def profile(*_args: object, **_kwargs: object) -> Any:
+        yield tmp_path, {}
+
+    def remaining_timeout() -> int:
+        events.append("check_after" if process_started else "check_before")
+        if process_started:
+            raise boundary_error
+        return 30
+
+    @contextmanager
+    def track_process_group(pid: int) -> Any:
+        assert pid == 2468
+        events.append("track_enter")
+        try:
+            yield
+        finally:
+            events.append("track_exit")
+
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.COMPACT,
+        SessionLifecycle.RESUME_REQUIRED,
+    )
+    binding = create_pi_binding(
+        session_id="pi-session",
+        cwd=tmp_path,
+        role=request.role,
+        model="private/provider-model",
+    )
+    result: agent_runtime.AgentRunResult | None = None
+    with (
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", StartingAdapter()),
+        patch(
+            "hephaestus.agents.runtime._require_pi_automation_admission",
+            return_value=PiPreflightResult.ready_result(executable=executable),
+        ),
+        patch("hephaestus.agents.runtime._pi_automation_profile", side_effect=profile),
+        patch("hephaestus.agents.runtime._pi_policy_args", return_value=[]),
+        pytest.raises(error_type, match=error_match),
+    ):
+        result = agent_runtime.resume_agent_session(
+            "pi",
+            "pi-session",
+            "/compact",
+            cwd=tmp_path,
+            timeout=30,
+            model="private/provider-model",
+            execution_request=request,
+            resume_binding=binding,
+            process_tracker=track_process_group,
+            remaining_timeout=remaining_timeout,
+        )
+
+    assert result is None
+    assert received_boundary is remaining_timeout
+    assert process.stopped is True
+    assert process.reaped is True
+    assert events == [
+        "check_before",
+        "spawn",
+        "track_enter",
+        "check_after",
+        "terminate",
+        "reap",
+        "track_exit",
+    ]
+
+
 def test_run_agent_text_preserves_ordinary_effort_words_in_pi_output(
     tmp_path: Path,
 ) -> None:
@@ -5812,6 +6095,60 @@ def test_pi_adapter_failure_redacts_default_provider_and_model_components(
         )
 
     _assert_pi_exception_chain_is_redacted(exc_info.value)
+
+
+def test_pi_adapter_timeout_preserves_type_and_redacts_diagnostics(
+    tmp_path: Path,
+) -> None:
+    """A Pi adapter timeout keeps its type and removes private diagnostics."""
+    from hephaestus.agents.execution_policy import resolve_policy
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    executable = tmp_path / "pi"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    class TimingOutAdapter:
+        def invoke(self, **_kwargs: object) -> agent_runtime.AgentRunResult:
+            raise subprocess.TimeoutExpired(
+                ["pi", "--model", "private-provider-alias/private-test-alias"],
+                7,
+                output="private-provider-alias private-test-alias",
+                stderr="private-test-alias private-provider-alias",
+            )
+
+    @contextmanager
+    def profile(*_args: object, **_kwargs: object) -> Any:
+        yield tmp_path, {}
+
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.PR_REVIEW,
+        SessionLifecycle.ONE_SHOT,
+    )
+    with (
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", TimingOutAdapter()),
+        patch("hephaestus.agents.runtime._pi_automation_profile", side_effect=profile),
+        patch("hephaestus.agents.runtime._pi_policy_args", return_value=[]),
+        pytest.raises(subprocess.TimeoutExpired) as exc_info,
+    ):
+        agent_runtime._run_pi_with_policy(
+            prompt="review",
+            cwd=tmp_path,
+            timeout=30,
+            model="private-provider-alias/private-test-alias",
+            policy=resolve_policy(request),
+            preflight=PiPreflightResult.ready_result(executable=executable),
+            lifecycle=SessionLifecycle.ONE_SHOT,
+        )
+
+    exc = exc_info.value
+    assert isinstance(exc, subprocess.TimeoutExpired)
+    assert exc.timeout == 7
+    for diagnostic in (str(exc.cmd), str(exc.stdout), str(exc.stderr)):
+        assert "private-provider-alias" not in diagnostic
+        assert "private-test-alias" not in diagnostic
+        assert agent_runtime.PI_PRIVATE_REDACTION in diagnostic
 
 
 @pytest.mark.parametrize(

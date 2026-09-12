@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -2399,7 +2399,74 @@ class TestWorkerPoolSubmitComplete:
             auth_status_timeout=10,
             pi_isolation_adapter="package:factory",
             pi_dir=Path("/private/pi-agent"),
+            remaining_timeout=ANY,
+            shutdown=ANY,
         )
+
+    def test_compact_job_cancellation_stops_during_session_discovery(
+        self,
+        pool: WorkerPool,
+        shutdown_event: threading.Event,
+    ) -> None:
+        """Cancellation during session discovery prevents provider launch."""
+        job = CompactJob(
+            repo="test/repo",
+            issue=123,
+            agent="claude",
+            session_agent="pr-reviewer",
+            model="claude-haiku-4-5",
+            cwd=Path("/tmp"),
+            timeout_s=60,
+        )
+
+        def cancel_discovery(*_args: object, **kwargs: object) -> str:
+            shutdown_event.set()
+            remaining_timeout = cast(Callable[[], int], kwargs["remaining_timeout"])
+            remaining_timeout()
+            pytest.fail("Cancelled session discovery returned a session ID.")
+
+        with (
+            patch("hephaestus.automation.learn.session_uuid", side_effect=cancel_discovery),
+            patch("hephaestus.automation.learn.run_subprocess") as provider,
+        ):
+            result = pool._run(job)
+
+        assert not result.ok
+        assert result.interrupted
+        provider.assert_not_called()
+
+    def test_compact_job_expired_deadline_stops_during_session_discovery(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """An expired compact deadline prevents provider launch without blocking review."""
+        clock = [100.0]
+        job = CompactJob(
+            repo="test/repo",
+            issue=123,
+            agent="claude",
+            session_agent="pr-reviewer",
+            model="claude-haiku-4-5",
+            cwd=Path("/tmp"),
+            timeout_s=10,
+        )
+
+        def expire_discovery(*_args: object, **kwargs: object) -> str:
+            clock[0] = 111.0
+            remaining_timeout = cast(Callable[[], int], kwargs["remaining_timeout"])
+            remaining_timeout()
+            pytest.fail("Expired session discovery returned a session ID.")
+
+        with (
+            patch(f"{_WP}.time.monotonic", side_effect=lambda: clock[0]),
+            patch("hephaestus.automation.learn.session_uuid", side_effect=expire_discovery),
+            patch("hephaestus.automation.learn.run_subprocess") as provider,
+        ):
+            result = pool._run(job)
+
+        assert result.ok
+        assert result.value is False
+        provider.assert_not_called()
 
     def test_submit_and_complete_non_claude_agent_job(
         self,
@@ -2523,6 +2590,7 @@ class TestWorkerPoolSubmitComplete:
             sandbox="workspace-write",
             approval="never",
             process_tracker=subprocess_registry.track_process_group,
+            remaining_timeout=ANY,
             execution_request=None,
             resume_binding=None,
             disable_pi_automation=False,
@@ -15924,6 +15992,48 @@ class TestGitOps:
         ]
         assert all(0 < call.kwargs["timeout"] <= job.timeout_s for call in mock_run.call_args_list)
 
+    def test_sync_checkout_metadata_lock_uses_remaining_operation_budget(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """Preflight time reduces the budget for the checkout metadata lock."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        metadata_lock = tmp_path / "metadata.lock"
+        clock = [100.0]
+        observed_remaining: list[float] = []
+        job = GitJob(
+            repo="test/repo",
+            op="sync_checkout",
+            timeout_s=10,
+            kwargs={"repo": "owner/name", "dest": str(checkout)},
+        )
+
+        def preflight(_checkout: Path, _timeout_s: int) -> None:
+            clock[0] = 104.0
+            return None
+
+        @contextmanager
+        def observe_lock(_path: Path) -> Iterator[None]:
+            remaining = git_utils.remaining_operation_timeout(None)
+            assert isinstance(remaining, float)
+            observed_remaining.append(remaining)
+            yield
+
+        with (
+            patch(f"{_WP}.time.monotonic", side_effect=lambda: clock[0]),
+            patch("hephaestus.automation.git_runtime.time.monotonic", side_effect=lambda: clock[0]),
+            patch(f"{_WP}._checkout_preflight_error", side_effect=preflight),
+            patch(f"{_WP}.WorktreeManager.git_metadata_lock_path", return_value=metadata_lock),
+            patch(f"{_WP}.operation_file_lock", side_effect=observe_lock),
+            patch.object(pool, "_sync_checkout_locked", return_value=JobResult(ok=True)),
+        ):
+            result = pool._run_git(job)
+
+        assert result.ok
+        assert observed_remaining == [6.0]
+
     def test_sync_checkout_rejects_local_commits_ahead_of_remote(
         self,
         pool: WorkerPool,
@@ -16619,8 +16729,9 @@ class TestShutdownReapsSubprocess:
                 model: str,
                 session_id: str | None,
                 process_tracker: agent_runtime.ProcessTracker | None,
+                remaining_timeout: agent_runtime.RemainingTimeout | None,
             ) -> AgentRunResult:
-                del policy, environment, prompt, model, session_id
+                del policy, environment, prompt, model, session_id, remaining_timeout
                 assert process_tracker is not None
                 process = subprocess.Popen(
                     sleeper,

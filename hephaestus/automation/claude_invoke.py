@@ -29,6 +29,7 @@ import os
 import re
 import signal
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import hephaestus.automation.subprocess_registry as subprocess_registry
@@ -164,6 +165,7 @@ def invoke_claude_with_session(
     input_via_stdin: bool = False,
     session_lifecycle: str | None = None,
     require_new_session: bool = True,
+    remaining_timeout: Callable[[], int] | None = None,
 ) -> tuple[str, str]:
     """Invoke Claude with a deterministic per-(repo, issue, agent, model) session.
 
@@ -224,6 +226,8 @@ def invoke_claude_with_session(
         input_via_stdin: When True, ``prompt`` is fed via stdin instead of argv.
         require_new_session: Reject an existing transcript for a new durable
             cycle. Ordinary deterministic retries can reuse the transcript.
+        remaining_timeout: Optional operation callback that checks the deadline
+            and cancellation. It bounds session discovery and provider execution.
 
     Returns:
         ``(stdout, session_uuid)`` — the deterministic id derived from the
@@ -261,6 +265,7 @@ def invoke_claude_with_session(
             input_via_stdin=input_via_stdin,
             session_lifecycle=session_lifecycle,
             require_new_session=require_new_session,
+            remaining_timeout=remaining_timeout,
         )
 
     fallback = fallback_model(fallback_model_value)
@@ -304,6 +309,7 @@ def _invoke_claude_once(
     input_via_stdin: bool,
     session_lifecycle: str | None,
     require_new_session: bool = True,
+    remaining_timeout: Callable[[], int] | None = None,
 ) -> tuple[str, str]:
     """Run one ``claude`` create/resume call for the given model (no fallback).
 
@@ -311,7 +317,7 @@ def _invoke_claude_once(
     docstring for the session-key semantics.
     """
     display_name = session_name(repo, issue, agent, model)
-    sid = session_uuid(repo, issue, agent, model, cwd=cwd)
+    sid = session_uuid(repo, issue, agent, model, cwd=cwd, remaining_timeout=remaining_timeout)
 
     # Create on FIRST use, resume after (#1168). ``claude --resume`` does NOT
     # auto-create — it errors "No conversation found" for an unknown id — so the
@@ -322,7 +328,7 @@ def _invoke_claude_once(
     # This is NOT the old recreate-on-failure cascade (that mis-fired on 429s,
     # re-sending full prompts 3x and crossing models); a ``--resume``/``--session-id``
     # failure now simply propagates.
-    transcript = resolve_session_jsonl_path(sid, cwd)
+    transcript = resolve_session_jsonl_path(sid, cwd, remaining_timeout=remaining_timeout)
     create = not transcript.is_file()
     if session_lifecycle == "resume-required" and create:
         raise AgentSessionLostError("Claude review transcript is missing")
@@ -377,10 +383,11 @@ def _invoke_claude_once(
     result = _run_tracked(
         cmd,
         stdin_text=prompt if input_via_stdin else None,
-        timeout=timeout,
+        timeout=min(timeout, remaining_timeout()) if remaining_timeout is not None else timeout,
         env=env,
         use_devnull_stdin=not input_via_stdin,
         cwd=str(cwd),
+        remaining_timeout=remaining_timeout,
     )
     return result.stdout, sid
 
@@ -393,6 +400,7 @@ def _run_tracked(
     env: dict[str, str],
     use_devnull_stdin: bool,
     cwd: str,
+    remaining_timeout: Callable[[], int] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run *cmd* like ``subprocess.run(check=True, timeout=...)`` but killable.
 
@@ -406,6 +414,8 @@ def _run_tracked(
     :class:`subprocess.CalledProcessError` on non-zero exit,
     :class:`subprocess.TimeoutExpired` on timeout.
     """
+    if remaining_timeout is not None:
+        timeout = min(timeout, remaining_timeout())
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL if use_devnull_stdin else subprocess.PIPE,
@@ -418,6 +428,8 @@ def _run_tracked(
     )
     with subprocess_registry.track_process_group(proc.pid):
         try:
+            if remaining_timeout is not None:
+                timeout = min(timeout, remaining_timeout())
             stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc)
@@ -426,6 +438,7 @@ def _run_tracked(
         except BaseException:
             # Includes the SIGTERM-driven teardown path: never leave the child.
             _kill_process_tree(proc)
+            proc.communicate()
             raise
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)

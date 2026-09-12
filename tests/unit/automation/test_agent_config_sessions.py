@@ -178,7 +178,7 @@ class TestSessionUUID:
         dashed.mkdir(parents=True)
         monkeypatch.setattr(
             "hephaestus.automation.agent_config._checkout_identity",
-            lambda cwd: str(cwd.resolve()),
+            lambda cwd, *, remaining_timeout=None: str(cwd.resolve()),
         )
 
         monkeypatch.chdir(dotted)

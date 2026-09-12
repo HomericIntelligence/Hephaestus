@@ -235,7 +235,10 @@ class TestWorktreeManager:
 
         with (
             patch.object(manager, "_worktree_holding_branch", return_value=None),
-            patch("hephaestus.automation.worktree_manager.file_lock", side_effect=fake_file_lock),
+            patch(
+                "hephaestus.automation.worktree_manager.operation_file_lock",
+                side_effect=fake_file_lock,
+            ),
         ):
             manager.create_worktree(123, "123-feature")
 

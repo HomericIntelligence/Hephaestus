@@ -24,20 +24,27 @@ that runs the automation. Recovery procedure for a force-killed loop:
     git -C <repo> worktree remove build/.worktrees/auto-N-review
 """
 
-import contextlib
 import logging
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.git_runtime import (
+    current_operation_shutdown,
+    operation_deadline,
+    operation_file_lock,
+    remaining_operation_timeout,
+)
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
-from hephaestus.utils.file_lock import file_lock
+from hephaestus.config.child_environments import read_approved_parent_env
 from hephaestus.utils.git import _is_full_commit_sha
+from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
 
 from .git_utils import get_repo_root, is_clean_working_tree, run
@@ -423,7 +430,7 @@ class WorktreeManager:
         if self._base_branch_override_source == "loop_trunk":
             self._base_branch_override = None
             self._base_branch_override_source = None
-        with file_lock(self._git_metadata_lock_path()):
+        with operation_file_lock(self._git_metadata_lock_path()):
             try:
                 run(
                     ["git", *self._remote_git_config, "fetch", "origin"],
@@ -627,7 +634,7 @@ class WorktreeManager:
                 # The worker owns the source-lane lock for the complete
                 # handoff. Do not acquire it here: nested flock calls can
                 # release the worker's lock when this scope exits.
-                with file_lock(self._git_metadata_lock_path()):
+                with operation_file_lock(self._git_metadata_lock_path()):
                     direct_predecessor = False
                     direct_target_ref_revision: str | None = None
                     if source_lane == "impl" and not adopting_implementation_writer:
@@ -859,8 +866,10 @@ class WorktreeManager:
 
             except (
                 BranchWorktreeOwnedError,
+                InterruptedError,
                 RemoteGitRefreshError,
                 WorktreeCreationReceiptError,
+                subprocess.TimeoutExpired,
             ):
                 raise
             except Exception as e:
@@ -880,7 +889,7 @@ class WorktreeManager:
         key = source_worktree_name(issue_number, "review")
         path = self.base_dir / key
         try:
-            with file_lock(self._git_metadata_lock_path()):
+            with operation_file_lock(self._git_metadata_lock_path()):
                 if path.exists():
                     if not is_clean_working_tree(path):
                         raise RuntimeError(f"deterministic review worktree is dirty: {path}")
@@ -888,6 +897,8 @@ class WorktreeManager:
                 self._add_isolated_worktree_for_branch(path, branch_name, timeout=timeout)
             self.worktrees[key] = path
             return path
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
         except Exception as exc:
             raise RuntimeError(f"Failed to create worktree: {exc}") from exc
 
@@ -945,7 +956,7 @@ class WorktreeManager:
         if refresh_base:
             self.refresh_base_branch(timeout=timeout)
         try:
-            with file_lock(self._git_metadata_lock_path()):
+            with operation_file_lock(self._git_metadata_lock_path()):
                 worktree_key, worktree_path = self._next_isolated_worktree_slot(
                     issue_number, isolated_generation, timeout=timeout
                 )
@@ -961,6 +972,8 @@ class WorktreeManager:
                 worktree_path,
             )
             return worktree_path
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
         except Exception as e:
             # Do not remove this path on failure. Another coordinator may have
             # created it while we waited for the metadata lock, or an
@@ -1469,6 +1482,39 @@ class WorktreeManager:
                 **_timeout_kw(timeout),
             )
 
+    def _prune_incomplete_worktree_registration(self) -> None:
+        """Prune a stale registration after a staged removal does not complete."""
+        try:
+            with operation_deadline(None, shutdown=threading.Event()):
+                run(
+                    ["git", "worktree", "prune", "--expire", "now"],
+                    cwd=self.repo_root,
+                    check=False,
+                    timeout=1,
+                )
+        except Exception as cleanup_error:
+            logger.debug(
+                "Could not prune the removed worktree metadata after incomplete removal: %s",
+                cleanup_error,
+            )
+
+    def _handle_worktree_path_removal_failure(
+        self,
+        worktree_path: Path,
+        staged_path: Path | None,
+        error: Exception,
+    ) -> None:
+        """Log a removal failure and preserve staged recovery state."""
+        logger.warning(
+            "Failed to remove worktree directory %s directly: %s",
+            worktree_path,
+            error,
+        )
+        if staged_path is None:
+            return
+        self._prune_incomplete_worktree_registration()
+        raise error
+
     def _remove_worktree_path_forcefully(
         self,
         worktree_path: Path,
@@ -1484,30 +1530,66 @@ class WorktreeManager:
                 check=False,
                 **_timeout_kw(timeout),
             )
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
         except Exception as e:
             logger.debug("git worktree remove failed (expected if not a worktree): %s", e)
 
-        try:
-            # Fallback to direct directory removal.
-            if worktree_path.exists():
-                try:
-                    shutil.rmtree(worktree_path)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to remove worktree directory %s directly: %s",
-                        worktree_path,
-                        e,
-                    )
-        finally:
+        operation_timeout = remaining_operation_timeout(timeout)
+        shutdown = current_operation_shutdown()
+        staged_path: Path | None = None
+        if worktree_path.exists():
             try:
-                run(
-                    ["git", "worktree", "prune"],
-                    cwd=self.repo_root,
-                    check=False,
-                    **_timeout_kw(timeout),
-                )
+                if operation_timeout is None and shutdown is None:
+                    shutil.rmtree(worktree_path)
+                else:
+                    next_staged_path = worktree_path.with_name(
+                        f".{worktree_path.name}.removing-{secrets.token_hex(16)}"
+                    )
+                    remaining_operation_timeout(timeout)
+                    staged_path = next_staged_path
+                    worktree_path.rename(staged_path)
+
+                    def _remaining_timeout() -> int | float:
+                        remaining = remaining_operation_timeout(timeout)
+                        if remaining is None:
+                            raise RuntimeError("bounded worktree removal timeout is unavailable")
+                        return remaining
+
+                    run_subprocess(
+                        [
+                            sys.executable,
+                            "-I",
+                            "-c",
+                            "import shutil, sys; shutil.rmtree(sys.argv[1])",
+                            str(staged_path),
+                        ],
+                        cwd=self.repo_root,
+                        env=read_approved_parent_env(),
+                        timeout=timeout,
+                        check=True,
+                        log_on_error=False,
+                        track_process_group=True,
+                        shutdown=shutdown,
+                        remaining_timeout=_remaining_timeout,
+                    )
+            except (InterruptedError, subprocess.TimeoutExpired):
+                if staged_path is not None:
+                    self._prune_incomplete_worktree_registration()
+                raise
             except Exception as e:
-                logger.debug("git worktree prune failed: %s", e)
+                self._handle_worktree_path_removal_failure(worktree_path, staged_path, e)
+        try:
+            run(
+                ["git", "worktree", "prune"],
+                cwd=self.repo_root,
+                check=False,
+                **_timeout_kw(timeout),
+            )
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
+        except Exception as e:
+            logger.debug("git worktree prune failed: %s", e)
 
     def _add_authenticated_adopted_implementation_writer(  # noqa: C901
         self,
@@ -2055,14 +2137,24 @@ class WorktreeManager:
                     issue_number,
                     worktree_path,
                 )
-                del self.worktrees[issue_number]
-                with contextlib.suppress(Exception):
+                try:
                     run(
                         ["git", "worktree", "prune"],
                         cwd=self.repo_root,
                         check=False,
                         **_timeout_kw(timeout),
                     )
+                except (InterruptedError, subprocess.TimeoutExpired):
+                    raise
+                except Exception as exc:
+                    logger.debug(
+                        "Could not prune metadata for absent worktree issue #%s at %s "
+                        "(error type: %s)",
+                        issue_number,
+                        worktree_path,
+                        type(exc).__name__,
+                    )
+                del self.worktrees[issue_number]
                 return
 
             self._cleanup_automation_prompt_artifacts(worktree_path)
@@ -2075,12 +2167,14 @@ class WorktreeManager:
                 if force:
                     cmd.append("--force")
 
-                with file_lock(self._git_metadata_lock_path()):
+                with operation_file_lock(self._git_metadata_lock_path()):
                     run(cmd, cwd=self.repo_root, **_timeout_kw(timeout))
 
                 del self.worktrees[issue_number]
                 logger.info("Removed worktree for issue #%s", issue_number)
 
+            except (InterruptedError, subprocess.TimeoutExpired):
+                raise
             except Exception as e:
                 raise RuntimeError(f"Failed to remove worktree: {e}") from e
 
@@ -2138,6 +2232,8 @@ class WorktreeManager:
                 self.remove_worktree(issue_num, force=force, timeout=timeout)
                 if path is not None:
                     removed_paths.add(path)
+            except (InterruptedError, subprocess.TimeoutExpired):
+                raise
             except WorktreeDirtyError as e:
                 logger.info("Preserved dirty worktree for issue #%s at %s", e.issue_number, e.path)
                 self.preserved.append((e.issue_number, e.path))
@@ -2152,6 +2248,8 @@ class WorktreeManager:
         try:
             run(["git", "worktree", "prune"], cwd=self.repo_root, **_timeout_kw(timeout))
             logger.info("Pruned stale worktrees")
+        except (InterruptedError, subprocess.TimeoutExpired):
+            raise
         except Exception as e:
             logger.error("Failed to prune worktrees: %s", e)
 

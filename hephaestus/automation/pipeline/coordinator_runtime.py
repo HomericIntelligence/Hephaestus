@@ -1305,6 +1305,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if self._pool_shut_down:
             return
         self._pool_shut_down = True
+        if self._fatal:
+            # Both pools share the host executor. Mark both lanes before
+            # either pool can cancel work in the other lane.
+            self._worker_shutdown.set()
+            self._force_shutdown.set()
         try:
             # The worker event is separate from the operator-signal event.
             # Thus, a fatal exit cancels active work without changing exit 1
