@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+import hephaestus.automation.git_runtime as git_runtime
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.github_api.prs as prs_mod
 import hephaestus.automation.pipeline_github_mutations as mutations_mod
@@ -9065,6 +9066,48 @@ class TestRepoScopedAutoMerge:
 
 class TestCreatePr:
     """create_pr: idempotent reuse, given-body create, dry-run neutral."""
+
+    def test_create_pr_uses_checkout_for_signatures_and_explicit_state_root_for_journals(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
+    ) -> None:
+        """A separate state root cannot replace the Git checkout for signature reads."""
+        checkout = tmp_path / "intake" / "worktree"
+        state_root = tmp_path / "intake"
+        checkout.mkdir(parents=True)
+        signature_cwds: list[Path] = []
+
+        monkeypatch.setattr(PipelineGitHub, "_open_prs_for_branch", lambda self, branch: [])
+        monkeypatch.setattr(PipelineGitHub, "find_pr_for_issue", lambda self, issue: None)
+
+        def assert_signed(branch: str, **kwargs: Any) -> None:
+            del branch
+            kwargs["run_git"](["git", "log"])
+
+        def run_git(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            signature_cwds.append(kwargs["cwd"])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(prs_mod, "_assert_branch_commits_signed", assert_signed)
+        monkeypatch.setattr(git_runtime, "run", run_git)
+        command_runner.side_effect = lambda argv, **_kwargs: subprocess.CompletedProcess(
+            argv, 0, "https://github.com/org/repo-a/pull/8\n", ""
+        )
+        adapter = PipelineGitHub(
+            "org",
+            repo="repo-a",
+            repo_root=checkout,
+            state_root=state_root,
+            command_runner=command_runner,
+        )
+
+        assert adapter.create_pr(7, "feature", "title", "Closes #7") == 8
+        assert signature_cwds == [checkout]
+        assert adapter._implementation_reply_lock_path(7).parent == (
+            state_root / "build" / ".issue_implementer" / "locks"
+        )
 
     def test_repo_scoped_reuses_existing_open_pr(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock

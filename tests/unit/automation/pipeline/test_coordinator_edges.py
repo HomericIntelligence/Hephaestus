@@ -221,16 +221,33 @@ class TestWiring:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         accessor = MagicMock()
+        github_factory = MagicMock(return_value=accessor)
         monkeypatch.setattr(
             "hephaestus.automation.pipeline_github.PipelineGitHub",
-            MagicMock(return_value=accessor),
+            github_factory,
         )
         monkeypatch.setattr(coordinator_mod.Coordinator, "run", lambda self: 7)
+        checkout = tmp_path / "intake" / "worktree"
+        state_root = tmp_path / "intake"
         config = PipelineConfig(
-            org="org", repos=["r"], dry_run=True, projects_dir=tmp_path, rate_guard_enabled=False
+            org="org",
+            repos=["r"],
+            dry_run=True,
+            projects_dir=tmp_path,
+            rate_guard_enabled=False,
+            repo_roots={"r": checkout},
+            repo_state_roots={"r": state_root},
         )
 
         assert run_pipeline(config) == 7
+        github_factory.assert_called_once_with(
+            "org",
+            repo="r",
+            dry_run=True,
+            repo_root=checkout,
+            state_root=state_root,
+            gh_timeout=config.gh_timeout,
+        )
 
     @staticmethod
     def _stub_pipeline_runtime(

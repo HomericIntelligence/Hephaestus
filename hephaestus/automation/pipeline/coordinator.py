@@ -418,7 +418,8 @@ def run_pipeline(config: ct.PipelineConfig) -> int:
             config.org,
             repo=repo_name,
             dry_run=config.dry_run,
-            repo_root=state_root,
+            repo_root=repo_root,
+            state_root=state_root,
             gh_timeout=config.gh_timeout,
         )
 

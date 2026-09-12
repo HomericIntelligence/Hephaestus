@@ -239,18 +239,21 @@ class FakeWorkerPool:
             return JobResult(ok=True, value="a" * 40)
         if job.op == "prepare_intake":
             caller_root = Path(str(job.kwargs.get("caller_root") or ""))
-            intake_path = caller_root.parent / f".{caller_root.name}-intake"
+            intake_path = caller_root.parent / f".{caller_root.name}-intake" / "worktree"
+            common_dir = caller_root / ".git"
+            common_dir.mkdir(parents=True, exist_ok=True)
             intake_path.mkdir(parents=True, exist_ok=True)
             (intake_path / ".git").write_text("gitdir: fake\n", encoding="utf-8")
             return JobResult(
                 ok=True,
                 value={
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "repository": job.kwargs.get("repo", ""),
                     "repository_identity": "fake:repo",
                     "ownership_key": "fake:repo:intake",
-                    "common_dir": str(caller_root),
+                    "common_dir": str(common_dir),
                     "path": str(intake_path),
+                    "state_root": str(intake_path.parent),
                     "default_branch": "main",
                     "revision": "a" * 40,
                     "generation": 1,

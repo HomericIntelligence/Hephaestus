@@ -24,6 +24,48 @@ _PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in ct.StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 
 
+def _intake_materialization_error(receipt: RepoIntakeReceipt) -> str | None:
+    """Return an error when receipt paths are not materialized Git paths."""
+    git_entry = receipt.path / ".git"
+    if (
+        receipt.common_dir.is_symlink()
+        or not receipt.common_dir.is_dir()
+        or receipt.path.is_symlink()
+        or not receipt.path.is_dir()
+        or git_entry.is_symlink()
+        or not (git_entry.is_file() or git_entry.is_dir())
+    ):
+        return "repository-intake receipt paths are not materialized Git paths"
+    return None
+
+
+def _intake_reuse_error(
+    *,
+    previous_receipt: dict[str, object] | None,
+    receipt: RepoIntakeReceipt,
+    current_root: Path,
+    receipt_root: Path,
+    previous_state_root: Path | None,
+    state_root: Path,
+) -> str | None:
+    """Reject a receipt that changes an adopted intake identity or its roots."""
+    if previous_receipt is None:
+        return None
+    if previous_receipt != receipt.to_dict():
+        return "repository-intake re-adoption changed ownership identity"
+    try:
+        if receipt_root != current_root.resolve():
+            return "repository-intake receipt changed the verified intake path"
+        if (
+            previous_state_root is not None
+            and previous_state_root.resolve() != state_root.resolve()
+        ):
+            return "repository-intake receipt changed the durable state root"
+    except (OSError, RuntimeError):
+        return "verified repository-intake path cannot be resolved"
+    return None
+
+
 class ExecutionCoordinator(_CoordinatorHost):
     """Own job dispatch and independent main/learning permit budgets."""
 
@@ -320,26 +362,36 @@ class ExecutionCoordinator(_CoordinatorHost):
         if receipt.repository.casefold() != expected_repository.casefold():
             return "repository-intake receipt repository does not match the requested repository"
         current_root = ct._effective_repo_root(self.config, item.repo)
+        caller_root = ct._effective_repo_caller_root(self.config, item.repo)
         try:
-            if receipt.path.resolve() == current_root.resolve():
+            resolved_receipt = receipt.path.resolve()
+            resolved_caller = caller_root.resolve()
+            if resolved_receipt == resolved_caller:
                 return "repository-intake receipt points to the caller checkout"
         except (OSError, RuntimeError):
             return "repository-intake receipt path cannot be resolved"
-        git_entry = receipt.path / ".git"
-        if (
-            receipt.common_dir.is_symlink()
-            or not receipt.common_dir.is_dir()
-            or receipt.path.is_symlink()
-            or not receipt.path.is_dir()
-            or git_entry.is_symlink()
-            or not (git_entry.is_file() or git_entry.is_dir())
-        ):
-            return "repository-intake receipt paths are not materialized Git paths"
-        self.config.repo_roots[item.repo] = receipt.path
+        try:
+            state_root = receipt.state_root.resolve()
+        except (OSError, RuntimeError):
+            return "repository-intake durable state root cannot be resolved"
+        reuse_error = _intake_reuse_error(
+            previous_receipt=self.config.repo_intake_receipts.get(item.repo),
+            receipt=receipt,
+            current_root=current_root,
+            receipt_root=resolved_receipt,
+            previous_state_root=self.config.repo_state_roots.get(item.repo),
+            state_root=state_root,
+        )
+        if reuse_error is not None:
+            return reuse_error
+        if materialization_error := _intake_materialization_error(receipt):
+            return materialization_error
+        self.config.repo_caller_roots.setdefault(item.repo, resolved_caller)
+        self.config.repo_roots[item.repo] = resolved_receipt
         # The intake worktree can be rebound and removed when the remote
-        # default branch advances.  Keep durable journals beside its receipt,
-        # not inside that replaceable worktree or the caller checkout.
-        self.config.repo_state_roots[item.repo] = receipt.path.parent
+        # default branch advances. Keep durable journals beside its receipt.
+        self.config.repo_state_roots[item.repo] = state_root
+        self.config.repo_intake_receipts[item.repo] = receipt.to_dict()
         self._ctx_cache.pop(item.repo, None)
         return None
 

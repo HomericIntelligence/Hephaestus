@@ -662,12 +662,12 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         repository's ``.git/worktrees/<name>`` directory.  Reply publication
         must use the common directory rather than the worktree-local state
         directory, otherwise separate loop processes can both pass the
-        snapshot read and attach duplicate responses.  A standalone checkout
-        retains its repository-local state fallback.
+        snapshot read and attach duplicate responses. A standalone checkout
+        uses its explicit durable state root as the fallback.
         """
         repo_key = hashlib.sha256((self._repo_slug or self.org).encode("utf-8")).hexdigest()[:16]
         git_metadata = self._repo_root / ".git"
-        lock_root = ensure_state_dir(self._repo_root) / "locks"
+        lock_root = ensure_state_dir(self._state_root) / "locks"
         if git_metadata.is_dir():
             lock_root = git_metadata / "hephaestus-automation-locks"
         elif git_metadata.is_file():

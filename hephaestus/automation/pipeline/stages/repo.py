@@ -396,9 +396,15 @@ class RepoStage(Stage):
         # through into label work or discovery after a failed fetch.
         if item.payload.pop("clone_failed", False):
             if item.attempts.get("clone", 0) >= ctx.budget("clone"):
+                detail = str(
+                    item.payload.pop(
+                        "checkout_error",
+                        "repository checkout preparation failed",
+                    )
+                )
                 return StageOutcome(
                     Disposition.FINISH_FAIL,
-                    note=f"clone exhausted after {item.attempts['clone']} attempts",
+                    note=(f"clone exhausted after {item.attempts['clone']} attempts: {detail}"),
                 )
             logger.warning(
                 "repo:%s: clone failed (attempt %d/%d); retrying",
@@ -430,12 +436,20 @@ class RepoStage(Stage):
             return JobRequest(job=job, on_done_state="CLONE_WAIT")
 
         if dest.exists():
+            caller_root = Path(
+                str(
+                    getattr(ctx.config, "repo_caller_roots", {}).get(
+                        item.repo,
+                        dest,
+                    )
+                )
+            )
             item.payload["checkout_op"] = "prepare_intake"
             job = GitJob(
                 repo=item.repo,
                 op="prepare_intake",
                 timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
-                kwargs={"repo": f"{ctx.org}/{item.repo}", "caller_root": str(dest)},
+                kwargs={"repo": f"{ctx.org}/{item.repo}", "caller_root": str(caller_root)},
                 descr=f"prepare isolated intake for {ctx.org}/{item.repo}",
             )
             return JobRequest(job=job, on_done_state="CLONE_WAIT")
@@ -547,6 +561,7 @@ class RepoStage(Stage):
                 except (RepoIntakeError, TypeError) as exc:
                     item.attempts["clone"] = item.attempts.get("clone", 0) + 1
                     item.payload["clone_failed"] = True
+                    item.payload["checkout_error"] = f"invalid intake receipt: {exc}"
                     logger.warning("repo:%s: invalid intake receipt: %s", item.repo, exc)
                     return
                 item.payload[INTAKE_RECEIPT_KEY] = receipt.to_dict()
@@ -558,8 +573,10 @@ class RepoStage(Stage):
             else:  # pragma: no cover - every checkout JobRequest records its operation
                 item.payload["clone_failed"] = True
                 item.attempts["clone"] = item.attempts.get("clone", 0) + 1
+                item.payload["checkout_error"] = "checkout operation identity missing"
                 logger.warning("repo:%s: checkout operation identity missing", item.repo)
             return
         item.attempts["clone"] = item.attempts.get("clone", 0) + 1
         item.payload["clone_failed"] = True
+        item.payload["checkout_error"] = result.error or "checkout preparation failed"
         logger.warning("repo:%s: checkout preparation failed: %s", item.repo, result.error)
