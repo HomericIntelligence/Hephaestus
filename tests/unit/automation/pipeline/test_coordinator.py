@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import subprocess
 import threading
@@ -25,6 +26,7 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
+from hephaestus.automation.pipeline import worker_pool as worker_pool_module
 from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.coordinator import Coordinator
@@ -1764,6 +1766,7 @@ class TestImplementationAdmission:
             completion_q=completion_q,
             lock_dir=tmp_path / "locks",
         )
+        remote_git_env = worker_pool_module._controlled_git_env()
         first_job = GitJob(
             repo="repo-a",
             op="create_worktree",
@@ -1796,13 +1799,16 @@ class TestImplementationAdmission:
             with patch.object(
                 worker,
                 "_authenticated_remote_git_configuration",
-                return_value=({}, ("-c", "credential.helper=")),
+                return_value=(remote_git_env, ("-c", "credential.helper=")),
             ):
                 assert worker._run_git(first_job).ok is True
                 restarted_result = worker._run_git(second_job)
         finally:
             worker.shutdown(mark_interrupted=False)
 
+        trusted_git = worker_pool_module._trusted_git_executable()
+        assert trusted_git is not None
+        assert remote_git_env["PATH"].split(os.pathsep)[0] == str(Path(trusted_git).parent)
         assert restarted_result.ok is True
         coordinator, _pool, _ = make_coordinator(
             tmp_path,
@@ -1874,6 +1880,7 @@ class TestImplementationAdmission:
             completion_q=completion_q,
             lock_dir=tmp_path / "locks",
         )
+        remote_git_env = worker_pool_module._controlled_git_env()
         job = GitJob(
             repo="repo-a",
             op="create_worktree",
@@ -1894,7 +1901,7 @@ class TestImplementationAdmission:
                 patch.object(
                     worker,
                     "_authenticated_remote_git_configuration",
-                    return_value=({}, ("-c", "credential.helper=")),
+                    return_value=(remote_git_env, ("-c", "credential.helper=")),
                 ),
                 patch.object(worker, "_sync_worktree_to_remote_branch"),
             ):
@@ -1903,6 +1910,9 @@ class TestImplementationAdmission:
         finally:
             worker.shutdown(mark_interrupted=False)
 
+        trusted_git = worker_pool_module._trusted_git_executable()
+        assert trusted_git is not None
+        assert remote_git_env["PATH"].split(os.pathsep)[0] == str(Path(trusted_git).parent)
         assert restarted_result.ok is True
         coordinator, _pool, _ = make_coordinator(
             tmp_path,
