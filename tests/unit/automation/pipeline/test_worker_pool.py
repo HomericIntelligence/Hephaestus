@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import logging
@@ -120,7 +121,7 @@ from hephaestus.automation.remediation_recovery import (
     RemediationReplyResult,
     RemediationReviewInput,
 )
-from hephaestus.automation.repo_intake import RepoIntakeError
+from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
@@ -20304,6 +20305,217 @@ def test_failed_first_intake_preparation_releases_new_run_lease(
     assert events == ["enter", "exit"]
     pool.release_repo_intake_leases()
     assert events == ["enter", "exit"]
+
+
+def _local_intake_manager_factory(
+    remote: Path,
+    *,
+    remote_head_override: Callable[[int, str], str] | None = None,
+    ancestry_returncode: int | None = None,
+) -> Callable[..., RepoIntakeManager]:
+    """Return a real intake-manager factory with a local fetch transport."""
+    remote_reads = 0
+
+    def factory(caller_root: Path, **kwargs: Any) -> RepoIntakeManager:
+        def runner(
+            command: list[str],
+            *,
+            cwd: Path | None = None,
+            check: bool = True,
+            timeout: int | float | None = None,
+            env: dict[str, str] | None = None,
+            log_errors: bool = True,
+            input_text: str | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal remote_reads
+            del log_errors
+            if command[0] == "gh":
+                return subprocess.CompletedProcess(command, 0, "main\n", "")
+            if "merge-base" in command and ancestry_returncode is not None:
+                return subprocess.CompletedProcess(command, ancestry_returncode, "", "")
+            adjusted = list(command)
+            if "fetch" in adjusted:
+                adjusted[adjusted.index("origin")] = str(remote)
+            result = git_utils.run(
+                adjusted,
+                cwd=cwd,
+                check=check,
+                timeout=timeout,
+                env=env,
+                log_errors=False,
+                input_text=input_text,
+            )
+            if "refs/remotes/origin/main^{commit}" in command:
+                remote_reads += 1
+                if remote_head_override is not None:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        remote_head_override(remote_reads, result.stdout) + "\n",
+                        "",
+                    )
+            return result
+
+        return RepoIntakeManager(
+            caller_root,
+            repository=kwargs["repository"],
+            gh_command=kwargs["gh_command"],
+            timeout_s=kwargs["timeout_s"],
+            git_runner=runner,
+            git_env=kwargs["git_env"],
+            remote_config=(),
+        )
+
+    return factory
+
+
+def _intake_job(repo: Path) -> GitJob:
+    """Return one worker request for the real intake entry point."""
+    return GitJob(
+        repo="acme/repo",
+        op="prepare_intake",
+        timeout_s=30,
+        kwargs={"repo": "acme/repo", "caller_root": str(repo)},
+    )
+
+
+def test_prepare_intake_rejects_unexpected_origin_at_worker_entry(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """Worker intake rejects an origin outside the requested repository."""
+    repo, _predecessor, _head = _worker_repository(tmp_path)
+    with (
+        patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+        patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+    ):
+        result = pool._git_prepare_intake(_intake_job(repo))
+
+    assert result.error == "checkout has unexpected origin; expected origin acme/repo"
+
+
+@pytest.mark.parametrize(
+    ("gh_command", "remote_config", "expected"),
+    [
+        (
+            None,
+            (),
+            "required GitHub executable is unavailable; pass --gh-extra-path-root ROOT "
+            "when ROOT/bin/gh is the intended installation",
+        ),
+        ("gh", None, "required fetch executable is unavailable"),
+    ],
+)
+def test_prepare_intake_rejects_unavailable_trusted_transport_at_worker_entry(
+    pool: WorkerPool,
+    tmp_path: Path,
+    gh_command: str | None,
+    remote_config: tuple[str, ...] | None,
+    expected: str,
+) -> None:
+    """Worker intake stops when a trusted transport executable is unavailable."""
+    repo, _predecessor, _head = _worker_repository(tmp_path)
+    with (
+        patch(f"{_WP}._trusted_gh_executable", return_value=gh_command),
+        patch(f"{_WP}._trusted_remote_git_config", return_value=remote_config),
+        patch(f"{_WP}.RepoIntakeManager") as manager,
+    ):
+        result = pool._git_prepare_intake(_intake_job(repo))
+
+    assert result.error == expected
+    manager.assert_not_called()
+
+
+def test_prepare_intake_reports_unavailable_run_lock_at_worker_entry(
+    pool: WorkerPool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker intake reports a missing lock capability, not lease contention."""
+    repo, _predecessor, _head = _worker_repository(tmp_path)
+    _git(repo, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    real_import = builtins.__import__
+
+    def import_without_fcntl(name: str, *args: object, **kwargs: object) -> object:
+        if name == "fcntl":
+            raise ImportError("injected host without exclusive file locks")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", import_without_fcntl)
+    with (
+        patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+        patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+    ):
+        result = pool._git_prepare_intake(_intake_job(repo))
+
+    assert result.error == "exclusive repository-intake run locking is unavailable"
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        (lambda _count, _head: "not-a-sha", "fetched default branch has a malformed SHA"),
+        (
+            lambda count, head: "f" * 40 if count == 2 else head.strip(),
+            "repository-intake SHA changed during preparation",
+        ),
+    ],
+)
+def test_prepare_intake_rejects_sha_failures_at_worker_entry(
+    pool: WorkerPool,
+    tmp_path: Path,
+    override: Callable[[int, str], str],
+    expected: str,
+) -> None:
+    """Worker intake rejects malformed and drifting remote revisions."""
+    repo, _predecessor, _head = _worker_repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    _git(repo, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    with (
+        patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+        patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+        patch(
+            f"{_WP}.RepoIntakeManager",
+            side_effect=_local_intake_manager_factory(
+                remote,
+                remote_head_override=override,
+            ),
+        ),
+    ):
+        result = pool._git_prepare_intake(_intake_job(repo))
+
+    assert result.error == expected
+
+
+def test_prepare_intake_rejects_ancestry_ambiguity_at_worker_entry(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """Worker intake fails closed when Git cannot prove update ancestry."""
+    repo, _predecessor, _head = _worker_repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    _git(repo, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    normal_factory = _local_intake_manager_factory(remote)
+    ambiguous_factory = _local_intake_manager_factory(remote, ancestry_returncode=2)
+    try:
+        with (
+            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+            patch(f"{_WP}.RepoIntakeManager", side_effect=normal_factory),
+        ):
+            assert pool._git_prepare_intake(_intake_job(repo)).ok
+
+        (repo / "tracked.txt").write_text("three\n", encoding="utf-8")
+        _git(repo, "commit", "-am", "third")
+        _git(repo, "push", str(remote), "main")
+        with (
+            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+            patch(f"{_WP}.RepoIntakeManager", side_effect=ambiguous_factory),
+        ):
+            result = pool._git_prepare_intake(_intake_job(repo))
+
+        assert result.error == "repository-intake ancestry proof failed"
+    finally:
+        pool.release_repo_intake_leases()
 
 
 class _RecordingIntakeLease:

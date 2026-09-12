@@ -19,6 +19,7 @@ there is a single, tested primitive (DRY).
 
 from __future__ import annotations
 
+import errno
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -28,6 +29,10 @@ from typing import TextIO
 
 class LockUnavailableError(RuntimeError):
     """Raised by :func:`file_lock` with ``blocking=False`` when held elsewhere."""
+
+
+class ExclusiveLockUnavailableError(LockUnavailableError):
+    """Raised when the host cannot provide a required exclusive file lock."""
 
 
 def _open_secure_lock_file(path: Path) -> TextIO:
@@ -87,7 +92,7 @@ def file_lock(
         import fcntl
     except ImportError:  # pragma: no cover - Windows path
         if require_exclusive:
-            raise LockUnavailableError(
+            raise ExclusiveLockUnavailableError(
                 f"Exclusive file locking is unavailable on this platform: {path}"
             ) from None
         # No advisory locking available; degrade to a no-op so callers stay
@@ -103,8 +108,13 @@ def file_lock(
         try:
             fcntl.flock(fh.fileno(), mode)
         except OSError as exc:
-            if not blocking:
+            if not blocking and exc.errno in {errno.EACCES, errno.EAGAIN}:
                 raise LockUnavailableError(f"Lock already held: {path}") from exc
+            unsupported_errors = {errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP}
+            if require_exclusive and exc.errno in unsupported_errors:
+                raise ExclusiveLockUnavailableError(
+                    f"Exclusive file locking is unavailable on this platform: {path}"
+                ) from exc
             raise
         try:
             yield
