@@ -28,8 +28,10 @@ from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.repo import (
     CHECKOUT_CONTENTION_ATTEMPTS_KEY,
+    CHECKOUT_CONTENTION_ELAPSED_KEY,
+    CHECKOUT_CONTENTION_FIRST_WAIT_KEY,
+    CHECKOUT_CONTENTION_PENDING_KEY,
     CHECKOUT_CONTENTION_RESULT_KEY,
-    CHECKOUT_CONTENTION_STARTED_KEY,
     CHECKOUT_CONTENTION_WAIT_KEY,
     SYNCED_MAIN_SHA_KEY,
     RepoIssueSource,
@@ -245,10 +247,10 @@ class TestOnEnterAndCloneStates:
         assert result.disposition is Disposition.RETRY
         assert result.note.startswith("repository contention")
 
-    def test_slow_successful_clone_does_not_consume_contention_budget(
+    def test_slow_successful_clone_after_contention_does_not_consume_contention_budget(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
     ) -> None:
-        """Network time before contention does not reduce lock admission time."""
+        """A clone operation after contention does not reduce the lock budget."""
         now = [100.0]
         ctx = make_ctx(
             paths=_RepoPaths(tmp_path, repo_root=tmp_path / "repo-a"),
@@ -264,16 +266,33 @@ class TestOnEnterAndCloneStates:
         clone = stage.step(repo_item, ctx)
         assert isinstance(clone, JobRequest)
         assert clone.job.repository_lock_wait_timeout_s == 10.0
-        assert CHECKOUT_CONTENTION_STARTED_KEY not in repo_item.payload
+        now[0] += 0.25
+        stage.on_job_done(
+            repo_item,
+            JobResult(
+                ok=False,
+                error="lock_timeout",
+                value={"operation": "clone", "attempt_wait_s": 0.25},
+            ),
+            ctx,
+        )
+        parked = stage.step(repo_item, ctx)
+        assert isinstance(parked, StageOutcome)
+        assert parked.disposition is Disposition.RETRY
+        assert repo_item.payload["retry_delay_s"] == 5.0
 
-        now[0] += 15.0
+        now[0] += 5.0
+        retried_clone = stage.step(repo_item, ctx)
+        assert isinstance(retried_clone, JobRequest)
+        assert retried_clone.job.repository_lock_wait_timeout_s == 4.75
+
+        now[0] += 20.0
         stage.on_job_done(repo_item, JobResult(ok=True), ctx)
         sync = stage.step(repo_item, ctx)
 
         assert isinstance(sync, JobRequest)
         assert sync.job.op == "sync_checkout"
-        assert sync.job.repository_lock_wait_timeout_s == 10.0
-        assert CHECKOUT_CONTENTION_STARTED_KEY not in repo_item.payload
+        assert sync.job.repository_lock_wait_timeout_s == 4.75
 
     def test_lock_contention_backoff_starts_at_five_seconds_and_caps_at_sixty(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
@@ -322,13 +341,14 @@ class TestOnEnterAndCloneStates:
         stage.on_job_done(repo_item, JobResult(ok=False, error="timeout"), repo_ctx)
 
         assert repo_item.attempts["clone"] == 1
-        assert CHECKOUT_CONTENTION_STARTED_KEY not in repo_item.payload
+        assert CHECKOUT_CONTENTION_ELAPSED_KEY not in repo_item.payload
+        assert CHECKOUT_CONTENTION_FIRST_WAIT_KEY not in repo_item.payload
         assert CHECKOUT_CONTENTION_RESULT_KEY not in repo_item.payload
 
     def test_contention_budget_counts_timer_backoff(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
     ) -> None:
-        """One monotonic deadline includes each parked retry delay."""
+        """The contention budget includes each parked retry delay."""
         now = [100.0]
         ctx = make_ctx(
             paths=_RepoPaths(tmp_path, repo_root=tmp_path / "repo-a"),
@@ -341,7 +361,7 @@ class TestOnEnterAndCloneStates:
         request = stage.step(repo_item, ctx)
         assert isinstance(request, JobRequest)
         assert request.job.repository_lock_wait_timeout_s == 10.0
-        assert CHECKOUT_CONTENTION_STARTED_KEY not in repo_item.payload
+        assert CHECKOUT_CONTENTION_ELAPSED_KEY not in repo_item.payload
         now[0] += 0.25
         stage.on_job_done(
             repo_item,
@@ -361,7 +381,7 @@ class TestOnEnterAndCloneStates:
         retry = stage.step(repo_item, ctx)
         assert isinstance(retry, JobRequest)
         assert retry.job.repository_lock_wait_timeout_s == 4.75
-        assert repo_item.payload[CHECKOUT_CONTENTION_STARTED_KEY] == 100.0
+        assert repo_item.payload[CHECKOUT_CONTENTION_ELAPSED_KEY] == 5.25
         assert repo_item.payload[CHECKOUT_CONTENTION_WAIT_KEY] == 0.25
 
     def test_contention_timeout_retains_structured_diagnostics(
@@ -542,8 +562,10 @@ class TestOnEnterAndCloneStates:
 
         assert isinstance(ready, Continue)
         for key in (
-            CHECKOUT_CONTENTION_STARTED_KEY,
+            CHECKOUT_CONTENTION_ELAPSED_KEY,
             CHECKOUT_CONTENTION_ATTEMPTS_KEY,
+            CHECKOUT_CONTENTION_FIRST_WAIT_KEY,
+            CHECKOUT_CONTENTION_PENDING_KEY,
             CHECKOUT_CONTENTION_RESULT_KEY,
             CHECKOUT_CONTENTION_WAIT_KEY,
             "retry_delay_s",

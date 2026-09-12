@@ -100,7 +100,7 @@ INTAKE_RECEIPT_KEY = "_repo_intake_receipt"
 WAVE_PLAN_KEY = "_issue_wave_admission_plan"
 WAVE_ANCESTRY_VERIFIED_KEY = "_issue_wave_ancestry_verified"
 WAVE_ANCESTRY_ERROR_KEY = "_issue_wave_ancestry_error"
-CHECKOUT_CONTENTION_STARTED_KEY = "checkout_contention_started_s"
+CHECKOUT_CONTENTION_ELAPSED_KEY = "checkout_contention_elapsed_s"
 CHECKOUT_CONTENTION_ATTEMPTS_KEY = "checkout_contention_attempts"
 CHECKOUT_CONTENTION_RESULT_KEY = "checkout_contention_result"
 CHECKOUT_CONTENTION_WAIT_KEY = "checkout_contention_wait_s"
@@ -128,7 +128,7 @@ _REPOSITORY_CONTENTION_BACKOFF_CAP_S = 60.0
 def _clear_checkout_contention(item: WorkItem) -> None:
     """Remove the state for one completed checkout contention budget."""
     for key in (
-        CHECKOUT_CONTENTION_STARTED_KEY,
+        CHECKOUT_CONTENTION_ELAPSED_KEY,
         CHECKOUT_CONTENTION_ATTEMPTS_KEY,
         CHECKOUT_CONTENTION_RESULT_KEY,
         CHECKOUT_CONTENTION_WAIT_KEY,
@@ -461,16 +461,15 @@ class RepoStage(Stage):
             else None
         )
         if isinstance(contention, dict):
-            started_s = float(item.payload[CHECKOUT_CONTENTION_STARTED_KEY])
             contention_timeout_s = float(getattr(ctx.config, "repository_contention_timeout", 600))
-            remaining_s = max(0.0, contention_timeout_s - (ctx.now() - started_s))
+            elapsed_s = float(item.payload.get(CHECKOUT_CONTENTION_ELAPSED_KEY, 0.0))
+            remaining_s = max(0.0, contention_timeout_s - elapsed_s)
             attempts = int(item.payload.get(CHECKOUT_CONTENTION_ATTEMPTS_KEY, 1))
             candidate_delay_s = min(
                 _REPOSITORY_CONTENTION_BACKOFF_BASE_S * (2 ** max(0, attempts - 1)),
                 _REPOSITORY_CONTENTION_BACKOFF_CAP_S,
             )
             if remaining_s <= 0.0:
-                elapsed_s = ctx.now() - started_s
                 cumulative_wait_s = float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0))
                 return _repository_busy_outcome(
                     item,
@@ -479,7 +478,9 @@ class RepoStage(Stage):
                     elapsed_s=elapsed_s,
                     cumulative_lock_wait_s=cumulative_wait_s,
                 )
-            item.payload["retry_delay_s"] = min(candidate_delay_s, remaining_s)
+            retry_delay_s = min(candidate_delay_s, remaining_s)
+            item.payload["retry_delay_s"] = retry_delay_s
+            item.payload[CHECKOUT_CONTENTION_ELAPSED_KEY] = elapsed_s + retry_delay_s
             return StageOutcome(
                 Disposition.RETRY,
                 note="repository contention: lock_timeout",
@@ -524,19 +525,15 @@ class RepoStage(Stage):
             return Continue(next_state="WAVE_ADMIT")
 
         contention_timeout_s = float(getattr(ctx.config, "repository_contention_timeout", 600))
-        started = item.payload.get(CHECKOUT_CONTENTION_STARTED_KEY)
-        remaining_s = (
-            contention_timeout_s
-            if started is None
-            else max(0.0, contention_timeout_s - (ctx.now() - float(started)))
-        )
-        if started is not None and remaining_s <= 0:
+        contention_elapsed_s = float(item.payload.get(CHECKOUT_CONTENTION_ELAPSED_KEY, 0.0))
+        remaining_s = max(0.0, contention_timeout_s - contention_elapsed_s)
+        if contention_elapsed_s > 0.0 and remaining_s <= 0:
             cumulative_wait_s = float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0))
             return _repository_busy_outcome(
                 item,
                 ctx,
                 operation=item.payload.get("checkout_op"),
-                elapsed_s=ctx.now() - float(started),
+                elapsed_s=contention_elapsed_s,
                 cumulative_lock_wait_s=cumulative_wait_s,
             )
         configured_wait_s = float(getattr(ctx.config, "repository_lock_wait_timeout", 120))
@@ -678,11 +675,6 @@ class RepoStage(Stage):
                 and math.isfinite(float(raw_attempt_wait))
                 else 0.0
             )
-            observed_s = ctx.now()
-            item.payload.setdefault(
-                CHECKOUT_CONTENTION_STARTED_KEY,
-                observed_s - attempt_wait_s,
-            )
             item.payload[CHECKOUT_CONTENTION_ATTEMPTS_KEY] = (
                 int(item.payload.get(CHECKOUT_CONTENTION_ATTEMPTS_KEY, 0)) + 1
             )
@@ -693,6 +685,9 @@ class RepoStage(Stage):
             )
             item.payload[CHECKOUT_CONTENTION_WAIT_KEY] = (
                 float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0)) + attempt_wait_s
+            )
+            item.payload[CHECKOUT_CONTENTION_ELAPSED_KEY] = (
+                float(item.payload.get(CHECKOUT_CONTENTION_ELAPSED_KEY, 0.0)) + attempt_wait_s
             )
             item.payload.setdefault(CHECKOUT_CONTENTION_FIRST_WAIT_KEY, attempt_wait_s)
             contention["cumulative_wait_s"] = float(
