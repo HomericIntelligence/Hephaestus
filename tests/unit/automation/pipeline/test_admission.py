@@ -21,8 +21,10 @@ import pytest
 from hephaestus.automation.comment_identity import CommentAliasConflictError
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline.admission import (
+    DependencyFact,
     _filter_open_issues,
     _parse_planned_files,
+    dependency_block_reason,
     order_for_implementation,
     parse_publication_scope_files,
 )
@@ -293,6 +295,112 @@ class TestOrderForImplementation:
             order = order_for_implementation(infos)
         assert order == [1, 2, 3]
         assert any("dependency cycle" in record.message for record in caplog.records)
+
+
+class TestDependencyReadiness:
+    """Live dependency facts decide implementation readiness."""
+
+    class GitHub:
+        """Return one scripted batch and record the exact request."""
+
+        def __init__(
+            self,
+            facts: tuple[DependencyFact, ...] | Exception,
+        ) -> None:
+            self.facts = facts
+            self.requests: list[tuple[int, ...]] = []
+
+        def batch_dependency_facts(
+            self,
+            issue_numbers: tuple[int, ...],
+            *,
+            deadline_s: float,
+            shutdown: threading.Event | None = None,
+        ) -> tuple[DependencyFact, ...]:
+            """Return the configured complete result or raise its error."""
+            assert deadline_s > 0
+            assert shutdown is None or isinstance(shutdown, threading.Event)
+            self.requests.append(issue_numbers)
+            if isinstance(self.facts, Exception):
+                raise self.facts
+            return self.facts
+
+    @pytest.mark.parametrize(
+        ("fact", "expected"),
+        [
+            (DependencyFact(10, "Issue", "CLOSED"), None),
+            (DependencyFact(10, "PullRequest", "MERGED", True), None),
+            (DependencyFact(10, "Issue", "OPEN"), "dependency #10 is still open"),
+            (
+                DependencyFact(10, "PullRequest", "OPEN", False),
+                "dependency #10 has an open pull request",
+            ),
+            (
+                DependencyFact(10, "PullRequest", "CLOSED", False),
+                "dependency #10 has a closed unmerged pull request",
+            ),
+        ],
+    )
+    def test_issue_and_pr_lifecycle(self, fact: DependencyFact, expected: str | None) -> None:
+        """Only a closed issue or a merged PR satisfies a dependency."""
+        github = self.GitHub((fact,))
+
+        assert dependency_block_reason((10,), github, deadline_s=10.0) == expected
+        assert github.requests == [(10,)]
+
+    def test_multiple_pending_reasons_have_canonical_order(self) -> None:
+        """One result lists each pending dependency in number order."""
+        github = self.GitHub(
+            (
+                DependencyFact(10, "PullRequest", "CLOSED", False),
+                DependencyFact(20, "Issue", "OPEN"),
+            )
+        )
+
+        assert dependency_block_reason((10, 20), github, deadline_s=10.0) == (
+            "dependency #10 has a closed unmerged pull request; dependency #20 is still open"
+        )
+        assert github.requests == [(10, 20)]
+
+    @pytest.mark.parametrize(
+        "facts",
+        [
+            (),
+            (DependencyFact(20, "Issue", "CLOSED"),),
+            RuntimeError("GraphQL failed"),
+        ],
+        ids=["partial", "mismatched", "read-failure"],
+    )
+    def test_incomplete_or_unverifiable_facts_fail_closed(
+        self,
+        facts: tuple[DependencyFact, ...] | Exception,
+    ) -> None:
+        """Incomplete external evidence cannot authorize an agent turn."""
+        github = self.GitHub(facts)
+
+        assert dependency_block_reason((10,), github, deadline_s=10.0) == (
+            "dependency #10 state could not be verified"
+        )
+
+    def test_external_error_text_is_not_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        """An external diagnostic cannot put its content in the host log."""
+        github = self.GitHub(RuntimeError("credential-bearing diagnostic"))
+
+        with caplog.at_level(logging.WARNING):
+            reason = dependency_block_reason((10,), github, deadline_s=10.0)
+
+        assert reason == "dependency #10 state could not be verified"
+        assert "RuntimeError" in caplog.text
+        assert "credential-bearing diagnostic" not in caplog.text
+
+    def test_duplicate_inputs_fail_closed_before_external_read(self) -> None:
+        """A duplicate declaration cannot create an ambiguous batch."""
+        github = self.GitHub(())
+
+        assert dependency_block_reason((10, 10), github, deadline_s=10.0) == (
+            "dependencies could not be verified"
+        )
+        assert github.requests == []
 
 
 class TestFilterOpenIssues:

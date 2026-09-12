@@ -15,10 +15,11 @@ import re
 import subprocess
 import sys
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar, cast, overload
 
+from hephaestus.automation.dependency_parser import MAX_DEPENDENCY_FACTS
 from hephaestus.github.client import (
     ClaudeUsageCapError,
     GitHubRateLimitError,
@@ -933,6 +934,85 @@ def batch_issue_states_query(
     return _query("batchIssueStates", document, validate)
 
 
+def _validate_dependency_node(
+    node: object,
+    *,
+    alias: str,
+    expected_number: int,
+) -> dict[str, Any]:
+    """Return one complete issue-or-PR fact from an untrusted node."""
+    if not isinstance(node, dict):
+        raise ValueError(f"dependency alias {alias} was missing")
+    if type(node.get("number")) is not int or node.get("number") != expected_number:
+        raise ValueError(f"dependency alias {alias} was mismatched")
+    typename = node.get("__typename")
+    state = node.get("state")
+    if type(typename) is not str or typename not in {"Issue", "PullRequest"}:
+        raise ValueError(f"dependency alias {alias} typename was invalid")
+    if typename == "Issue":
+        if type(state) is not str or state not in {"OPEN", "CLOSED"}:
+            raise ValueError(f"dependency alias {alias} state was invalid")
+        if "merged" in node:
+            raise ValueError("issue dependency contained a pull-request field")
+        merged: bool | None = None
+    else:
+        if type(state) is not str or state not in {"OPEN", "CLOSED", "MERGED"}:
+            raise ValueError(f"dependency alias {alias} state was invalid")
+        merged = node.get("merged")
+        if type(merged) is not bool:
+            raise ValueError("pull-request dependency merged field was invalid")
+        if merged != (state == "MERGED"):
+            raise ValueError("pull-request state and merged field are inconsistent")
+    return {
+        "number": expected_number,
+        "typename": typename,
+        "state": state,
+        "merged": merged,
+    }
+
+
+def batch_dependency_facts_query(
+    batch: Sequence[int], owner: str, name: str
+) -> GraphQLQuerySpec[tuple[dict[str, Any], ...]]:
+    """Build one strict repository-scoped issue-or-PR lifecycle query."""
+    numbers = tuple(batch)
+    if len(numbers) > MAX_DEPENDENCY_FACTS:
+        raise ValueError("dependency batch exceeds the bounded maximum")
+    if any(type(number) is not int or number <= 0 for number in numbers):
+        raise ValueError("dependency numbers must be positive integers")
+    if len(set(numbers)) != len(numbers):
+        raise ValueError("dependency numbers must be unique")
+    if numbers != tuple(sorted(numbers)):
+        raise ValueError("dependency numbers must be in canonical order")
+
+    variable_declarations = ",".join(f"$n{idx}:Int!" for idx in range(len(numbers)))
+    variable_suffix = f",{variable_declarations}" if variable_declarations else ""
+    fragments = " ".join(
+        f"dependency{idx}:issueOrPullRequest(number:$n{idx}){{"
+        "__typename ... on Issue { number state } "
+        "... on PullRequest { number state merged }"
+        "}"
+        for idx in range(len(numbers))
+    )
+    document = (
+        f"query BatchDependencyFacts($owner:String!,$name:String!{variable_suffix}){{"
+        f"repository(owner:$owner,name:$name){{owner{{login}} name {fragments}}}}}"
+    )
+
+    def validate(data: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+        repository = _repo_identity(data, owner, name)
+        return tuple(
+            _validate_dependency_node(
+                repository.get(f"dependency{idx}"),
+                alias=f"dependency{idx}",
+                expected_number=expected_number,
+            )
+            for idx, expected_number in enumerate(numbers)
+        )
+
+    return _query("batchDependencyFacts", document, validate)
+
+
 def issue_comments_query(
     owner: str, name: str, issue_number: int
 ) -> GraphQLQuerySpec[list[dict[str, Any]]]:
@@ -1588,6 +1668,7 @@ __all__ = [
     "add_implementation_thread_reply_mutation",
     "add_reviewer_feedback_reply_mutation",
     "add_thread_reply_mutation",
+    "batch_dependency_facts_query",
     "batch_issue_comments_query",
     "batch_issue_labels_query",
     "batch_issue_states_query",

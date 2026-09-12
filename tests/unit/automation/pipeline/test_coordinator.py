@@ -2840,6 +2840,25 @@ class TestImplementationAdmission:
             (21, coordinator._ctx_for_repo("repo-a").github),
         ]
 
+    def test_topology_uses_seeded_issue_body_before_stale_payload_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Normal issue-body declarations supply current queue topology."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=1)
+        dependent = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        dependent.payload.update(
+            {
+                "issue_body": "Depends on #22",
+                "dependencies": [999],
+            }
+        )
+        prerequisite = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-a")
+
+        selected = coordinator._select_implementation_dispatch([dependent, prerequisite])
+
+        assert selected == [prerequisite, dependent]
+        assert dependent.payload["dependencies"] == [22]
+
     def test_aged_dependent_never_overtakes_its_queued_prerequisite(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

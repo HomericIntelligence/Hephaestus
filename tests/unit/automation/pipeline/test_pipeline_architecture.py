@@ -166,6 +166,23 @@ def test_worker_side_modules_never_import_github_api_or_pr_manager() -> None:
     )
 
 
+def test_admission_uses_the_pipeline_dependency_facts_boundary() -> None:
+    """Keep dependency admission off the broad GitHub implementation package."""
+    path = _PIPELINE / "admission.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module:
+                imports.add(module)
+            imports.update(f"{module}.{alias.name}" for alias in node.names)
+
+    assert not any(imported == "hephaestus.automation.github_api" for imported in imports)
+
+
 def test_scope_expansion_adapter_does_not_mix_github_api_module_and_star_import() -> None:
     """Keep direct GitHub imports distinct from the transport star namespace."""
     path = _AUTOMATION / "pipeline_github_scope_expansion.py"

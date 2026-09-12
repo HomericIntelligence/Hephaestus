@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.github_api import issue_body_digest
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
@@ -107,6 +108,7 @@ class FakeStageGitHub(FakeGitHub):
         plan_read_error: str | None = None,
         journal_read_error: str | None = None,
         issue_body_owned_by_viewer: bool = True,
+        dependency_fact_batches: list[tuple[DependencyFact, ...] | Exception] | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -142,6 +144,8 @@ class FakeStageGitHub(FakeGitHub):
                 discovery.
             journal_read_error: Optional failure returned by review-journal
                 discovery.
+            dependency_fact_batches: Optional live dependency results. The
+                final result repeats after the scripted transitions finish.
 
         """
         super().__init__()
@@ -193,6 +197,8 @@ class FakeStageGitHub(FakeGitHub):
         self.review_rebase_records: dict[int, RebaseReviewRecord] = {}
         self.pending_go_audits: dict[int, PendingImplementationGoAudit] = {}
         self.operation_deadlines: list[tuple[float, threading.Event | None]] = []
+        self._dependency_fact_batches = deque(dependency_fact_batches or [])
+        self.dependency_fact_requests: list[tuple[int, ...]] = []
 
     @contextmanager
     def operation_deadline(
@@ -232,6 +238,26 @@ class FakeStageGitHub(FakeGitHub):
             "state": self._issue_state,
             "labels": [{"name": name} for name in sorted(self._issue_labels(issue_number))],
         }
+
+    def batch_dependency_facts(
+        self,
+        issue_numbers: Sequence[int],
+        *,
+        deadline_s: float,
+        shutdown: threading.Event | None = None,
+    ) -> tuple[Any, ...]:
+        """Return the next scripted complete dependency batch."""
+        del deadline_s, shutdown
+        requested = tuple(issue_numbers)
+        self.dependency_fact_requests.append(requested)
+        if not self._dependency_fact_batches:
+            raise RuntimeError("dependency fact batch was not scripted")
+        result = self._dependency_fact_batches[0]
+        if len(self._dependency_fact_batches) > 1:
+            result = self._dependency_fact_batches.popleft()
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
         """Return whether the current actor owns the latest issue-body edit."""
