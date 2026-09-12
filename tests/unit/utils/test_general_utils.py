@@ -13,8 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import hephaestus.utils.helpers as helpers
 from hephaestus.utils.helpers import (
-    SubprocessOutputLimitExceeded,
     _format_cmd_for_log,
     flatten_dict,
     get_repo_root,
@@ -368,7 +368,10 @@ class TestRunSubprocess:
         """Neither child output stream can make captured output unbounded."""
         started = time.monotonic()
 
-        with pytest.raises(SubprocessOutputLimitExceeded, match="output limit") as raised:
+        with pytest.raises(
+            helpers.SubprocessOutputLimitExceeded,
+            match="output limit",
+        ) as raised:
             run_subprocess(
                 [
                     sys.executable,
@@ -415,7 +418,7 @@ class TestRunSubprocess:
             f"import subprocess, sys\nsubprocess.Popen([sys.executable, '-c', {descendant!r}])\n"
         )
 
-        with pytest.raises(SubprocessOutputLimitExceeded):
+        with pytest.raises(helpers.SubprocessOutputLimitExceeded):
             run_subprocess(
                 [sys.executable, "-c", parent],
                 env={"PATH": os.defpath},
