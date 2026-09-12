@@ -12168,6 +12168,19 @@ class TestGitOps:
                 return MagicMock(stdout="x.py\0")
             if argv == ["git", "ls-files", "--stage", "-z"]:
                 return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z", "--", "x.py"]:
+                return MagicMock(
+                    stdout=(f"100644 {'a' * 40} 1\tx.py\x00100644 {'b' * 40} 2\tx.py\x00")
+                )
+            if argv == [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ]:
+                return MagicMock(stdout="")
             if argv == ["git", "rev-parse", "HEAD"]:
                 return MagicMock(stdout=("c" * 40) + "\n")
             if argv == ["git", "rev-parse", "origin/main"]:
