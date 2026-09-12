@@ -15,6 +15,7 @@ from hephaestus.automation.repo_intake import (
     RepoIntakeManager,
     RepoIntakeReceipt,
 )
+from hephaestus.automation.worktree_snapshot import _controlled_git_env
 
 
 def _run_git(cwd: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -80,7 +81,7 @@ def _manager(caller: Path, remote: Path) -> RepoIntakeManager:
         gh_command="gh",
         timeout_s=30,
         git_runner=runner,
-        git_env={},
+        git_env=_controlled_git_env(),
         remote_config=(),
     )
 
@@ -715,6 +716,7 @@ import sys
 from pathlib import Path
 from hephaestus.automation import git_utils
 from hephaestus.automation.repo_intake import RepoIntakeManager
+from hephaestus.automation.worktree_snapshot import _controlled_git_env
 
 manager = RepoIntakeManager(
     Path(sys.argv[1]),
@@ -722,7 +724,7 @@ manager = RepoIntakeManager(
     gh_command="gh",
     timeout_s=30,
     git_runner=git_utils.run,
-    git_env={},
+    git_env=_controlled_git_env(),
     remote_config=(),
 )
 try:
