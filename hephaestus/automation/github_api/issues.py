@@ -24,6 +24,7 @@ from ..comment_identity import (
     validate_planning_body_for_write,
     validate_planning_comment_identities,
 )
+from ..dependency_parser import parse_issue_dependencies as parse_issue_dependencies
 from ..models import IssueInfo, IssueState
 from ..protocol import comment_marker_aliases
 from ..requirements_recovery import (
@@ -857,51 +858,6 @@ def is_issue_closed(
     except Exception as e:
         _api.logger.warning("Failed to check if issue #%s is closed: %s", issue_number, e)
         return False
-
-
-def parse_issue_dependencies(issue_body: str) -> list[int]:
-    """Parse issue dependencies from issue body.
-
-    Looks for patterns like:
-    - Depends on #123
-    - Depends: #123, #456
-    - Blocked by #789
-
-    Args:
-        issue_body: Issue body text
-
-    Returns:
-        List of dependency issue numbers
-
-    """
-    dependencies = []
-
-    # Pattern 1: Find all #numbers after dependency keywords on the same
-    # line. Only refs at-or-after the keyword match are harvested — a #N
-    # that precedes the keyword (e.g. "Part of epic #1809. Depends on
-    # #1811.") must not be treated as a dependency, and a line that merely
-    # *mentions* the keyword with no following ref (e.g. "no dependencies.")
-    # must yield nothing (#1830).
-    dep_keywords = r"(?:depends on|blocked by|requires|dependencies?:?)"
-    keyword_re = re.compile(dep_keywords, re.IGNORECASE)
-    for line in issue_body.split("\n"):
-        keyword_match = keyword_re.search(line)
-        if keyword_match:
-            for match in re.finditer(r"#(\d+)", line[keyword_match.start() :]):
-                dependencies.append(int(match.group(1)))
-
-    # Pattern 2: Find issue references in lists under Dependencies heading
-    # Look for a "Dependencies" section and extract list items from it
-    dep_section_match = re.search(
-        r"##\s*Dependencies.*?\n(.*?)(?=##|\Z)", issue_body, re.IGNORECASE | re.DOTALL
-    )
-    if dep_section_match:
-        dep_section = dep_section_match.group(1)
-        list_pattern = r"^\s*[-*]\s*#(\d+)"
-        for match in re.finditer(list_pattern, dep_section, re.MULTILINE):
-            dependencies.append(int(match.group(1)))
-
-    return list(set(dependencies))  # Remove duplicates
 
 
 def fetch_issue_info(issue_number: int) -> IssueInfo:

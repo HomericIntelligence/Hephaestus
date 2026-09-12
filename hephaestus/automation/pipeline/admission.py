@@ -10,9 +10,15 @@ import logging
 import re
 from concurrent.futures import CancelledError
 from subprocess import SubprocessError
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from hephaestus.automation.comment_identity import CommentAliasConflictError
+from hephaestus.automation.dependency_parser import (
+    MAX_DEPENDENCY_FACTS,
+    DependencyFact,
+    canonical_dependency_numbers,
+    parse_issue_dependencies,
+)
 from hephaestus.automation.dependency_resolver import CyclicDependencyError, DependencyResolver
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
@@ -44,6 +50,20 @@ _PLAN_FILE_SECTION_RE = re.compile(r"^#{2,}\s+Files to (Modify|Create)\b", re.IG
 # implementation queue is shared across repositories, so a bare path string
 # would incorrectly serialize independent ``repo-a`` and ``repo-b`` changes.
 type PlanFileClaim = tuple[tuple[str, str] | None, str]
+
+
+class DependencyFactsReader(Protocol):
+    """Read one complete repository-scoped dependency batch."""
+
+    def batch_dependency_facts(
+        self,
+        issue_numbers: tuple[int, ...],
+        *,
+        deadline_s: float,
+        shutdown: Event | None = None,
+    ) -> tuple[DependencyFact, ...]:
+        """Return strict facts in the requested canonical order."""
+        ...
 
 
 def _parse_planned_files(plan_body: str) -> set[str]:
@@ -198,6 +218,65 @@ def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
         return [info.number for info in issue_infos]
 
 
+def dependency_block_reason(
+    dependencies: Sequence[int],
+    github: DependencyFactsReader,
+    *,
+    deadline_s: float,
+    shutdown: Event | None = None,
+) -> str | None:
+    """Return a safe hold reason when one live dependency is incomplete.
+
+    Read every dependency through one coordinator-owned repository batch. Reject
+    incomplete or contradictory facts instead of allowing an agent turn.
+    """
+    canonical: tuple[int, ...] = ()
+    try:
+        canonical = canonical_dependency_numbers(dependencies)
+        if not canonical:
+            return None
+        raw_facts = github.batch_dependency_facts(
+            canonical,
+            deadline_s=deadline_s,
+            shutdown=shutdown,
+        )
+        if not isinstance(raw_facts, tuple) or len(raw_facts) != len(canonical):
+            raise ValueError("dependency facts are incomplete")
+        facts: list[DependencyFact] = []
+        for dependency, raw_fact in zip(canonical, raw_facts, strict=True):
+            try:
+                fact = DependencyFact(
+                    number=raw_fact.number,
+                    typename=raw_fact.typename,
+                    state=raw_fact.state,
+                    merged=raw_fact.merged,
+                )
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError(f"dependency #{dependency} fact is invalid") from error
+            if fact.number != dependency:
+                raise ValueError(f"dependency #{dependency} fact identity is invalid")
+            facts.append(fact)
+    except Exception as error:
+        LOG.warning("dependency facts could not be read: %s", type(error).__name__)
+        if canonical:
+            return "; ".join(
+                f"dependency #{dependency} state could not be verified" for dependency in canonical
+            )
+        return "dependencies could not be verified"
+
+    pending = [_dependency_pending_reason(fact) for fact in facts if not fact.satisfied]
+    return "; ".join(pending) if pending else None
+
+
+def _dependency_pending_reason(fact: DependencyFact) -> str:
+    """Return one stable action reason for an unsatisfied dependency fact."""
+    if fact.typename == "Issue":
+        return f"dependency #{fact.number} is still open"
+    if fact.state == "OPEN":
+        return f"dependency #{fact.number} has an open pull request"
+    return f"dependency #{fact.number} has a closed unmerged pull request"
+
+
 def _filter_open_issues(
     repo: tuple[str, str],
     issue_numbers: list[int],
@@ -229,9 +308,14 @@ def _filter_open_issues(
 
 
 __all__ = [
+    "MAX_DEPENDENCY_FACTS",
+    "DependencyFact",
     "PlanFileClaim",
     "_fetch_planned_files",
     "_filter_open_issues",
     "_parse_planned_files",
+    "canonical_dependency_numbers",
+    "dependency_block_reason",
     "order_for_implementation",
+    "parse_issue_dependencies",
 ]

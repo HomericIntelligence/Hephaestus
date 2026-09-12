@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,7 @@ from hephaestus.agents.execution_policy import (
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.address_review_core import _parse_addressed_block
 from hephaestus.automation.agent_config import AGENT_IMPLEMENTER
+from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
@@ -6753,6 +6755,52 @@ class TestCommitPushAndPrCreate:
         )
         assert github.mutation_log == []
 
+    def test_satisfied_dependencies_preserve_no_commit_failure(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A completed dependency retains the current terminal no-work result."""
+        github = FakeStageGitHub(
+            issue_body="Depends on #10",
+            dependency_fact_batches=[(DependencyFact(10, "Issue", "CLOSED"),)],
+        )
+        item = make_work_item(
+            issue=9,
+            state="PR_CREATE",
+            payload={"no_commits": True, "implement_summary": "No change was necessary."},
+        )
+
+        assert ImplementationStage().step(item, make_ctx(github=github)) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_no_changes: No change was necessary.",
+        )
+        assert "no_commits" not in item.payload
+        assert github.dependency_fact_requests == [(10,)]
+        assert github.mutation_log == []
+
+    def test_unreadable_dependencies_keep_no_commit_result_resumable(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An unreadable dependency cannot become a terminal no-work result."""
+        github = FakeStageGitHub(
+            issue_body="Depends on #10",
+            dependency_fact_batches=[RuntimeError("dependency read failed")],
+        )
+        item = make_work_item(
+            issue=9,
+            state="PR_CREATE",
+            payload={"no_commits": True, "implement_summary": "Waiting."},
+        )
+
+        result = ImplementationStage().step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.RETRY
+        assert item.state == "PR_CREATE"
+        assert item.payload["no_commits"] is True
+        assert item.payload["retry_delay_s"] == 1.0
+        assert github.dependency_fact_requests == [(10,)]
+        assert github.mutation_log == []
+
     def test_push_failure_retries_without_pr(self, make_ctx: Any, make_work_item: Any) -> None:
         """A non-"no commits" push failure RETRYs with no PR created."""
         stage = ImplementationStage()
@@ -8212,6 +8260,347 @@ def test_dirty_agent_job_keeps_current_source_authority(
     if operation != "inspect":
         assert result.job.source_operation.allowed_paths == ("a.py",)
     _validate_source_operation_job(result.job)
+
+
+class _LiveDependencyGitHub(FakeStageGitHub):
+    """Return a current dependency declaration and record each issue read."""
+
+    def __init__(self, *, malformed_dependency: bool = False) -> None:
+        super().__init__()
+        self.issue_reads: list[int] = []
+        self.batch_requests: list[tuple[int, ...]] = []
+        self.malformed_dependency = malformed_dependency
+
+    def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+        """Return current issue data for the dependent and its prerequisite."""
+        self.issue_reads.append(issue_number)
+        if issue_number == 1:
+            return {
+                "number": 1,
+                "title": "Dependent task",
+                "body": "Depends on #10",
+                "state": "OPEN",
+                "labels": [],
+            }
+        if issue_number == 10:
+            return {
+                "number": "10" if self.malformed_dependency else 10,
+                "title": "Prerequisite",
+                "body": "",
+                "state": "OPEN",
+                "labels": [],
+            }
+        raise AssertionError(f"unexpected issue read: {issue_number}")
+
+    def batch_dependency_facts(
+        self,
+        issue_numbers: Sequence[int],
+        *,
+        deadline_s: float,
+        shutdown: threading.Event | None = None,
+    ) -> tuple[SimpleNamespace, ...]:
+        """Return one scripted prerequisite fact through the batch boundary."""
+        del deadline_s, shutdown
+        self.batch_requests.append(tuple(issue_numbers))
+        return (
+            SimpleNamespace(
+                number="10" if self.malformed_dependency else 10,
+                typename="Issue",
+                state="OPEN",
+                merged=None,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("operation", "state", "handler_name"),
+    [
+        ("dirty inspection", "DIRTY_DECISION_WAIT", "_dirty_decision_wait"),
+        ("existing PR remediation", "IMPLEMENT_WAIT", "_implement_wait"),
+        ("ordinary implementation", "IMPLEMENT_WAIT", "_implement_wait"),
+        ("dirty direct continuation", "IMPLEMENT_WAIT", "_implement_wait"),
+        ("rebase conflict", "REBASE_CONFLICT_WAIT", "_rebase_conflict_wait"),
+        ("test repair", "TESTFIX_WAIT", "_testfix_wait"),
+    ],
+)
+@pytest.mark.parametrize("malformed_dependency", [False, True], ids=["open", "malformed"])
+def test_live_dependency_blocks_every_agent_dispatch(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    state: str,
+    handler_name: str,
+    malformed_dependency: bool,
+) -> None:
+    """A current unmet or invalid dependency stops each implementation turn."""
+    github = _LiveDependencyGitHub(malformed_dependency=malformed_dependency)
+    ctx = make_ctx(github=github)
+    item = make_work_item(issue=1, state=state)
+    item.payload.update({"issue_body": "No dependencies", "dependencies": []})
+    attempts_before = dict(item.attempts)
+
+    def agent_request(_stage: Any, current: Any, _ctx: Any) -> JobRequest:
+        return JobRequest(
+            AgentJob(
+                repo=current.repo,
+                issue=current.issue,
+                agent="test-agent",
+                model="test-model",
+                prompt_builder=lambda **_kwargs: "test prompt",
+                cwd=tmp_path,
+                timeout_s=1,
+                descr=operation,
+            ),
+            on_done_state=current.state,
+        )
+
+    monkeypatch.setattr(ImplementationStage, handler_name, agent_request)
+
+    result = ImplementationStage().step(item, ctx)
+
+    assert isinstance(result, StageOutcome)
+    assert result.disposition is Disposition.RETRY
+    assert item.state == state
+    assert item.attempts == attempts_before
+    assert github.issue_reads == [1]
+    assert github.batch_requests == [(10,)]
+
+
+class _BatchDependencyGitHub(FakeStageGitHub):
+    """Expose only the repository-scoped dependency-facts read to admission."""
+
+    def __init__(self) -> None:
+        super().__init__(labels=[STATE_PLAN_GO])
+        self._issue_labels(1)
+        self.issue_reads: list[int] = []
+        self.batch_requests: list[tuple[int, ...]] = []
+        self.serial_probe_calls: list[tuple[str, int]] = []
+
+    def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+        """Serve the dependent body, then reject dependency-by-dependency reads."""
+        self.issue_reads.append(issue_number)
+        if issue_number != 1:
+            self.serial_probe_calls.append(("issue", issue_number))
+            raise AssertionError("dependency admission must use one batch read")
+        return {
+            "number": 1,
+            "title": "Dependent task",
+            "body": "Depends on #20\nDepends on #10",
+            "state": "OPEN",
+            "labels": [{"name": STATE_PLAN_GO}],
+        }
+
+    def batch_dependency_facts(
+        self,
+        issue_numbers: Sequence[int],
+        *,
+        deadline_s: float,
+        shutdown: threading.Event | None = None,
+    ) -> tuple[SimpleNamespace, ...]:
+        """Return one pending typed fact and record the repository batch."""
+        del deadline_s, shutdown
+        self.batch_requests.append(tuple(issue_numbers))
+        return (
+            SimpleNamespace(
+                number=10,
+                typename="Issue",
+                state="CLOSED",
+                merged=None,
+            ),
+            SimpleNamespace(
+                number=20,
+                typename="Issue",
+                state="OPEN",
+                merged=None,
+            ),
+        )
+
+    def find_pr_for_issue(self, issue_number: int) -> int | None:
+        """Fail if admission falls back to a serial open-PR probe."""
+        if issue_number == 1:
+            return None
+        self.serial_probe_calls.append(("open_pr", issue_number))
+        raise AssertionError("dependency admission must not probe open PRs serially")
+
+    def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
+        """Fail if admission falls back to a serial merged-PR probe."""
+        self.serial_probe_calls.append(("merged_pr", issue_number))
+        raise AssertionError("dependency admission must not probe merged PRs serially")
+
+
+def test_dependency_guard_uses_one_batch_and_preserves_inflight_state(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending batch fact parks an agent turn without consuming item state."""
+    github = _BatchDependencyGitHub()
+    ctx = make_ctx(github=github)
+    item = make_work_item(
+        issue=1,
+        state="IMPLEMENT_WAIT",
+        payload={
+            "issue_body": "Depends on #20\nDepends on #10",
+            "dependencies": [20, 10],
+            "implementation_receipt": {"attempt": 4, "head": "a" * 40},
+            "retry_delay_s": 99.0,
+        },
+    )
+    attempts_before = dict(item.attempts)
+    payload_before = dict(item.payload)
+
+    def agent_request(_stage: Any, current: Any, _ctx: Any) -> JobRequest:
+        return JobRequest(
+            AgentJob(
+                repo=current.repo,
+                issue=current.issue,
+                agent="test-agent",
+                model="test-model",
+                prompt_builder=lambda **_kwargs: "test prompt",
+                cwd=tmp_path,
+                timeout_s=1,
+                descr="ordinary implementation",
+            ),
+            on_done_state=current.state,
+        )
+
+    monkeypatch.setattr(ImplementationStage, "_implement_wait", agent_request)
+
+    result = ImplementationStage().step(item, ctx)
+
+    assert isinstance(result, StageOutcome)
+    assert result.disposition is Disposition.RETRY
+    assert item.state == "IMPLEMENT_WAIT"
+    assert item.attempts == attempts_before
+    assert item.payload["implementation_receipt"] == payload_before["implementation_receipt"]
+    assert github.issue_reads == [1]
+    assert github.batch_requests == [(10, 20)]
+    assert github.serial_probe_calls == []
+    assert github.labels[1] == {STATE_PLAN_GO}
+    assert github.mutation_log == []
+
+
+def test_dependency_guard_does_not_read_when_handler_returns_no_agent(
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-agent step result does not perform implementation admission."""
+    github = _LiveDependencyGitHub()
+    item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
+
+    monkeypatch.setattr(
+        ImplementationStage,
+        "_implement_wait",
+        lambda _stage, _item, _ctx: Continue(next_state="TEST_WAIT"),
+    )
+
+    assert ImplementationStage().step(item, make_ctx(github=github)) == Continue(
+        next_state="TEST_WAIT"
+    )
+    assert github.issue_reads == []
+    assert github.batch_requests == []
+
+
+def test_dependency_guard_covers_new_agent_return_without_handler_allowlist(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The return boundary blocks an agent from any implementation mini-state."""
+    github = _LiveDependencyGitHub()
+    item = make_work_item(issue=1, state="REMEDIATION_REPLY_RECOVERY_WAIT")
+
+    def agent_request(_stage: Any, current: Any, _ctx: Any) -> JobRequest:
+        current.payload.pop("preserved_receipt")
+        current.payload["transient_agent_state"] = True
+        return JobRequest(
+            AgentJob(
+                repo=current.repo,
+                issue=current.issue,
+                agent="test-agent",
+                model="test-model",
+                prompt_builder=lambda **_kwargs: "test prompt",
+                cwd=tmp_path,
+                timeout_s=1,
+                descr="new implementation agent operation",
+            ),
+            on_done_state=current.state,
+        )
+
+    item.payload["preserved_receipt"] = {"head": "a" * 40}
+    payload_before = deepcopy(item.payload)
+    attempts_before = dict(item.attempts)
+    monkeypatch.setattr(
+        ImplementationStage,
+        "_remediation_reply_recovery_wait",
+        agent_request,
+    )
+
+    result = ImplementationStage().step(item, make_ctx(github=github))
+
+    assert isinstance(result, StageOutcome)
+    assert result.disposition is Disposition.RETRY
+    assert item.state == "REMEDIATION_REPLY_RECOVERY_WAIT"
+    assert item.attempts == attempts_before
+    assert item.payload["preserved_receipt"] == payload_before["preserved_receipt"]
+    assert "transient_agent_state" not in item.payload
+    assert github.issue_reads == [1]
+    assert github.batch_requests == [(10,)]
+
+
+def test_pending_dependency_blocks_fresh_path_before_worktree(
+    make_ctx: Any,
+    make_work_item: Any,
+) -> None:
+    """A fresh approved item stays at GATE while a dependency is pending."""
+    github = _BatchDependencyGitHub()
+    item = make_work_item(issue=1, state="GATE")
+    branch_before = item.branch
+
+    result = ImplementationStage().step(item, make_ctx(github=github))
+
+    assert isinstance(result, StageOutcome)
+    assert result.disposition is Disposition.RETRY
+    assert item.state == "GATE"
+    assert item.branch == branch_before
+    assert item.payload["retry_delay_s"] == 1.0
+    assert github.issue_reads == [1, 1]
+    assert github.batch_requests == [(10, 20)]
+    assert github.mutation_log == []
+
+
+def test_pending_dependency_keeps_no_commit_result_resumable(
+    make_ctx: Any,
+    make_work_item: Any,
+) -> None:
+    """A pending dependency prevents terminal no-change classification."""
+    github = _BatchDependencyGitHub()
+    item = make_work_item(
+        issue=1,
+        state="PR_CREATE",
+        payload={
+            "no_commits": True,
+            "implement_summary": "Waiting for the prerequisite.",
+            "commit_push_receipt": {"head": "a" * 40},
+        },
+    )
+    receipt_before = deepcopy(item.payload["commit_push_receipt"])
+
+    result = ImplementationStage().step(item, make_ctx(github=github))
+
+    assert isinstance(result, StageOutcome)
+    assert result.disposition is Disposition.RETRY
+    assert item.state == "PR_CREATE"
+    assert item.payload["no_commits"] is True
+    assert item.payload["commit_push_receipt"] == receipt_before
+    assert github.issue_reads == [1]
+    assert github.batch_requests == [(10, 20)]
+    assert github.mutation_log == []
 
 
 def test_failed_implementation_reconciles_source_before_another_turn(

@@ -61,6 +61,10 @@ class ImplementationDispatcher(_CoordinatorHost):
                 by_repo.setdefault(item.repo, {})[item.issue] = item
         sequences: list[deque[ct.WorkItem]] = []
         for issue_items in by_repo.values():
+            for item in issue_items.values():
+                issue_body = item.payload.get("issue_body")
+                if isinstance(issue_body, str):
+                    item.payload["dependencies"] = _admission.parse_issue_dependencies(issue_body)
             infos = [
                 IssueInfo(
                     number=number,

@@ -2,8 +2,12 @@
 # ruff: noqa: F403, F405
 import json
 import subprocess
+import time
+from collections.abc import Sequence
+from threading import Event
 
-from .github_api.graphql import reviewed_pr_state_query
+from .dependency_parser import DependencyFact, canonical_dependency_numbers
+from .github_api.graphql import batch_dependency_facts_query, reviewed_pr_state_query
 from .github_api.issues import issue_read_error
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
@@ -21,6 +25,37 @@ _THREAD_PAGE_MAX = 100
 
 class PipelineGitHubQueries(_PipelineGitHubHost):
     """Own read-only issue, PR, plan, and review-state queries."""
+
+    def batch_dependency_facts(
+        self,
+        issue_numbers: Sequence[int],
+        *,
+        deadline_s: float,
+        shutdown: Event | None = None,
+    ) -> tuple[DependencyFact, ...]:
+        """Read strict issue and pull-request dependency facts in one batch."""
+        if self._repo_slug is None:
+            raise RuntimeError("dependency facts require a repo-scoped PipelineGitHub")
+        canonical = canonical_dependency_numbers(issue_numbers)
+        if not canonical:
+            return ()
+        remaining_s = deadline_s - time.monotonic()
+        if remaining_s <= 0:
+            raise subprocess.TimeoutExpired("dependency facts deadline", 0)
+        owner, name = self._owner_name()
+        spec = batch_dependency_facts_query(canonical, owner, name)
+        variables = {f"n{index}": number for index, number in enumerate(canonical)}
+        with self.operation_deadline(deadline_s, shutdown=shutdown):
+            raw_facts = self._graphql_with_timeout(spec, remaining_s, **variables)
+        return tuple(
+            DependencyFact(
+                number=fact["number"],
+                typename=fact["typename"],
+                state=fact["state"],
+                merged=fact["merged"],
+            )
+            for fact in raw_facts
+        )
 
     def _open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
         """Return open PRs on ``branch_name`` without altering auto-merge."""

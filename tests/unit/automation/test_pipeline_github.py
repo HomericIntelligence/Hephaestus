@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import threading
 import time
@@ -31,6 +32,7 @@ import hephaestus.automation.pipeline_github_queries as queries_mod
 import hephaestus.automation.pipeline_github_required_checks as required_checks_mod
 import hephaestus.automation.pipeline_github_reviews as reviews_mod
 import hephaestus.automation.pipeline_github_transport as transport_mod
+from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.github_api.graphql import GraphQLSpec
 from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
@@ -9746,3 +9748,211 @@ def test_dirty_direct_strict_create_submits_only_one_new_pr(
     assert callable(signed.call_args.kwargs["verify_commit"])
     assert create.call_count == 1
     assert create.call_args.args[0][:2] == ["pr", "create"]
+
+
+_MISSING_NODE = object()
+
+
+def _dependency_node(
+    number: int,
+    typename: str,
+    state: str,
+    *,
+    merged: object = _MISSING_NODE,
+) -> dict[str, object]:
+    """Build one raw ``issueOrPullRequest`` node for the batch contract."""
+    node: dict[str, object] = {
+        "number": number,
+        "__typename": typename,
+        "state": state,
+    }
+    if merged is not _MISSING_NODE:
+        node["merged"] = merged
+    return node
+
+
+def _dependency_batch_adapter(
+    tmp_path: Path,
+    issue_numbers: tuple[int, ...],
+    nodes: tuple[dict[str, object] | None, ...],
+    *,
+    graphql_error: bool = False,
+) -> tuple[tuple[DependencyFact, ...], list[list[str]]]:
+    """Call the future batch boundary with a deterministic GraphQL transport fake."""
+    calls: list[list[str]] = []
+
+    def command_runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if graphql_error:
+            payload: dict[str, object] = {
+                "errors": [{"message": "dependency query failed"}],
+            }
+        else:
+            query_argument = next(argument for argument in argv if argument.startswith("query="))
+            aliases = re.findall(
+                r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*issueOrPullRequest",
+                query_argument,
+            )
+            assert len(aliases) == len(nodes)
+            repository: dict[str, object] = {
+                "owner": {"login": "owner"},
+                "name": "repo",
+            }
+            for alias, node in zip(aliases, nodes, strict=True):
+                if node is not None:
+                    repository[alias] = node
+            payload = {"data": {"repository": repository}}
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+    adapter = PipelineGitHub(
+        "owner", repo="repo", repo_root=tmp_path, command_runner=command_runner
+    )
+    facts = adapter.batch_dependency_facts(
+        issue_numbers,
+        deadline_s=time.monotonic() + 10.0,
+        shutdown=threading.Event(),
+    )
+    return tuple(facts), calls
+
+
+@pytest.mark.parametrize(
+    ("node", "expected", "satisfied"),
+    [
+        (
+            _dependency_node(10, "Issue", "CLOSED"),
+            (10, "Issue", "CLOSED", None),
+            True,
+        ),
+        (
+            _dependency_node(10, "PullRequest", "CLOSED", merged=True),
+            (10, "PullRequest", "CLOSED", True),
+            True,
+        ),
+        (_dependency_node(10, "Issue", "OPEN"), (10, "Issue", "OPEN", None), False),
+        (
+            _dependency_node(10, "PullRequest", "OPEN", merged=False),
+            (10, "PullRequest", "OPEN", False),
+            False,
+        ),
+        (
+            _dependency_node(10, "PullRequest", "CLOSED", merged=False),
+            (10, "PullRequest", "CLOSED", False),
+            False,
+        ),
+    ],
+    ids=["closed-issue", "merged-pr", "open-issue", "open-pr", "closed-unmerged-pr"],
+)
+def test_batch_dependency_facts_preserves_typed_lifecycle(
+    tmp_path: Path,
+    node: dict[str, object],
+    expected: tuple[object, ...],
+    satisfied: bool,
+) -> None:
+    """One repository read returns the node kind and lifecycle without guessing."""
+    facts, calls = _dependency_batch_adapter(tmp_path, (10,), (node,))
+
+    assert len(calls) == 1
+    fact = facts[0]
+    assert (
+        fact.number,
+        fact.typename,
+        fact.state,
+        fact.merged,
+    ) == expected
+    assert (
+        (expected[1] == "Issue" and expected[2] == "CLOSED")
+        or (expected[1] == "PullRequest" and expected[2] == "CLOSED" and expected[3] is True)
+    ) is satisfied
+
+
+def test_batch_dependency_facts_returns_canonical_request_order(tmp_path: Path) -> None:
+    """Mixed issue and PR facts stay in the sorted dependency order."""
+    numbers = (10, 20, 30)
+    nodes = (
+        _dependency_node(10, "Issue", "CLOSED"),
+        _dependency_node(20, "PullRequest", "CLOSED", merged=True),
+        _dependency_node(30, "Issue", "OPEN"),
+    )
+
+    facts, calls = _dependency_batch_adapter(tmp_path, numbers, nodes)
+
+    assert len(calls) == 1
+    assert "owner=owner" in calls[0]
+    assert "name=repo" in calls[0]
+    query_argument = next(argument for argument in calls[0] if argument.startswith("query="))
+    assert "... on Issue { number state }" in query_argument
+    assert "... on PullRequest { number state merged }" in query_argument
+    assert [fact.number for fact in facts] == list(numbers)
+
+
+@pytest.mark.parametrize(
+    "nodes",
+    [
+        (None,),
+        (_dependency_node(999, "Issue", "OPEN"),),
+        (_dependency_node(10, "Repository", "CLOSED"),),
+        (_dependency_node(10, "Issue", "MERGED"),),
+        (_dependency_node(10, "Issue", "CLOSED", merged=True),),
+        (_dependency_node(10, "PullRequest", "OPEN", merged=True),),
+        (_dependency_node(10, "PullRequest", "CLOSED", merged="yes"),),
+    ],
+    ids=[
+        "missing-node",
+        "number-mismatch",
+        "unsupported-typename",
+        "invalid-issue-state",
+        "issue-merged-field",
+        "open-pr-merged",
+        "nonboolean-merged",
+    ],
+)
+def test_batch_dependency_facts_rejects_malformed_or_ambiguous_nodes(
+    tmp_path: Path,
+    nodes: tuple[dict[str, object] | None, ...],
+) -> None:
+    """A malformed node cannot become a satisfied dependency by omission."""
+    with pytest.raises((ValueError, RuntimeError)):
+        _dependency_batch_adapter(tmp_path, (10,), nodes)
+
+
+def test_batch_dependency_facts_rejects_partial_and_duplicate_responses(tmp_path: Path) -> None:
+    """Every requested number must have one exact node in the batch response."""
+    with pytest.raises((ValueError, RuntimeError)):
+        _dependency_batch_adapter(
+            tmp_path,
+            (10, 20),
+            (_dependency_node(10, "Issue", "OPEN"), None),
+        )
+    with pytest.raises((ValueError, RuntimeError)):
+        _dependency_batch_adapter(
+            tmp_path,
+            (10, 20),
+            (
+                _dependency_node(10, "Issue", "OPEN"),
+                _dependency_node(10, "Issue", "CLOSED"),
+            ),
+        )
+
+
+def test_batch_dependency_facts_rejects_duplicate_requests(tmp_path: Path) -> None:
+    """Duplicate dependency numbers are rejected before ambiguous admission."""
+    with pytest.raises((ValueError, RuntimeError)):
+        _dependency_batch_adapter(
+            tmp_path,
+            (10, 10),
+            (
+                _dependency_node(10, "Issue", "OPEN"),
+                _dependency_node(10, "Issue", "OPEN"),
+            ),
+        )
+
+
+def test_batch_dependency_facts_propagates_graphql_failures(tmp_path: Path) -> None:
+    """A GraphQL error fails the read instead of authorizing implementation."""
+    with pytest.raises(RuntimeError, match="dependency query failed"):
+        _dependency_batch_adapter(
+            tmp_path,
+            (10,),
+            (_dependency_node(10, "Issue", "CLOSED"),),
+            graphql_error=True,
+        )

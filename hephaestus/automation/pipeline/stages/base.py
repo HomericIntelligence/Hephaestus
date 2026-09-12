@@ -77,6 +77,9 @@ from ..stage_results import Continue, JobRequest
 from ..work_item import ItemKind, WorkItem
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from hephaestus.automation.dependency_parser import DependencyFact
     from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 
     from ..coordinator_types import PipelineConfig
@@ -236,6 +239,21 @@ class StageGitHub(Protocol):
 
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
         """Fetch issue JSON (mirrors ``github_api.issues.gh_issue_json``)."""
+        ...
+
+    def batch_dependency_facts(
+        self,
+        issue_numbers: Sequence[int],
+        *,
+        deadline_s: float,
+        shutdown: threading.Event | None = None,
+    ) -> tuple[DependencyFact, ...]:
+        """Read complete dependency lifecycles in one repository-scoped batch.
+
+        The accessor must reject duplicate, missing, mismatched, or
+        contradictory nodes. It must not turn a partial or failed response
+        into an empty successful result.
+        """
         ...
 
     def issue_body_edited_by_viewer(self, issue_number: int) -> bool:

@@ -44,6 +44,7 @@ import shlex
 import sys
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypedDict, cast
@@ -122,6 +123,7 @@ from hephaestus.automation.state_labels import (
 from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
+from ..admission import dependency_block_reason, parse_issue_dependencies
 from ..coordinator_sessions import agent_session_lifecycle
 from ..diagnostics import redact_diagnostic_text
 from ..git_jobs import (
@@ -376,6 +378,8 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     PR_CREATE: "_create_pr",
 }
 
+_DEPENDENCY_RETRY_DELAY_S = 1.0
+
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _PLAN_SCOPE_RECEIPT = "_implementation_plan_scope_receipt"
 _PLAN_SCOPE_STATE = "_implementation_plan_scope_state"
@@ -408,6 +412,61 @@ def _is_valid_dirty_content_snapshot(value: object) -> bool:
             for digest in value.values()
         )
     )
+
+
+def _live_dependency_block_reason(item: WorkItem, ctx: StageContext) -> str | None:
+    """Read the current issue body and return a safe dependency hold reason."""
+    issue = _issue_number(item)
+    deadline_s = operation_deadline_after(stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
+    try:
+        with ctx.github.operation_deadline(deadline_s, shutdown=ctx.cancellation):
+            snapshot = ctx.github.gh_issue_json(issue)
+        if not isinstance(snapshot, dict) or snapshot.get("number") != issue:
+            raise ValueError("issue identity is invalid")
+        state = snapshot.get("state")
+        if not isinstance(state, str) or state.upper() not in {"OPEN", "CLOSED"}:
+            raise ValueError("issue state is invalid")
+        body = snapshot.get("body")
+        if not isinstance(body, str):
+            raise ValueError("issue body is invalid")
+        dependencies = parse_issue_dependencies(body)
+        if not isinstance(dependencies, list) or any(
+            type(dependency) is not int or dependency <= 0 for dependency in dependencies
+        ):
+            raise ValueError("dependency declarations are invalid")
+        canonical_dependencies = tuple(sorted(set(dependencies)))
+        return dependency_block_reason(
+            canonical_dependencies,
+            ctx.github,
+            deadline_s=deadline_s,
+            shutdown=ctx.cancellation,
+        )
+    except Exception as error:
+        logger.warning(
+            "implementation:%d: dependency admission could not be verified: %s",
+            issue,
+            type(error).__name__,
+        )
+        return f"dependency #{issue} state could not be verified"
+
+
+def _dependency_retry(item: WorkItem, reason: str) -> StageOutcome:
+    """Park the same item without changing its implementation mini-state."""
+    item.payload["dependency_blocked_reason"] = reason
+    item.payload["retry_delay_s"] = _DEPENDENCY_RETRY_DELAY_S
+    return StageOutcome(Disposition.RETRY, reason)
+
+
+def _clear_dependency_retry(item: WorkItem) -> None:
+    """Remove an obsolete dependency retry marker after a successful read."""
+    if item.payload.pop("dependency_blocked_reason", None) is not None:
+        item.payload.pop("retry_delay_s", None)
+
+
+def _restore_work_item(item: WorkItem, snapshot: WorkItem) -> None:
+    """Restore item data that a deferred agent request prepared locally."""
+    item.__dict__.clear()
+    item.__dict__.update(snapshot.__dict__)
 
 
 def _is_sha256(value: object) -> bool:
@@ -1484,11 +1543,19 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "remediation_pretest_failed")
         handler_name = _STEP_HANDLER_NAMES.get(item.state)
         if handler_name is not None:
+            item_snapshot = deepcopy(item)
             handler = cast(
                 Callable[[WorkItem, StageContext], StepResult],
                 getattr(self, handler_name),
             )
-            return handler(item, ctx)
+            result = handler(item, ctx)
+            if isinstance(result, JobRequest) and isinstance(result.job, AgentJob):
+                dependency_reason = _live_dependency_block_reason(item, ctx)
+                if dependency_reason is not None:
+                    _restore_work_item(item, item_snapshot)
+                    return _dependency_retry(item, dependency_reason)
+                _clear_dependency_retry(item)
+            return result
 
         logger.warning("implementation:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
@@ -4889,6 +4956,11 @@ class ImplementationStage(Stage):
         if codex_scope_failure is not None:
             return codex_scope_failure
 
+        dependency_reason = _live_dependency_block_reason(item, ctx)
+        if dependency_reason is not None:
+            return _dependency_retry(item, dependency_reason)
+        _clear_dependency_retry(item)
+
         # A queued scope read must retain the marker. A fresh writer turn
         # charges its own attempt after source preparation.
         item.payload.pop("agent_error_failback", None)
@@ -5053,6 +5125,10 @@ class ImplementationStage(Stage):
             _clear_remediation_cycle(item)
 
         if item.payload.get("no_commits"):
+            dependency_reason = _live_dependency_block_reason(item, ctx)
+            if dependency_reason is not None:
+                return _dependency_retry(item, dependency_reason)
+            _clear_dependency_retry(item)
             # Preserve the external ownership gate for retained PRs. An empty
             # implementation does not prove that the issue is complete.
             if item.pr is not None:
