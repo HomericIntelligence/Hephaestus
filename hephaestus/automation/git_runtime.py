@@ -103,7 +103,11 @@ def run(
     shutdown: threading.Event | None = None,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess command with consistent, redacted error handling."""
+    """Run a subprocess command with consistent, redacted error handling.
+
+    Args:
+        input_text: Text to send through standard input. If this value is None, no text is sent.
+    """
     logger.debug("Running subprocess")
     timeout = remaining_operation_timeout(timeout)
     shutdown = shutdown or current_operation_shutdown()

@@ -807,7 +807,7 @@ class RepoIntakeManager:
 
     @staticmethod
     def _metadata_line(payload: str) -> str:
-        """Return one canonical metadata line or fail closed."""
+        """Return the single metadata line, or raise an error if it is malformed."""
         lines = payload.splitlines()
         if len(lines) != 1 or not lines[0] or lines[0] != lines[0].strip():
             raise RepoIntakeError("repository-intake Git metadata is malformed")
@@ -833,7 +833,10 @@ class RepoIntakeManager:
             raise RepoIntakeError("repository-intake Git configuration is unsafe")
 
     def _validate_intake_git_pointer(self) -> tuple[str, str | None]:
-        """Verify the intake gitfile and capture its no-follow local configs."""
+        """Verify the intake gitfile and capture its local configuration.
+
+        The configuration is read without following symlinks.
+        """
         worktree_fd = common_fd = worktrees_fd = admin_fd = -1
         try:
             worktree_fd = os.open(self.worktree_path, self._directory_open_flags())
@@ -904,7 +907,7 @@ class RepoIntakeManager:
         self,
         records: tuple[_WorktreeRecord, ...],
     ) -> None:
-        """Preserve each registered worktree below an intake that needs rebind."""
+        """Reject a rebind when a registered descendant exists."""
         intake_path = Path(os.path.abspath(self.worktree_path))
         for record in records:
             registered_path = Path(os.path.abspath(record.path))
