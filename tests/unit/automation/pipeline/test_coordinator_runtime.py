@@ -88,16 +88,6 @@ def test_lock_timeout_event_retains_bounded_contention_evidence() -> None:
     assert fields["lock_contention"]["holder_metadata"]["operation"] == "commit_push"
 
 
-def test_repository_busy_summary_does_not_report_clone_exhaustion() -> None:
-    """The durable failure class keeps repository contention distinct."""
-    fields = CoordinatorRuntime._job_result_event_fields(
-        JobResult(ok=False, error="repository_busy")
-    )
-
-    assert fields["error"] == "repository_busy"
-    assert "clone exhausted" not in str(fields)
-
-
 @pytest.mark.parametrize(
     ("error", "expected"),
     [

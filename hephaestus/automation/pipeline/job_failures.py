@@ -25,7 +25,6 @@ _DURABLE_FAILURE_KINDS = frozenset(
         "runner",
         "timeout",
         "lock_timeout",
-        "repository_busy",
         "source_workspace_ownership",
     }
 )
@@ -33,7 +32,6 @@ _DURABLE_FAILURE_KINDS = frozenset(
 _DURABLE_ERROR_CLASSES = {
     "circuit_open": "circuit_open",
     "lock_timeout": "lock_timeout",
-    "repository_busy": "repository_busy",
     "review-session-lost": "session_lost",
 }
 _DURABLE_ERROR_PREFIXES = (

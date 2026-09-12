@@ -317,8 +317,6 @@ class RepoIntakeManager:
             raise RepoIntakeError("exclusive Git metadata locking is unavailable") from exc
         except RepoIntakeError:
             raise
-        except InterruptedError:
-            raise
         except (OSError, RuntimeError) as exc:
             raise RepoIntakeError("repository-intake preparation failed safely") from exc
 

@@ -21,6 +21,7 @@ import hephaestus.automation.loop_repo_manager as loop_repo_manager_mod
 from hephaestus.automation.issue_waves import WAVE_LEASE_PAYLOAD, IssueWaveStore, WaveLease
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline import seeding as seeding_mod
+from hephaestus.automation.pipeline.events import RepositoryBusyEvent
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts
@@ -244,6 +245,36 @@ class TestOnEnterAndCloneStates:
         assert result.disposition is Disposition.RETRY
         assert result.note.startswith("repository contention")
 
+    def test_slow_successful_clone_does_not_consume_contention_budget(
+        self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
+    ) -> None:
+        """Network time before contention does not reduce lock admission time."""
+        now = [100.0]
+        ctx = make_ctx(
+            paths=_RepoPaths(tmp_path, repo_root=tmp_path / "repo-a"),
+            now_fn=lambda: now[0],
+            config_overrides={
+                "repository_lock_wait_timeout": 120,
+                "repository_contention_timeout": 10,
+            },
+        )
+        repo_item.state = "CLONE_WAIT"
+        stage = RepoStage()
+
+        clone = stage.step(repo_item, ctx)
+        assert isinstance(clone, JobRequest)
+        assert clone.job.repository_lock_wait_timeout_s == 10.0
+        assert CHECKOUT_CONTENTION_STARTED_KEY not in repo_item.payload
+
+        now[0] += 15.0
+        stage.on_job_done(repo_item, JobResult(ok=True), ctx)
+        sync = stage.step(repo_item, ctx)
+
+        assert isinstance(sync, JobRequest)
+        assert sync.job.op == "sync_checkout"
+        assert sync.job.repository_lock_wait_timeout_s == 10.0
+        assert CHECKOUT_CONTENTION_STARTED_KEY not in repo_item.payload
+
     def test_lock_contention_backoff_starts_at_five_seconds_and_caps_at_sixty(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
     ) -> None:
@@ -309,7 +340,9 @@ class TestOnEnterAndCloneStates:
 
         request = stage.step(repo_item, ctx)
         assert isinstance(request, JobRequest)
-        started = repo_item.payload[CHECKOUT_CONTENTION_STARTED_KEY]
+        assert request.job.repository_lock_wait_timeout_s == 10.0
+        assert CHECKOUT_CONTENTION_STARTED_KEY not in repo_item.payload
+        now[0] += 0.25
         stage.on_job_done(
             repo_item,
             JobResult(
@@ -328,7 +361,7 @@ class TestOnEnterAndCloneStates:
         retry = stage.step(repo_item, ctx)
         assert isinstance(retry, JobRequest)
         assert retry.job.repository_lock_wait_timeout_s == 5.0
-        assert repo_item.payload[CHECKOUT_CONTENTION_STARTED_KEY] == started == 100.0
+        assert repo_item.payload[CHECKOUT_CONTENTION_STARTED_KEY] == 100.25
         assert repo_item.payload[CHECKOUT_CONTENTION_WAIT_KEY] == 0.25
 
     def test_contention_timeout_retains_structured_diagnostics(
@@ -366,17 +399,26 @@ class TestOnEnterAndCloneStates:
     ) -> None:
         """A delay larger than the remaining budget parks until the deadline."""
         now = [20.0]
+        events: list[RepositoryBusyEvent] = []
         ctx = make_ctx(
             paths=_RepoPaths(tmp_path, repo_root=tmp_path / "repo-a"),
             now_fn=lambda: now[0],
-            config_overrides={"repository_contention_timeout": 1},
+            event_fn=events.append,
+            config_overrides={"repository_contention_timeout": 1.25},
         )
         repo_item.state = "CLONE_WAIT"
         stage = RepoStage()
-        stage.step(repo_item, ctx)
+        request = stage.step(repo_item, ctx)
+        assert isinstance(request, JobRequest)
+        assert request.job.repository_lock_wait_timeout_s == 1.25
+        now[0] += 0.25
         stage.on_job_done(
             repo_item,
-            JobResult(ok=False, error="lock_timeout", value={"operation": "clone"}),
+            JobResult(
+                ok=False,
+                error="lock_timeout",
+                value={"operation": "clone", "attempt_wait_s": 0.25},
+            ),
             ctx,
         )
 
@@ -384,15 +426,17 @@ class TestOnEnterAndCloneStates:
 
         assert isinstance(parked, StageOutcome)
         assert parked.disposition is Disposition.RETRY
-        assert repo_item.payload["retry_delay_s"] == 1.0
+        assert repo_item.payload["retry_delay_s"] == 1.25
 
-        now[0] += 1.0
+        now[0] += 1.25
         outcome = stage.step(repo_item, ctx)
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition is Disposition.FINISH_FAIL
         assert outcome.note.startswith("repository_busy:")
         assert "clone exhausted" not in outcome.note
+        assert events == [RepositoryBusyEvent("repo-a", "clone", 1.25, 0.25)]
+        assert outcome.note == events[0].summary()
 
     def test_contention_backoff_equal_to_remaining_parks_before_terminal(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]

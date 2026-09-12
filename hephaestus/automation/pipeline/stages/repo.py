@@ -32,6 +32,7 @@ without network I/O.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from itertools import chain
@@ -51,6 +52,7 @@ from hephaestus.automation.issue_waves import (
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 
+from ..events import RepositoryBusyEvent
 from .base import (
     GIT_JOB_TIMEOUT_S,
     Continue,
@@ -133,6 +135,30 @@ def _clear_checkout_contention(item: WorkItem) -> None:
         "retry_delay_s",
     ):
         item.payload.pop(key, None)
+
+
+def _repository_busy_outcome(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    operation: object,
+    elapsed_s: float,
+    cumulative_lock_wait_s: float,
+) -> StageOutcome:
+    """Emit and summarize one typed terminal checkout contention result."""
+    selected_operation = (
+        operation
+        if isinstance(operation, str) and operation in {"clone", "prepare_intake", "sync_checkout"}
+        else str(item.payload.get("checkout_op", "unknown"))
+    )
+    event = RepositoryBusyEvent(
+        repository=item.repo,
+        operation=selected_operation,
+        elapsed_s=max(0.0, elapsed_s),
+        cumulative_lock_wait_s=max(0.0, cumulative_lock_wait_s),
+    )
+    ctx.emit_event(event)
+    return StageOutcome(Disposition.FINISH_FAIL, event.summary())
 
 
 def is_direct_scope_worktree_nonce(value: object) -> TypeGuard[str]:
@@ -444,17 +470,12 @@ class RepoStage(Stage):
             if remaining_s <= 0.0:
                 elapsed_s = ctx.now() - started_s
                 cumulative_wait_s = float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0))
-                return StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    note=(
-                        f"repository_busy: repository={item.repo} "
-                        f"operation={contention.get('operation', 'unknown')} "
-                        f"elapsed={elapsed_s:.3f}s "
-                        f"retries={attempts} "
-                        f"lock_wait={cumulative_wait_s:.3f}s "
-                        f"holder={contention.get('holder_metadata_status', 'unavailable')} "
-                        "cause=lock_timeout"
-                    ),
+                return _repository_busy_outcome(
+                    item,
+                    ctx,
+                    operation=contention.get("operation"),
+                    elapsed_s=elapsed_s,
+                    cumulative_lock_wait_s=cumulative_wait_s,
                 )
             item.payload["retry_delay_s"] = min(candidate_delay_s, remaining_s)
             return StageOutcome(
@@ -500,21 +521,21 @@ class RepoStage(Stage):
             logger.info("[dry-run] would clone %s/%s to %s", ctx.org, item.repo, dest)
             return Continue(next_state="WAVE_ADMIT")
 
-        started_s = float(item.payload.setdefault(CHECKOUT_CONTENTION_STARTED_KEY, ctx.now()))
         contention_timeout_s = float(getattr(ctx.config, "repository_contention_timeout", 600))
-        remaining_s = max(0.0, contention_timeout_s - (ctx.now() - started_s))
-        if remaining_s <= 0:
+        started = item.payload.get(CHECKOUT_CONTENTION_STARTED_KEY)
+        remaining_s = (
+            contention_timeout_s
+            if started is None
+            else max(0.0, contention_timeout_s - (ctx.now() - float(started)))
+        )
+        if started is not None and remaining_s <= 0:
             cumulative_wait_s = float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0))
-            return StageOutcome(
-                Disposition.FINISH_FAIL,
-                note=(
-                    f"repository_busy: repository={item.repo} "
-                    f"operation={item.payload.get('checkout_op', 'unknown')} "
-                    f"elapsed={contention_timeout_s:.3f}s "
-                    f"retries={item.payload.get(CHECKOUT_CONTENTION_ATTEMPTS_KEY, 0)} "
-                    f"lock_wait={cumulative_wait_s:.3f}s "
-                    "holder=unavailable cause=lock_timeout"
-                ),
+            return _repository_busy_outcome(
+                item,
+                ctx,
+                operation=item.payload.get("checkout_op"),
+                elapsed_s=ctx.now() - float(started),
+                cumulative_lock_wait_s=cumulative_wait_s,
             )
         configured_wait_s = float(getattr(ctx.config, "repository_lock_wait_timeout", 120))
         admission_wait_s = min(configured_wait_s, remaining_s)
@@ -646,21 +667,30 @@ class RepoStage(Stage):
         if item.state != "CLONE_WAIT":
             return
         if result.error == "lock_timeout":
-            item.payload.setdefault(CHECKOUT_CONTENTION_STARTED_KEY, ctx.now())
+            value = result.value if isinstance(result.value, dict) else {}
+            raw_attempt_wait = value.get("attempt_wait_s", 0.0)
+            attempt_wait_s = (
+                max(0.0, float(raw_attempt_wait))
+                if isinstance(raw_attempt_wait, (int, float))
+                and not isinstance(raw_attempt_wait, bool)
+                and math.isfinite(float(raw_attempt_wait))
+                else 0.0
+            )
+            item.payload.setdefault(
+                CHECKOUT_CONTENTION_STARTED_KEY,
+                ctx.now(),
+            )
             item.payload[CHECKOUT_CONTENTION_ATTEMPTS_KEY] = (
                 int(item.payload.get(CHECKOUT_CONTENTION_ATTEMPTS_KEY, 0)) + 1
             )
-            value = result.value if isinstance(result.value, dict) else {}
             contention = {key: value[key] for key in _LOCK_RESULT_FIELDS if key in value}
             contention.setdefault(
                 "operation",
                 str(item.payload.get("checkout_op", "unknown")),
             )
-            attempt_wait = value.get("attempt_wait_s", 0.0)
-            if isinstance(attempt_wait, (int, float)) and not isinstance(attempt_wait, bool):
-                item.payload[CHECKOUT_CONTENTION_WAIT_KEY] = float(
-                    item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0)
-                ) + max(0.0, float(attempt_wait))
+            item.payload[CHECKOUT_CONTENTION_WAIT_KEY] = (
+                float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0)) + attempt_wait_s
+            )
             contention["cumulative_wait_s"] = float(
                 item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0)
             )

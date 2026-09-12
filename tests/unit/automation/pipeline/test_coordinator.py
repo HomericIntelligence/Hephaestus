@@ -31,6 +31,7 @@ from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import _FAIL_BACK_CAP, PipelineConfig
+from hephaestus.automation.pipeline.events import RepositoryBusyEvent
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
@@ -4038,6 +4039,39 @@ class TestDurableEventLog:
                 cast(Any, UnsafeEvent("untrusted reviewer data"))
             )
         assert not event_log_path.exists()
+
+    def test_repository_busy_stage_event_is_written_as_structured_jsonl(
+        self, tmp_path: Path
+    ) -> None:
+        """The coordinator persists the typed terminal contention record."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+
+        coordinator._ctx_for_repo("repo-a").emit_event(
+            RepositoryBusyEvent("repo-a", "clone", 15.0, 8.5)
+        )
+
+        record = json.loads(event_log_path.read_text())
+        assert record["event"] == "repository_busy"
+        assert record["fields"] == [
+            {
+                "repository": "repo-a",
+                "operation": "clone",
+                "elapsed_s": 15.0,
+                "cumulative_lock_wait_s": 8.5,
+            }
+        ]
 
     def test_event_log_path_persists_job_completion_records(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
