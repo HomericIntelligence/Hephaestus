@@ -329,7 +329,7 @@ class TestDependencyReadiness:
         ("fact", "expected"),
         [
             (DependencyFact(10, "Issue", "CLOSED"), None),
-            (DependencyFact(10, "PullRequest", "CLOSED", True), None),
+            (DependencyFact(10, "PullRequest", "MERGED", True), None),
             (DependencyFact(10, "Issue", "OPEN"), "dependency #10 is still open"),
             (
                 DependencyFact(10, "PullRequest", "OPEN", False),

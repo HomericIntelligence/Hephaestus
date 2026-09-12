@@ -9824,8 +9824,8 @@ def _dependency_batch_adapter(
             True,
         ),
         (
-            _dependency_node(10, "PullRequest", "CLOSED", merged=True),
-            (10, "PullRequest", "CLOSED", True),
+            _dependency_node(10, "PullRequest", "MERGED", merged=True),
+            (10, "PullRequest", "MERGED", True),
             True,
         ),
         (_dependency_node(10, "Issue", "OPEN"), (10, "Issue", "OPEN", None), False),
@@ -9840,7 +9840,13 @@ def _dependency_batch_adapter(
             False,
         ),
     ],
-    ids=["closed-issue", "merged-pr", "open-issue", "open-pr", "closed-unmerged-pr"],
+    ids=[
+        "closed-issue",
+        "merged-pr",
+        "open-issue",
+        "open-pr",
+        "closed-unmerged-pr",
+    ],
 )
 def test_batch_dependency_facts_preserves_typed_lifecycle(
     tmp_path: Path,
@@ -9859,10 +9865,7 @@ def test_batch_dependency_facts_preserves_typed_lifecycle(
         fact.state,
         fact.merged,
     ) == expected
-    assert (
-        (expected[1] == "Issue" and expected[2] == "CLOSED")
-        or (expected[1] == "PullRequest" and expected[2] == "CLOSED" and expected[3] is True)
-    ) is satisfied
+    assert fact.satisfied is satisfied
 
 
 def test_batch_dependency_facts_returns_canonical_request_order(tmp_path: Path) -> None:
@@ -9870,7 +9873,7 @@ def test_batch_dependency_facts_returns_canonical_request_order(tmp_path: Path) 
     numbers = (10, 20, 30)
     nodes = (
         _dependency_node(10, "Issue", "CLOSED"),
-        _dependency_node(20, "PullRequest", "CLOSED", merged=True),
+        _dependency_node(20, "PullRequest", "MERGED", merged=True),
         _dependency_node(30, "Issue", "OPEN"),
     )
 
@@ -9894,6 +9897,8 @@ def test_batch_dependency_facts_returns_canonical_request_order(tmp_path: Path) 
         (_dependency_node(10, "Issue", "MERGED"),),
         (_dependency_node(10, "Issue", "CLOSED", merged=True),),
         (_dependency_node(10, "PullRequest", "OPEN", merged=True),),
+        (_dependency_node(10, "PullRequest", "CLOSED", merged=True),),
+        (_dependency_node(10, "PullRequest", "MERGED", merged=False),),
         (_dependency_node(10, "PullRequest", "CLOSED", merged="yes"),),
     ],
     ids=[
@@ -9903,6 +9908,8 @@ def test_batch_dependency_facts_returns_canonical_request_order(tmp_path: Path) 
         "invalid-issue-state",
         "issue-merged-field",
         "open-pr-merged",
+        "closed-pr-merged",
+        "merged-pr-unmerged",
         "nonboolean-merged",
     ],
 )

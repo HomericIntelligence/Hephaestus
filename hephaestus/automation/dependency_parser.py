@@ -16,7 +16,7 @@ class DependencyFact:
 
     number: int
     typename: Literal["Issue", "PullRequest"]
-    state: Literal["OPEN", "CLOSED"]
+    state: Literal["OPEN", "CLOSED", "MERGED"]
     merged: bool | None = None
 
     def __post_init__(self) -> None:
@@ -25,20 +25,25 @@ class DependencyFact:
             raise ValueError("dependency number must be a positive integer")
         if type(self.typename) is not str or self.typename not in {"Issue", "PullRequest"}:
             raise ValueError("dependency typename is invalid")
-        if type(self.state) is not str or self.state not in {"OPEN", "CLOSED"}:
-            raise ValueError("dependency state is invalid")
         if self.typename == "Issue":
+            if self.state not in {"OPEN", "CLOSED"}:
+                raise ValueError("issue dependency state is invalid")
             if self.merged is not None:
                 raise ValueError("issue dependency cannot have merged state")
-        elif type(self.merged) is not bool:
-            raise ValueError("pull-request dependency merged state is invalid")
-        if self.typename == "PullRequest" and self.state == "OPEN" and self.merged:
-            raise ValueError("open pull request cannot be merged")
+        else:
+            if self.state not in {"OPEN", "CLOSED", "MERGED"}:
+                raise ValueError("pull-request dependency state is invalid")
+            if type(self.merged) is not bool:
+                raise ValueError("pull-request dependency merged state is invalid")
+            if self.merged != (self.state == "MERGED"):
+                raise ValueError("pull-request state and merged field are inconsistent")
 
     @property
     def satisfied(self) -> bool:
         """Return whether this node proves a completed dependency."""
-        return self.state == "CLOSED" and (self.typename == "Issue" or self.merged is True)
+        if self.typename == "Issue":
+            return self.state == "CLOSED"
+        return self.merged is True
 
 
 def canonical_dependency_numbers(dependencies: Sequence[int]) -> tuple[int, ...]:

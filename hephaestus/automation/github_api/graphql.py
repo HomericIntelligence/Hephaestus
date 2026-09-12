@@ -949,18 +949,20 @@ def _validate_dependency_node(
     state = node.get("state")
     if type(typename) is not str or typename not in {"Issue", "PullRequest"}:
         raise ValueError(f"dependency alias {alias} typename was invalid")
-    if type(state) is not str or state not in {"OPEN", "CLOSED"}:
-        raise ValueError(f"dependency alias {alias} state was invalid")
     if typename == "Issue":
+        if type(state) is not str or state not in {"OPEN", "CLOSED"}:
+            raise ValueError(f"dependency alias {alias} state was invalid")
         if "merged" in node:
             raise ValueError("issue dependency contained a pull-request field")
         merged: bool | None = None
     else:
+        if type(state) is not str or state not in {"OPEN", "CLOSED", "MERGED"}:
+            raise ValueError(f"dependency alias {alias} state was invalid")
         merged = node.get("merged")
         if type(merged) is not bool:
             raise ValueError("pull-request dependency merged field was invalid")
-        if state == "OPEN" and merged:
-            raise ValueError("open pull request cannot be merged")
+        if merged != (state == "MERGED"):
+            raise ValueError("pull-request state and merged field are inconsistent")
     return {
         "number": expected_number,
         "typename": typename,
