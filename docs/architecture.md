@@ -1361,9 +1361,23 @@ Architectural contract:
   an exact-head lease before the implementation agent starts.
 - A GO conflict starts a rebase agent. The host checks the current head, GO,
   and conflict state before replay. An agent can edit only the conflict paths;
-  the host owns Git, signing, and publication. A manual rebase first tries a
-  mechanical replay. On a conflict, it aborts, starts the agent, and retries
-  against the same captured base. A changed base stops that retry.
+  the host owns Git, signing, and publication. The host creates a versioned
+  conflict-context receipt before it starts the agent. This receipt contains
+  complete marker blocks. For a marker-free conflict, it contains the available
+  base, ours, and theirs index stages. The host rejects malformed text, binary
+  text, text that requires redaction, a block that is too large, or total context
+  that is too large. It also rejects an incomplete or old receipt. A bounded
+  conflict prompt gives the agent the allowed paths, validated current context,
+  and last host diagnosis. A missing receipt starts one read-only host refresh.
+  If that refresh cannot create safe context, the stage stops before it starts
+  the agent.
+  After each agent turn, the host classifies the result as no edit, residual
+  markers, an out-of-scope edit, or resolved content. A retryable result resumes
+  the same session. The host rejects index changes, remote-head drift, missing
+  base ancestry, and invalid replayed commits. The event log keeps only a
+  bounded redacted summary. A manual rebase first tries a mechanical replay. On
+  a conflict, it aborts, starts the agent, and retries against the same captured
+  base. A changed base stops that retry.
 - `--rebase` requires explicit `--issues` or `--prs` and the `implementation` stage.
   It applies once to each selected item in one invocation, then normal work
   continues. A linked issue

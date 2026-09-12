@@ -314,16 +314,17 @@ def test_public_session_apis_do_not_accept_adapter_or_frozen_request() -> None:
 @pytest.mark.parametrize(
     ("operation", "tools", "accepted"),
     [
-        (AgentOperation.IMPLEMENT, ["Edit", "Glob", "Grep", "Read", "Write"], True),
+        (AgentOperation.REBASE_CONFLICT, ["Edit", "Glob", "Grep", "Read", "Write"], True),
+        (AgentOperation.IMPLEMENT, ["Edit", "Glob", "Grep", "Read", "Write"], False),
         (AgentOperation.IMPLEMENT, ["Glob", "Grep", "Read", "Write"], False),
         (AgentOperation.IMPLEMENT, ["Edit", "Glob", "Grep", "Read", "Unknown", "Write"], False),
         (AgentOperation.TEST_FIX, ["Edit", "Glob", "Grep", "Read", "Write"], False),
     ],
 )
-def test_codex_rebase_tool_grant_is_closed(
+def test_codex_rebase_conflict_tool_grant_is_closed(
     tmp_path: Path, operation: AgentOperation, tools: list[str], accepted: bool
 ) -> None:
-    """Accept the exact rebase grant without a shell tool."""
+    """Accept the exact dedicated rebase-conflict grant without a shell tool."""
     request = _codex_implementation_request(tmp_path)
     request.session = json.dumps(
         {

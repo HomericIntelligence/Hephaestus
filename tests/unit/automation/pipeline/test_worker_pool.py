@@ -101,12 +101,15 @@ from hephaestus.automation.pipeline.worker_pool import (
     _path_content_identity,
     _prepare_host_output_aliases,
     _quota_backed_volume,
+    _read_bounded_conflict_file,
+    _RebaseConflictContextError,
     _repo_lock_path,
     _run_bounded_git_output,
     _run_bounded_host_command,
     _trusted_gh_executable,
     _trusted_git_executable,
     _unsafe_local_git_config_key,
+    _validated_conflict_path,
     _validated_git_exec_path,
     _validated_signing_key,
     _verifier_owned_runtime_environment,
@@ -405,6 +408,108 @@ def _executable_path(name: str, *, path: str | None = None) -> str:
     executable = shutil.which(name, path=path)
     assert executable is not None
     return str(Path(executable).resolve())
+
+
+def _prepare_one_file_rebase_conflict(
+    tmp_path: Path,
+    *,
+    delete_topic: bool = False,
+) -> tuple[Path, dict[str, str], str, str, str | None]:
+    """Create one signed-policy rebase with a textual conflict in one file."""
+    origin = tmp_path / "origin.git"
+    checkout = tmp_path / "checkout"
+    signing_key = tmp_path / "signing-key"
+
+    def run_git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    subprocess.run(
+        ["git", "init", "--bare", "--quiet", str(origin)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "init", "--initial-branch", "main", str(checkout)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            _executable_path("ssh-keygen"),
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-f",
+            str(signing_key),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for key, value in (
+        ("user.name", "Test User"),
+        ("user.email", "test@example.invalid"),
+        ("gpg.format", "ssh"),
+        ("user.signingkey", str(signing_key)),
+        ("commit.gpgsign", "false"),
+    ):
+        run_git("config", key, value)
+    run_git("remote", "add", "origin", str(origin))
+
+    source = checkout / "tests" / "test_gateway_lifecycle.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "wait_for(lambda: active_path.read_text().strip() == str(second))\n",
+        encoding="utf-8",
+    )
+    run_git("add", str(source.relative_to(checkout)))
+    run_git("commit", "-m", "test: add gateway lifecycle check")
+    run_git("push", "-u", "origin", "main")
+
+    run_git("switch", "-c", "7-auto-impl")
+    topic_content: str | None = None
+    if delete_topic:
+        run_git("rm", str(source.relative_to(checkout)))
+        run_git("commit", "-m", "test(gateway): remove obsolete lifecycle check")
+    else:
+        topic_content = (
+            "wait_for(lambda: active_path.is_file() and "
+            "active_path.read_text().strip() == str(second))\n"
+        )
+        source.write_text(topic_content, encoding="utf-8")
+        run_git("commit", "-am", "test(gateway): wait for active release publication")
+    run_git("push", "-u", "origin", "7-auto-impl")
+    expected_remote_sha = run_git("rev-parse", "HEAD")
+
+    run_git("switch", "main")
+    source.write_text(
+        "wait_for(lambda: active_path.exists() and "
+        "active_path.read_text().strip() == str(second))\n",
+        encoding="utf-8",
+    )
+    run_git("commit", "-am", "test: guard gateway path")
+    run_git("push", "origin", "main")
+    base_sha = run_git("rev-parse", "HEAD")
+    run_git("switch", "7-auto-impl")
+
+    signing = {
+        "user.name": "Test User",
+        "user.email": "test@example.invalid",
+        "gpg.format": "ssh",
+        "user.signingkey": str(signing_key),
+    }
+    return checkout, signing, expected_remote_sha, base_sha, topic_content
 
 
 def test_trusted_gh_executable_accepts_explicit_extra_root(
@@ -803,6 +908,13 @@ def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_p
             "Read,Glob,Grep",
             "read-only",
             ("Glob", "Grep", "Read"),
+        ),
+        (
+            AgentOperation.REBASE_CONFLICT,
+            "workspace-write",
+            "Read,Write,Edit,Glob,Grep",
+            "workspace-write",
+            ("Edit", "Glob", "Grep", "Read", "Write"),
         ),
         (
             AgentOperation.ADDRESS_REVIEW,
@@ -5217,6 +5329,104 @@ class TestGitOps:
         )
 
         assert after == before
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
+    def test_path_content_identity_rejects_a_replaced_root_after_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A detached root descriptor cannot produce a live-worktree receipt."""
+        root = tmp_path / "root"
+        replacement = tmp_path / "replacement"
+        detached = tmp_path / "detached"
+        root.mkdir()
+        replacement.mkdir()
+        (root / "payload").write_text("detached bytes\n", encoding="utf-8")
+        (replacement / "payload").write_text("live bytes\n", encoding="utf-8")
+        original_stat = os.stat
+        replaced = False
+
+        def replace_root_before_leaf_stat(
+            path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            *,
+            dir_fd: int | None = None,
+            follow_symlinks: bool = True,
+        ) -> os.stat_result:
+            nonlocal replaced
+            if path == "payload" and dir_fd is not None and not replaced:
+                replaced = True
+                root.rename(detached)
+                replacement.rename(root)
+            return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(os, "stat", replace_root_before_leaf_stat)
+        monkeypatch.setattr(
+            os,
+            "supports_dir_fd",
+            {*os.supports_dir_fd, replace_root_before_leaf_stat},
+        )
+        monkeypatch.setattr(
+            os,
+            "supports_follow_symlinks",
+            {*os.supports_follow_symlinks, replace_root_before_leaf_stat},
+        )
+
+        with pytest.raises(RuntimeError, match="changed during inspection"):
+            _path_content_identity(root, "payload\0", remaining_content_bytes=[64])
+        assert replaced is True
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason="Secure no-follow path inspection requires POSIX directory descriptors",
+    )
+    def test_path_content_identity_rejects_a_replaced_open_ancestor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A detached ancestor descriptor cannot produce a live-worktree receipt."""
+        root = tmp_path / "root"
+        ancestor = root / "directory"
+        replacement = root / "replacement"
+        detached = root / "detached"
+        ancestor.mkdir(parents=True)
+        replacement.mkdir()
+        (ancestor / "payload").write_text("detached bytes\n", encoding="utf-8")
+        (replacement / "payload").write_text("live bytes\n", encoding="utf-8")
+        original_open = os.open
+        replaced = False
+
+        def replace_ancestor_after_open(
+            path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            nonlocal replaced
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+            if path == "directory" and dir_fd is not None and not replaced:
+                replaced = True
+                ancestor.rename(detached)
+                replacement.rename(ancestor)
+            return descriptor
+
+        monkeypatch.setattr(os, "open", replace_ancestor_after_open)
+        monkeypatch.setattr(
+            os,
+            "supports_dir_fd",
+            {*os.supports_dir_fd, replace_ancestor_after_open},
+        )
+
+        with pytest.raises(RuntimeError, match="changed during inspection"):
+            _path_content_identity(
+                root,
+                "directory/payload\0",
+                remaining_content_bytes=[64],
+            )
+        assert replaced is True
 
     @pytest.mark.requires_posix
     @pytest.mark.skipif(
@@ -11475,7 +11685,10 @@ class TestGitOps:
         assert result.error == "legacy rebase options are not allowed"
 
     def test_conflict_receipt_binds_index_head_base_and_remote_head(
-        self, pool: WorkerPool, tmp_path: Path
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        require_git_worktree_list_z: None,
     ) -> None:
         """The host captures the complete index before agent file editing."""
         root, predecessor, base = _worker_repository(tmp_path)
@@ -11507,13 +11720,19 @@ class TestGitOps:
                 (binding.cwd / "host-staged.py").write_text("host change\n")
                 _git(binding.cwd, "add", "host-staged.py")
                 index_state = _git(binding.cwd, "ls-files", "--stage", "-z")
-                receipt = pool._conflict_receipt(
-                    binding.cwd,
-                    remote="origin",
-                    base_branch="main",
-                    expected_remote_sha=writer_head,
-                    timeout=60,
-                )
+                with patch.object(
+                    pool,
+                    "_authenticated_remote_git_configuration",
+                    return_value=({}, ()),
+                ):
+                    receipt = pool._conflict_receipt(
+                        binding.cwd,
+                        remote="origin",
+                        base_branch="main",
+                        expected_repo="test/repo",
+                        expected_remote_sha=writer_head,
+                        timeout=60,
+                    )
             finally:
                 _git(binding.cwd, "rebase", "--abort")
 
@@ -11521,15 +11740,315 @@ class TestGitOps:
         assert receipt["conflict_paths"] == ("tracked.txt",)
         assert " 0\thost-staged.py\0" in index_state
         assert all(f" {stage}\ttracked.txt\0" in index_state for stage in (1, 2, 3))
+        index_digest = hashlib.sha256(index_state.encode()).hexdigest()
+        ignored_digest = pool._conflict_ignored_state_snapshot(binding.cwd, timeout=60)
         assert (
-            receipt["conflict_index_snapshot"] == hashlib.sha256(index_state.encode()).hexdigest()
+            receipt["conflict_index_snapshot"]
+            == hashlib.sha256(f"{index_digest}\0{ignored_digest}".encode()).hexdigest()
         )
         content_snapshot = receipt["content_snapshot"]
         assert isinstance(content_snapshot, dict)
-        assert content_snapshot["index_sha256"] == receipt["conflict_index_snapshot"]
+        assert content_snapshot["index_sha256"] == index_digest
         assert receipt["paused_head_sha"] == base
         assert receipt["base_sha"] == base
         assert receipt["expected_remote_sha"] == writer_head
+
+    def test_validate_conflict_uses_source_lease_without_recording_detached_head(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Read-only conflict validation keeps the existing source receipt."""
+        binding = WorkspaceBinding.source(
+            cwd=tmp_path,
+            reusable_root=tmp_path,
+            repository="test/repo",
+            ownership_key="test-owner",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision="c" * 40,
+            generation=0,
+            detached=False,
+        )
+        manager = MagicMock(spec=SourceWorkspaceManager)
+        receipt = MagicMock()
+        receipt.to_dict.return_value = {"revision": "c" * 40}
+        manager._require_receipt.return_value = receipt
+        record = Mock(return_value=binding)
+        manager.implementation_local_commit.return_value = nullcontext(record)
+        (tmp_path / "x.py").write_text("resolved\n", encoding="utf-8")
+        job = GitJob(
+            repo="test/repo",
+            op="validate_rebase_conflict",
+            timeout_s=60,
+            deadline_s=time.monotonic() + 60,
+            workspace=binding,
+            kwargs={
+                "cwd": str(tmp_path),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "branch": "7-auto-impl",
+                "paused_head_sha": "c" * 40,
+                "base_sha": "b" * 40,
+                "expected_remote_sha": "a" * 40,
+                "conflict_paths": ("x.py",),
+                "conflict_snapshot": {"x.py": "before"},
+                "conflict_index_snapshot": "1" * 64,
+            },
+        )
+        current_receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
+            "conflict_hunks": {"x.py": "bounded hunk"},
+        }
+        with (
+            patch.object(pool, "_source_git_manager", return_value=(manager, binding)),
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=current_receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
+        ):
+            result = pool._run_source_git_operation(job)
+
+        assert result.ok is True
+        assert result.value["conflict_resolution"] == "resolved_content"
+        assert result.value["source_receipt"] == {"revision": "c" * 40}
+        record.assert_not_called()
+
+    def test_conflict_hunk_bounds_file_capture_before_reading_content(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An oversized conflict file is rejected before an oversized read."""
+        content = b"<<<<<<< HEAD\n" + (b"a" * 4001) + b"\n=======\ntheirs\n>>>>>>> topic\n"
+        target = tmp_path / "x.py"
+        target.write_bytes(content)
+        captured: list[int] = []
+        original_read_bytes = Path.read_bytes
+
+        def capture(path: Path) -> bytes:
+            value = original_read_bytes(path)
+            captured.append(len(value))
+            return value
+
+        with patch.object(Path, "read_bytes", capture), pytest.raises(_RebaseConflictContextError):
+            pool._conflict_path_hunk(tmp_path, "x.py", timeout=60)
+
+        assert not captured or max(captured) <= 4000
+
+    def test_marker_free_context_bounds_each_index_stage_capture(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Each marker-free index stage uses the per-stage context limit."""
+        limits: list[int] = []
+
+        def bounded(argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
+            limits.append(cast(int, kwargs["max_bytes"]))
+            if argv[1:3] == ("ls-files", "--stage"):
+                text = f"100644 {'a' * 40} 2\tx.py\0"
+                return _BoundedGitOutput(
+                    text=text,
+                    sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    byte_count=len(text),
+                )
+            return _BoundedGitOutput(
+                text="x" * 4001,
+                sha256="0" * 64,
+                byte_count=4001,
+            )
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
+            patch(f"{_WP}.git_utils.run", return_value=MagicMock(stdout="x" * 4001)),
+            pytest.raises(_RebaseConflictContextError),
+        ):
+            pool._marker_free_conflict_context(tmp_path, "x.py", timeout=60)
+
+        assert limits == [16000, 4000]
+
+    def test_marker_free_context_rejects_a_present_stage_read_failure(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A corrupt present stage cannot be reported as absent."""
+
+        def bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            if argv[1:3] == ("ls-files", "--stage"):
+                text = f"100644 {'a' * 40} 2\tx.py\0"
+                return _BoundedGitOutput(
+                    text=text,
+                    sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    byte_count=len(text),
+                )
+            raise subprocess.CalledProcessError(128, argv, stderr="missing object")
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
+            pytest.raises(_RebaseConflictContextError, match="cannot be read"),
+        ):
+            pool._marker_free_conflict_context(tmp_path, "x.py", timeout=60)
+
+    def test_conflict_hunk_reports_an_absent_delete_conflict_stage(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A deleted conflict file keeps the proven absent-stage context."""
+
+        def bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            if argv[1:3] == ("ls-files", "--stage"):
+                text = f"100644 {'a' * 40} 1\tx.py\x00100644 {'b' * 40} 2\tx.py\0"
+            elif argv[2] == ":1:x.py":
+                text = "base\n"
+            elif argv[2] == ":2:x.py":
+                text = "ours\n"
+            else:
+                raise subprocess.CalledProcessError(128, argv, stderr="absent stage")
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text),
+            )
+
+        with patch(f"{_WP}._run_bounded_git_output", side_effect=bounded):
+            context = pool._conflict_path_hunk(tmp_path, "x.py", timeout=60)
+
+        assert context == "Base:\nbase\n\nOurs:\nours\n\nTheirs:\n_(absent)_\n"
+
+    def test_marker_free_context_carries_worker_cancellation(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Each bounded index read remains in the worker cancellation scope."""
+        shutdowns: list[object] = []
+
+        def bounded(argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
+            shutdowns.append(kwargs.get("shutdown"))
+            if argv[1:3] == ("ls-files", "--stage"):
+                text = f"100644 {'a' * 40} 2\tx.py\0"
+            else:
+                if argv[2] != ":2:x.py":
+                    raise subprocess.CalledProcessError(128, argv, stderr="absent stage")
+                text = "content\n"
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text),
+            )
+
+        with patch(f"{_WP}._run_bounded_git_output", side_effect=bounded):
+            pool._marker_free_conflict_context(tmp_path, "x.py", timeout=60)
+
+        assert shutdowns
+        assert all(shutdown is pool._shutdown for shutdown in shutdowns)
+
+    def test_conflict_receipt_streams_repository_scale_index_snapshot(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A repository-scale index is hashed without retained output."""
+        limits: list[int] = []
+        retained: list[bool] = []
+        index_digest = "2" * 64
+        ignored_digest = "3" * 64
+        (tmp_path / "x.py").write_text(
+            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n",
+            encoding="utf-8",
+        )
+
+        def bounded(argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
+            limits.append(cast(int, kwargs["max_bytes"]))
+            retained.append(cast(bool, kwargs["retain_text"]))
+            text = "x.py\0" if argv[1] == "diff" else ""
+            return _BoundedGitOutput(
+                text=text,
+                sha256=(hashlib.sha256(text.encode()).hexdigest() if text else index_digest),
+                byte_count=(len(text.encode()) if text else 96 * 1024),
+            )
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
+            patch.object(
+                pool,
+                "_conflict_ignored_state_snapshot",
+                return_value=ignored_digest,
+            ),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_repo="test/repo",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert isinstance(result, dict)
+        assert (
+            result["conflict_index_snapshot"]
+            == hashlib.sha256(f"{index_digest}\0{ignored_digest}".encode()).hexdigest()
+        )
+        assert limits == [64 * 1024, 1024 * 1024]
+        assert retained == [True, False]
+
+    @pytest.mark.parametrize("path_kind", ["file_symlink", "parent_symlink"])
+    def test_conflict_context_rejects_symlinked_paths(
+        self, pool: WorkerPool, tmp_path: Path, path_kind: str
+    ) -> None:
+        """Conflict context never follows a file or parent-directory link."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "x.py").write_text(
+            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n", encoding="utf-8"
+        )
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        if path_kind == "file_symlink":
+            (worktree / "x.py").symlink_to(outside / "x.py")
+            path = "x.py"
+        else:
+            (worktree / "linked").symlink_to(outside, target_is_directory=True)
+            path = "linked/x.py"
+
+        with pytest.raises(_RebaseConflictContextError, match="unsafe"):
+            pool._conflict_path_hunk(worktree, path, timeout=60)
+
+    def test_conflict_receipt_rejects_changed_remote_base(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A live remote base change is detected when the local ref is unchanged."""
+        captured_base = "b" * 40
+        current_base = "d" * 40
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=captured_base + "\n")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value=current_base),
+        ):
+            result = pool._conflict_receipt_revisions(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_repo="test/repo",
+                timeout=60,
+                base_sha=captured_base,
+            )
+
+        assert result == JobResult(
+            ok=False,
+            error="paused rebase base changed during conflict resolution",
+        )
 
     @staticmethod
     def _continue_rebase_job(tmp_path: Path, *, repo: str = "Hephaestus") -> GitJob:
@@ -11558,10 +12077,12 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "before"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
             patch(f"{_WP}.git_utils.run") as run,
         ):
             result = pool._git_continue_rebase(job, record_source=Mock())
@@ -11569,6 +12090,427 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == "rebase conflict resolution required: agent made no file changes"
         run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("content", "expected_detail"),
+        [
+            (
+                b"<<<<<<< HEAD\n" + (b"a" * 4001) + b"\n=======\ntheirs\n>>>>>>> topic\n",
+                "conflict block exceeds 4000 characters",
+            ),
+            (
+                b"<<<<<<< HEAD\nsk_live_12345678901234567890\n=======\ntheirs\n>>>>>>> topic\n",
+                "conflict source requires redaction",
+            ),
+            (
+                b"<<<<<<< HEAD\nours\n=======\n\xff\n>>>>>>> topic\n",
+                "conflict source is not valid UTF-8",
+            ),
+            (
+                b"<<<<<<< HEAD\nours\n=======\ntheirs\n",
+                "conflict markers are malformed",
+            ),
+        ],
+    )
+    def test_conflict_receipt_rejects_unsafe_context_without_retaining_source(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        content: bytes,
+        expected_detail: str,
+    ) -> None:
+        """Unsafe conflict source cannot enter a receipt or agent prompt."""
+        (tmp_path / "x.py").write_bytes(content)
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
+                return MagicMock(stdout="x.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z"]:
+                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ]:
+                return MagicMock(stdout="")
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        def fake_bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            result = fake_run(list(argv))
+            text = result.stdout
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_repo="test/repo",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "rebase_conflict_context_unavailable"},
+            error=f"rebase conflict context unavailable: {expected_detail}",
+        )
+        assert content.decode(errors="replace") not in str(result)
+
+    def test_conflict_receipt_uses_index_stages_when_markers_are_absent(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A marker-free textual conflict gets complete base, ours, and theirs context."""
+        (tmp_path / "x.py").write_text("working tree content\n", encoding="utf-8")
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
+                return MagicMock(stdout="x.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z"]:
+                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z", "--", "x.py"]:
+                return MagicMock(
+                    stdout=(f"100644 {'a' * 40} 1\tx.py\x00100644 {'b' * 40} 2\tx.py\x00")
+                )
+            if argv == [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ]:
+                return MagicMock(stdout="")
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
+            if argv == ["git", "show", ":1:x.py"]:
+                return MagicMock(stdout="base content\n")
+            if argv == ["git", "show", ":2:x.py"]:
+                return MagicMock(stdout="ours content\n")
+            if argv == ["git", "show", ":3:x.py"]:
+                raise subprocess.CalledProcessError(128, argv)
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        def fake_bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            result = fake_run(list(argv))
+            text = result.stdout
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_repo="test/repo",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert isinstance(result, dict)
+        assert result["conflict_context_version"] == 1
+        assert result["conflict_hunks"] == {
+            "x.py": ("Base:\nbase content\n\nOurs:\nours content\n\nTheirs:\n_(absent)_\n")
+        }
+
+    def test_conflict_receipt_rejects_invalid_index_stage_text(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Invalid UTF-8 in a marker-free index stage stops before agent dispatch."""
+        (tmp_path / "x.py").write_text("working tree content\n", encoding="utf-8")
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
+                return MagicMock(stdout="x.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z"]:
+                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z", "--", "x.py"]:
+                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ]:
+                return MagicMock(stdout="")
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
+            if argv == ["git", "show", ":1:x.py"]:
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        def fake_bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            result = fake_run(list(argv))
+            text = result.stdout
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_repo="test/repo",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "rebase_conflict_context_unavailable"},
+            error="rebase conflict context unavailable: conflict source is not valid UTF-8",
+        )
+
+    def test_conflict_receipt_rejects_context_over_total_limit(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Many valid blocks cannot exceed the total prompt-context limit."""
+        paths = tuple(f"conflict_{index}.py" for index in range(5))
+        block = "<<<<<<< HEAD\n" + ("a" * 3200) + "\n=======\ntheirs\n>>>>>>> topic\n"
+        for path in paths:
+            (tmp_path / path).write_text(block, encoding="utf-8")
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "--diff-filter=U", "-z"]:
+                return MagicMock(stdout="\0".join(paths) + "\0")
+            if argv == ["git", "ls-files", "--stage", "-z"]:
+                return MagicMock(stdout="100644 deadbeef 1\tconflict_0.py\0")
+            if argv == [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ]:
+                return MagicMock(stdout="")
+            if argv == ["git", "rev-parse", "HEAD"]:
+                return MagicMock(stdout=("c" * 40) + "\n")
+            if argv == ["git", "rev-parse", "origin/main"]:
+                return MagicMock(stdout=("b" * 40) + "\n")
+            raise AssertionError(f"unexpected Git command: {argv!r}")
+
+        def fake_bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            result = fake_run(list(argv))
+            text = result.stdout
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text.encode()),
+            )
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=fake_bounded),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
+            patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
+        ):
+            result = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_repo="test/repo",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+                base_sha="b" * 40,
+            )
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "rebase_conflict_context_unavailable"},
+            error=(
+                "rebase conflict context unavailable: "
+                "total conflict context exceeds 16000 characters"
+            ),
+        )
+
+    @pytest.mark.parametrize(
+        ("content", "classification", "expected_ok", "error"),
+        [
+            (
+                "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n",
+                "residual_markers",
+                False,
+                "rebase conflict resolution required: conflict markers remain",
+            ),
+            (
+                "resolved\n",
+                "resolved_content",
+                True,
+                None,
+            ),
+        ],
+    )
+    def test_validate_rebase_conflict_classifies_file_content(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        content: str,
+        classification: str,
+        expected_ok: bool,
+        error: str | None,
+    ) -> None:
+        """The host classifies edited content before any continuation call."""
+        (tmp_path / "x.py").write_text(content, encoding="utf-8")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "before"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
+        }
+        current_receipt = {
+            **receipt,
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_hunks": {"x.py": "bounded hunk"},
+        }
+        validation_job = GitJob(
+            repo=job.repo,
+            op="validate_rebase_conflict",
+            timeout_s=job.timeout_s,
+            kwargs=job.kwargs,
+        )
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=current_receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
+        ):
+            result = pool._git_validate_rebase_conflict(validation_job)
+
+        assert result.ok is expected_ok
+        assert isinstance(result.value, dict)
+        assert result.value["conflict_resolution"] == classification
+        assert result.error == error
+
+    def test_validate_rebase_conflict_rejects_out_of_scope_paths(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A changed conflict set is an out-of-scope agent result."""
+        job = self._continue_rebase_job(tmp_path)
+        current_receipt = {
+            "conflict_paths": ("x.py", "outside.py"),
+            "conflict_snapshot": {"x.py": "after", "outside.py": "new"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
+        }
+        validation_job = GitJob(
+            repo=job.repo,
+            op="validate_rebase_conflict",
+            timeout_s=job.timeout_s,
+            kwargs=job.kwargs,
+        )
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=current_receipt),
+        ):
+            result = pool._git_validate_rebase_conflict(validation_job)
+
+        assert result.ok is False
+        assert isinstance(result.value, dict)
+        assert result.value["conflict_resolution"] == "out_of_scope_edit"
+        assert result.error == "conflict index was mutated outside host ownership"
+
+    def test_rebase_semantic_validation_rejects_duplicate_adr_numbers(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A resolved README conflict cannot publish duplicate ADR identities."""
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
+        (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
+        (adr_dir / "README.md").write_text(
+            "- [Durable plan review conversations](0027-durable-plan-review-conversations.md)\n"
+            "- [Host-owned learning preparation](0027-host-owned-learning-preparation.md)\n"
+        )
+
+        result = pool._validate_rebased_tree(
+            tmp_path, policy=pool._select_rebase_policy("Hephaestus")
+        )
+
+        assert result == JobResult(
+            ok=False,
+            value={
+                "failure_kind": "semantic_validation",
+                "rebase_policy": "hephaestus-adr-v1",
+            },
+            error=(
+                "rebase policy hephaestus-adr-v1 semantic validation failed: "
+                "rebase semantic validation failed: duplicate ADR number 0027 "
+                "(0027-durable-plan-review-conversations.md, "
+                "0027-host-owned-learning-preparation.md)"
+            ),
+        )
+
+    def test_rebase_semantic_validation_rejects_malformed_adr_record(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An ADR that bypasses the duplicate check still cannot be published."""
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0001-first-decision.md").write_text(
+            "# ADR-0001: First decision\n- Status: Accepted\n"
+        )
+        (adr_dir / "README.md").write_text("- [First decision](0001-first-decision.md)\n")
+
+        result = pool._validate_rebased_tree(
+            tmp_path, policy=pool._select_rebase_policy("Hephaestus")
+        )
+
+        assert result == JobResult(
+            ok=False,
+            value={
+                "failure_kind": "semantic_validation",
+                "rebase_policy": "hephaestus-adr-v1",
+            },
+            error=(
+                "rebase policy hephaestus-adr-v1 semantic validation failed: "
+                "rebase semantic validation failed: malformed ADR record "
+                "0001-first-decision.md"
+            ),
+        )
 
     def test_continue_rebase_selected_policy_semantic_failure_does_not_publish(
         self, pool: WorkerPool, tmp_path: Path
@@ -11588,6 +12530,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -11600,6 +12543,7 @@ class TestGitOps:
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch.object(pool, "_run_immutable_build_test", return_value=JobResult(ok=True)),
+            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
@@ -11640,6 +12584,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -11662,6 +12607,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch.object(pool, "_run_immutable_build_test", return_value=failed),
@@ -11695,6 +12641,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -11717,6 +12664,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch.object(
                 pool,
@@ -11790,10 +12738,12 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
         ):
             result = pool._git_continue_rebase(job, record_source=Mock())
 
@@ -11811,11 +12761,10 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
-            if argv == ["git", "diff", "--name-only", "-z"]:
-                return MagicMock(returncode=0, stdout="x.py\0outside.py\0")
             if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
                 return MagicMock(returncode=0, stdout="")
             if argv[:3] == ["git", "rev-list", "--reverse"]:
@@ -11830,11 +12779,20 @@ class TestGitOps:
                 )
             return MagicMock(returncode=0, stdout="")
 
+        def bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            text = "x.py\0outside.py\0" if argv[1] == "diff" else ""
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text),
+            )
+
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch(f"{_WP}.git_utils.push_head_to_branch"),
+            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
             result = pool._git_continue_rebase(job, record_source=Mock())
@@ -11847,19 +12805,20 @@ class TestGitOps:
     ) -> None:
         """Clean paths staged by the paused rebase are host state, not agent edits."""
 
-        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
-            if argv == ["git", "diff", "--name-only", "-z"]:
-                return MagicMock(returncode=0, stdout="conflict.py\0")
-            if argv == ["git", "diff", "--cached", "--name-only", "-z"]:
-                return MagicMock(
-                    returncode=0,
-                    stdout="conflict.py\0host-staged.py\0",
-                )
-            if argv == ["git", "ls-files", "--others", "--exclude-standard", "-z"]:
-                return MagicMock(returncode=0, stdout="")
-            raise AssertionError(f"unexpected git probe: {argv!r}")
+        def bounded(argv: tuple[str, ...], **_kwargs: object) -> _BoundedGitOutput:
+            if argv == ("git", "diff", "--name-only", "-z"):
+                text = "conflict.py\0"
+            elif argv == ("git", "ls-files", "--others", "--exclude-standard", "-z"):
+                text = ""
+            else:
+                raise AssertionError(f"unexpected git probe: {argv!r}")
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text),
+            )
 
-        with patch(f"{_WP}.git_utils.run", side_effect=fake_run):
+        with patch(f"{_WP}._run_bounded_git_output", side_effect=bounded):
             result = pool._rebase_conflict_edit_scope_error(
                 tmp_path,
                 conflict_paths=("conflict.py",),
@@ -11867,6 +12826,229 @@ class TestGitOps:
             )
 
         assert result is None
+
+    @pytest.mark.parametrize(
+        ("probe_index", "failure_kind"),
+        (
+            pytest.param(0, "output-limit", id="diff-output-limit"),
+            pytest.param(0, "shutdown", id="diff-shutdown"),
+            pytest.param(1, "output-limit", id="untracked-output-limit"),
+            pytest.param(1, "shutdown", id="untracked-shutdown"),
+        ),
+    )
+    def test_rebase_conflict_scope_maps_bounded_probe_failures_to_safe_error(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        probe_index: int,
+        failure_kind: str,
+    ) -> None:
+        """Each edit-scope probe stays bounded and cancellable."""
+        probes = (
+            ("git", "diff", "--name-only", "-z"),
+            ("git", "ls-files", "--others", "--exclude-standard", "-z"),
+        )
+        calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+        def bounded(argv: tuple[str, ...], **kwargs: object) -> _BoundedGitOutput:
+            current = len(calls)
+            calls.append((argv, kwargs))
+            if current == probe_index:
+                if failure_kind == "output-limit":
+                    raise _GitInspectionResourceLimitError("Git output limit exceeded")
+                raise InterruptedError("Git capture cancelled")
+            text = "conflict.py\0"
+            return _BoundedGitOutput(
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                byte_count=len(text),
+            )
+
+        with (
+            patch(f"{_WP}._run_bounded_git_output", side_effect=bounded),
+            patch(f"{_WP}.git_utils.run") as unbounded,
+        ):
+            result = pool._rebase_conflict_edit_scope_error(
+                tmp_path,
+                conflict_paths=("conflict.py",),
+                timeout=60,
+            )
+
+        assert result == JobResult(ok=False, error="cannot validate rebase conflict edit scope")
+        unbounded.assert_not_called()
+        assert [argv for argv, _kwargs in calls] == list(probes[: probe_index + 1])
+        assert all(kwargs["cwd"] == tmp_path for _argv, kwargs in calls)
+        assert all(kwargs["timeout"] == 60 for _argv, kwargs in calls)
+        assert all(kwargs["max_bytes"] == 64 * 1024 for _argv, kwargs in calls)
+        assert all(kwargs["retain_text"] is True for _argv, kwargs in calls)
+        assert all(kwargs["shutdown"] is pool._shutdown for _argv, kwargs in calls)
+
+    def test_conflict_ignored_snapshot_distinguishes_agent_changes_from_preexisting_files(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An unchanged ignored artifact is allowed, but an agent change is not."""
+        _git(tmp_path, "init", "-b", "main")
+        _git(tmp_path, "config", "user.email", "test@example.invalid")
+        _git(tmp_path, "config", "user.name", "Test User")
+        (tmp_path / ".gitignore").write_text("outside.log\n", encoding="utf-8")
+        _git(tmp_path, "add", ".gitignore")
+        _git(tmp_path, "commit", "-m", "base")
+        ignored = tmp_path / "outside.log"
+        ignored.write_text("preexisting\n", encoding="utf-8")
+
+        before = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+        unchanged = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+        ignored.write_text("agent output\n", encoding="utf-8")
+        changed = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+
+        assert unchanged == before
+        assert changed != before
+
+    def test_conflict_ignored_snapshot_is_bounded_and_cancellable(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Ignored-file provenance uses bounded reads in the worker stop scope."""
+        paths = "cache/output.bin\0"
+        bounded = _BoundedGitOutput(
+            text=paths,
+            sha256=hashlib.sha256(paths.encode()).hexdigest(),
+            byte_count=len(paths),
+        )
+        with (
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded) as capture,
+            patch(f"{_WP}._path_content_identity", return_value="a" * 64) as identity,
+        ):
+            result = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+
+        assert result == "a" * 64
+        assert capture.call_args.kwargs["max_bytes"] == 1024 * 1024
+        assert capture.call_args.kwargs["shutdown"] is pool._shutdown
+        assert identity.call_args.kwargs["include_file_content"] is False
+        assert identity.call_args.kwargs["shutdown"] is pool._shutdown
+
+    def test_conflict_ignored_snapshot_rejects_too_many_files(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An ignored tree cannot exceed the fixed file-count limit."""
+        paths = "".join(f"cache/{index}\0" for index in range(20_001))
+        bounded = _BoundedGitOutput(
+            text=paths,
+            sha256=hashlib.sha256(paths.encode()).hexdigest(),
+            byte_count=len(paths),
+        )
+        with (
+            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
+            pytest.raises(_GitInspectionResourceLimitError, match="file limit"),
+        ):
+            pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+
+    def test_conflict_ignored_snapshot_accepts_a_managed_virtual_environment(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A normal ignored virtual environment fits the metadata receipt."""
+        _git(tmp_path, "init", "-b", "main")
+        _git(tmp_path, "config", "user.email", "test@example.invalid")
+        _git(tmp_path, "config", "user.name", "Test User")
+        (tmp_path / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+        _git(tmp_path, "add", ".gitignore")
+        _git(tmp_path, "commit", "-m", "base")
+        environment = tmp_path / ".venv"
+        environment.mkdir()
+        for index in range(513):
+            (environment / f"module-{index}.py").write_text("value = 1\n", encoding="utf-8")
+        with (environment / "large.bin").open("wb") as stream:
+            stream.truncate(9 * 1024 * 1024)
+
+        before = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+        (environment / "module-0.py").write_text("value = 2\n", encoding="utf-8")
+        after = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+
+        assert after != before
+
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Secure conflict reads require POSIX")
+    def test_bounded_conflict_read_rejects_a_replaced_symlink_ancestor_without_reading_outside(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ancestor replacement cannot redirect a conflict read outside its root."""
+        root = tmp_path / "root"
+        ancestor = root / "directory"
+        detached = root / "detached"
+        outside = tmp_path / "outside"
+        ancestor.mkdir(parents=True)
+        outside.mkdir()
+        target = ancestor / "conflict.py"
+        outside_target = outside / "conflict.py"
+        target.write_text("inside\n", encoding="utf-8")
+        outside_target.write_text("outside\n", encoding="utf-8")
+        outside_identity = (outside_target.stat().st_dev, outside_target.stat().st_ino)
+        original_read = os.read
+        replaced = False
+        outside_read = False
+
+        def validate_then_replace(cwd: Path, path: str) -> Path:
+            nonlocal replaced
+            validated = _validated_conflict_path(cwd, path)
+            replaced = True
+            ancestor.rename(detached)
+            ancestor.symlink_to(outside, target_is_directory=True)
+            return validated
+
+        def record_read(descriptor: int, size: int) -> bytes:
+            nonlocal outside_read
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) == outside_identity:
+                outside_read = True
+            return original_read(descriptor, size)
+
+        monkeypatch.setattr(os, "read", record_read)
+        with patch(f"{_WP}._validated_conflict_path", side_effect=validate_then_replace):
+            raised: _RebaseConflictContextError | None = None
+            try:
+                _read_bounded_conflict_file(root, "directory/conflict.py")
+            except _RebaseConflictContextError as exc:
+                raised = exc
+
+        assert outside_read is False
+        assert raised is not None
+        assert replaced is True
+
+    def test_residual_marker_check_uses_the_secure_bounded_reader(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The final marker check cannot follow or read an unsafe path."""
+        (tmp_path / "x.py").write_text("resolved\n", encoding="utf-8")
+        current_receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
+        }
+        with (
+            patch.object(pool, "_conflict_receipt", return_value=current_receipt),
+            patch.object(pool, "_rebase_conflict_edit_scope_error", return_value=None),
+            patch(
+                f"{_WP}._read_bounded_conflict_file",
+                side_effect=_RebaseConflictContextError("unsafe path"),
+            ) as secure_read,
+        ):
+            result = pool._classify_rebase_conflict_edits(
+                tmp_path,
+                remote="origin",
+                expected_repo="test/repo",
+                paths=("x.py",),
+                snapshot={"x.py": "before"},
+                index_snapshot="1" * 64,
+                paused_head_sha="c" * 40,
+                base_sha="b" * 40,
+                expected_remote_sha="a" * 40,
+                timeout=60,
+            )
+
+        secure_read.assert_called_once_with(tmp_path, "x.py")
+        assert result.ok is False
+        assert result.error == "rebase conflict context unavailable: unsafe path"
 
     def test_continue_rebase_rejects_mutated_conflict_index(
         self, pool: WorkerPool, tmp_path: Path
@@ -11879,6 +13061,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "2" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -11920,6 +13103,7 @@ class TestGitOps:
             # The complete index changed after the agent staged outside.py.
             "conflict_index_snapshot": "2" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
@@ -11943,6 +13127,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "d" * 40,
+            "base_sha": "b" * 40,
         }
 
         def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
@@ -12011,6 +13196,7 @@ class TestGitOps:
             result = pool._continue_rebase_process(
                 tmp_path,
                 remote="origin",
+                expected_repo="test/repo",
                 base_sha="b" * 40,
                 expected_remote_sha="a" * 40,
                 paths=("x.py",),
@@ -12039,12 +13225,14 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         record_source = Mock()
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
+            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
@@ -12077,12 +13265,14 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         record_source = Mock()
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
+            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
@@ -12108,6 +13298,7 @@ class TestGitOps:
             "conflict_snapshot": {"x.py": "after"},
             "conflict_index_snapshot": "1" * 64,
             "paused_head_sha": "c" * 40,
+            "base_sha": "b" * 40,
         }
         signed = (
             "tree deadbeef\ngpgsig -----BEGIN SIGNATURE-----\n\nfix\n\n"
@@ -12118,6 +13309,7 @@ class TestGitOps:
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
+            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch.object(
                 pool,
@@ -12132,8 +13324,6 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.run") as run,
         ):
             run.side_effect = [
-                MagicMock(returncode=0, stdout="x.py\0"),
-                MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
@@ -12161,6 +13351,145 @@ class TestGitOps:
             env={"GIT_TERMINAL_PROMPT": "0"},
             remote_config=("-c", "credential.helper=!trusted-gh auth git-credential"),
             revalidate_remote=ANY,
+        )
+
+    @pytest.mark.usefixtures("require_git_path_format")
+    @pytest.mark.parametrize("delete_topic", [False, True], ids=["text", "delete"])
+    def test_one_file_textual_conflict_is_validated_then_host_continued(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        delete_topic: bool,
+    ) -> None:
+        """A semantic one-file resolution is staged and continued only by the host."""
+        checkout, signing, expected_remote_sha, base_sha, topic_content = (
+            _prepare_one_file_rebase_conflict(tmp_path, delete_topic=delete_topic)
+        )
+        relative_path = "tests/test_gateway_lifecycle.py"
+        source = checkout / relative_path
+        rebase_job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": checkout,
+                "base_branch": "main",
+                "remote": "origin",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": expected_remote_sha,
+                "rebase_reason": "review_conflict",
+            },
+        )
+
+        with (
+            patch.object(pool, "_revalidate_review_conflict", return_value=None),
+            patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(os.environ.copy(), ()),
+            ),
+        ):
+            paused = pool._git_rebase(rebase_job, record_source=Mock())
+
+            assert paused.ok is False
+            assert paused.error == "mechanical rebase hit conflicts; resolution required"
+            assert isinstance(paused.value, dict)
+            assert paused.value["conflict_paths"] == (relative_path,)
+            conflict_hunks = paused.value.get("conflict_hunks")
+            assert isinstance(conflict_hunks, dict)
+            conflict_hunk = conflict_hunks.get(relative_path)
+            assert isinstance(conflict_hunk, str)
+            if delete_topic:
+                assert "Base:" in conflict_hunk
+                assert "Ours:" in conflict_hunk
+                assert "Theirs:\n_(absent)_" in conflict_hunk
+            else:
+                assert "<<<<<<<" in conflict_hunk
+                assert "active_path.is_file()" in conflict_hunk
+                assert "active_path.exists()" in conflict_hunk
+
+            continuation_kwargs = {
+                key: value for key, value in paused.value.items() if key != "rebased"
+            }
+            continuation_kwargs.update(
+                {"cwd": checkout, "remote": "origin", "branch": "7-auto-impl"}
+            )
+            validation_job = GitJob(
+                repo="test/repo",
+                op="validate_rebase_conflict",
+                timeout_s=60,
+                kwargs=continuation_kwargs,
+            )
+            if topic_content is None:
+                source.unlink()
+            else:
+                source.write_text(topic_content, encoding="utf-8")
+            status_before_validation = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            validated = pool._git_validate_rebase_conflict(validation_job)
+            status_after_validation = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+            assert validated.ok is True
+            assert isinstance(validated.value, dict)
+            assert validated.value["conflict_resolution"] == "resolved_content"
+            assert status_after_validation == status_before_validation
+
+            continued = pool._git_continue_rebase(
+                GitJob(
+                    repo="test/repo",
+                    op="continue_rebase",
+                    timeout_s=60,
+                    kwargs=continuation_kwargs,
+                ),
+                record_source=Mock(),
+            )
+
+        assert continued.ok is True
+        assert isinstance(continued.value, dict)
+        if topic_content is None:
+            assert not source.exists()
+        else:
+            assert source.read_text(encoding="utf-8") == topic_content
+        assert (
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            == ""
+        )
+        published_sha = str(continued.value["head_sha"])
+        assert (
+            subprocess.run(
+                ["git", "ls-remote", "origin", "refs/heads/7-auto-impl"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.split()[0]
+            == published_sha
+        )
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base_sha, published_sha],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
     @pytest.mark.usefixtures("require_git_path_format")

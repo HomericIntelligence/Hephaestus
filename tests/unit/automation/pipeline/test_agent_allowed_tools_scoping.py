@@ -65,7 +65,7 @@ EXPECTED_SCOPES = {
     (
         "stages/implementation.py",
         "_rebase_conflict_wait",
-        "build_implementation_prompt",
+        "get_rebase_conflict_prompt",
     ): EDIT_ONLY,
     ("stages/implementation.py", "_testfix_wait", "build_test_fix_prompt"): WRITE,
     (

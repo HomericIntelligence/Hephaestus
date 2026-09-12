@@ -35,6 +35,7 @@ _AGENT_DIRECTION_TEMPLATES = frozenset(
         "implementation/dirty_direct_continuation.j2",
         "implementation/implementation.j2",
         "implementation/loop_review.j2",
+        "implementation/rebase_conflict_resolution.j2",
         "implementation/resume_feedback.j2",
         "planning/context.j2",
         "planning/plan.j2",

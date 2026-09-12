@@ -23,6 +23,9 @@ conflict-resolution attempts have separate budgets from ``ctx.budget``.
 Consecutive Git failures have a bounded retry policy. Worktree preparation
 failures do not consume implementation attempts.
 
+After each edit-only conflict turn, ``REBASE_CONFLICT_VALIDATE_WAIT`` asks the
+host to classify the result before the host continues the rebase.
+
 PR creation is a durable publication step before the stage advances. A
 no-commit result reports incomplete work. It does not apply ``state:skip``
 or prove that the issue is complete. Failed or uncertain publication keeps
@@ -86,6 +89,7 @@ from hephaestus.automation.prompts.implementation import (
     get_dirty_reused_worktree_decision_prompt,
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
+    get_rebase_conflict_prompt,
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
 from hephaestus.automation.remediation_prepublication import (
@@ -300,6 +304,15 @@ RUNNER_FALLBACK_REASONS = frozenset(
         "container-start-failed",
     }
 )
+_REBASE_CONFLICT_RESOLUTION_KEY = "rebase_conflict_resolution"
+_REBASE_CONFLICT_DIAGNOSIS_KEY = "rebase_conflict_resolution_diagnostic"
+_REBASE_CONFLICT_AGENT_SUMMARY_KEY = "rebase_conflict_agent_summary"
+_REBASE_CONFLICT_VALIDATION_KEY = "rebase_conflict_validation_result"
+_REBASE_CONFLICT_CONTEXT_VERSION = 1
+_REBASE_CONFLICT_RETRYABLE = frozenset({"no_edit", "residual_markers"})
+_REBASE_CONFLICT_OUTCOMES = frozenset(
+    {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
+)
 
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
@@ -315,6 +328,8 @@ REMEDIATION_JOURNAL_GIT_VERIFY_WAIT = "REMEDIATION_JOURNAL_GIT_VERIFY_WAIT"
 REBASE_WAIT = "REBASE_WAIT"
 REBASE_AGENT_WAIT = "REBASE_AGENT_WAIT"
 REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
+REBASE_CONFLICT_REFRESH_WAIT = "REBASE_CONFLICT_REFRESH_WAIT"
+REBASE_CONFLICT_VALIDATE_WAIT = "REBASE_CONFLICT_VALIDATE_WAIT"
 REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
 _REBASE_AGENT_INFLIGHT = "rebase_agent_inflight"
 ADOPTED = "ADOPTED"
@@ -344,6 +359,8 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     REBASE_WAIT: "_rebase_wait",
     REBASE_AGENT_WAIT: "_rebase_agent_wait",
     REBASE_CONFLICT_WAIT: "_rebase_conflict_wait",
+    REBASE_CONFLICT_REFRESH_WAIT: "_rebase_conflict_refresh_wait",
+    REBASE_CONFLICT_VALIDATE_WAIT: "_rebase_conflict_validate_wait",
     REBASE_CONTINUE_WAIT: "_rebase_continue_wait",
     ADOPTED: "_adopted",
     ADVISE_WAIT: "_advise_wait",
@@ -1357,8 +1374,6 @@ def build_implementation_prompt(
     branch_name: str = "",
     worktree_path: str = "",
     advise_findings: str = "",
-    rebase_conflict: bool = False,
-    rebase_conflict_paths: tuple[str, ...] = (),
 ) -> str:
     """Compose the implementation prompt with the advise-findings block.
 
@@ -1375,9 +1390,6 @@ def build_implementation_prompt(
         branch_name: Feature branch the worktree is on.
         worktree_path: Worktree the implementer works in.
         advise_findings: Advise-step findings; empty string means no block.
-        rebase_conflict: Whether the host's mechanical rebase found conflicts
-            whose file contents the implementation agent must resolve.
-        rebase_conflict_paths: Host-validated paths the agent may edit.
 
     Returns:
         The full implementer prompt, with the findings block appended when
@@ -1391,23 +1403,12 @@ def build_implementation_prompt(
         branch_name=branch_name,
         worktree_path=worktree_path,
     )
-    if not advise_findings and not rebase_conflict:
+    if not advise_findings:
         return prompt
-    blocks: list[str] = [prompt]
-    if advise_findings:
-        blocks.append(
-            PromptCatalog.current().render(
-                "implementation/advise_append.j2", advise_findings=advise_findings
-            )
-        )
-    if rebase_conflict:
-        blocks.append(
-            PromptCatalog.current().render(
-                "implementation/rebase_conflict_append.j2",
-                conflict_paths=rebase_conflict_paths,
-            )
-        )
-    return "".join(blocks)
+    return prompt + PromptCatalog.current().render(
+        "implementation/advise_append.j2",
+        advise_findings=advise_findings,
+    )
 
 
 def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: str) -> str:
@@ -2412,19 +2413,29 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         if item.payload.pop("rebase_complete", None):
             for key in (
+                "rebase_conflict",
                 "rebase_conflict_paths",
                 "rebase_conflict_snapshot",
                 "rebase_content_snapshot",
+                "rebase_conflict_hunks",
+                "rebase_conflict_context_version",
                 "rebase_conflict_index_snapshot",
                 "rebase_paused_head_sha",
                 "rebase_base_sha",
                 "rebase_expected_remote_sha",
+                _REBASE_CONFLICT_RESOLUTION_KEY,
+                _REBASE_CONFLICT_DIAGNOSIS_KEY,
+                _REBASE_CONFLICT_AGENT_SUMMARY_KEY,
+                "rebase_conflict_agent_error_detail",
+                _REBASE_CONFLICT_VALIDATION_KEY,
             ):
                 item.payload.pop(key, None)
             return self._finish_rebase(item, ctx)
         if item.payload.pop("rebase_conflict_agent_error", None):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         if not item.payload.pop("rebase_conflict_agent_complete", False):
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        if item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY) != "resolved_content":
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         try:
             workspace = _existing_impl_workspace(item)
@@ -2697,8 +2708,6 @@ class ImplementationStage(Stage):
                 "branch_name": item.branch,
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
-                "rebase_conflict": bool(item.payload.get("rebase_conflict")),
-                "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
             },
             **_codex_isolation_job_kwargs(ctx),
             descr="implement",
@@ -2748,13 +2757,20 @@ class ImplementationStage(Stage):
             )
         except (KeyError, TypeError, ValueError):
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_source_authority_unavailable")
+        if not self._has_current_rebase_conflict_context(item):
+            return JobRequest(
+                self._rebase_conflict_validation_job(item, ctx, workspace),
+                on_done_state=REBASE_CONFLICT_REFRESH_WAIT,
+            )
         logger.info("implementation:%d: requesting edit-only rebase resolution", issue)
+        raw_hunks = item.payload.get("rebase_conflict_hunks")
+        conflict_hunks = raw_hunks if isinstance(raw_hunks, dict) else {}
         job = AgentJob(
             repo=item.repo,
             issue=issue,
             agent=agent_provider(ctx, "implementer"),
             model=stage_model(ctx, "implementer", implementer_model),
-            prompt_builder=build_implementation_prompt,
+            prompt_builder=get_rebase_conflict_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
             allowed_tools="Read,Write,Edit,Glob,Grep",
@@ -2762,26 +2778,116 @@ class ImplementationStage(Stage):
             resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
-                AgentOperation.IMPLEMENT,
+                AgentOperation.REBASE_CONFLICT,
                 agent_session_lifecycle(item, AGENT_IMPLEMENTER),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
-                "issue_number": item.issue,
-                "issue_title": item.payload.get("issue_title", ""),
-                "issue_body": item.payload.get("issue_body", ""),
-                "branch_name": item.branch,
-                "worktree_path": item.worktree,
-                "advise_findings": "",
-                "rebase_conflict": True,
-                "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
+                "conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
+                "conflict_hunks": dict(conflict_hunks),
+                "diagnosis": str(item.payload.get(_REBASE_CONFLICT_DIAGNOSIS_KEY) or ""),
             },
             **_codex_isolation_job_kwargs(ctx),
             workspace=workspace,
             source_operation=source_operation,
             descr="resolve_rebase_conflict",
         )
-        return JobRequest(job, on_done_state=REBASE_CONTINUE_WAIT)
+        return JobRequest(job, on_done_state=REBASE_CONFLICT_VALIDATE_WAIT)
+
+    @staticmethod
+    def _has_current_rebase_conflict_context(item: WorkItem) -> bool:
+        """Return true when the receipt has complete current context."""
+        paths = item.payload.get("rebase_conflict_paths")
+        hunks = item.payload.get("rebase_conflict_hunks")
+        return bool(
+            item.payload.get("rebase_conflict_context_version") == _REBASE_CONFLICT_CONTEXT_VERSION
+            and isinstance(paths, (list, tuple))
+            and paths
+            and isinstance(hunks, dict)
+            and set(hunks) == set(paths)
+            and all(isinstance(hunks.get(path), str) and hunks[path] for path in paths)
+        )
+
+    @staticmethod
+    def _rebase_conflict_validation_job(
+        item: WorkItem, ctx: StageContext, workspace: WorkspaceBinding
+    ) -> GitJob:
+        """Build one read-only host conflict-classification job."""
+        return GitJob(
+            repo=item.repo,
+            op="validate_rebase_conflict",
+            workspace=workspace,
+            timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
+            kwargs={
+                "cwd": _worktree_path(item, ctx),
+                "repo_root": str(ctx.paths.repo_root),
+                "issue_number": item.issue,
+                "base_sha": item.payload.get("rebase_base_sha"),
+                "remote": "origin",
+                "branch": item.branch,
+                "expected_remote_sha": item.payload.get("rebase_expected_remote_sha"),
+                "conflict_paths": item.payload.get("rebase_conflict_paths"),
+                "conflict_snapshot": item.payload.get("rebase_conflict_snapshot"),
+                "conflict_index_snapshot": item.payload.get("rebase_conflict_index_snapshot"),
+                "paused_head_sha": item.payload.get("rebase_paused_head_sha"),
+                "agent_summary": item.payload.get(_REBASE_CONFLICT_AGENT_SUMMARY_KEY, ""),
+            },
+            descr="validate_rebase_conflict",
+        )
+
+    def _rebase_conflict_refresh_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Route a host refresh of a legacy conflict receipt."""
+        if item.payload.pop("rebase_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
+        classification = item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY)
+        if classification == "resolved_content":
+            item.payload["rebase_conflict_agent_complete"] = True
+            return Continue(next_state=REBASE_CONTINUE_WAIT)
+        if classification == "out_of_scope_edit":
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_out_of_scope_edit")
+        if classification in _REBASE_CONFLICT_RETRYABLE:
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+            item.payload.pop("rebase_conflict_agent_complete", None)
+            if not self._has_current_rebase_conflict_context(item):
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_receipt_incompatible")
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_receipt_incompatible")
+
+    def _rebase_conflict_validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Classify one agent turn before host-owned rebase continuation."""
+        if item.payload.pop("rebase_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
+        if item.payload.pop("rebase_conflict_validation_pending", False):
+            try:
+                workspace = _existing_impl_workspace(item)
+            except (KeyError, TypeError, ValueError):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable"
+                )
+            return JobRequest(
+                self._rebase_conflict_validation_job(item, ctx, workspace),
+                on_done_state=REBASE_CONFLICT_VALIDATE_WAIT,
+            )
+        classification = item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY)
+        if classification in _REBASE_CONFLICT_RETRYABLE:
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+            if item.attempts.get("rebase_conflict", 0) >= ctx.budget("rebase_conflict"):
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_exhausted")
+            if (
+                AGENT_IMPLEMENTER not in item.session_ids
+                and AGENT_IMPLEMENTER not in item.session_bindings
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_session_unavailable")
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        if classification == "resolved_content":
+            item.payload["rebase_conflict_agent_complete"] = True
+            return Continue(next_state=REBASE_CONTINUE_WAIT)
+        if classification == "out_of_scope_edit":
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_out_of_scope_edit")
+        return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_validation_missing")
 
     def _pretest_persist_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Persist the actual successful completion before dispatching tests."""
@@ -3515,6 +3621,7 @@ class ImplementationStage(Stage):
                 item.payload["rebase_complete"] = True
             elif (result.error or "").startswith("rebase conflict resolution required"):
                 self._record_rebase_conflict(item, result)
+                item.payload.pop("rebase_conflict_agent_complete", None)
             else:
                 logger.warning(
                     "implementation:%s: host rebase completion failed: %s",
@@ -3525,6 +3632,14 @@ class ImplementationStage(Stage):
                 diagnostic = _rebase_failure_diagnostic(result)
                 if diagnostic is not None:
                     item.payload["rebase_failure_diagnostic"] = diagnostic
+            return
+
+        if item.state == REBASE_CONFLICT_VALIDATE_WAIT:
+            self._on_rebase_conflict_validation_done(item, result)
+            return
+
+        if item.state == REBASE_CONFLICT_REFRESH_WAIT:
+            self._on_rebase_conflict_validation_done(item, result)
             return
 
         if item.state == ADVISE_WAIT:
@@ -4026,10 +4141,50 @@ class ImplementationStage(Stage):
     def _on_rebase_conflict_agent_done(item: WorkItem, result: JobResult) -> None:
         """Count one conflict-only turn without consuming implementation budget."""
         item.attempts["rebase_conflict"] = item.attempts.get("rebase_conflict", 0) + 1
-        if result.ok:
-            item.payload["rebase_conflict_agent_complete"] = True
-        else:
-            item.payload["rebase_conflict_agent_error"] = True
+        item.payload.pop("rebase_conflict_agent_complete", None)
+        item.payload.pop("rebase_conflict_agent_error_detail", None)
+        item.payload["rebase_conflict_validation_pending"] = True
+        summary = result.value if isinstance(result.value, str) else result.stdout_tail
+        if not summary:
+            summary = result.error or "agent returned no summary"
+        item.payload[_REBASE_CONFLICT_AGENT_SUMMARY_KEY] = redact_diagnostic_text(summary)[:500]
+        if result.error:
+            item.payload["rebase_conflict_agent_error_detail"] = redact_diagnostic_text(
+                result.error
+            )[:500]
+
+    @staticmethod
+    def _on_rebase_conflict_validation_done(item: WorkItem, result: JobResult) -> None:
+        """Store host classification and diagnosis for one conflict turn."""
+        item.payload.pop("rebase_conflict_validation_pending", None)
+        value = result.value if isinstance(result.value, dict) else {}
+        classification = value.get("conflict_resolution")
+        if classification not in _REBASE_CONFLICT_OUTCOMES:
+            ImplementationStage._record_rebase_failure(item, result)
+            return
+
+        preserve_snapshot = classification == "resolved_content"
+        ImplementationStage._record_rebase_conflict(
+            item, result, preserve_snapshot=preserve_snapshot
+        )
+        if item.payload.get("rebase_error"):
+            return
+        item.payload[_REBASE_CONFLICT_VALIDATION_KEY] = classification
+        if classification in _REBASE_CONFLICT_RETRYABLE or classification == "out_of_scope_edit":
+            detail = result.error or f"host classified the turn as {classification}"
+            summary = str(item.payload.get(_REBASE_CONFLICT_AGENT_SUMMARY_KEY) or "")
+            diagnosis = (
+                f"classification={classification}; host diagnosis={detail}; "
+                f"agent summary={summary or 'none'}"
+            )
+            diagnosis = redact_diagnostic_text(diagnosis)[:500]
+            item.payload[_REBASE_CONFLICT_DIAGNOSIS_KEY] = diagnosis
+            logger.warning(
+                "implementation:%s: rebase conflict turn classified as %s: %s",
+                item.issue,
+                classification,
+                diagnosis,
+            )
 
     @staticmethod
     def _record_rebase_failure(item: WorkItem, result: JobResult) -> None:
@@ -4056,12 +4211,16 @@ class ImplementationStage(Stage):
             item.payload.pop("rebase_error_policy", None)
 
     @staticmethod
-    def _record_rebase_conflict(item: WorkItem, result: JobResult) -> None:
+    def _record_rebase_conflict(
+        item: WorkItem, result: JobResult, *, preserve_snapshot: bool = False
+    ) -> None:
         """Retain only a complete host-produced conflict receipt on the item."""
         value = result.value if isinstance(result.value, dict) else {}
         paths = value.get("conflict_paths")
         snapshot = value.get("conflict_snapshot")
         content_snapshot = value.get("content_snapshot")
+        hunks = value.get("conflict_hunks")
+        context_version = value.get("conflict_context_version")
         index_snapshot = value.get("conflict_index_snapshot")
         paused_head_sha = value.get("paused_head_sha")
         base_sha = value.get("base_sha")
@@ -4071,6 +4230,10 @@ class ImplementationStage(Stage):
             or not paths
             or not all(isinstance(path, str) and path for path in paths)
             or not isinstance(snapshot, dict)
+            or context_version != _REBASE_CONFLICT_CONTEXT_VERSION
+            or not isinstance(hunks, dict)
+            or set(hunks) != set(paths)
+            or not all(isinstance(hunks.get(path), str) and hunks[path] for path in paths)
             or not _is_valid_dirty_content_snapshot(content_snapshot)
             or not isinstance(index_snapshot, str)
             or re.fullmatch(r"[0-9a-f]{64}", index_snapshot) is None
@@ -4082,8 +4245,19 @@ class ImplementationStage(Stage):
             return
         item.payload["rebase_conflict"] = True
         item.payload["rebase_conflict_paths"] = tuple(paths)
-        item.payload["rebase_conflict_snapshot"] = snapshot
+        item.payload["rebase_conflict_context_version"] = context_version
+        if not preserve_snapshot:
+            item.payload["rebase_conflict_snapshot"] = snapshot
         item.payload["rebase_content_snapshot"] = content_snapshot
+        if isinstance(hunks, dict):
+            item.payload["rebase_conflict_hunks"] = {
+                str(path): str(hunk)
+                for path, hunk in hunks.items()
+                if str(path) in paths and isinstance(hunk, str)
+            }
+        classification = value.get("conflict_resolution")
+        if classification in _REBASE_CONFLICT_OUTCOMES:
+            item.payload[_REBASE_CONFLICT_RESOLUTION_KEY] = classification
         item.payload["rebase_conflict_index_snapshot"] = index_snapshot
         item.payload["rebase_paused_head_sha"] = paused_head_sha
         item.payload["rebase_base_sha"] = base_sha

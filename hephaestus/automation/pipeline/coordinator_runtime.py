@@ -27,6 +27,7 @@ from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .diagnostics import (
     bounded_source_workspace_recovery,
+    rebase_conflict_event_fields,
     redact_bounded_diagnostic_tails,
     redact_diagnostic_text,
 )
@@ -734,7 +735,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self.recovery_preserved.append(entry)
 
     @staticmethod
-    def _job_result_event_fields(result: JobResult) -> dict[str, ct.Any]:
+    def _job_result_event_fields(
+        result: JobResult, *, job: object | None = None
+    ) -> dict[str, ct.Any]:
         """Return bounded, output-free job result fields for durable event logs."""
         fields: dict[str, ct.Any] = {
             "ok": result.ok,
@@ -769,6 +772,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 "stdout_tail": diagnostics.get("stdout_tail", ""),
                 "stderr_tail": diagnostics.get("stderr_tail", ""),
             }
+        if isinstance(job, GitJob) and job.op in {
+            "validate_rebase_conflict",
+            "continue_rebase",
+        }:
+            fields |= rebase_conflict_event_fields(value, result.error)
         return fields
 
     @staticmethod

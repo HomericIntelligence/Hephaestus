@@ -225,7 +225,7 @@ class ExecutionCoordinator(_CoordinatorHost):
                 "complete_unknown",
                 type(handle.job).__name__,
                 handle.on_done_state,
-                self._job_result_event_fields(result),
+                self._job_result_event_fields(result, job=handle.job),
             )
             logger.warning("completion for unknown handle (already torn down?): %s", handle)
             return
@@ -238,7 +238,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             {
                 "descr": getattr(handle.job, "descr", ""),
                 "lane": "auxiliary" if auxiliary else "main",
-                **self._job_result_event_fields(result),
+                **self._job_result_event_fields(result, job=handle.job),
             },
         )
         if not auxiliary:

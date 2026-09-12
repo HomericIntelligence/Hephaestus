@@ -360,13 +360,16 @@ def _path_content_identity(  # noqa: C901
     *,
     seed_digest: str = "",
     remaining_content_bytes: list[int] | None = None,
+    include_file_content: bool = True,
     timeout: int | float | None = None,
     copy_root: Path | None = None,
     shutdown: threading.Event | None = None,
 ) -> str:
-    """Hash NUL-delimited paths and their current file-system content."""
+    """Hash NUL-delimited paths and their current file-system state."""
     if paths_output and (not paths_output.endswith("\0") or "\0\0" in paths_output):
         raise RuntimeError("dirty snapshot contains an unsafe path")
+    if copy_root is not None and not include_file_content:
+        raise ValueError("a metadata-only snapshot cannot copy file content")
     relative_values = tuple(paths_output[:-1].split("\0")) if paths_output else ()
     if copy_root is not None:
         relative_values = tuple(
@@ -378,6 +381,8 @@ def _path_content_identity(  # noqa: C901
     digest = hashlib.sha256()
     digest.update(b"D")
     digest.update(seed_digest.encode("ascii"))
+    if not include_file_content:
+        digest.update(b"M")
     if not relative_values:
         return digest.hexdigest()
     if not _secure_dir_fd_supported():
@@ -420,6 +425,39 @@ def _path_content_identity(  # noqa: C901
 
     open_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
     root_fd = os.open(root, open_flags | os.O_DIRECTORY)
+    root_identity = identity(os.fstat(root_fd))
+
+    def revalidate_root() -> None:
+        """Confirm that the root path still names the open root directory."""
+        try:
+            current_fd = os.open(root, open_flags | os.O_DIRECTORY)
+            try:
+                current_identity = identity(os.fstat(current_fd))
+            finally:
+                os.close(current_fd)
+        except OSError as exc:
+            raise RuntimeError("dirty snapshot content changed during inspection") from exc
+        if current_identity != root_identity:
+            raise RuntimeError("dirty snapshot content changed during inspection")
+
+    def revalidate_bindings(
+        bindings: list[tuple[int, str, int, tuple[int, int, int, int, int, int]]],
+    ) -> None:
+        """Confirm that each retained descriptor still has its trusted name."""
+        try:
+            for bound_parent, component, descriptor, expected in bindings:
+                named = os.stat(
+                    component,
+                    dir_fd=bound_parent,
+                    follow_symlinks=False,
+                )
+                opened = os.fstat(descriptor)
+                if identity(named) != expected or identity(opened) != expected:
+                    raise RuntimeError("dirty snapshot content changed during inspection")
+        except OSError as exc:
+            raise RuntimeError("dirty snapshot content changed during inspection") from exc
+        revalidate_root()
+
     try:
         for relative in relative_values:
             check_deadline()
@@ -436,7 +474,9 @@ def _path_content_identity(  # noqa: C901
             digest.update(len(encoded_path).to_bytes(8, "big"))
             digest.update(encoded_path)
             descriptors: list[int] = []
+            bindings: list[tuple[int, str, int, tuple[int, int, int, int, int, int]]] = []
             parent_fd = root_fd
+
             try:
                 try:
                     missing_ancestor = False
@@ -453,14 +493,28 @@ def _path_content_identity(  # noqa: C901
                         if not stat.S_ISDIR(component_metadata.st_mode):
                             missing_ancestor = True
                             break
-                        parent_fd = os.open(
+                        child_fd = os.open(
                             component,
                             open_flags | os.O_DIRECTORY,
                             dir_fd=parent_fd,
                         )
-                        descriptors.append(parent_fd)
+                        opened_metadata = os.fstat(child_fd)
+                        if identity(component_metadata) != identity(opened_metadata):
+                            os.close(child_fd)
+                            raise RuntimeError("dirty snapshot content changed during inspection")
+                        bindings.append(
+                            (
+                                parent_fd,
+                                component,
+                                child_fd,
+                                identity(opened_metadata),
+                            )
+                        )
+                        parent_fd = child_fd
+                        descriptors.append(child_fd)
                     if missing_ancestor:
                         digest.update(b"M")
+                        revalidate_bindings(bindings)
                         continue
                     metadata = os.stat(
                         parts[-1],
@@ -469,10 +523,13 @@ def _path_content_identity(  # noqa: C901
                     )
                 except FileNotFoundError:
                     digest.update(b"M")
+                    revalidate_bindings(bindings)
                     continue
                 except NotADirectoryError as exc:
                     raise RuntimeError("dirty snapshot contains an unsafe path") from exc
                 digest.update(f"{stat.S_IFMT(metadata.st_mode):o}\0".encode())
+                if not include_file_content:
+                    digest.update(b":".join(str(value).encode() for value in identity(metadata)))
                 if stat.S_ISLNK(metadata.st_mode):
                     digest.update(b"L")
                     target = os.fsencode(os.readlink(parts[-1], dir_fd=parent_fd))
@@ -506,6 +563,8 @@ def _path_content_identity(  # noqa: C901
                         metadata.st_ino,
                     ) != (before.st_dev, before.st_ino):
                         raise RuntimeError("dirty snapshot content changed during inspection")
+                    if not include_file_content and identity(metadata) != identity(before):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
                     if (
                         remaining_content_bytes is not None
                         and before.st_size > remaining_content_bytes[0]
@@ -516,31 +575,32 @@ def _path_content_identity(  # noqa: C901
                     digest.update(b"F")
                     digest.update(b"X" if before.st_mode & 0o111 else b"N")
                     digest.update(before.st_size.to_bytes(8, "big"))
-                    os.set_blocking(file_fd, True)
-                    captured = bytearray()
-                    while True:
-                        check_deadline()
-                        read_limit = 1024 * 1024
-                        if remaining_content_bytes is not None:
-                            read_limit = min(read_limit, remaining_content_bytes[0] + 1)
-                        block = os.read(file_fd, max(1, read_limit))
-                        if not block:
-                            break
-                        if remaining_content_bytes is not None:
-                            remaining_content_bytes[0] -= len(block)
-                            if remaining_content_bytes[0] < 0:
-                                raise _GitInspectionResourceLimitError(
-                                    "dirty snapshot content limit exceeded"
-                                )
-                        digest.update(block)
+                    if include_file_content:
+                        os.set_blocking(file_fd, True)
+                        captured = bytearray()
+                        while True:
+                            check_deadline()
+                            read_limit = 1024 * 1024
+                            if remaining_content_bytes is not None:
+                                read_limit = min(read_limit, remaining_content_bytes[0] + 1)
+                            block = os.read(file_fd, max(1, read_limit))
+                            if not block:
+                                break
+                            if remaining_content_bytes is not None:
+                                remaining_content_bytes[0] -= len(block)
+                                if remaining_content_bytes[0] < 0:
+                                    raise _GitInspectionResourceLimitError(
+                                        "dirty snapshot content limit exceeded"
+                                    )
+                            digest.update(block)
+                            if copy_root is not None:
+                                captured.extend(block)
                         if copy_root is not None:
-                            captured.extend(block)
+                            copy_path = destination_path(parts)
+                            copy_path.write_bytes(captured)
+                            copy_path.chmod(stat.S_IMODE(before.st_mode))
                     if identity(before) != identity(os.fstat(file_fd)):
                         raise RuntimeError("dirty snapshot content changed during inspection")
-                    if copy_root is not None:
-                        copy_path = destination_path(parts)
-                        copy_path.write_bytes(captured)
-                        copy_path.chmod(stat.S_IMODE(before.st_mode))
                 else:
                     if not stat.S_ISDIR(metadata.st_mode):
                         raise RuntimeError("dirty snapshot contains an unsupported path type")
@@ -555,6 +615,7 @@ def _path_content_identity(  # noqa: C901
                     digest.update(f"{metadata.st_size}:{metadata.st_rdev}".encode())
                     if copy_root is not None:
                         destination_path(parts).mkdir(exist_ok=True)
+                revalidate_bindings(bindings)
             finally:
                 for descriptor in reversed(descriptors):
                     os.close(descriptor)

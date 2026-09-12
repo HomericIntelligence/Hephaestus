@@ -16,6 +16,9 @@ from hephaestus.automation.source_worktree import SourceWorkspaceRecoveryKind
 from hephaestus.diagnostics import bounded_git_diagnostic
 
 _REDACTION = "<redacted>"
+_REBASE_CONFLICT_OUTCOMES = frozenset(
+    {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
+)
 
 # Whole-value token patterns: the entire match is replaced.
 _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -133,3 +136,19 @@ def bounded_source_workspace_recovery(value: object) -> dict[str, object] | None
         "receipt_path": redact_diagnostic_text(receipt_path)[:500],
         "manual_action": redact_diagnostic_text(manual_action)[:2000],
     }
+
+
+def rebase_conflict_event_fields(value: object, error: str | None) -> dict[str, str]:
+    """Return bounded event fields for a validated conflict classification."""
+    if not isinstance(value, dict):
+        return {}
+    classification = value.get("conflict_resolution")
+    if classification not in _REBASE_CONFLICT_OUTCOMES:
+        return {}
+    fields = {"rebase_conflict_resolution": str(classification)}
+    if error:
+        fields["rebase_conflict_diagnostic"] = redact_diagnostic_text(error)[:500]
+    summary = value.get("agent_summary")
+    if isinstance(summary, str) and summary:
+        fields["rebase_conflict_agent_summary"] = redact_diagnostic_text(summary)[:500]
+    return fields

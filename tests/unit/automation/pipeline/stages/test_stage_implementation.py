@@ -78,9 +78,14 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_implementation_prompt,
     build_test_fix_prompt,
 )
-from hephaestus.automation.pipeline.worker_pool import WorkerPool, _codex_implementation_grants
+from hephaestus.automation.pipeline.worker_pool import (
+    WorkerPool,
+    _codex_implementation_grants,
+    _validate_source_operation_job,
+)
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
+from hephaestus.automation.prompts.implementation import get_rebase_conflict_prompt
 from hephaestus.automation.remediation_recovery import (
     RemediationRecoveryReceipt,
     RemediationReplyResult,
@@ -585,6 +590,15 @@ class TestComposedPromptBuilders:
         assert "## Prior Learnings from Team Knowledge Base" in prompt
         assert prompt.endswith("Use the retry helper.")
 
+    def test_ordinary_implementation_prompt_rejects_legacy_conflict_inputs(self) -> None:
+        """Conflict context cannot use the ordinary implementation prompt."""
+        with pytest.raises(TypeError):
+            cast(Any, build_implementation_prompt)(
+                42,
+                rebase_conflict=True,
+                rebase_conflict_paths=("x.py",),
+            )
+
     def test_stage_contract_does_not_make_implementation_go_a_merge_boundary(self) -> None:
         """The module contract must describe the bootstrap containment semantics."""
         contract = implementation_module.__doc__ or ""
@@ -598,6 +612,40 @@ class TestComposedPromptBuilders:
 
         assert "FAILED tests/unit/test_x.py::test_y" in prompt
         assert "Address every concrete finding above" in prompt
+
+    def test_rebase_conflict_prompt_is_narrow_and_carries_current_hunks(self) -> None:
+        """Conflict prompts carry bounded context without ordinary implementation work."""
+        prompt = get_rebase_conflict_prompt(
+            conflict_paths=("tests/test_gateway_lifecycle.py",),
+            conflict_hunks={
+                "tests/test_gateway_lifecycle.py": (
+                    "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b18b362\n"
+                )
+            },
+            diagnosis="classification=no_edit; host diagnosis=agent made no file changes",
+        )
+
+        assert "tests/test_gateway_lifecycle.py" in prompt
+        assert "<<<<<<< HEAD" in prompt
+        assert "classification=no_edit" in prompt
+        assert "Implement GitHub issue" not in prompt
+        assert "Do not run Git commands" in prompt
+
+    @pytest.mark.parametrize(
+        ("paths", "hunks"),
+        [
+            ((), {}),
+            (("conflict.py",), {}),
+            (("conflict.py",), {"conflict.py": ""}),
+            (("conflict.py",), {"conflict.py": "valid", "extra.py": "unexpected"}),
+        ],
+    )
+    def test_rebase_conflict_prompt_rejects_incomplete_context(
+        self, paths: tuple[str, ...], hunks: dict[str, str]
+    ) -> None:
+        """The prompt builder cannot replace required host context with a placeholder."""
+        with pytest.raises(ValueError, match="complete conflict context is required"):
+            get_rebase_conflict_prompt(conflict_paths=paths, conflict_hunks=hunks)
 
 
 class TestImplementationStageOnEnter:
@@ -1297,6 +1345,12 @@ class TestGate:
                 "conflict_paths": ("hephaestus/example.py",),
                 "conflict_snapshot": {"hephaestus/example.py": "before"},
                 "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "conflict_context_version": 1,
+                "conflict_hunks": {
+                    "hephaestus/example.py": (
+                        "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+                    )
+                },
                 "conflict_index_snapshot": "1" * 64,
                 "paused_head_sha": "c" * 40,
                 "base_sha": "b" * 40,
@@ -1330,18 +1384,19 @@ class TestGate:
 
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, AgentJob)
-        assert request.job.prompt_kwargs["rebase_conflict"] is True
+        assert request.job.prompt_builder is get_rebase_conflict_prompt
         assert request.job.allowed_tools == "Read,Write,Edit,Glob,Grep"
         assert _codex_implementation_grants(request.job) == (
             "workspace-write",
             ("Edit", "Glob", "Grep", "Read", "Write"),
             True,
         )
-        assert request.on_done_state == "REBASE_CONTINUE_WAIT"
+        assert request.on_done_state == "REBASE_CONFLICT_VALIDATE_WAIT"
         prompt = request.job.prompt_builder(**request.job.prompt_kwargs)
-        assert "Rebase Conflict Resolution Required" in prompt
+        assert "Rebase Conflict Resolution" in prompt
         assert "Do not run Git commands" in prompt
         assert "hephaestus/example.py" in prompt
+        assert "<<<<<<< HEAD" in prompt
 
     def test_rebase_conflict_attempts_are_bounded_independently(
         self, make_ctx: Any, make_work_item: Any
@@ -1354,6 +1409,12 @@ class TestGate:
             {
                 "rebase_conflict": True,
                 "rebase_conflict_paths": ("hephaestus/example.py",),
+                "rebase_conflict_context_version": 1,
+                "rebase_conflict_hunks": {
+                    "hephaestus/example.py": (
+                        "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+                    )
+                },
             }
         )
         item.attempts["implement"] = ctx.budget("implement")
@@ -1374,6 +1435,12 @@ class TestGate:
             {
                 "rebase_conflict": True,
                 "rebase_conflict_paths": ("hephaestus/example.py",),
+                "rebase_conflict_context_version": 1,
+                "rebase_conflict_hunks": {
+                    "hephaestus/example.py": (
+                        "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+                    )
+                },
             }
         )
         _prepared_writer(item)
@@ -1410,6 +1477,12 @@ class TestGate:
                     "conflict_paths": ("hephaestus/example.py",),
                     "conflict_snapshot": {"hephaestus/example.py": "after first pass"},
                     "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
+                    "conflict_hunks": {
+                        "hephaestus/example.py": (
+                            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+                        )
+                    },
                     "conflict_index_snapshot": "2" * 64,
                     "paused_head_sha": "d" * 40,
                     "base_sha": "b" * 40,
@@ -1533,6 +1606,29 @@ class TestGate:
         assert item.payload["post_review_rebase_required"] is True
         assert item.attempts["rebase_conflict"] == 1
 
+        item.state = "REBASE_CONFLICT_VALIDATE_WAIT"
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "conflict_paths": ("hephaestus/example.py",),
+                    "conflict_snapshot": {"hephaestus/example.py": "after"},
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
+                    "conflict_hunks": {"hephaestus/example.py": "resolved"},
+                    "conflict_index_snapshot": "1" * 64,
+                    "paused_head_sha": "c" * 40,
+                    "base_sha": "b" * 40,
+                    "expected_remote_sha": "a" * 40,
+                    "conflict_resolution": "resolved_content",
+                },
+            ),
+            ctx,
+        )
+        assert stage.step(item, ctx) == Continue(next_state="REBASE_CONTINUE_WAIT")
+        assert item.payload["rebase_conflict_validation_result"] == "resolved_content"
+
         item.state = "REBASE_CONTINUE_WAIT"
         request = stage.step(item, ctx)
 
@@ -1543,6 +1639,274 @@ class TestGate:
         assert request.job.kwargs["expected_remote_sha"] == "a" * 40
         assert request.job.kwargs["conflict_index_snapshot"] == "1" * 64
         assert request.job.kwargs["paused_head_sha"] == "c" * 40
+
+    def test_noop_conflict_agent_is_not_marked_complete_before_host_validation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A successful no-op turn must wait for host edit validation."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("tests/test_gateway_lifecycle.py",),
+                "rebase_conflict_hunks": {
+                    "tests/test_gateway_lifecycle.py": (
+                        "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+                    )
+                },
+            }
+        )
+
+        stage.on_job_done(item, JobResult(ok=True, value="No files changed."), ctx)
+
+        assert item.attempts["rebase_conflict"] == 1
+        assert "rebase_conflict_agent_complete" not in item.payload
+        assert item.payload["rebase_conflict_agent_summary"] == "No files changed."
+
+    def test_missing_conflict_context_uses_host_refresh_before_agent(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A legacy receipt cannot send placeholder context to an agent."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+        binding = _prepared_writer(item)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "validate_rebase_conflict"
+        assert result.job.workspace == binding
+        assert result.on_done_state == "REBASE_CONFLICT_REFRESH_WAIT"
+        assert item.attempts.get("rebase_conflict", 0) == 0
+
+    def test_legacy_conflict_refresh_supplies_context_without_consuming_turn(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A valid legacy receipt gets current host context before the first turn."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+        _prepared_writer(item)
+        refresh = stage.step(item, ctx)
+        assert isinstance(refresh, JobRequest)
+
+        item.state = refresh.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase conflict resolution required: agent made no file changes",
+                value={
+                    "conflict_paths": ("conflict.py",),
+                    "conflict_snapshot": {"conflict.py": "before"},
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
+                    "conflict_hunks": {
+                        "conflict.py": "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n"
+                    },
+                    "conflict_index_snapshot": "1" * 64,
+                    "paused_head_sha": "c" * 40,
+                    "base_sha": "b" * 40,
+                    "expected_remote_sha": "a" * 40,
+                    "conflict_resolution": "no_edit",
+                },
+            ),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == Continue(next_state="REBASE_CONFLICT_WAIT")
+        assert item.attempts.get("rebase_conflict", 0) == 0
+        item.state = "REBASE_CONFLICT_WAIT"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        prompt = request.job.prompt_builder(**request.job.prompt_kwargs)
+        assert "<<<<<<< HEAD" in prompt
+
+    def test_unsafe_conflict_refresh_fails_before_agent(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An unsafe legacy context terminates before an agent gets source text."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+        _prepared_writer(item)
+        refresh = stage.step(item, ctx)
+        assert isinstance(refresh, JobRequest)
+
+        item.state = refresh.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase conflict context unavailable: conflict source requires redaction",
+                value={"failure_kind": "rebase_conflict_context_unavailable"},
+            ),
+            ctx,
+        )
+
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert item.attempts.get("rebase_conflict", 0) == 0
+
+    def test_noop_conflict_turn_retries_with_diagnosis_and_then_exhausts(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """No-op turns use distinct feedback and never submit host continuation."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_context_version": 1,
+                "rebase_conflict_hunks": {
+                    "conflict.py": "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+                },
+                "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+        binding = _prepared_writer(item)
+
+        first = stage.step(item, ctx)
+        assert isinstance(first, JobRequest)
+        first_prompt = first.job.prompt_builder(**first.job.prompt_kwargs)
+        stage.on_job_done(item, JobResult(ok=True, value="No files changed."), ctx)
+        item.state = first.on_done_state
+        validation = stage.step(item, ctx)
+        assert isinstance(validation, JobRequest)
+        assert isinstance(validation.job, GitJob)
+        assert validation.job.op == "validate_rebase_conflict"
+        assert validation.job.workspace == binding
+        assert validation.job.expected_repository == f"{ctx.org}/{item.repo}"
+        assert validation.job.kwargs["repo_root"] == str(ctx.paths.repo_root)
+        assert validation.job.kwargs["issue_number"] == item.issue
+        assert validation.job.kwargs["agent_summary"] == "No files changed."
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase conflict resolution required: agent made no file changes",
+                value={
+                    "conflict_paths": ("conflict.py",),
+                    "conflict_snapshot": {"conflict.py": "before"},
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
+                    "conflict_hunks": {
+                        "conflict.py": ("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n")
+                    },
+                    "conflict_index_snapshot": "1" * 64,
+                    "paused_head_sha": "c" * 40,
+                    "base_sha": "b" * 40,
+                    "expected_remote_sha": "a" * 40,
+                    "conflict_resolution": "no_edit",
+                },
+            ),
+            ctx,
+        )
+        item.session_ids[AGENT_IMPLEMENTER] = "conflict-session"
+        item.state = validation.on_done_state
+        assert stage.step(item, ctx) == Continue(next_state="REBASE_CONFLICT_WAIT")
+
+        item.state = "REBASE_CONFLICT_WAIT"
+        second = stage.step(item, ctx)
+        assert isinstance(second, JobRequest)
+        second_prompt = second.job.prompt_builder(**second.job.prompt_kwargs)
+        assert second_prompt != first_prompt
+        assert "classification=no_edit" in second_prompt
+        assert second.on_done_state == "REBASE_CONFLICT_VALIDATE_WAIT"
+
+        stage.on_job_done(item, JobResult(ok=True, value="Still unchanged."), ctx)
+        item.state = second.on_done_state
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase conflict resolution required: agent made no file changes",
+                value={
+                    "conflict_paths": ("conflict.py",),
+                    "conflict_snapshot": {"conflict.py": "before"},
+                    "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                    "conflict_context_version": 1,
+                    "conflict_hunks": {
+                        "conflict.py": ("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n")
+                    },
+                    "conflict_index_snapshot": "1" * 64,
+                    "paused_head_sha": "c" * 40,
+                    "base_sha": "b" * 40,
+                    "expected_remote_sha": "a" * 40,
+                    "conflict_resolution": "no_edit",
+                },
+            ),
+            ctx,
+        )
+        item.state = "REBASE_CONFLICT_VALIDATE_WAIT"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "rebase_conflict_exhausted"
+        )
+
+    def test_retryable_conflict_without_session_fails_closed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A retry cannot start a new conversation after a no-edit classification."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_VALIDATE_WAIT")
+        item.payload["rebase_conflict_validation_result"] = "no_edit"
+        item.attempts["rebase_conflict"] = 1
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "rebase_conflict_session_unavailable"
+        )
 
     def test_host_completed_conflict_rebase_clears_receipt_and_requires_fresh_review(
         self, make_ctx: Any, make_work_item: Any
@@ -1571,6 +1935,33 @@ class TestGate:
         assert "rebase_conflict" not in item.payload
         assert "rebase_conflict_index_snapshot" not in item.payload
         assert "rebase_paused_head_sha" not in item.payload
+
+    def test_legacy_conflict_completion_cannot_continue_without_host_proof(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart cannot continue from an unproven agent-complete flag."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_agent_complete": True,
+                "rebase_conflict_paths": ("conflict.py",),
+                "rebase_conflict_snapshot": {"conflict.py": "before"},
+                "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+        _prepared_writer(item)
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="REBASE_CONFLICT_WAIT")
+        assert "rebase_conflict_agent_complete" not in item.payload
 
     def test_failed_host_rebase_retains_structured_diagnostics(
         self, make_ctx: Any, make_work_item: Any
@@ -2435,8 +2826,8 @@ class TestWorktreeAndAdvise:
     @pytest.mark.parametrize(
         ("field", "value"),
         [
-            ("status", "x" * (64 * 1024 + 1)),
-            ("diff", "x" * (256 * 1024 + 1)),
+            pytest.param("status", "x" * (64 * 1024 + 1), id="status-overflow"),
+            pytest.param("diff", "x" * (256 * 1024 + 1), id="diff-overflow"),
         ],
     )
     def test_remediation_inspection_rejects_oversized_prompt_data(
@@ -2448,7 +2839,7 @@ class TestWorktreeAndAdvise:
     ) -> None:
         """Writer output cannot put oversized text in an agent prompt."""
         stage = ImplementationStage()
-        item = make_work_item(issue=1, pr=1001, state="REMEDIATION_REPLY_RECOVERY_WAIT")
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/implementation-writer"
         inspection = {
@@ -2458,21 +2849,27 @@ class TestWorktreeAndAdvise:
             "status": " M module.py\n",
             "diff": "+change\n",
             "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-            "status_sha256": "4" * 64,
-            "diff_sha256": "5" * 64,
+            "candidate_tree_sha": "c" * 40,
+            "candidate_add_paths": ["module.py"],
+            "candidate_update_paths": [],
             "changed_file_count": 1,
             "worktree_path": item.worktree,
         }
         inspection[field] = value
+        inspection["status_sha256"] = hashlib.sha256(
+            cast(str, inspection["status"]).encode("utf-8", "surrogateescape")
+        ).hexdigest()
+        inspection["diff_sha256"] = hashlib.sha256(
+            cast(str, inspection["diff"]).encode("utf-8", "surrogateescape")
+        ).hexdigest()
         item.payload.update(
             {
                 "implementation_remediation": True,
                 "_impl_source_revision": "a" * 40,
-                "remediation_thread_snapshots": [{"id": "thread-1"}],
-                "remediation_failure_diagnostic": "file_change failed",
-                "remediation_writer_inspection": inspection,
+                "remediation_writer_inspection_inflight": True,
             }
         )
+        stage.on_job_done(item, JobResult(ok=True, value=inspection), make_ctx())
 
         assert stage.step(item, make_ctx()) == StageOutcome(
             Disposition.FINISH_FAIL,
@@ -3754,6 +4151,8 @@ class TestImplementBudget:
         assert result.on_done_state == "TEST_WAIT"
         assert result.job.prompt_kwargs["advise_findings"] == "use helpers"
         assert result.job.prompt_kwargs["branch_name"] == "1-auto-impl"
+        prompt = result.job.prompt_builder(**result.job.prompt_kwargs)
+        assert "use helpers" in prompt
         sandbox, codex_tools, workspace_write = _codex_implementation_grants(result.job)
         assert sandbox == "workspace-write"
         assert codex_tools == ("Bash", "Edit", "Glob", "Grep", "Read", "Write")
@@ -7791,6 +8190,10 @@ def test_dirty_agent_job_keeps_current_source_authority(
             "worktree_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
             "rebase_conflict": operation == "rebase-conflict",
             "rebase_conflict_paths": ("a.py",),
+            "rebase_conflict_context_version": 1,
+            "rebase_conflict_hunks": {
+                "a.py": "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> commit\n"
+            },
             "rebase_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
             "rebase_paused_head_sha": "b" * 40,
         }
@@ -7808,6 +8211,7 @@ def test_dirty_agent_job_keeps_current_source_authority(
     assert result.job.source_operation.kind == operation
     if operation != "inspect":
         assert result.job.source_operation.allowed_paths == ("a.py",)
+    _validate_source_operation_job(result.job)
 
 
 def test_failed_implementation_reconciles_source_before_another_turn(

@@ -92,6 +92,7 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillResult,
     athena_workspace_lease,
 )
+from hephaestus.automation.pipeline.diagnostics import redact_diagnostic_text
 from hephaestus.automation.pipeline.git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
@@ -259,6 +260,20 @@ logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
+_CONFLICT_HUNK_MAX = 4000
+_CONFLICT_CONTEXT_MAX = 16000
+_CONFLICT_CONTEXT_VERSION = 1
+_CONFLICT_PATHS_MAX_BYTES = 64 * 1024
+# The current repository index is approximately 100 KiB. A conflicted path can
+# have three stage records, so keep a fixed limit with repository-scale margin.
+_CONFLICT_INDEX_MAX_BYTES = 1024 * 1024
+_CONFLICT_PATH_INDEX_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
+_CONFLICT_IGNORED_PATHS_MAX_BYTES = 1024 * 1024
+_CONFLICT_IGNORED_FILE_MAX = 20_000
+_CONFLICT_FILE_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
+_CONFLICT_RESOLUTION_OUTCOMES = frozenset(
+    {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
+)
 _GIT_LOCK_WAIT_POLL_S = 0.1
 _CODEX_IMPLEMENTATION_OUTPUT_MAX_BYTES = 1024 * 1024
 _CODEX_IMPLEMENTATION_GRACE_SECONDS = 5.0
@@ -827,7 +842,7 @@ def _validate_source_operation_job(job: AgentJob) -> None:
     request = job.execution_request
     expected_operation, tools = {
         "inspect": (AgentOperation.IMPLEMENT_INSPECT, "Read,Glob,Grep"),
-        "rebase-conflict": (AgentOperation.IMPLEMENT, "Read,Write,Edit,Glob,Grep"),
+        "rebase-conflict": (AgentOperation.REBASE_CONFLICT, "Read,Write,Edit,Glob,Grep"),
         "test-fix": (AgentOperation.TEST_FIX, "Read,Write,Edit,Glob,Grep,Bash"),
     }[operation.kind]
     if (
@@ -947,6 +962,239 @@ class _HostVerificationBoundaryError(RuntimeError):
 
 class _RebaseSigningEnvironmentError(RuntimeError):
     """Raised when a policy rebase cannot obtain the validated signing bridge."""
+
+
+class _RebaseConflictContextError(RuntimeError):
+    """Raised when conflict context is incomplete or unsafe to retain."""
+
+
+def _validated_conflict_path(cwd: Path, path: str) -> Path:
+    """Validate every path component before a conflict file read."""
+    target = cwd / path
+    try:
+        target.relative_to(cwd)
+        current = target
+        while True:
+            if current.is_symlink():
+                raise _RebaseConflictContextError("conflict source path is unsafe")
+            if current == cwd:
+                break
+            parent = current.parent
+            if parent == current:
+                raise _RebaseConflictContextError("conflict source path is unsafe")
+            current = parent
+    except (OSError, ValueError) as exc:
+        raise _RebaseConflictContextError("conflict source path is unsafe") from exc
+    return target
+
+
+def _open_bounded_conflict_file(parent_fd: int, name: str) -> int:
+    """Open one conflict file through its bound parent descriptor."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if not isinstance(nofollow, int) or not nofollow or not isinstance(nonblock, int):
+        raise _RebaseConflictContextError("secure conflict source reads are unavailable")
+    try:
+        return os.open(
+            name,
+            os.O_RDONLY | os.O_CLOEXEC | nofollow | nonblock,
+            dir_fd=parent_fd,
+        )
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise _RebaseConflictContextError("conflict source path is unsafe") from exc
+
+
+_ConflictFileIdentity = tuple[int, int, int, int, int]
+_ConflictPathBinding = tuple[int, str, int, _ConflictFileIdentity]
+
+
+def _conflict_file_identity(info: os.stat_result) -> _ConflictFileIdentity:
+    """Return metadata that proves one file stayed unchanged."""
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _read_conflict_file_chunks(descriptor: int) -> bytes:
+    """Read at most the configured number of bytes from an open file."""
+    chunks: list[bytes] = []
+    size = 0
+    while size < _CONFLICT_FILE_MAX_BYTES:
+        chunk = os.read(descriptor, _CONFLICT_FILE_MAX_BYTES - size)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > _CONFLICT_FILE_MAX_BYTES:
+            raise _RebaseConflictContextError(
+                f"conflict source exceeds {_CONFLICT_HUNK_MAX} characters"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _read_bounded_conflict_descriptor(descriptor: int) -> bytes:
+    """Read and verify one open conflict file without exceeding its bound."""
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise _RebaseConflictContextError("conflict source path is unsafe")
+    if before.st_size > _CONFLICT_FILE_MAX_BYTES:
+        raise _RebaseConflictContextError(
+            f"conflict source exceeds {_CONFLICT_HUNK_MAX} characters"
+        )
+    raw = _read_conflict_file_chunks(descriptor)
+    after = os.fstat(descriptor)
+    if after.st_size > _CONFLICT_FILE_MAX_BYTES:
+        raise _RebaseConflictContextError(
+            f"conflict source exceeds {_CONFLICT_HUNK_MAX} characters"
+        )
+    if _conflict_file_identity(before) != _conflict_file_identity(after):
+        raise _RebaseConflictContextError("conflict source changed during read")
+    return raw
+
+
+def _open_conflict_descriptor_chain(
+    cwd: Path,
+    parts: tuple[str, ...],
+    validated_root: os.stat_result,
+) -> tuple[
+    list[int],
+    int,
+    int,
+    list[_ConflictPathBinding],
+    _ConflictFileIdentity,
+    int,
+]:
+    """Open a conflict path and retain each directory-name binding."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if not isinstance(nofollow, int) or not nofollow:
+        raise _RebaseConflictContextError("secure conflict source reads are unavailable")
+    directory_flags = os.O_RDONLY | os.O_CLOEXEC | nofollow | os.O_DIRECTORY
+    descriptors: list[int] = []
+    try:
+        try:
+            root_fd = os.open(cwd, directory_flags)
+        except FileNotFoundError as exc:
+            raise _RebaseConflictContextError("conflict source changed during read") from exc
+        descriptors.append(root_fd)
+        root_identity = _conflict_file_identity(os.fstat(root_fd))
+        if _conflict_file_identity(validated_root) != root_identity:
+            raise _RebaseConflictContextError("conflict source changed during read")
+        bindings: list[_ConflictPathBinding] = []
+        parent_fd = root_fd
+        for component in parts[:-1]:
+            try:
+                named = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError as exc:
+                raise _RebaseConflictContextError("conflict source changed during read") from exc
+            if not stat.S_ISDIR(named.st_mode) or stat.S_ISLNK(named.st_mode):
+                raise _RebaseConflictContextError("conflict source path is unsafe")
+            try:
+                child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            except FileNotFoundError as exc:
+                raise _RebaseConflictContextError("conflict source changed during read") from exc
+            descriptors.append(child_fd)
+            opened = os.fstat(child_fd)
+            expected = _conflict_file_identity(opened)
+            if _conflict_file_identity(named) != expected:
+                raise _RebaseConflictContextError("conflict source changed during read")
+            bindings.append((parent_fd, component, child_fd, expected))
+            parent_fd = child_fd
+
+        descriptor = _open_bounded_conflict_file(parent_fd, parts[-1])
+        descriptors.append(descriptor)
+        return (
+            descriptors,
+            descriptor,
+            parent_fd,
+            bindings,
+            root_identity,
+            directory_flags,
+        )
+    except BaseException:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+
+
+def _revalidate_conflict_descriptor_chain(
+    cwd: Path,
+    leaf_name: str,
+    descriptor: int,
+    parent_fd: int,
+    bindings: list[_ConflictPathBinding],
+    root_identity: _ConflictFileIdentity,
+    directory_flags: int,
+) -> None:
+    """Confirm that the conflict path still names all retained descriptors."""
+    try:
+        current_leaf = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+        if _conflict_file_identity(current_leaf) != _conflict_file_identity(os.fstat(descriptor)):
+            raise _RebaseConflictContextError("conflict source changed during read")
+        for bound_parent, component, child_fd, expected in bindings:
+            current = os.stat(component, dir_fd=bound_parent, follow_symlinks=False)
+            if (
+                _conflict_file_identity(current) != expected
+                or _conflict_file_identity(os.fstat(child_fd)) != expected
+            ):
+                raise _RebaseConflictContextError("conflict source changed during read")
+        current_root_fd = os.open(cwd, directory_flags)
+        try:
+            if _conflict_file_identity(os.fstat(current_root_fd)) != root_identity:
+                raise _RebaseConflictContextError("conflict source changed during read")
+        finally:
+            os.close(current_root_fd)
+    except _RebaseConflictContextError:
+        raise
+    except OSError as exc:
+        raise _RebaseConflictContextError("conflict source changed during read") from exc
+
+
+def _read_bounded_conflict_file(cwd: Path, path: str) -> bytes:
+    """Read one regular conflict file without following links or exceeding its bound."""
+    try:
+        validated_root = cwd.lstat()
+        if not stat.S_ISDIR(validated_root.st_mode) or stat.S_ISLNK(validated_root.st_mode):
+            raise _RebaseConflictContextError("conflict source path is unsafe")
+        target = _validated_conflict_path(cwd, path)
+        relative = target.relative_to(cwd)
+        parts = relative.parts
+        if not parts or any(component in {"", ".", ".."} for component in parts):
+            raise _RebaseConflictContextError("conflict source path is unsafe")
+        (
+            descriptors,
+            descriptor,
+            parent_fd,
+            bindings,
+            root_identity,
+            directory_flags,
+        ) = _open_conflict_descriptor_chain(cwd, parts, validated_root)
+        try:
+            raw = _read_bounded_conflict_descriptor(descriptor)
+            _revalidate_conflict_descriptor_chain(
+                cwd,
+                parts[-1],
+                descriptor,
+                parent_fd,
+                bindings,
+                root_identity,
+                directory_flags,
+            )
+            return raw
+        finally:
+            for open_descriptor in reversed(descriptors):
+                os.close(open_descriptor)
+    except _RebaseConflictContextError:
+        raise
+    except FileNotFoundError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise _RebaseConflictContextError("conflict source cannot be read") from exc
 
 
 class _RemoteGitAuthenticationError(RuntimeError):
@@ -3310,6 +3558,14 @@ def _git_evidence_fields(job: GitJob, result: JobResult) -> dict[str, object]:
         fields["committed_patch_sha256"] = _evidence_patch_digest(
             Path(worktree), f"{head_sha}^", head_sha
         )
+    classification = result.value.get("conflict_resolution")
+    if job.op == "validate_rebase_conflict" and classification in _CONFLICT_RESOLUTION_OUTCOMES:
+        fields["rebase_conflict_resolution"] = classification
+        if result.error:
+            fields["rebase_conflict_diagnostic"] = redact_diagnostic_text(result.error)[:500]
+        summary = result.value.get("agent_summary")
+        if isinstance(summary, str) and summary:
+            fields["rebase_conflict_agent_summary"] = redact_diagnostic_text(summary)[:500]
     return fields
 
 
@@ -3408,6 +3664,7 @@ _CODEX_NON_APPLICABLE_TOOLS = {
 _CODEX_OPERATION_TOOLS = {
     AgentOperation.IMPLEMENT_INSPECT: ("Glob", "Grep", "Read"),
     AgentOperation.IMPLEMENT: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
+    AgentOperation.REBASE_CONFLICT: ("Edit", "Glob", "Grep", "Read", "Write"),
     AgentOperation.TEST_FIX: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
     AgentOperation.ADDRESS_REVIEW: ("Bash", "Edit", "Glob", "Grep", "Read", "Write"),
 }
@@ -3437,10 +3694,8 @@ def _codex_implementation_grants(job: AgentJob) -> tuple[str, tuple[str, ...], b
     non_applicable = _CODEX_NON_APPLICABLE_TOOLS.get(execution.operation, frozenset())
     allowed_tools = tuple(sorted(declared_tools - non_applicable))
     capabilities = {_CODEX_TOOL_CAPABILITIES.get(value, "") for value in allowed_tools}
-    rebase_tools = ("Edit", "Glob", "Grep", "Read", "Write")
-    rebase_grant = execution.operation is AgentOperation.IMPLEMENT and allowed_tools == rebase_tools
     if (
-        (allowed_tools != expected_tools and not rebase_grant)
+        allowed_tools != expected_tools
         or "" in capabilities
         or not capabilities <= operation_policy.builtins
     ):
@@ -5492,6 +5747,7 @@ class WorkerPool:
                     "inspect_implementation_worktree",
                     "recover_dirty_worktree",
                     "rebase",
+                    "validate_rebase_conflict",
                     "continue_rebase",
                 }:
                     return self._run_source_git_operation(job)
@@ -5624,7 +5880,9 @@ class WorkerPool:
                 path=binding.cwd,
                 expected_binding=binding,
                 paused_head_sha=(
-                    job.kwargs.get("paused_head_sha") if job.op == "continue_rebase" else None
+                    job.kwargs.get("paused_head_sha")
+                    if job.op in {"validate_rebase_conflict", "continue_rebase"}
+                    else None
                 ),
                 deadline=deadline,
             ) as record:
@@ -5666,7 +5924,7 @@ class WorkerPool:
         if not result.ok and recorded is None:
             return result
         if recorded is None:
-            if job.op != "inspect_implementation_worktree":
+            if job.op not in {"inspect_implementation_worktree", "validate_rebase_conflict"}:
                 record_source(manager._head_revision(binding.cwd, deadline=deadline))
             else:
                 recorded = (
@@ -5691,6 +5949,8 @@ class WorkerPool:
         try:
             if job.op == "rebase":
                 return self._git_rebase(job, record_source=record_source)
+            if job.op == "validate_rebase_conflict":
+                return self._git_validate_rebase_conflict(job)
             if job.op == "continue_rebase":
                 return self._git_continue_rebase(job, record_source=record_source)
             return self._dispatch_git_op(job)
@@ -5771,6 +6031,9 @@ class WorkerPool:
 
         elif job.op == "verify_rebase_review":
             return self._git_verify_rebase_review(job)
+
+        elif job.op == "validate_rebase_conflict":
+            return self._git_validate_rebase_conflict(job)
 
         elif job.op == "commit_push" or job.op == "prepare_remediation_recovery":
             return self._git_commit_push(job)
@@ -6603,6 +6866,7 @@ class WorkerPool:
             cwd,
             remote="origin",
             base_branch="main",
+            expected_repo=job.transport_repository,
             expected_remote_sha=expected,
             timeout=job.timeout_s,
             base_sha=base_sha,
@@ -7022,62 +7286,170 @@ class WorkerPool:
             fetch_config=remote_config,
         )
 
+    def _conflict_receipt_index_data(
+        self, cwd: Path, *, timeout: int
+    ) -> tuple[tuple[str, ...], str] | JobResult:
+        """Capture bounded unmerged paths and the index snapshot."""
+        paths_result = _run_bounded_git_output(
+            ("git", "diff", "--name-only", "--diff-filter=U", "-z"),
+            cwd=cwd,
+            timeout=timeout,
+            max_bytes=_CONFLICT_PATHS_MAX_BYTES,
+            retain_text=True,
+            shutdown=self._shutdown,
+        )
+        try:
+            paths_result.text.encode("utf-8")
+        except UnicodeEncodeError:
+            return JobResult(ok=False, error="paused rebase conflict paths invalid")
+        paths = tuple(path for path in paths_result.text.split("\0") if path)
+        if not paths or any(not is_safe_scope_retraction_path(path) for path in paths):
+            return JobResult(ok=False, error="paused rebase conflict paths invalid")
+        index_result = _run_bounded_git_output(
+            ("git", "ls-files", "--stage", "-z"),
+            cwd=cwd,
+            timeout=timeout,
+            max_bytes=_CONFLICT_INDEX_MAX_BYTES,
+            retain_text=False,
+            shutdown=self._shutdown,
+        )
+        if index_result.byte_count == 0:
+            return JobResult(ok=False, error="paused rebase conflict index invalid")
+        ignored_snapshot = self._conflict_ignored_state_snapshot(cwd, timeout=timeout)
+        host_state = hashlib.sha256(
+            f"{index_result.sha256}\0{ignored_snapshot}".encode()
+        ).hexdigest()
+        return paths, host_state
+
+    def _conflict_ignored_state_snapshot(self, cwd: Path, *, timeout: int) -> str:
+        """Return ignored-file metadata while the source-lane lease is active."""
+        ignored_paths = _run_bounded_git_output(
+            ("git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
+            cwd=cwd,
+            timeout=timeout,
+            max_bytes=_CONFLICT_IGNORED_PATHS_MAX_BYTES,
+            retain_text=True,
+            shutdown=self._shutdown,
+        )
+        paths = tuple(path for path in ignored_paths.text.split("\0") if path)
+        if len(paths) > _CONFLICT_IGNORED_FILE_MAX:
+            raise _GitInspectionResourceLimitError("ignored worktree file limit exceeded")
+        return _path_content_identity(
+            cwd,
+            ignored_paths.text,
+            include_file_content=False,
+            timeout=timeout,
+            shutdown=self._shutdown,
+        )
+
+    def _conflict_receipt_revisions(
+        self,
+        cwd: Path,
+        *,
+        remote: str,
+        base_branch: str,
+        expected_repo: str,
+        timeout: int,
+        base_sha: str | None,
+    ) -> tuple[str, str] | JobResult:
+        """Capture HEAD and verify the remote base did not change."""
+        paused_head_sha = git_utils.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            timeout=timeout,
+        ).stdout.strip()
+        if not _is_full_commit_sha(paused_head_sha):
+            return JobResult(ok=False, error="paused rebase head invalid")
+        observed_base_sha = self._read_remote_branch_head(
+            cwd,
+            remote=remote,
+            branch=base_branch,
+            expected_repo=expected_repo,
+            timeout=timeout,
+        )
+        if isinstance(observed_base_sha, JobResult):
+            return observed_base_sha
+        if not _is_full_commit_sha(observed_base_sha):
+            return JobResult(ok=False, error="paused rebase base head invalid")
+        if base_sha is not None and observed_base_sha != base_sha:
+            return JobResult(
+                ok=False,
+                error="paused rebase base changed during conflict resolution",
+            )
+        captured_base_sha = base_sha or observed_base_sha
+        if not _is_full_commit_sha(captured_base_sha):
+            return JobResult(ok=False, error="paused rebase base head invalid")
+        return paused_head_sha, captured_base_sha
+
+    def _conflict_receipt_hunks(
+        self, cwd: Path, paths: tuple[str, ...], *, timeout: int
+    ) -> dict[str, str]:
+        """Capture bounded, redacted context for every conflict path."""
+        hunks: dict[str, str] = {}
+        context_size = 0
+        for path in paths:
+            context = self._conflict_path_hunk(cwd, path, timeout=timeout)
+            context_size += len(context)
+            if context_size > _CONFLICT_CONTEXT_MAX:
+                raise _RebaseConflictContextError(
+                    f"total conflict context exceeds {_CONFLICT_CONTEXT_MAX} characters"
+                )
+            hunks[path] = context
+        return hunks
+
     def _conflict_receipt(
         self,
         cwd: Path,
         *,
         remote: str,
         base_branch: str,
+        expected_repo: str,
         expected_remote_sha: str,
         timeout: int,
         base_sha: str | None = None,
     ) -> dict[str, object] | JobResult:
         """Capture the immutable inputs and file snapshot of a paused rebase."""
         try:
-            paths_result = git_utils.run(
-                ["git", "diff", "--name-only", "--diff-filter=U", "-z"],
-                cwd=cwd,
+            index_data = self._conflict_receipt_index_data(cwd, timeout=timeout)
+            if isinstance(index_data, JobResult):
+                return index_data
+            paths, index_snapshot = index_data
+            revision_data = self._conflict_receipt_revisions(
+                cwd,
+                remote=remote,
+                base_branch=base_branch,
+                expected_repo=expected_repo,
                 timeout=timeout,
+                base_sha=base_sha,
             )
-            paths = tuple(path for path in paths_result.stdout.split("\0") if path)
-            if not paths or any(not is_safe_scope_retraction_path(path) for path in paths):
-                return JobResult(ok=False, error="paused rebase conflict paths invalid")
-            index_result = git_utils.run(
-                ["git", "ls-files", "--stage", "-z"],
-                cwd=cwd,
-                timeout=timeout,
-            )
-            if not index_result.stdout:
-                return JobResult(ok=False, error="paused rebase conflict index invalid")
-            index_snapshot = hashlib.sha256(index_result.stdout.encode()).hexdigest()
-            paused_head_sha = git_utils.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=cwd,
-                timeout=timeout,
-            ).stdout.strip()
-            if not _is_full_commit_sha(paused_head_sha):
-                return JobResult(ok=False, error="paused rebase head invalid")
-            base_sha = (
-                base_sha
-                or git_utils.run(
-                    ["git", "rev-parse", f"{remote}/{base_branch}"],
-                    cwd=cwd,
-                    timeout=timeout,
-                ).stdout.strip()
-            )
-            if not _is_full_commit_sha(base_sha):
-                return JobResult(ok=False, error="paused rebase base head invalid")
+            if isinstance(revision_data, JobResult):
+                return revision_data
+            paused_head_sha, base_sha = revision_data
             snapshot = {path: self._conflict_path_digest(cwd, path) for path in paths}
             content_snapshot = _dirty_worktree_content_snapshot(
                 cwd, timeout=timeout, shutdown=self._shutdown
             )
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            hunks = self._conflict_receipt_hunks(cwd, paths, timeout=timeout)
+        except _RebaseConflictContextError as exc:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "rebase_conflict_context_unavailable"},
+                error=f"rebase conflict context unavailable: {exc}",
+            )
+        except (
+            _GitInspectionResourceLimitError,
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
             return JobResult(ok=False, error=f"cannot capture paused rebase: {exc}")
         return {
             "rebased": False,
+            "conflict_context_version": _CONFLICT_CONTEXT_VERSION,
             "conflict_paths": paths,
             "conflict_snapshot": snapshot,
             "content_snapshot": content_snapshot,
+            "conflict_hunks": hunks,
             "conflict_index_snapshot": index_snapshot,
             "paused_head_sha": paused_head_sha,
             "base_sha": base_sha,
@@ -7087,10 +7459,171 @@ class WorkerPool:
     @staticmethod
     def _conflict_path_digest(cwd: Path, path: str) -> str:
         """Return a stable digest for one host-validated conflict path."""
-        target = cwd / path
-        if not target.exists():
+        try:
+            raw = _read_bounded_conflict_file(cwd, path)
+        except FileNotFoundError:
             return "<absent>"
-        return hashlib.sha256(target.read_bytes()).hexdigest()
+        return hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def _conflict_marker_blocks(lines: list[str]) -> list[str]:
+        """Return complete conflict-marker blocks or reject malformed markers."""
+        blocks: list[str] = []
+        start: int | None = None
+        separator_seen = False
+        for index, line in enumerate(lines):
+            if line.startswith("<<<<<<<"):
+                if start is not None:
+                    raise _RebaseConflictContextError("conflict markers are malformed")
+                start = index
+                separator_seen = False
+                continue
+            if line.startswith("======="):
+                if start is None or separator_seen:
+                    raise _RebaseConflictContextError("conflict markers are malformed")
+                separator_seen = True
+                continue
+            if not line.startswith(">>>>>>>"):
+                continue
+            if start is None or not separator_seen:
+                raise _RebaseConflictContextError("conflict markers are malformed")
+            block = "".join(lines[start : index + 1])
+            if len(block) > _CONFLICT_HUNK_MAX:
+                raise _RebaseConflictContextError(
+                    f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
+                )
+            blocks.append(block)
+            start = None
+            separator_seen = False
+        if start is not None or separator_seen:
+            raise _RebaseConflictContextError("conflict markers are malformed")
+        return blocks
+
+    def _conflict_path_hunk(self, cwd: Path, path: str, *, timeout: int) -> str:
+        """Return complete validated context for one conflict path."""
+        try:
+            raw = _read_bounded_conflict_file(cwd, path)
+        except FileNotFoundError:
+            context = self._marker_free_conflict_context(cwd, path, timeout=timeout)
+        else:
+            if b"\0" in raw:
+                raise _RebaseConflictContextError("conflict source is binary")
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
+            lines = text.splitlines(keepends=True)
+            blocks = self._conflict_marker_blocks(lines)
+            context = (
+                "\n...\n".join(blocks)
+                if blocks
+                else self._marker_free_conflict_context(cwd, path, timeout=timeout)
+            )
+        if not context:
+            raise _RebaseConflictContextError("conflict context is incomplete")
+        if redact_diagnostic_text(context) != context:
+            raise _RebaseConflictContextError("conflict source requires redaction")
+        return context
+
+    def _conflict_index_stages(self, cwd: Path, path: str, *, timeout: int) -> set[int]:
+        """Return the proven unmerged index stages for one conflict path."""
+        index = _run_bounded_git_output(
+            ("git", "ls-files", "--stage", "-z", "--", path),
+            cwd=cwd,
+            timeout=timeout,
+            max_bytes=_CONFLICT_PATH_INDEX_MAX_BYTES,
+            retain_text=True,
+            shutdown=self._shutdown,
+        )
+        stages: set[int] = set()
+        for record in (value for value in index.text.split("\0") if value):
+            metadata, separator, record_path = record.partition("\t")
+            fields = metadata.split()
+            if (
+                separator != "\t"
+                or record_path != path
+                or len(fields) != 3
+                or fields[2] not in {"1", "2", "3"}
+            ):
+                raise _RebaseConflictContextError("conflict index context is invalid")
+            stages.add(int(fields[2]))
+        if not stages:
+            raise _RebaseConflictContextError("conflict index context is incomplete")
+        return stages
+
+    def _conflict_index_stage_text(
+        self,
+        cwd: Path,
+        path: str,
+        *,
+        stage: int,
+        stages: set[int],
+        timeout: int,
+    ) -> str:
+        """Return one bounded stage or its proven absence marker."""
+        try:
+            result = _run_bounded_git_output(
+                ("git", "show", f":{stage}:{path}"),
+                cwd=cwd,
+                timeout=timeout,
+                max_bytes=_CONFLICT_HUNK_MAX,
+                retain_text=True,
+                shutdown=self._shutdown,
+            )
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 128 or stage in stages:
+                raise _RebaseConflictContextError("conflict index context cannot be read") from exc
+            return "_(absent)_\n"
+        except UnicodeDecodeError as exc:
+            raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
+        except _GitInspectionResourceLimitError as exc:
+            raise _RebaseConflictContextError(
+                f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
+            ) from exc
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise _RebaseConflictContextError("conflict index context cannot be read") from exc
+        if stage not in stages:
+            raise _RebaseConflictContextError("conflict index changed during capture")
+        value = result.text
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
+        if "\0" in value:
+            raise _RebaseConflictContextError("conflict source is binary")
+        if len(value) > _CONFLICT_HUNK_MAX:
+            raise _RebaseConflictContextError(
+                f"conflict block exceeds {_CONFLICT_HUNK_MAX} characters"
+            )
+        return value
+
+    def _marker_free_conflict_context(self, cwd: Path, path: str, *, timeout: int) -> str:
+        """Return base, ours, and theirs text for a marker-free conflict."""
+        stages = self._conflict_index_stages(cwd, path, timeout=timeout)
+        parts: list[str] = []
+        for stage, label in ((1, "Base"), (2, "Ours"), (3, "Theirs")):
+            value = self._conflict_index_stage_text(
+                cwd,
+                path,
+                stage=stage,
+                stages=stages,
+                timeout=timeout,
+            )
+            parts.append(f"{label}:\n{value}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _conflict_paths_have_markers(cwd: Path, paths: tuple[str, ...]) -> bool:
+        """Return whether a bounded secure conflict-path read finds markers."""
+        marker = re.compile(rb"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
+        for path in paths:
+            try:
+                raw = _read_bounded_conflict_file(cwd, path)
+            except FileNotFoundError:
+                continue
+            if marker.search(raw):
+                return True
+        return False
 
     @staticmethod
     def _annotate_rebase_policy_failure(
@@ -7298,6 +7831,7 @@ class WorkerPool:
         edits = self._validate_rebase_conflict_edits(
             cwd,
             remote=remote,
+            expected_repo=job.transport_repository,
             paths=paths,
             snapshot=snapshot,
             index_snapshot=index_snapshot,
@@ -7311,6 +7845,7 @@ class WorkerPool:
         continued = self._continue_rebase_process(
             cwd,
             remote=remote,
+            expected_repo=job.transport_repository,
             base_sha=base_sha,
             expected_remote_sha=expected_remote_sha,
             paths=paths,
@@ -7375,6 +7910,56 @@ class WorkerPool:
         )
         return self._retain_rebase_review(job, completed, record)
 
+    def _git_validate_rebase_conflict(self, job: GitJob) -> JobResult:
+        """Classify agent edits without changing Git state."""
+        parsed = self._parse_rebase_continuation(job)
+        if isinstance(parsed, JobResult):
+            return parsed
+        (
+            cwd,
+            branch,
+            remote,
+            base_sha,
+            expected_remote_sha,
+            paths,
+            snapshot,
+            index_snapshot,
+            paused_head_sha,
+        ) = parsed
+        remote_head = self._read_remote_branch_head(
+            cwd,
+            remote=remote,
+            branch=branch,
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        if isinstance(remote_head, JobResult):
+            return remote_head
+        if remote_head != expected_remote_sha:
+            return JobResult(
+                ok=False, error="remote writer head changed during conflict resolution"
+            )
+        classification = self._classify_rebase_conflict_edits(
+            cwd,
+            remote=remote,
+            expected_repo=job.transport_repository,
+            paths=paths,
+            snapshot=snapshot,
+            index_snapshot=index_snapshot,
+            paused_head_sha=paused_head_sha,
+            base_sha=base_sha,
+            expected_remote_sha=expected_remote_sha,
+            timeout=job.timeout_s,
+        )
+        if not isinstance(classification.value, dict):
+            return classification
+        raw_summary = job.kwargs.get("agent_summary")
+        if not isinstance(raw_summary, str) or not raw_summary:
+            return classification
+        value = dict(classification.value)
+        value["agent_summary"] = redact_diagnostic_text(raw_summary)[:500]
+        return replace(classification, value=value)
+
     @staticmethod
     def _parse_rebase_continuation(
         job: GitJob,
@@ -7419,11 +8004,101 @@ class WorkerPool:
             paused_head_sha,
         )
 
+    def _classify_rebase_conflict_edits(
+        self,
+        cwd: Path,
+        *,
+        remote: str,
+        expected_repo: str,
+        paths: tuple[str, ...],
+        snapshot: dict[str, object],
+        index_snapshot: str,
+        paused_head_sha: str,
+        base_sha: str,
+        expected_remote_sha: str,
+        timeout: int,
+    ) -> JobResult:
+        """Classify the workspace after an edit-only conflict turn."""
+        current_receipt = self._conflict_receipt(
+            cwd,
+            remote=remote,
+            base_branch="main",
+            expected_repo=expected_repo,
+            expected_remote_sha=expected_remote_sha,
+            timeout=timeout,
+            base_sha=base_sha,
+        )
+        if isinstance(current_receipt, JobResult):
+            return current_receipt
+        if current_receipt.get("base_sha") != base_sha:
+            return JobResult(
+                ok=False,
+                error="paused rebase base changed during conflict resolution",
+            )
+        raw_current_paths = current_receipt.get("conflict_paths")
+        current_paths: tuple[str, ...] = (
+            tuple(str(path) for path in raw_current_paths)
+            if isinstance(raw_current_paths, (list, tuple))
+            else ()
+        )
+        if set(current_paths) != set(paths):
+            current_receipt["conflict_resolution"] = "out_of_scope_edit"
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error="conflict index was mutated outside host ownership",
+            )
+        if current_receipt.get("conflict_index_snapshot") != index_snapshot:
+            current_receipt["conflict_resolution"] = "out_of_scope_edit"
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error="conflict index was mutated outside host ownership",
+            )
+        if current_receipt.get("paused_head_sha") != paused_head_sha:
+            return JobResult(ok=False, error="paused rebase head changed outside host ownership")
+        scope_error = self._rebase_conflict_edit_scope_error(
+            cwd,
+            conflict_paths=paths,
+            timeout=timeout,
+        )
+        if scope_error is not None:
+            current_receipt["conflict_resolution"] = "out_of_scope_edit"
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error=scope_error.error,
+            )
+        current_snapshot = current_receipt.get("conflict_snapshot")
+        if not isinstance(current_snapshot, dict) or all(
+            current_snapshot.get(path) == snapshot.get(path) for path in paths
+        ):
+            current_receipt["conflict_resolution"] = "no_edit"
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error="rebase conflict resolution required: agent made no file changes",
+            )
+        try:
+            residual_markers = self._conflict_paths_have_markers(cwd, paths)
+        except _RebaseConflictContextError as exc:
+            return JobResult(ok=False, error=f"rebase conflict context unavailable: {exc}")
+        if residual_markers:
+            current_receipt["conflict_resolution"] = "residual_markers"
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error="rebase conflict resolution required: conflict markers remain",
+            )
+        current_receipt["conflict_resolution"] = "resolved_content"
+        return JobResult(ok=True, value=current_receipt)
+
     def _validate_rebase_conflict_edits(
         self,
         cwd: Path,
         *,
         remote: str,
+        expected_repo: str,
         paths: tuple[str, ...],
         snapshot: dict[str, object],
         index_snapshot: str,
@@ -7433,58 +8108,22 @@ class WorkerPool:
         timeout: int,
     ) -> JobResult | None:
         """Reject out-of-band index edits, no-op agents, and residual markers."""
-        current_receipt = self._conflict_receipt(
+        classification = self._classify_rebase_conflict_edits(
             cwd,
             remote=remote,
-            base_branch="main",
+            expected_repo=expected_repo,
+            paths=paths,
+            snapshot=snapshot,
+            index_snapshot=index_snapshot,
+            paused_head_sha=paused_head_sha,
+            base_sha=base_sha,
             expected_remote_sha=expected_remote_sha,
             timeout=timeout,
         )
-        if isinstance(current_receipt, JobResult):
-            return current_receipt
-        current_receipt["base_sha"] = base_sha
-        raw_current_paths = current_receipt.get("conflict_paths")
-        current_paths: tuple[str, ...] = (
-            tuple(str(path) for path in raw_current_paths)
-            if isinstance(raw_current_paths, (list, tuple))
-            else ()
-        )
-        if set(current_paths) != set(paths):
-            return JobResult(ok=False, error="conflict index was mutated outside host ownership")
-        if current_receipt.get("conflict_index_snapshot") != index_snapshot:
-            return JobResult(ok=False, error="conflict index was mutated outside host ownership")
-        if current_receipt.get("paused_head_sha") != paused_head_sha:
-            return JobResult(ok=False, error="paused rebase head changed outside host ownership")
-        current_snapshot = current_receipt.get("conflict_snapshot")
-        if not isinstance(current_snapshot, dict) or all(
-            current_snapshot.get(path) == snapshot.get(path) for path in paths
-        ):
-            return JobResult(
-                ok=False,
-                value=current_receipt,
-                error="rebase conflict resolution required: agent made no file changes",
-            )
-        marker = re.compile(rb"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
-        if any(
-            (cwd / path).is_file() and marker.search((cwd / path).read_bytes()) for path in paths
-        ):
-            return JobResult(
-                ok=False,
-                value=current_receipt,
-                error="rebase conflict resolution required: conflict markers remain",
-            )
-        scope_error = self._rebase_conflict_edit_scope_error(
-            cwd,
-            conflict_paths=paths,
-            timeout=timeout,
-        )
-        if scope_error is not None:
-            return scope_error
-        return None
+        return None if classification.ok else classification
 
-    @staticmethod
     def _rebase_conflict_edit_scope_error(
-        cwd: Path, *, conflict_paths: tuple[str, ...], timeout: int
+        self, cwd: Path, *, conflict_paths: tuple[str, ...], timeout: int
     ) -> JobResult | None:
         """Reject unstaged tracked or untracked changes outside conflicts.
 
@@ -7495,19 +8134,32 @@ class WorkerPool:
         """
         allowed = set(conflict_paths)
         probes = (
-            ["git", "diff", "--name-only", "-z"],
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            ("git", "diff", "--name-only", "-z"),
+            ("git", "ls-files", "--others", "--exclude-standard", "-z"),
         )
         try:
             for argv in probes:
-                result = git_utils.run(argv, cwd=cwd, timeout=timeout)
-                changed = {path for path in result.stdout.split("\0") if path}
+                result = _run_bounded_git_output(
+                    argv,
+                    cwd=cwd,
+                    timeout=timeout,
+                    max_bytes=64 * 1024,
+                    retain_text=True,
+                    shutdown=self._shutdown,
+                )
+                changed = {path for path in result.text.split("\0") if path}
                 if not changed.issubset(allowed):
                     return JobResult(
                         ok=False,
                         error="rebase conflict resolution changed paths outside host scope",
                     )
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except (
+            _GitInspectionResourceLimitError,
+            InterruptedError,
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ):
             return JobResult(ok=False, error="cannot validate rebase conflict edit scope")
         return None
 
@@ -7516,6 +8168,7 @@ class WorkerPool:
         cwd: Path,
         *,
         remote: str,
+        expected_repo: str,
         base_sha: str,
         expected_remote_sha: str,
         paths: tuple[str, ...],
@@ -7549,11 +8202,12 @@ class WorkerPool:
                     cwd,
                     remote=remote,
                     base_branch="main",
+                    expected_repo=expected_repo,
                     expected_remote_sha=expected_remote_sha,
                     timeout=timeout,
+                    base_sha=base_sha,
                 )
                 if isinstance(next_receipt, dict):
-                    next_receipt["base_sha"] = base_sha
                     return JobResult(
                         ok=False,
                         value=next_receipt,
