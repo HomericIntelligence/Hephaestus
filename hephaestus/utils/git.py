@@ -179,6 +179,7 @@ def run_git(
     dry_run: bool = False,
     log_on_error: bool = True,
     env: dict[str, str] | None = None,
+    input_text: str | None = None,
     retries: int | None = None,
     shutdown: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -198,6 +199,8 @@ def run_git(
             "dry_run": dry_run,
             "log_on_error": log_errors,
         }
+        if input_text is not None:
+            kwargs["input_text"] = input_text
         if shutdown is not None:
             kwargs["shutdown"] = shutdown
             kwargs["track_process_group"] = True
