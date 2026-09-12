@@ -82,6 +82,7 @@ from hephaestus.agents.workspace import (
 )
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
+from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
 from hephaestus.automation.git_runtime import current_operation_shutdown, operation_file_lock
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
@@ -2520,63 +2521,9 @@ def _trusted_gh_executable(extra_path_root: Path | None = None) -> str | None:
     )
 
 
-def _unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
+def _unsafe_local_git_config_key(config: str) -> str | None:
     """Return an unsafe repository/worktree config key, if *config* contains one."""
-    for entry in config.split("\0"):
-        if not entry:
-            continue
-        key, _separator, _value = entry.partition("\n")
-        normalized = key.lower()
-        if normalized in {
-            "core.askpass",
-            "core.attributesfile",
-            "core.excludesfile",
-            "core.fsmonitor",
-            "core.gitproxy",
-            "core.hookspath",
-            "core.pager",
-            "core.sshcommand",
-            "core.worktree",
-        }:
-            return key
-        if normalized in {"diff.external", "interactive.difffilter"}:
-            return key
-        if normalized.startswith("diff.") and normalized.rsplit(".", 1)[-1] in {
-            "command",
-            "textconv",
-        }:
-            return key
-        if normalized == "credential.helper" or (
-            normalized.startswith("credential.") and normalized.endswith(".helper")
-        ):
-            return key
-        if normalized.startswith("remote.") and normalized.rsplit(".", 1)[-1] in {
-            "proxy",
-            "proxyauthmethod",
-            "pushurl",
-            "receivepack",
-            "uploadpack",
-        }:
-            return key
-        if normalized in {"fetch.recursesubmodules", "submodule.recurse"}:
-            return key
-        if normalized.startswith(("include.", "includeif.")):
-            return key
-        if normalized.startswith("filter.") and normalized.rsplit(".", 1)[-1] in {
-            "clean",
-            "process",
-            "smudge",
-        }:
-            return key
-        if normalized.startswith("merge.") and normalized.endswith(".driver"):
-            return key
-        # A checkout-specific URL rewrite can transform the validated literal
-        # GitHub origin when it is later passed to ``git fetch``.  Any local
-        # HTTP configuration can similarly proxy traffic or override TLS
-        # verification/CA trust, including URL-scoped variants.
-        if normalized.startswith(("http.", "url.")):
-            return key
-    return None
+    return unsafe_local_git_config_key(config)
 
 
 def _checkout_preflight_error(  # noqa: C901

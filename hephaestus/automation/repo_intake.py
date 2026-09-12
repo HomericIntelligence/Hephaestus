@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, Self, TypeGuard
 
+from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
@@ -146,6 +147,12 @@ _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _KNOWN_WORKTREE_LINES = ("locked", "prunable")
 _DURABLE_STATE_NAMES = (".automation-state", ".issue_implementer")
 _GIT_METADATA_TEXT_LIMIT = 4096
+_GIT_CONFIG_TEXT_LIMIT = 1024 * 1024
+_GIT_CONFIG_SECTION_RE = re.compile(
+    r'^\s*\[([A-Za-z0-9][A-Za-z0-9.-]*)(?:\s+"((?:\\.|[^"\\])*)")?\]'
+    r"\s*(?:[#;].*)?$"
+)
+_GIT_CONFIG_KEY_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9-]*)(?:\s*=\s*(.*))?$")
 
 
 def _validate_receipt_values(receipt: RepoIntakeReceipt) -> None:
@@ -382,6 +389,9 @@ class RepoIntakeManager:
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run a controlled command and map subprocess failures safely."""
+        intake_path = getattr(self, "worktree_path", None)
+        if intake_path is not None and cwd == intake_path and intake_path.exists():
+            self._validate_intake_git_pointer()
         try:
             return self._run_command(
                 command,
@@ -737,18 +747,26 @@ class RepoIntakeManager:
         return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
     @staticmethod
-    def _read_metadata_text(directory_fd: int, name: str) -> str:
-        """Read one bounded regular metadata file without following a link."""
+    def _read_optional_metadata_text(
+        directory_fd: int,
+        name: str,
+        *,
+        max_bytes: int = _GIT_METADATA_TEXT_LIMIT,
+    ) -> str | None:
+        """Read one optional bounded regular file without following a link."""
         flags = os.O_RDONLY | os.O_NOFOLLOW
         if hasattr(os, "O_NONBLOCK"):
             flags |= os.O_NONBLOCK
         file_fd = -1
         try:
-            file_fd = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                file_fd = os.open(name, flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                return None
             if not stat.S_ISREG(os.fstat(file_fd).st_mode):
                 raise RepoIntakeError("repository-intake Git metadata is not a regular file")
             chunks: list[bytes] = []
-            remaining = _GIT_METADATA_TEXT_LIMIT + 1
+            remaining = max_bytes + 1
             while remaining:
                 chunk = os.read(file_fd, remaining)
                 if not chunk:
@@ -756,7 +774,7 @@ class RepoIntakeManager:
                 chunks.append(chunk)
                 remaining -= len(chunk)
             payload = b"".join(chunks)
-            if len(payload) > _GIT_METADATA_TEXT_LIMIT:
+            if len(payload) > max_bytes:
                 raise RepoIntakeError("repository-intake Git metadata is too large")
             return payload.decode("utf-8")
         except RepoIntakeError:
@@ -766,6 +784,24 @@ class RepoIntakeManager:
         finally:
             if file_fd >= 0:
                 os.close(file_fd)
+
+    @classmethod
+    def _read_metadata_text(
+        cls,
+        directory_fd: int,
+        name: str,
+        *,
+        max_bytes: int = _GIT_METADATA_TEXT_LIMIT,
+    ) -> str:
+        """Read one required bounded regular file without following a link."""
+        payload = cls._read_optional_metadata_text(
+            directory_fd,
+            name,
+            max_bytes=max_bytes,
+        )
+        if payload is None:
+            raise RepoIntakeError("repository-intake Git metadata is unavailable")
+        return payload
 
     @staticmethod
     def _normalized_metadata_path(value: str, *, relative_to: Path) -> Path:
@@ -781,6 +817,54 @@ class RepoIntakeManager:
         if len(lines) != 1 or not lines[0] or lines[0] != lines[0].strip():
             raise RepoIntakeError("repository-intake Git metadata is malformed")
         return lines[0]
+
+    @staticmethod
+    def _config_line_continues(line: str) -> bool:
+        """Return whether a Git config line continues on the next line."""
+        trailing_backslashes = len(line) - len(line.rstrip("\\"))
+        return bool(trailing_backslashes % 2)
+
+    @classmethod
+    def _git_config_key_stream(cls, payload: str) -> str:
+        """Parse raw Git config into the key stream used by the safety classifier."""
+        if "\0" in payload:
+            raise RepoIntakeError("repository-intake Git configuration is malformed")
+        section: str | None = None
+        subsection: str | None = None
+        continuing = False
+        entries: list[str] = []
+        for line in payload.splitlines():
+            if continuing:
+                continuing = cls._config_line_continues(line)
+                continue
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("#", ";")):
+                continue
+            section_match = _GIT_CONFIG_SECTION_RE.fullmatch(line)
+            if section_match is not None:
+                section = section_match.group(1)
+                subsection = section_match.group(2)
+                continue
+            if section is None:
+                raise RepoIntakeError("repository-intake Git configuration is malformed")
+            key_match = _GIT_CONFIG_KEY_RE.fullmatch(line)
+            if key_match is None:
+                raise RepoIntakeError("repository-intake Git configuration is malformed")
+            key = key_match.group(1)
+            value = key_match.group(2) or ""
+            prefix = section if subsection is None else f"{section}.{subsection}"
+            entries.append(f"{prefix}.{key}\n{value}\0")
+            continuing = cls._config_line_continues(line)
+        if continuing:
+            raise RepoIntakeError("repository-intake Git configuration is malformed")
+        return "".join(entries)
+
+    @classmethod
+    def _validate_local_git_config(cls, payload: str) -> None:
+        """Reject local Git configuration that can change trusted commands."""
+        config = cls._git_config_key_stream(payload)
+        if unsafe_local_git_config_key(config) is not None:
+            raise RepoIntakeError("repository-intake Git configuration is unsafe")
 
     def _validate_intake_git_pointer(self) -> None:
         """Bind the intake gitfile to its registered common-directory admin entry."""
@@ -823,6 +907,19 @@ class RepoIntakeManager:
                 raise RepoIntakeError(
                     "repository-intake Git pointer is bound to a different common directory"
                 )
+            common_config = self._read_metadata_text(
+                common_fd,
+                "config",
+                max_bytes=_GIT_CONFIG_TEXT_LIMIT,
+            )
+            worktree_config = self._read_optional_metadata_text(
+                admin_fd,
+                "config.worktree",
+                max_bytes=_GIT_CONFIG_TEXT_LIMIT,
+            )
+            self._validate_local_git_config(common_config)
+            if worktree_config is not None:
+                self._validate_local_git_config(worktree_config)
         except RepoIntakeError:
             raise
         except OSError as exc:
