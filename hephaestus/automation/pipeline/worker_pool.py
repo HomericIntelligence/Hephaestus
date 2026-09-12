@@ -27,7 +27,7 @@ import time
 import uuid
 from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PureWindowsPath
@@ -4103,6 +4103,9 @@ class WorkerPool:
         self._completion_saturation: threading.Event | None = None
         self._repo_locks: dict[str, _RepoLockEntry] = {}
         self._repo_locks_guard = threading.Lock()
+        self._repo_intake_leases: dict[Path, AbstractContextManager[None]] = {}
+        self._repo_intake_lease_locks: dict[Path, threading.Lock] = {}
+        self._repo_intake_leases_guard = threading.Lock()
         self._lock_dir = lock_dir
         self._gh_extra_path_root = gh_extra_path_root
         self._github_job_runner = github_job_runner
@@ -4232,6 +4235,18 @@ class WorkerPool:
         self._executor.shutdown(wait=mark_interrupted, cancel_futures=True)
         if not mark_interrupted:
             subprocess_registry.terminate_all()
+
+    def release_repo_intake_leases(self) -> None:
+        """Release all run-lifetime repository-intake leases once."""
+        with self._repo_intake_leases_guard:
+            leases = tuple(reversed(self._repo_intake_leases.values()))
+            self._repo_intake_leases.clear()
+            self._repo_intake_lease_locks.clear()
+        for lease in leases:
+            try:
+                lease.__exit__(None, None, None)
+            except Exception:
+                logger.exception("repository-intake lease release failed")
 
     def _on_future_done(self, handle: JobHandle, future: Future[JobResult]) -> None:
         """Drain result to completion queue when a job future completes.
@@ -8341,7 +8356,7 @@ class WorkerPool:
         if remote_config is None:
             return JobResult(ok=False, error="required fetch executable is unavailable")
         try:
-            receipt = RepoIntakeManager(
+            manager = RepoIntakeManager(
                 caller_root,
                 repository=expected_repo,
                 gh_command=gh_command,
@@ -8349,7 +8364,28 @@ class WorkerPool:
                 git_runner=git_utils.run,
                 git_env=_controlled_git_env(),
                 remote_config=remote_config,
-            ).prepare()
+            )
+            common_dir = manager.common_dir
+            with self._repo_intake_leases_guard:
+                preparation_lock = self._repo_intake_lease_locks.setdefault(
+                    common_dir, threading.Lock()
+                )
+            with preparation_lock:
+                with self._repo_intake_leases_guard:
+                    lease = self._repo_intake_leases.get(common_dir)
+                acquired_lease = lease is None
+                if lease is None:
+                    lease = manager.run_lease()
+                    lease.__enter__()
+                try:
+                    receipt = manager.prepare()
+                except BaseException as exc:
+                    if acquired_lease:
+                        lease.__exit__(type(exc), exc, exc.__traceback__)
+                    raise
+                if acquired_lease:
+                    with self._repo_intake_leases_guard:
+                        self._repo_intake_leases[common_dir] = lease
         except RepoIntakeError as exc:
             return JobResult(ok=False, error=str(exc))
         return JobResult(ok=True, value=receipt.to_dict())

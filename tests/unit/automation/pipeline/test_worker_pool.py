@@ -120,6 +120,7 @@ from hephaestus.automation.remediation_recovery import (
     RemediationReplyResult,
     RemediationReviewInput,
 )
+from hephaestus.automation.repo_intake import RepoIntakeError
 from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
@@ -20215,3 +20216,89 @@ def test_worker_pool_retains_explicit_pyxis_placement(tmp_path: Path) -> None:
         assert pool._host_verification_pyxis_placement is placement
     finally:
         pool.shutdown()
+
+
+def test_intake_lease_is_reused_until_explicit_idempotent_release(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """One pool keeps one run lease across repeated intake preparation."""
+    events: list[str] = []
+
+    @contextmanager
+    def lease() -> Iterator[None]:
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    receipt = MagicMock()
+    receipt.to_dict.return_value = {"revision": "a" * 40}
+    managers = [MagicMock(), MagicMock()]
+    for manager in managers:
+        manager.common_dir = tmp_path / ".git"
+        manager.run_lease.side_effect = lease
+        manager.prepare.return_value = receipt
+    job = GitJob(
+        repo="acme/repo",
+        op="prepare_intake",
+        timeout_s=30,
+        kwargs={"repo": "acme/repo", "caller_root": str(tmp_path)},
+    )
+
+    with (
+        patch(f"{_WP}._checkout_preflight_error", return_value=None),
+        patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+        patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+        patch(f"{_WP}.RepoIntakeManager", side_effect=managers),
+    ):
+        assert pool._git_prepare_intake(job).ok
+        assert pool._git_prepare_intake(job).ok
+
+    assert events == ["enter"]
+    managers[0].run_lease.assert_called_once_with()
+    managers[1].run_lease.assert_not_called()
+    pool.shutdown(mark_interrupted=False)
+    assert events == ["enter"]
+    pool.release_repo_intake_leases()
+    pool.release_repo_intake_leases()
+    assert events == ["enter", "exit"]
+
+
+def test_failed_first_intake_preparation_releases_new_run_lease(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """A failed first preparation does not keep a run lease."""
+    events: list[str] = []
+
+    @contextmanager
+    def lease() -> Iterator[None]:
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    manager = MagicMock()
+    manager.common_dir = tmp_path / ".git"
+    manager.run_lease.side_effect = lease
+    manager.prepare.side_effect = RepoIntakeError("injected preparation failure")
+    job = GitJob(
+        repo="acme/repo",
+        op="prepare_intake",
+        timeout_s=30,
+        kwargs={"repo": "acme/repo", "caller_root": str(tmp_path)},
+    )
+
+    with (
+        patch(f"{_WP}._checkout_preflight_error", return_value=None),
+        patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+        patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+        patch(f"{_WP}.RepoIntakeManager", return_value=manager),
+    ):
+        result = pool._git_prepare_intake(job)
+
+    assert result.error == "injected preparation failure"
+    assert events == ["enter", "exit"]
+    pool.release_repo_intake_leases()
+    assert events == ["enter", "exit"]

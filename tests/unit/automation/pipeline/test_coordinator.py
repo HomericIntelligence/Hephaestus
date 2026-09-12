@@ -4728,3 +4728,78 @@ def test_update_plan_same_issue_number_in_two_repositories(
     )
     assert first_stage is StageName.IMPLEMENTATION
     assert second_stage is StageName.PLANNING
+
+
+@pytest.mark.parametrize("case", ["normal", "fatal", "interrupt", "report_failure"])
+def test_run_releases_intake_leases_after_shutdown_and_reporting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """All run exits release intake leases after final ownership and reports."""
+    events: list[str] = []
+
+    class OrderedPool(FakeWorkerPool):
+        def __init__(self, lane: str) -> None:
+            super().__init__()
+            self.lane = lane
+
+        def shutdown(self, *, mark_interrupted: bool = True) -> None:
+            super().shutdown(mark_interrupted=mark_interrupted)
+            events.append(f"{self.lane}_shutdown")
+
+        def release_repo_intake_leases(self) -> None:
+            events.append(f"{self.lane}_release")
+
+    main = OrderedPool("main")
+    auxiliary = OrderedPool("auxiliary")
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=[],
+            loops=1,
+            projects_dir=tmp_path,
+            rate_guard_enabled=False,
+        ),
+        github=FakeStageGitHub(),
+        **fake_worker_factories(main, auxiliary),
+        install_signals=False,
+    )
+    original_finalize = coordinator._finalize_resumable
+
+    def finalize() -> None:
+        original_finalize()
+        events.append("resumable")
+
+    def seed() -> int:
+        if case == "fatal":
+            raise RuntimeError("injected fatal failure")
+        if case == "interrupt":
+            coordinator.shutdown.set()
+        return 0
+
+    def report(*_args: object, **_kwargs: object) -> None:
+        events.append("summary")
+        if case == "report_failure":
+            raise RuntimeError("injected report failure")
+
+    monkeypatch.setattr(coordinator, "_seed_pass", seed)
+    monkeypatch.setattr(coordinator, "_finalize_resumable", finalize)
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.coordinator_runtime.summary_mod.print_summary",
+        report,
+    )
+
+    if case == "report_failure":
+        with pytest.raises(RuntimeError, match="injected report failure"):
+            coordinator.run()
+    else:
+        coordinator.run()
+
+    assert events == [
+        "main_shutdown",
+        "auxiliary_shutdown",
+        "resumable",
+        "summary",
+        "main_release",
+    ]

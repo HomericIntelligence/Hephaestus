@@ -771,10 +771,24 @@ Repo intake has three separate worktree layers:
   verified intake worktree. They retain their existing strict dirty-state and
   cleanup checks.
 
-The intake worktree is created or rebound only under the shared Git metadata
-lock. A valid clean receipt is reused. A dirty, symlinked, unregistered,
-foreign, or mismatched path is preserved and fails closed. Intake never
-attaches the default branch a second time.
+Before intake preparation starts, the main worker pool takes an exclusive
+nonblocking run lease for the Git common directory. The lease path is stable
+for the common directory. The pool keeps the entered lease across all loop
+passes. Thus, a second process cannot remove or rebind the fixed intake path
+while the first coordinator uses it. The second process fails immediately with
+`repository_intake_in_use` and tells the operator to wait for the active run.
+
+The intake worktree is created or rebound only under the separate shared Git
+metadata lock. A valid clean receipt is reused. A dirty, symlinked,
+unregistered, foreign, or mismatched path is preserved and fails closed.
+Intake never attaches the default branch a second time.
+
+The coordinator releases all intake run leases after both worker lanes stop,
+completion results drain, resumable records are complete, and the final summary
+finishes. A nested finalization path releases the leases if final reporting
+fails. `WorkerPool.shutdown()` does not release them. A hard process exit lets
+the kernel release the file locks. The receipt, worktree, and lease sentinel
+stay on disk for the next verified run.
 
 #### Boundary diagram
 
@@ -1980,8 +1994,17 @@ operation, enforcing the `StageGitHub` concurrency contract without implying
 cross-process GitHub serialization; exact live-state guards remain authoritative
 across processes.
 
-`prepare_intake` and `sync_checkout` additionally take the status-safe
-Git-metadata lock resolved by
+`prepare_intake` first takes a nonblocking run-lifetime lease at
+`<git-common-dir>/hephaestus-repository-intake.run.lock`. The main worker pool
+keeps one entered lease context for each Git common directory. A repeated
+preparation in the same pool uses that context and does not take a nested file
+lock. If the first preparation fails, the pool releases the new lease. The
+coordinator releases retained leases after its final run report. A separate
+process that owns the lease causes an immediate `repository_intake_in_use`
+result.
+
+`prepare_intake` and `sync_checkout` also take the status-safe Git-metadata
+lock resolved by
 [`WorktreeManager.git_metadata_lock_path`](../hephaestus/automation/worktree_manager.py).
 For linked worktrees this resolves Git's common directory, so the primary
 checkout and every linked worktree serialize synchronization and worktree

@@ -319,50 +319,52 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             logger.exception("pipeline run failed")
             self._fatal = True
         finally:
-            # Reap the pool on every exit. A fatal exception does not set shutdown,
-            # so the executor and agent subprocesses would leak (#2059). This call is
-            # idempotent, so an earlier signal-path call is a no-op.
-            self._shutdown_pool()
-            self._finalize_resumable()
-            exit_code = self._exit_code()
-            stats = summary_mod.RunStats(
-                exit_code=exit_code,
-                loops_run=self._loops_run,
-                agent_job_count=self._agent_job_count,
-                agent_job_time_s=self._agent_job_time_s,
-                wall_s=self._monotonic() - started,
-                auxiliary_job_count=self._auxiliary_job_count,
-                auxiliary_job_time_s=self._auxiliary_job_time_s,
-                auxiliary_job_failure_count=self._auxiliary_job_failure_count,
-                auxiliary_job_deferred_count=self._auxiliary_job_deferred_count,
-            )
-            summary_items = self._effective_items()
-            preserved = self._active_preserved_worktrees()
-            recovery_preserved = self._active_recovery_worktrees()
             try:
-                self._record_event(
-                    "run_end",
-                    {
-                        "exit_code": exit_code,
-                        "interrupted": stats.interrupted,
-                        "items": len(summary_items),
-                        "agent_jobs": self._agent_job_count,
-                        "wall_s": stats.wall_s,
-                    },
+                # Reap both lanes before final records and reports. The intake
+                # lease remains held while those consumers use its fixed paths.
+                self._shutdown_pool()
+                self._finalize_resumable()
+                exit_code = self._exit_code()
+                stats = summary_mod.RunStats(
+                    exit_code=exit_code,
+                    loops_run=self._loops_run,
+                    agent_job_count=self._agent_job_count,
+                    agent_job_time_s=self._agent_job_time_s,
+                    wall_s=self._monotonic() - started,
+                    auxiliary_job_count=self._auxiliary_job_count,
+                    auxiliary_job_time_s=self._auxiliary_job_time_s,
+                    auxiliary_job_failure_count=self._auxiliary_job_failure_count,
+                    auxiliary_job_deferred_count=self._auxiliary_job_deferred_count,
                 )
-                summary_mod.print_summary(
-                    summary_items,
-                    stats,
-                    preserved,
-                    json_out=self.config.json_out,
-                    recovery_preserved=recovery_preserved,
-                    terminal_summary=(
-                        self._terminal_summary if self._terminal_summary.total else None
-                    ),
-                )
+                summary_items = self._effective_items()
+                preserved = self._active_preserved_worktrees()
+                recovery_preserved = self._active_recovery_worktrees()
+                try:
+                    self._record_event(
+                        "run_end",
+                        {
+                            "exit_code": exit_code,
+                            "interrupted": stats.interrupted,
+                            "items": len(summary_items),
+                            "agent_jobs": self._agent_job_count,
+                            "wall_s": stats.wall_s,
+                        },
+                    )
+                    summary_mod.print_summary(
+                        summary_items,
+                        stats,
+                        preserved,
+                        json_out=self.config.json_out,
+                        recovery_preserved=recovery_preserved,
+                        terminal_summary=(
+                            self._terminal_summary if self._terminal_summary.total else None
+                        ),
+                    )
+                finally:
+                    if self._metrics_server is not None:
+                        self._metrics_server.stop()
             finally:
-                if self._metrics_server is not None:
-                    self._metrics_server.stop()
+                self.pool.release_repo_intake_leases()
         return exit_code
 
     def _effective_items(self) -> list[ct.WorkItem]:

@@ -80,6 +80,7 @@ class FakeWorkerPool:
         self.submitted: list[JobHandle] = []
         self.submitted_claims: list[tuple[str, str]] = []
         self.shutdown_calls = 0
+        self.repo_intake_lease_release_calls = 0
         self._scripted: deque[JobResult | Exception] = deque()
         self.github_job_runner = github_job_runner
         self._wakeup = threading.Event()
@@ -293,6 +294,10 @@ class FakeWorkerPool:
         self.shutdown_calls += 1
         if mark_interrupted:
             self.shutdown_event.set()
+
+    def release_repo_intake_leases(self) -> None:
+        """Record release of the test lane's repository-intake leases."""
+        self.repo_intake_lease_release_calls += 1
 
 
 class WorkerFactories(TypedDict):

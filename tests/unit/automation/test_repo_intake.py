@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -701,3 +702,64 @@ def test_linked_callers_share_one_concurrent_intake(tmp_path: Path) -> None:
     assert receipts[0].path == receipts[1].path
     assert receipts[0].revision == receipts[1].revision
     assert receipts[0].generation == receipts[1].generation == 1
+
+
+def test_run_lease_blocks_a_second_process_before_intake_rebind(tmp_path: Path) -> None:
+    """A live run keeps a second process from changing its intake checkout."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    first = manager.prepare()
+    _advance_remote(tmp_path, remote)
+    child = """
+import sys
+from pathlib import Path
+from hephaestus.automation import git_utils
+from hephaestus.automation.repo_intake import RepoIntakeManager
+
+manager = RepoIntakeManager(
+    Path(sys.argv[1]),
+    repository="acme/repo",
+    gh_command="gh",
+    timeout_s=30,
+    git_runner=git_utils.run,
+    git_env={},
+    remote_config=(),
+)
+try:
+    with manager.run_lease():
+        raise SystemExit(0)
+except Exception as error:
+    print(f"{type(error).__name__}: {error}", file=sys.stderr)
+    raise SystemExit(23)
+"""
+
+    with manager.run_lease():
+        attempted = subprocess.run(
+            [sys.executable, "-c", child, str(caller)],
+            cwd=caller,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+
+    assert attempted.returncode == 23
+    assert "RepoIntakeInUseError: repository_intake_in_use:" in attempted.stderr
+    assert "wait for the active automation run to finish" in attempted.stderr
+    assert _run_git(first.path, "rev-parse", "HEAD").stdout.strip() == first.revision
+
+
+def test_run_lease_uses_a_stable_common_directory_path(tmp_path: Path) -> None:
+    """Linked callers use one stable lease for their Git common directory."""
+    caller, remote = _make_repository(tmp_path)
+    linked = tmp_path / "lease-linked-caller"
+    _run_git(caller, "worktree", "add", "--detach", str(linked), "HEAD")
+    primary = _manager(caller, remote)
+    secondary = _manager(linked, remote)
+
+    assert primary.run_lease_path == secondary.run_lease_path
+    with primary.run_lease():
+        with pytest.raises(RepoIntakeError) as caught:
+            with secondary.run_lease():
+                pass
+    assert type(caught.value).__name__ == "RepoIntakeInUseError"

@@ -33,8 +33,23 @@ find <caller-parent> -maxdepth 3 -path '*/.hephaestus-repo-intake/*' -print
 If the intake receipt and registered path are both valid but the checkout is
 dirty, preserve the path and inspect it before a later run. If the path is
 foreign, symlinked, or ambiguously registered, stop and recover it manually.
-The automation path uses the shared Git metadata lock, so a second process
-waits instead of allocating a conflicting intake worktree.
+The automation process holds an exclusive intake run lease while it uses this
+path. A second process fails immediately with `repository_intake_in_use`. It
+does not wait and it does not allocate, remove, or rebind the intake worktree.
+
+Wait for the active automation process to finish. Then, run the command again.
+Do not delete
+`<git-common-dir>/hephaestus-repository-intake.run.lock`. The sentinel can stay
+after a normal stop or a crash. The kernel releases the file lock when the
+process closes it or exits. If `repository_intake_in_use` continues, another
+live process still has the lock. Stop that process through its normal shutdown
+path before you continue.
+
+A normal stop and a hard exit preserve the intake receipt and worktree. The
+next run validates the receipt, worktree registration, clean state, and exact
+revision before it reuses or rebinds the path. If that validation fails, follow
+the preservation rules above. Do not remove the receipt or worktree to bypass
+the failure.
 
 ## Locate
 

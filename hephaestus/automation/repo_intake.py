@@ -14,18 +14,23 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, Self, TypeGuard
 
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.io.utils import write_secure
-from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 
 class RepoIntakeError(RuntimeError):
     """Raised when an intake checkout cannot be verified safely."""
+
+
+class RepoIntakeInUseError(RepoIntakeError):
+    """Raised when a different process owns the repository-intake run lease."""
 
 
 def is_full_commit_sha(value: object) -> TypeGuard[str]:
@@ -238,6 +243,34 @@ class RepoIntakeManager:
         self.worktree_path = self.state_dir / "worktree"
         self.receipt_path = self.state_dir / "receipt.json"
         self.ownership_key = f"{self.repository_identity}:intake"
+
+    @property
+    def run_lease_path(self) -> Path:
+        """Return the stable run-lease path for this Git common directory."""
+        return self.common_dir / "hephaestus-repository-intake.run.lock"
+
+    @contextmanager
+    def run_lease(self) -> Iterator[None]:
+        """Hold exclusive intake ownership until the automation run is complete."""
+        lease = file_lock(
+            self.run_lease_path,
+            blocking=False,
+            require_exclusive=True,
+        )
+        try:
+            lease.__enter__()
+        except LockUnavailableError as exc:
+            raise RepoIntakeInUseError(
+                "repository_intake_in_use: another automation run holds the "
+                "repository-intake lease; wait for the active automation run to "
+                "finish and retry"
+            ) from exc
+        except (OSError, RuntimeError) as exc:
+            raise RepoIntakeError("repository-intake run lease is unavailable") from exc
+        try:
+            yield
+        finally:
+            lease.__exit__(None, None, None)
 
     def prepare(self) -> RepoIntakeReceipt:
         """Return a verified intake receipt, creating or rebinding as needed."""
@@ -787,4 +820,10 @@ class RepoIntakeManager:
         )
 
 
-__all__ = ["RepoIntakeError", "RepoIntakeManager", "RepoIntakeReceipt", "is_full_commit_sha"]
+__all__ = [
+    "RepoIntakeError",
+    "RepoIntakeInUseError",
+    "RepoIntakeManager",
+    "RepoIntakeReceipt",
+    "is_full_commit_sha",
+]
