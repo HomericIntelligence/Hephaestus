@@ -27,8 +27,41 @@ is dirty. These conditions mean that ownership is not proven.
 
 ```bash
 git -C <caller-repo> worktree list --porcelain
-find <caller-parent> -maxdepth 3 -path '*/.hephaestus-repo-intake/*' -print
+python3 - '<caller-repo>' <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+common_dir_result = subprocess.run(
+    [
+        "git",
+        "-C",
+        sys.argv[1],
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+common_dir = Path(common_dir_result.stdout.rstrip("\n")).resolve(strict=True)
+state_root = common_dir.parent.parent / ".hephaestus-repo-intake"
+if state_root.is_symlink() or state_root.is_file():
+    print(state_root)
+elif state_root.is_dir():
+    subprocess.run(
+        ["find", "-P", str(state_root), "-maxdepth", "2", "-print"],
+        check=True,
+    )
+else:
+    print(f"No repository-intake state exists at {state_root}")
+PY
 ```
+
+The Python command reads the absolute Git common directory. This method also
+works from a linked worktree when Git stores a relative metadata path. The
+command does not use shell substitution for the path.
 
 If the intake receipt and registered path are both valid but the checkout is
 dirty, preserve the path and inspect it before a later run. If the path is
