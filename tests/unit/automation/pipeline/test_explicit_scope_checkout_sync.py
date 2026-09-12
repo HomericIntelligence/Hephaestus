@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from hephaestus.automation.issue_waves import IssueWaveStore
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
@@ -467,7 +468,7 @@ def _intake_result(caller_root: Path, intake_root: Path) -> JobResult:
     )
 
 
-@pytest.mark.parametrize("state_name", [".automation-state", ".issue_implementer"])
+@pytest.mark.parametrize("state_name", [".automation-state", Path(DEFAULT_STATE_DIR).name])
 @pytest.mark.parametrize("destination_exists", [False, True])
 def test_intake_preparation_failure_preserves_legacy_state_for_recovery(
     tmp_path: Path,

@@ -2046,6 +2046,18 @@ failure with bounded output and error text. A failure can retain a typed
 recovery value. Consumers must inspect that value before they select a retry.
 An unsuccessful result does not prove that no external effect occurred.
 
+During forced shutdown, a failed typed learning result remains interrupted
+after host execution starts. The coordinator retains the uncertain claim;
+restart must not repeat an unconfirmed delivery. A successful typed host
+result survives shutdown and a later workspace-cleanup error. The learning
+stage still validates its delivery receipt before it records success.
+Without forced shutdown, a typed host rejection retains the existing bounded
+retry policy.
+
+Learning uses its prepared review-lane source lease until the host returns.
+The worker then removes that exact workspace. A later request must prepare
+a new binding before it can use the lane.
+
 ### Completion contract
 
 Each submitted operation has one coordinator result, including cancellation.

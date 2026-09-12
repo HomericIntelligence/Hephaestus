@@ -103,7 +103,9 @@ class AuxiliaryWorkerPool:
                 error=f"{type(exc).__name__}: {exc}",
             )
         if self._shutdown.is_set() and not (
-            isinstance(job, AthenaSkillJob) and isinstance(result.value, AthenaSkillResult)
+            isinstance(job, AthenaSkillJob)
+            and isinstance(result.value, AthenaSkillResult)
+            and result.value.ok
         ):
             if isinstance(job, AthenaSkillJob) and not host_started:
                 result = replace(

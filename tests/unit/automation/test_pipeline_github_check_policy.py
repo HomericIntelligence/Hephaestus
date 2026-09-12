@@ -28,6 +28,14 @@ from hephaestus.automation.pipeline_github_ruleset_conditions import (
 _STATUS_EVIDENCE_NOW = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def stable_status_evidence_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evaluate fixed receipt timestamps against the same fixed clock."""
+    monkeypatch.setattr(
+        required_checks_mod, "_status_evidence_now_utc", lambda: _STATUS_EVIDENCE_NOW
+    )
+
+
 @pytest.fixture
 def command_runner() -> MagicMock:
     """Keep policy tests on the explicit command boundary."""
@@ -1170,15 +1178,11 @@ def _check_run(
 )
 def test_required_check_run_evidence_enforces_seven_day_freshness(
     command_runner: MagicMock,
-    monkeypatch: pytest.MonkeyPatch,
     completed_at: object,
     expected: bool,
 ) -> None:
     """A required Check Run is current only in the inclusive seven-day window."""
     adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
-    monkeypatch.setattr(
-        required_checks_mod, "_status_evidence_now_utc", lambda: _STATUS_EVIDENCE_NOW
-    )
     head = "a" * 40
     policy = EffectiveMergePolicy(
         base_branch="main",

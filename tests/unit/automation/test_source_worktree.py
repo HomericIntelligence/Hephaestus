@@ -455,6 +455,21 @@ time.sleep(30)
                 process.wait(timeout=1.0)
 
 
+def _wait_for_git_child_ready(
+    process: subprocess.Popen[str], child_pid: Path, heartbeat: Path
+) -> float:
+    """Wait for the owned child, or fail after bounded process-group cleanup."""
+    ready_limit = time.monotonic() + 3.0
+    while process.poll() is None and time.monotonic() < ready_limit:
+        if child_pid.exists() and heartbeat.exists() and heartbeat.stat().st_size:
+            return time.monotonic()
+        time.sleep(0.01)
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    process.wait(timeout=1.0)
+    raise AssertionError("synthetic Git child did not become ready")
+
+
 def test_bounded_prepare_stops_git_process_group_before_unlock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -505,7 +520,27 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
     parent_path = os.environ.get("PATH", os.defpath)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{parent_path}")
     monotonic = time.monotonic
-    deadline = _PreparationDeadline(monotonic() + 0.5, monotonic)
+    clock_start = monotonic()
+    ready_at: float | None = None
+    real_popen = subprocess.Popen
+    started: list[subprocess.Popen[str]] = []
+
+    def preparation_clock() -> float:
+        # Preparation must reach the process whose cleanup this test measures.
+        return clock_start if ready_at is None else clock_start + monotonic() - ready_at
+
+    def start_ready_git(cmd: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        nonlocal ready_at
+        process = real_popen(cmd, **kwargs)
+        if cmd[1:3] != ["worktree", "add"]:
+            return process
+        started.append(process)
+        assert kwargs.get("start_new_session") is True
+        ready_at = _wait_for_git_child_ready(process, child_pid, heartbeat)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", start_ready_git)
+    deadline = _PreparationDeadline(clock_start + 0.5, preparation_clock)
 
     try:
         with pytest.raises(SourceWorkspacePreparationError) as raised:
@@ -544,6 +579,11 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         else:
             pytest.fail("the timed-out Git child process is still running")
     finally:
+        for process in started:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            if process.poll() is None:
+                process.wait(timeout=1.0)
         if child_pid.exists():
             pid = int(child_pid.read_text(encoding="utf-8").split()[0])
             with suppress(ProcessLookupError):
@@ -1765,14 +1805,14 @@ def test_fresh_writer_claim_blocks_concurrent_adoption_until_claim_finishes(
         repo_root=repo,
         base_dir=source_manager.base_dir,
         base_branch=second,
-        remote_git_env={},
-        remote_git_config=("-c", "credential.helper="),
+        remote_git_env=build_git_child_env(),
+        remote_git_config=("-c", "protocol.file.allow=always"),
     )
     adopted_manager = WorktreeManager(
         repo_root=repo,
         base_dir=source_manager.base_dir,
-        remote_git_env={},
-        remote_git_config=("-c", "credential.helper="),
+        remote_git_env=build_git_child_env(),
+        remote_git_config=("-c", "protocol.file.allow=always"),
     )
     adoption_errors: list[Exception] = []
     contention_observed = threading.Event()
@@ -1866,8 +1906,8 @@ def test_worker_pool_adoption_waits_for_active_source_lease(
         repo_root=repo,
         base_dir=source_manager.base_dir,
         base_branch=second,
-        remote_git_env={},
-        remote_git_config=("-c", "credential.helper="),
+        remote_git_env=build_git_child_env(),
+        remote_git_config=("-c", "protocol.file.allow=always"),
     )
     with source_manager.implementation_writer_handoff(9) as handoff:
         writer = worktree_manager.create_worktree(
@@ -1952,7 +1992,10 @@ def test_worker_pool_adoption_waits_for_active_source_lease(
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",
-                return_value=({}, ("-c", "credential.helper=")),
+                return_value=(
+                    build_git_child_env(),
+                    ("-c", "protocol.file.allow=always"),
+                ),
             ) as remote_configuration,
             patch.object(pool, "_sync_worktree_to_remote_branch", observed_sync),
             patch.object(
@@ -2618,8 +2661,8 @@ def test_direct_writer_transition_revalidates_predecessor_branch_before_removal(
     worktree_manager = WorktreeManager(
         repo_root=repo,
         base_dir=source_manager.base_dir,
-        remote_git_env={},
-        remote_git_config=("-c", "credential.helper="),
+        remote_git_env=build_git_child_env(),
+        remote_git_config=("-c", "protocol.file.allow=always"),
     )
 
     with pytest.raises(
@@ -2706,8 +2749,8 @@ def test_adopted_writer_cannot_bypass_the_common_handoff_lifecycle(tmp_path: Pat
     worktree_manager = WorktreeManager(
         repo_root=repo,
         base_dir=source_manager.base_dir,
-        remote_git_env={},
-        remote_git_config=("-c", "credential.helper="),
+        remote_git_env=build_git_child_env(),
+        remote_git_config=("-c", "protocol.file.allow=always"),
     )
 
     with source_manager.implementation_writer_handoff(9) as handoff:
@@ -3545,6 +3588,7 @@ def test_prepared_same_identity_recovery_preserves_registered_predecessor(tmp_pa
         writer = manager.prepare(9, SourceLane.IMPLEMENTATION, revision, branch="adopted-writer")
     assert writer.generation == 4
     exclude = repo / _git(repo, "rev-parse", "--git-path", "info/exclude")
+    exclude.parent.mkdir(parents=True, exist_ok=True)
     with exclude.open("a") as stream:
         stream.write("\npreserved-sentinel\n")
     sentinel = writer.cwd / "preserved-sentinel"

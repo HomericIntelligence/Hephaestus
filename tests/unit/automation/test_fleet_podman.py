@@ -95,7 +95,7 @@ def test_explicit_engine_context_and_finite_container_environment(engine_process
         "XDG_RUNTIME_DIR",
         "LC_CTYPE",
     }
-    assert environment["HOME"] == str(private / "home")
+    assert environment["HOME"] == str((private / "home").resolve())
     assert "--mount" in args and str(spec.workspace) in args[args.index("--mount") + 1]
 
 
