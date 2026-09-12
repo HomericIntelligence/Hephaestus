@@ -7437,7 +7437,7 @@ class TestAuditPublication:
     ) -> None:
         """A pending write intent applies only to its exact journal head."""
         item = make_work_item(issue=50, pr=1001)
-        pending = {
+        pending: dict[str, object] = {
             "finding_id": "f" * 64,
             "source_head": "a" * 40,
             "severity": "major",
@@ -7448,7 +7448,11 @@ class TestAuditPublication:
             "surface": "inline",
             "reason": None,
         }
-        current = {**pending, "source_head": "b" * 40, "status": "published"}
+        current: dict[str, object] = {
+            **pending,
+            "source_head": "b" * 40,
+            "status": "published",
+        }
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "b" * 40,
