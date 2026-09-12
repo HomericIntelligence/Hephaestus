@@ -379,6 +379,115 @@ def test_legacy_caller_state_blocks_before_intake_and_is_preserved(
     assert _caller_state(caller) == before
 
 
+@pytest.mark.parametrize("directory_name", [".automation-state", ".issue_implementer"])
+def test_linked_caller_detects_legacy_state_in_primary_worktree(
+    tmp_path: Path,
+    directory_name: str,
+) -> None:
+    """A linked caller cannot miss legacy state in its primary worktree."""
+    primary, remote = _make_repository(tmp_path)
+    linked = tmp_path / "linked-caller"
+    _run_git(primary, "worktree", "add", "-b", "feature", str(linked), "HEAD")
+    source = primary / "build" / directory_name
+    source.mkdir(parents=True)
+    marker = source / "state.json"
+    marker.write_bytes(b'{"preserve":"primary"}\n')
+    manager = _manager(linked, remote)
+    destination = manager.state_dir / "build"
+    primary_before = _caller_state(primary)
+    linked_before = _caller_state(linked)
+
+    with pytest.raises(RepoIntakeError, match="legacy state") as caught:
+        manager.prepare()
+
+    assert str(source) in str(caught.value)
+    assert str(destination) in str(caught.value)
+    assert marker.read_bytes() == b'{"preserve":"primary"}\n'
+    assert not destination.exists()
+    assert not manager.worktree_path.exists()
+    assert _caller_state(primary) == primary_before
+    assert _caller_state(linked) == linked_before
+
+
+@pytest.mark.parametrize("path_kind", ["file", "symlink"])
+def test_linked_caller_rejects_unsafe_legacy_path_in_primary_worktree(
+    tmp_path: Path,
+    path_kind: str,
+) -> None:
+    """A linked caller validates legacy paths in its primary worktree."""
+    primary, remote = _make_repository(tmp_path)
+    linked = tmp_path / "linked-caller"
+    _run_git(primary, "worktree", "add", "-b", "feature", str(linked), "HEAD")
+    source = primary / "build" / ".automation-state"
+    source.parent.mkdir()
+    if path_kind == "file":
+        source.write_bytes(b"preserve-primary\n")
+    else:
+        foreign = tmp_path / "foreign-primary-state"
+        foreign.mkdir()
+        source.symlink_to(foreign, target_is_directory=True)
+    manager = _manager(linked, remote)
+    primary_before = _caller_state(primary)
+    linked_before = _caller_state(linked)
+
+    with pytest.raises(RepoIntakeError, match="legacy state path is unsafe") as caught:
+        manager.prepare()
+
+    assert str(source) in str(caught.value)
+    if path_kind == "symlink":
+        assert source.is_symlink()
+    else:
+        assert source.read_bytes() == b"preserve-primary\n"
+    assert not manager.worktree_path.exists()
+    assert _caller_state(primary) == primary_before
+    assert _caller_state(linked) == linked_before
+
+
+def test_linked_caller_legacy_state_blocks_owned_intake_rebind(tmp_path: Path) -> None:
+    """Legacy state in another worktree blocks removal of an owned intake."""
+    primary, remote = _make_repository(tmp_path)
+    linked = tmp_path / "linked-caller"
+    _run_git(primary, "worktree", "add", "-b", "feature", str(linked), "HEAD")
+    first = _manager(linked, remote).prepare()
+    source = primary / "build" / ".automation-state"
+    source.mkdir(parents=True)
+    marker = source / "state.json"
+    marker.write_bytes(b"preserve-before-rebind\n")
+    _advance_remote(tmp_path, remote)
+
+    with pytest.raises(RepoIntakeError, match="legacy state") as caught:
+        _manager(linked, remote).prepare()
+
+    assert str(source) in str(caught.value)
+    assert marker.read_bytes() == b"preserve-before-rebind\n"
+    assert _run_git(first.path, "rev-parse", "HEAD").stdout.strip() == first.revision
+
+
+def test_linked_caller_reports_all_registered_legacy_state_sources(tmp_path: Path) -> None:
+    """One failure identifies legacy state in each registered worktree."""
+    primary, remote = _make_repository(tmp_path)
+    linked = tmp_path / "linked-caller"
+    _run_git(primary, "worktree", "add", "-b", "feature", str(linked), "HEAD")
+    primary_source = primary / "build" / ".automation-state"
+    linked_source = linked / "build" / ".issue_implementer"
+    for source, content in (
+        (primary_source, b"primary\n"),
+        (linked_source, b"linked\n"),
+    ):
+        source.mkdir(parents=True)
+        (source / "state.json").write_bytes(content)
+    manager = _manager(linked, remote)
+
+    with pytest.raises(RepoIntakeError, match="legacy state") as caught:
+        manager.prepare()
+
+    assert str(primary_source) in str(caught.value)
+    assert str(linked_source) in str(caught.value)
+    assert (primary_source / "state.json").read_bytes() == b"primary\n"
+    assert (linked_source / "state.json").read_bytes() == b"linked\n"
+    assert not manager.worktree_path.exists()
+
+
 def test_empty_legacy_caller_state_does_not_block_intake(tmp_path: Path) -> None:
     """Empty ordinary legacy directories do not claim state authority."""
     caller, remote = _make_repository(tmp_path)

@@ -259,7 +259,7 @@ class RepoIntakeManager:
         self._validate_origin()
         records = self._worktree_records()
         self._validate_state_paths(records)
-        self._validate_state_authority()
+        self._validate_state_authority(records)
         old = self._read_receipt()
         record = self._validate_existing(old, records)
         default_branch = self._read_default_branch()
@@ -439,33 +439,38 @@ class RepoIntakeManager:
             raise RepoIntakeError("repository-intake receipt ownership does not match")
         return receipt
 
-    def _validate_state_authority(self) -> None:
+    def _validate_state_authority(self, records: tuple[_WorktreeRecord, ...]) -> None:
         """Reject legacy or conflicting durable state before intake changes."""
         destination_root = self.state_dir / "build"
         legacy_sources: list[Path] = []
+        for legacy_root in self._legacy_worktree_roots(records):
+            for name in _DURABLE_STATE_NAMES:
+                source = legacy_root / "build" / name
+                if self._state_directory_has_entries(
+                    source,
+                    root=legacy_root,
+                    source=source,
+                    destination=destination_root,
+                    label="legacy",
+                ):
+                    legacy_sources.append(source)
+        recovery_source = (
+            legacy_sources[0]
+            if legacy_sources
+            else self.caller_root / "build" / _DURABLE_STATE_NAMES[0]
+        )
         for name in _DURABLE_STATE_NAMES:
-            source = self.caller_root / "build" / name
             destination = destination_root / name
-            if self._state_directory_has_entries(
-                source,
-                root=self.caller_root,
-                source=source,
-                destination=destination_root,
-                label="legacy",
-            ):
-                legacy_sources.append(source)
             self._state_directory_has_entries(
                 destination,
                 root=self.state_dir,
-                source=source,
+                source=recovery_source,
                 destination=destination_root,
                 label="destination",
             )
         destination_has_state = self._destination_has_state(
             destination_root,
-            source=legacy_sources[0]
-            if legacy_sources
-            else self.caller_root / "build" / _DURABLE_STATE_NAMES[0],
+            source=recovery_source,
         )
         if not legacy_sources:
             return
@@ -481,6 +486,20 @@ class RepoIntakeManager:
             f"preserve source {sources} and destination {destination_root}, "
             "then reconcile them manually"
         )
+
+    def _legacy_worktree_roots(
+        self,
+        records: tuple[_WorktreeRecord, ...],
+    ) -> tuple[Path, ...]:
+        """Return unique registered roots other than the intake destination."""
+        roots: list[Path] = []
+        for record in records:
+            if self._same_path(record.path, self.worktree_path):
+                continue
+            if any(self._same_path(record.path, root) for root in roots):
+                continue
+            roots.append(record.path)
+        return tuple(roots)
 
     def _state_directory_has_entries(
         self,
@@ -522,6 +541,8 @@ class RepoIntakeManager:
         label: str,
     ) -> None:
         """Require a lexical, nonsymlinked state path below its owner root."""
+        if root.is_symlink() or (root.exists() and not root.is_dir()):
+            self._raise_unsafe_state_path(label, root, source, destination)
         try:
             relative = path.relative_to(root)
         except ValueError:
