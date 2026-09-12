@@ -2123,6 +2123,23 @@ class TestPrReviewStageStep:
                 ),
             ),
             (
+                "review_worker_pool_scratch_descriptor_walk",
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    (
+                        "tests/unit/automation/pipeline/test_worker_pool.py::"
+                        "TestWorkerPoolSubmitComplete::"
+                        "test_immutable_host_allows_descriptor_walk_to_scratch"
+                    ),
+                    "-q",
+                    "--tb=short",
+                ),
+            ),
+            (
                 "review_stalled_consumer_verification",
                 (
                     "uv",
@@ -2364,6 +2381,32 @@ class TestPrReviewStageStep:
             (
                 f"{path}::TestHostVerificationGitExecPath::"
                 "test_active_sandbox_git_reads_validated_system_config"
+            ),
+            "-q",
+            "--tb=short",
+        )
+
+    def test_changed_worker_pool_runs_host_scratch_descriptor_boundary(self) -> None:
+        """A worker-pool change runs the scratch descriptor-walk regression."""
+        path = "tests/unit/automation/pipeline/test_worker_pool.py"
+        specs = _host_verification_specs(
+            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        )
+
+        spec = next(
+            spec for spec in specs if spec.descr == "review_worker_pool_scratch_descriptor_walk"
+        )
+
+        assert spec.changed_path == path
+        assert spec.argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            (
+                f"{path}::TestWorkerPoolSubmitComplete::"
+                "test_immutable_host_allows_descriptor_walk_to_scratch"
             ),
             "-q",
             "--tb=short",
