@@ -106,6 +106,24 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
         descr="review_worker_pool_git_exec_path",
     ),
     _HostVerificationSpec(
+        changed_path="tests/unit/automation/pipeline/test_worker_pool.py",
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            (
+                "tests/unit/automation/pipeline/test_worker_pool.py::"
+                "TestWorkerPoolSubmitComplete::"
+                "test_immutable_host_allows_descriptor_walk_to_scratch"
+            ),
+            "-q",
+            "--tb=short",
+        ),
+        descr="review_worker_pool_scratch_descriptor_walk",
+    ),
+    _HostVerificationSpec(
         changed_path="tests/performance/test_worker_pool_load.py",
         argv=(
             "uv",

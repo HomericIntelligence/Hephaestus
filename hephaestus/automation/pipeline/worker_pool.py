@@ -1471,6 +1471,10 @@ def _host_verification_profile(
                     git_system_config,
                 )
             ),
+            # A secure descriptor walk opens each directory from the root to
+            # the scratch path. Permit directory read data only on this exact
+            # ancestor chain. The scratch subtree rule supplies later access.
+            f'(allow file-read-data (path-ancestors "{_sandbox_string(scratch)}"))',
             # Tests and validation helpers commonly use the stable ``/tmp``
             # spelling for inert fixture paths.  macOS resolves that symlink
             # through ``/private/tmp`` before a mocked boundary can observe

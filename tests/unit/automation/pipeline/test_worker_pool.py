@@ -53,7 +53,10 @@ from hephaestus.automation.agent_config import (
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
-from hephaestus.automation.pipeline.codex_worktree_boundary import CodexWorktreeBoundaryError
+from hephaestus.automation.pipeline.codex_worktree_boundary import (
+    CodexWorktreeBoundaryError,
+    _open_no_follow_path,
+)
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
@@ -135,7 +138,10 @@ from hephaestus.automation.worktree_snapshot import (
     _read_bounded_git_output_with_threads,
     _terminate_bounded_process_tree,
 )
-from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.config.child_environments import (
+    build_git_child_env,
+    build_nested_host_verification_env,
+)
 from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
@@ -3617,10 +3623,70 @@ class TestWorkerPoolSubmitComplete:
         assert f'  (literal "{Path("/tmp").resolve()}")' not in profile
         assert f'(allow file-read-metadata (literal "{Path("/tmp").resolve()}"))' in profile
         assert f'(allow file-read-metadata (path-ancestors "{source.resolve()}"))' in profile
+        file_read_data_rules = tuple(
+            line.strip()
+            for line in profile.splitlines()
+            if line.strip().startswith("(allow file-read-data ")
+        )
+        assert file_read_data_rules == (
+            f'(allow file-read-data (path-ancestors "{scratch.resolve()}"))',
+        )
         assert source_entry in profile
-        assert f"(allow file-write* {source_entry})" not in profile
-        assert f"(allow file-write* {scratch_entry})" in profile
-        assert f"(allow file-write* {pi_smoke_logs_entry})" in profile
+        file_write_rules = tuple(
+            line.strip()
+            for line in profile.splitlines()
+            if line.strip().startswith("(allow file-write* ")
+        )
+        assert file_write_rules == (
+            f"(allow file-write* {scratch_entry})",
+            f"(allow file-write* {pi_smoke_logs_entry})",
+        )
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
+    def test_immutable_host_allows_descriptor_walk_to_scratch(self, pool: WorkerPool) -> None:
+        """A secure path walker can open the exact scratch ancestor chain."""
+        checkout = Path.cwd().resolve()
+        head = _git(checkout, "rev-parse", "HEAD")
+        checkout_before = _immutable_runner_checkout_state(checkout)
+        try:
+            active_environment = build_nested_host_verification_env(checkout)
+        except ValueError:
+            active_environment = None
+        if active_environment is not None:
+            target = Path(active_environment["TMPDIR"]) / "descriptor-walk"
+            target.mkdir()
+            descriptor = _open_no_follow_path(target, directory=True)
+            os.close(descriptor)
+            assert _immutable_runner_checkout_state(checkout) == checkout_before
+            return
+
+        denied_checkout_file = checkout / "pyproject.toml"
+        program = (
+            "import os, pytest; from pathlib import Path; "
+            "from hephaestus.automation.pipeline.codex_worktree_boundary "
+            "import _open_no_follow_path; "
+            "target = Path(os.environ['TMPDIR']) / 'descriptor-walk'; "
+            "target.mkdir(); "
+            "descriptor = _open_no_follow_path(target, directory=True); "
+            "os.close(descriptor); "
+            f"denied = Path({str(denied_checkout_file)!r}); "
+            'exec("with pytest.raises(PermissionError):\\n    denied.read_text()")'
+        )
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=checkout,
+            argv=("uv", "run", "python", "-c", program),
+            timeout_s=60,
+            expected_head_sha=head,
+            immutable_source=True,
+        )
+
+        result = pool._run_build_test(job)
+
+        assert result.ok is True, (result.error, result.stdout_tail, result.stderr_tail)
+        assert result.value["head_sha"] == head
+        assert result.value["immutable_source"] is True
+        assert _immutable_runner_checkout_state(checkout) == checkout_before
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
     def test_immutable_trusted_runner_preserves_native_fallback(

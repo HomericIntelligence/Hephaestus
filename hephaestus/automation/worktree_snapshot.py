@@ -700,6 +700,32 @@ _TRUSTED_GIT_DISCOVERY_ROOTS = (
     Path("/usr/bin"),
 )
 
+_TRUSTED_APPLE_GIT_EXECUTABLES = frozenset(
+    {
+        Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+        Path("/Applications/Xcode.app/Contents/Developer/usr/bin/git"),
+    }
+)
+
+
+def _validated_apple_git_executable(candidate: Path) -> Path | None:
+    """Return an exact Apple Git leaf whose parent chain is safe."""
+    if candidate not in _TRUSTED_APPLE_GIT_EXECUTABLES:
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+        if resolved != candidate:
+            return None
+        current = Path(candidate.anchor)
+        for part in candidate.parent.parts[1:]:
+            current /= part
+            parent_mode = current.lstat().st_mode
+            if not stat.S_ISDIR(parent_mode) or parent_mode & 0o022:
+                return None
+    except OSError:
+        return None
+    return resolved
+
 
 def _controlled_git_env() -> dict[str, str]:
     """Return an environment that cannot redirect or extend Git execution."""
@@ -740,8 +766,15 @@ def _trusted_git_executable() -> str | None:
             if is_discovered:
                 if not candidate.is_absolute() or candidate.is_symlink():
                     continue
-                resolved = candidate
-                trusted_roots = _TRUSTED_GIT_DISCOVERY_ROOTS
+                if candidate in _TRUSTED_APPLE_GIT_EXECUTABLES:
+                    apple_git = _validated_apple_git_executable(candidate)
+                    if apple_git is None:
+                        continue
+                    resolved = apple_git
+                    trusted_roots: tuple[Path, ...] = ()
+                else:
+                    resolved = candidate
+                    trusted_roots = _TRUSTED_GIT_DISCOVERY_ROOTS
             else:
                 resolved = candidate.resolve(strict=True)
                 trusted_roots = _TRUSTED_GIT_ROOTS
@@ -752,7 +785,7 @@ def _trusted_git_executable() -> str | None:
             continue
         if mode & 0o022:
             continue
-        if not any(resolved.is_relative_to(root) for root in trusted_roots):
+        if trusted_roots and not any(resolved.is_relative_to(root) for root in trusted_roots):
             continue
         return str(resolved)
     return None
