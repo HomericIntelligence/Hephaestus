@@ -1511,6 +1511,27 @@ def test_rebase_prompt_renders_with_public_context_without_worktree_parent(tmp_p
     assert f"mkdir -p \"$(dirname '{worktree_path}')\"" in prompt
 
 
+def test_rebase_prompt_renders_string_worktree_paths_for_lock_and_fallbacks(
+    tmp_path: Path,
+) -> None:
+    """A public string path keeps lock and fallback commands in the agent worktree."""
+    worktree_path = tmp_path / "repo" / "build" / ".worktrees" / "tidy-agent"
+
+    prompt = tidy_module.PromptCatalog.current().render(
+        "tidy/rebase_fix.j2",
+        branch="feature/nested",
+        trunk="main",
+        repo_path=tmp_path / "repo",
+        repo_slug="owner/repo",
+        worktree_path=str(worktree_path),
+    )
+
+    assert f"> '{worktree_path}/uv.lock'" in prompt
+    assert f"(cd '{worktree_path}' && git show <ref>:<file> > <file>)" in prompt
+    assert f"git -C '{worktree_path}' switch <branch>" in prompt
+    assert f"git -C '{worktree_path}' reset --keep" in prompt
+
+
 def test_agent_prompt_quotes_worktree_commands_for_a_path_with_spaces(tmp_path: Path) -> None:
     """A rebase prompt preserves a repository path with spaces as one argument."""
     repo_path = tmp_path / "repo with spaces"
@@ -1674,6 +1695,64 @@ def test_agent_prompt_quotes_shell_metacharacters_as_single_arguments(tmp_path: 
     assert agent_lock.is_file()
     assert agent_lock.read_text(encoding="utf-8") == "agent lock\n"
     assert primary_lock.read_text(encoding="utf-8") == "primary lock\n"
+
+
+def test_agent_prompt_safety_net_commands_target_only_the_agent_worktree(
+    tmp_path: Path,
+) -> None:
+    """Each fallback command keeps its read and write target in the agent worktree."""
+    repo_path = tmp_path / "primary"
+    (repo_path / ".git").mkdir(parents=True)
+    prompt = tidy_module._make_agent_prompt("feature/nested", "main", repo_path, "owner/repo")
+    worktree_path = tidy_module._agent_worktree_path(repo_path, "feature/nested")
+    worktree_path.mkdir(parents=True)
+    primary_marker = repo_path / "primary-marker"
+    primary_marker.write_text("unchanged\n", encoding="utf-8")
+
+    fallback_lines = [line for line in prompt.splitlines() if line.startswith("- Instead of `git")]
+    assert len(fallback_lines) == 3
+    show_command, switch_command, reset_command = (line.split("`")[-2] for line in fallback_lines)
+    show_command = show_command.replace("<ref>:<file>", "origin/main:fixture.txt").replace(
+        "<file>", "fixture.txt"
+    )
+    switch_command = switch_command.replace("<branch>", "feature/fallback")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    trace = tmp_path / "git-trace"
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\t%s\\n\' "$PWD" "$*" >> "$TRACE_PATH"\n'
+        "printf '%s\\n' 'fallback content'\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    environment = {
+        "PATH": f"{fake_bin}{os.pathsep}{os.defpath}",
+        "TRACE_PATH": str(trace),
+    }
+
+    for command in (show_command, switch_command, reset_command):
+        result = subprocess.run(
+            ["sh", "-c", command],
+            cwd=repo_path,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    assert (worktree_path / "fixture.txt").read_text(encoding="utf-8") == "fallback content\n"
+    assert not (repo_path / "fixture.txt").exists()
+    assert primary_marker.read_text(encoding="utf-8") == "unchanged\n"
+    traces = trace.read_text(encoding="utf-8").splitlines()
+    assert traces == [
+        f"{worktree_path}\tshow origin/main:fixture.txt",
+        f"{repo_path}\t-C {worktree_path} switch feature/fallback",
+        f"{repo_path}\t-C {worktree_path} reset --keep",
+    ]
 
 
 @pytest.mark.parametrize(

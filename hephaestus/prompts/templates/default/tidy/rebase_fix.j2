@@ -96,7 +96,7 @@ NOTE: <one sentence summary>
 ```
 
 ## Safety Net workarounds (use these when Safety Net hook blocks a command):
-- Instead of `git checkout <ref> -- <file>`: use `git show <ref>:<file> > <file>`
-- Instead of `git checkout <branch>`: use `git switch <branch>`
-- Instead of `git reset --hard`: use `git reset --keep` (only if no uncommitted changes)
+- Instead of `git checkout <ref> -- <file>`: use `(cd {{ shell_quote(worktree_path) }} && git show <ref>:<file> > <file>)`
+- Instead of `git checkout <branch>`: use `git -C {{ shell_quote(worktree_path) }} switch <branch>`
+- Instead of `git reset --hard`: use `git -C {{ shell_quote(worktree_path) }} reset --keep` (only if no uncommitted changes)
 - `GIT_EDITOR=true` before `git rebase --continue` to suppress editor prompts
