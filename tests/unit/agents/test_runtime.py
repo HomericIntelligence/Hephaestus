@@ -6097,6 +6097,60 @@ def test_pi_adapter_failure_redacts_default_provider_and_model_components(
     _assert_pi_exception_chain_is_redacted(exc_info.value)
 
 
+def test_pi_adapter_timeout_preserves_type_and_redacts_diagnostics(
+    tmp_path: Path,
+) -> None:
+    """A Pi adapter timeout keeps its type and removes private diagnostics."""
+    from hephaestus.agents.execution_policy import resolve_policy
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    executable = tmp_path / "pi"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    class TimingOutAdapter:
+        def invoke(self, **_kwargs: object) -> agent_runtime.AgentRunResult:
+            raise subprocess.TimeoutExpired(
+                ["pi", "--model", "private-provider-alias/private-test-alias"],
+                7,
+                output="private-provider-alias private-test-alias",
+                stderr="private-test-alias private-provider-alias",
+            )
+
+    @contextmanager
+    def profile(*_args: object, **_kwargs: object) -> Any:
+        yield tmp_path, {}
+
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.PR_REVIEW,
+        SessionLifecycle.ONE_SHOT,
+    )
+    with (
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", TimingOutAdapter()),
+        patch("hephaestus.agents.runtime._pi_automation_profile", side_effect=profile),
+        patch("hephaestus.agents.runtime._pi_policy_args", return_value=[]),
+        pytest.raises(subprocess.TimeoutExpired) as exc_info,
+    ):
+        agent_runtime._run_pi_with_policy(
+            prompt="review",
+            cwd=tmp_path,
+            timeout=30,
+            model="private-provider-alias/private-test-alias",
+            policy=resolve_policy(request),
+            preflight=PiPreflightResult.ready_result(executable=executable),
+            lifecycle=SessionLifecycle.ONE_SHOT,
+        )
+
+    exc = exc_info.value
+    assert isinstance(exc, subprocess.TimeoutExpired)
+    assert exc.timeout == 7
+    for diagnostic in (str(exc.cmd), str(exc.stdout), str(exc.stderr)):
+        assert "private-provider-alias" not in diagnostic
+        assert "private-test-alias" not in diagnostic
+        assert agent_runtime.PI_PRIVATE_REDACTION in diagnostic
+
+
 @pytest.mark.parametrize(
     "settings",
     [
