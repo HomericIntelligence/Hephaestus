@@ -4900,6 +4900,8 @@ class TestGitOps:
     def _linked_intake_writer(
         tmp_path: Path,
         branch: str = "2973-auto-impl",
+        *,
+        relative_paths: bool = False,
     ) -> tuple[Path, Path, Path, str]:
         """Create a linked intake checkout with one contained writer."""
         repo = tmp_path / "repo"
@@ -4924,16 +4926,18 @@ class TestGitOps:
         git("add", ".gitignore", "tracked.txt")
         git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
         head = git("rev-parse", "HEAD").stdout.strip()
-        git("worktree", "add", "-q", "--detach", str(intake), head)
+        relative_args = ("--relative-paths",) if relative_paths else ()
+        git("worktree", "add", "-q", *relative_args, "--detach", str(intake), head)
         writer.parent.mkdir(parents=True)
-        git("worktree", "add", "-q", "-b", branch, str(writer), head)
+        git("worktree", "add", "-q", *relative_args, "-b", branch, str(writer), head)
         return repo, intake, writer, head
 
     @staticmethod
     def _linked_intake_metadata_paths(intake: Path) -> dict[str, Path]:
         """Return the metadata objects that bind one linked intake checkout."""
         marker = intake / ".git"
-        admin = Path(marker.read_text(encoding="ascii").removeprefix("gitdir: ").strip())
+        raw_admin = Path(marker.read_text(encoding="ascii").removeprefix("gitdir: ").strip())
+        admin = raw_admin if raw_admin.is_absolute() else Path(os.path.abspath(intake / raw_admin))
         return {
             "gitfile": marker,
             "admin": admin,
@@ -6298,6 +6302,110 @@ class TestGitOps:
         assert linked.binding.worktree == writer
         assert linked.binding.common_dir == repo / ".git"
         assert linked.binding.branch_sha == head
+
+    @pytest.mark.parametrize(
+        "secure_descriptors",
+        (
+            pytest.param(True, id="descriptor"),
+            pytest.param(False, id="portable"),
+        ),
+    )
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Linked intake tests require POSIX")
+    def test_linked_binding_accepts_relative_intake_metadata(
+        self,
+        tmp_path: Path,
+        secure_descriptors: bool,
+    ) -> None:
+        """The binding accepts relative Git links for an intake checkout."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        repo, intake, writer, head = self._linked_intake_writer(
+            tmp_path,
+            relative_paths=True,
+        )
+        metadata = self._linked_intake_metadata_paths(intake)
+        marker_pointer = (
+            metadata["gitfile"].read_text(encoding="ascii").removeprefix("gitdir: ").strip()
+        )
+        back_pointer = metadata["gitdir"].read_text(encoding="ascii").strip()
+        assert not Path(marker_pointer).is_absolute()
+        assert ".." in Path(marker_pointer).parts
+        assert not Path(back_pointer).is_absolute()
+        assert ".." in Path(back_pointer).parts
+
+        with patch(
+            f"{_WP}._secure_dir_fd_supported",
+            return_value=secure_descriptors,
+        ):
+            linked = worker_pool_module._linked_worktree_git_env(intake, writer)
+
+        assert linked.binding.repo_root == intake
+        assert linked.binding.worktree == writer
+        assert linked.binding.common_dir == repo / ".git"
+        assert linked.binding.branch_sha == head
+
+    @pytest.mark.parametrize(
+        ("secure_descriptors", "pointer_kind"),
+        (
+            pytest.param(True, "gitfile", id="descriptor-gitfile"),
+            pytest.param(True, "gitdir", id="descriptor-gitdir"),
+            pytest.param(False, "gitfile", id="portable-gitfile"),
+            pytest.param(False, "gitdir", id="portable-gitdir"),
+        ),
+    )
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Linked intake tests require POSIX")
+    def test_linked_binding_rejects_relative_symlink_detour(
+        self,
+        tmp_path: Path,
+        secure_descriptors: bool,
+        pointer_kind: str,
+    ) -> None:
+        """A relative link cannot use a symbolic-link detour."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        _repo, intake, writer, _head = self._linked_intake_writer(
+            tmp_path,
+            relative_paths=True,
+        )
+        intake_metadata = self._linked_intake_metadata_paths(intake)
+        intake_admin = intake_metadata["admin"]
+        if pointer_kind == "gitfile":
+            writer_admin = self._linked_intake_metadata_paths(writer)["admin"]
+            detour = intake / "metadata-detour"
+            detour.symlink_to(writer_admin, target_is_directory=True)
+            pointer = Path(detour.name) / ".." / intake_admin.name
+            intake_metadata["gitfile"].write_text(
+                f"gitdir: {pointer}\n",
+                encoding="ascii",
+            )
+            pointer_base = intake
+            expected = intake_admin
+        else:
+            detour = intake_admin / "metadata-detour"
+            detour.symlink_to(writer.parent, target_is_directory=True)
+            pointer = Path(detour.name) / ".." / ".git"
+            intake_metadata["gitdir"].write_text(f"{pointer}\n", encoding="ascii")
+            pointer_base = intake_admin
+            expected = intake_metadata["gitfile"]
+        assert (pointer_base / pointer).resolve(strict=True) == expected
+
+        with (
+            patch(
+                f"{_WP}._secure_dir_fd_supported",
+                return_value=secure_descriptors,
+            ),
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"repository root (gitfile is invalid|admin back-pointer changed)"
+                    r"|linked worktree metadata "
+                    r"(directory is unsafe|path has a reparse point)"
+                ),
+            ),
+        ):
+            worker_pool_module._linked_worktree_git_env(intake, writer)
 
     @pytest.mark.parametrize("secure_descriptors", (True, False))
     @pytest.mark.parametrize(

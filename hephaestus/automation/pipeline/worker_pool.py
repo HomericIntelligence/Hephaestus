@@ -2736,20 +2736,100 @@ def _open_directory_at_no_follow(
     return descriptor, _filesystem_identity(opened)
 
 
-def _open_absolute_directory_no_follow(path: Path) -> tuple[int, _FilesystemIdentity]:
-    """Open each component of an absolute directory without following links."""
+def _open_absolute_directory_no_follow(
+    path: Path,
+    *,
+    bound_path: Path | None = None,
+    bound_identity: _FilesystemIdentity | None = None,
+) -> tuple[int, _FilesystemIdentity, Path]:
+    """Open an absolute directory through its raw path components."""
     if not path.is_absolute():
         raise RuntimeError("linked worktree metadata path is not absolute")
-    descriptor, identity = _open_directory_no_follow(Path(path.anchor))
+    current = Path(path.anchor)
+    descriptor, identity = _open_directory_no_follow(current)
+    descriptors = [descriptor]
     try:
         for component in path.parts[1:]:
-            next_descriptor, identity = _open_directory_at_no_follow(descriptor, component)
-            os.close(descriptor)
-            descriptor = next_descriptor
+            if component == ".":
+                continue
+            if component == "..":
+                if len(descriptors) == 1:
+                    raise RuntimeError("linked worktree metadata path escapes its anchor")
+                os.close(descriptors.pop())
+                current = current.parent
+                descriptor = descriptors[-1]
+                identity = _filesystem_identity(os.fstat(descriptor))
+                continue
+            descriptor, identity = _open_directory_at_no_follow(descriptors[-1], component)
+            descriptors.append(descriptor)
+            current /= component
+            if bound_path is not None and current == bound_path and identity != bound_identity:
+                raise RuntimeError("linked worktree metadata directory changed")
     except BaseException:
-        os.close(descriptor)
+        for open_descriptor in reversed(descriptors):
+            os.close(open_descriptor)
         raise
-    return descriptor, identity
+    for open_descriptor in descriptors[:-1]:
+        os.close(open_descriptor)
+    return descriptors[-1], identity, current
+
+
+def _metadata_path(base: Path, value: str) -> tuple[Path, bool]:
+    """Return an absolute raw metadata path and its relative-path state."""
+    raw = Path(value)
+    relative = not raw.is_absolute()
+    return (base / raw if relative else raw), relative
+
+
+def _open_root_metadata_directory_no_follow(
+    base: Path,
+    value: str,
+    *,
+    base_identity: _FilesystemIdentity,
+    error: str,
+) -> tuple[int, _FilesystemIdentity, Path]:
+    """Open a Git metadata directory through the pointer's raw path."""
+    raw, relative = _metadata_path(base, value)
+    try:
+        return _open_absolute_directory_no_follow(
+            raw,
+            bound_path=base if relative else None,
+            bound_identity=base_identity if relative else None,
+        )
+    except RuntimeError as exc:
+        if ".." in raw.parts:
+            raise RuntimeError(error) from exc
+        raise
+    except OSError as exc:
+        raise RuntimeError(error) from exc
+
+
+def _root_metadata_file_identity_no_follow(
+    base: Path,
+    value: str,
+    *,
+    base_identity: _FilesystemIdentity,
+    error: str,
+) -> tuple[Path, _FilesystemIdentity]:
+    """Identify a Git metadata file through the pointer's raw path."""
+    raw, relative = _metadata_path(base, value)
+    parent_fd = -1
+    try:
+        parent_fd, _parent_identity, parent = _open_absolute_directory_no_follow(
+            raw.parent,
+            bound_path=base if relative else None,
+            bound_identity=base_identity if relative else None,
+        )
+        return parent / raw.name, _regular_file_identity_at(parent_fd, raw.name)
+    except RuntimeError as exc:
+        if ".." in raw.parts:
+            raise RuntimeError(error) from exc
+        raise
+    except OSError as exc:
+        raise RuntimeError(error) from exc
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
 
 
 def _read_bounded_regular_at(
@@ -2902,13 +2982,30 @@ def _read_branch_ref(
     return matches[0]
 
 
-def _portable_path_identity(path: Path, *, directory: bool) -> _FilesystemIdentity:
-    """Validate one absolute path without a symlink, junction, or reparse point."""
+def _portable_path_identity(
+    path: Path,
+    *,
+    directory: bool,
+    bound_path: Path | None = None,
+    bound_identity: _FilesystemIdentity | None = None,
+) -> _FilesystemIdentity:
+    """Validate the raw components of one absolute portable path."""
     if not path.is_absolute():
         raise RuntimeError("linked worktree metadata path is not absolute")
     current = Path(path.anchor)
-    final: os.stat_result | None = None
-    for component in path.parts[1:]:
+    final = current.lstat()
+    metadata_stack = [final]
+    components = path.parts[1:]
+    for offset, component in enumerate(components):
+        if component == ".":
+            continue
+        if component == "..":
+            if len(metadata_stack) == 1:
+                raise RuntimeError("linked worktree metadata path escapes its anchor")
+            metadata_stack.pop()
+            current = current.parent
+            final = metadata_stack[-1]
+            continue
         current /= component
         metadata = current.lstat()
         reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -2916,11 +3013,13 @@ def _portable_path_identity(path: Path, *, directory: bool) -> _FilesystemIdenti
             getattr(metadata, "st_file_attributes", 0) & reparse_flag
         ):
             raise RuntimeError("linked worktree metadata path has a reparse point")
-        if current != path and not stat.S_ISDIR(metadata.st_mode):
+        if offset != len(components) - 1 and not stat.S_ISDIR(metadata.st_mode):
             raise RuntimeError("linked worktree metadata path prefix is unsafe")
         final = metadata
-    if final is None:
-        final = path.lstat()
+        metadata_stack.append(metadata)
+        identity = _filesystem_identity(metadata)
+        if bound_path is not None and current == bound_path and identity != bound_identity:
+            raise RuntimeError("linked worktree metadata directory changed")
     expected_type = stat.S_ISDIR if directory else stat.S_ISREG
     if not expected_type(final.st_mode):
         raise RuntimeError("linked worktree metadata path has an unsafe type")
@@ -2964,23 +3063,30 @@ def _normalized_metadata_path(base: Path, value: str) -> Path:
     return Path(os.path.abspath(candidate))
 
 
-def _normalized_root_metadata_path(
+def _portable_root_metadata_identity(
     base: Path,
     value: str,
     *,
+    directory: bool,
+    base_identity: _FilesystemIdentity,
     error: str,
-    allow_common_parent: bool = False,
-) -> Path:
-    """Normalize root metadata without hiding a link before parent traversal."""
-    separator_value = value.replace("\\", "/") if os.name == "nt" else value
-    if allow_common_parent and os.name != "nt" and value == "..\\..":
-        raise RuntimeError(error)
-    native_common_parent = value == "../.." or (os.name == "nt" and value == "..\\..")
-    if allow_common_parent and native_common_parent:
-        return base.parent.parent
-    if any(component in {".", ".."} for component in separator_value.split("/")):
-        raise RuntimeError(error)
-    return _normalized_metadata_path(base, value)
+) -> tuple[Path, _FilesystemIdentity]:
+    """Validate and identify one portable Git metadata pointer."""
+    raw, relative = _metadata_path(base, value)
+    try:
+        identity = _portable_path_identity(
+            raw,
+            directory=directory,
+            bound_path=base if relative else None,
+            bound_identity=base_identity if relative else None,
+        )
+    except RuntimeError as exc:
+        if ".." in raw.parts:
+            raise RuntimeError(error) from exc
+        raise
+    except OSError as exc:
+        raise RuntimeError(error) from exc
+    return _normalized_metadata_path(base, value), identity
 
 
 def _portable_repository_git_root(repo_root: Path) -> _RepositoryGitRootBinding:
@@ -3002,30 +3108,31 @@ def _portable_repository_git_root(repo_root: Path) -> _RepositoryGitRootBinding:
     pointer, marker_identity = _portable_read_git_pointer(marker)
     if not pointer.startswith("gitdir: "):
         raise RuntimeError("repository root gitfile is invalid")
-    admin_dir = _normalized_root_metadata_path(
+    admin_dir, admin_identity = _portable_root_metadata_identity(
         repo_root,
         pointer.removeprefix("gitdir: "),
+        directory=True,
+        base_identity=repo_identity,
         error="repository root gitfile is invalid",
     )
-    admin_identity = _portable_path_identity(admin_dir, directory=True)
     back_pointer, back_pointer_identity = _portable_read_git_pointer(admin_dir / "gitdir")
-    if (
-        _normalized_root_metadata_path(
-            admin_dir,
-            back_pointer,
-            error="repository root admin back-pointer changed",
-        )
-        != marker
-    ):
+    back_path, back_identity = _portable_root_metadata_identity(
+        admin_dir,
+        back_pointer,
+        directory=False,
+        base_identity=admin_identity,
+        error="repository root admin back-pointer changed",
+    )
+    if back_path != marker or back_identity != marker_identity:
         raise RuntimeError("repository root admin back-pointer changed")
     common_pointer, common_pointer_identity = _portable_read_git_pointer(admin_dir / "commondir")
-    common_dir = _normalized_root_metadata_path(
+    common_dir, common_identity = _portable_root_metadata_identity(
         admin_dir,
         common_pointer,
+        directory=True,
+        base_identity=admin_identity,
         error="repository root common directory changed",
-        allow_common_parent=True,
     )
-    common_identity = _portable_path_identity(common_dir, directory=True)
     if admin_dir.parent != common_dir / "worktrees":
         raise RuntimeError("repository root admin directory is unregistered")
     return _RepositoryGitRootBinding(
@@ -3065,35 +3172,34 @@ def _repository_git_root(
     pointer, marker_identity = _read_bounded_git_pointer_at(repo_fd, ".git")
     if not pointer.startswith("gitdir: "):
         raise RuntimeError("repository root gitfile is invalid")
-    admin_dir = _normalized_root_metadata_path(
+    admin_fd, admin_identity, admin_dir = _open_root_metadata_directory_no_follow(
         repo_root,
         pointer.removeprefix("gitdir: "),
+        base_identity=repo_identity,
         error="repository root gitfile is invalid",
     )
-    admin_fd, admin_identity = _open_absolute_directory_no_follow(admin_dir)
+    common_fd = -1
     try:
         back_pointer, back_pointer_identity = _read_bounded_git_pointer_at(admin_fd, "gitdir")
-        if (
-            _normalized_root_metadata_path(
-                admin_dir,
-                back_pointer,
-                error="repository root admin back-pointer changed",
-            )
-            != repo_root / ".git"
-        ):
+        back_path, back_identity = _root_metadata_file_identity_no_follow(
+            admin_dir,
+            back_pointer,
+            base_identity=admin_identity,
+            error="repository root admin back-pointer changed",
+        )
+        if back_path != repo_root / ".git" or back_identity != marker_identity:
             raise RuntimeError("repository root admin back-pointer changed")
         common_pointer, common_pointer_identity = _read_bounded_git_pointer_at(
             admin_fd, "commondir"
         )
-        common_dir = _normalized_root_metadata_path(
+        common_fd, common_identity, common_dir = _open_root_metadata_directory_no_follow(
             admin_dir,
             common_pointer,
+            base_identity=admin_identity,
             error="repository root common directory changed",
-            allow_common_parent=True,
         )
     finally:
         os.close(admin_fd)
-    common_fd, common_identity = _open_absolute_directory_no_follow(common_dir)
     if admin_dir.parent != common_dir / "worktrees":
         os.close(common_fd)
         raise RuntimeError("repository root admin directory is unregistered")
