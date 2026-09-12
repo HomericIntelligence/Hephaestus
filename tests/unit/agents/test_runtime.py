@@ -6541,6 +6541,25 @@ def test_is_agent_authenticated_uses_explicit_status_timeout() -> None:
     assert mock_run.call_args.kwargs["timeout"] == 77
 
 
+def test_is_agent_authenticated_propagates_a_cancelled_guarded_probe() -> None:
+    """Keep cancellation distinct when it prevents authentication."""
+    shutdown = threading.Event()
+    shutdown.set()
+    with (
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/codex"),
+        patch("subprocess.Popen") as popen,
+    ):
+        with pytest.raises(InterruptedError, match="cancelled before start"):
+            agent_runtime.is_agent_authenticated(
+                "codex",
+                auth_status_timeout=10,
+                remaining_timeout=lambda: 3,
+                shutdown=shutdown,
+            )
+
+    popen.assert_not_called()
+
+
 def test_resolve_agent_rejects_pi_auto_detection_until_preflight_exists(tmp_path: Path) -> None:
     """Pi cannot enter normal automation before the required preflight exists."""
     _write_pi_models_config(tmp_path)

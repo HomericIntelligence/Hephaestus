@@ -160,10 +160,12 @@ def compact_agent_session(
             provider,
             cwd=cwd,
             disable_pi_automation=disable_pi_automation,
-            auth_status_timeout=auth_status_timeout,
+            auth_status_timeout=min(auth_status_timeout, timeout_s),
             pi_isolation_adapter=pi_isolation_adapter,
             pi_dir=pi_dir,
             model_references=(model or "",),
+            remaining_timeout=remaining_timeout,
+            shutdown=shutdown,
         )
         resume = agent_compaction_resume(
             provider,

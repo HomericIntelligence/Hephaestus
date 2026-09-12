@@ -78,7 +78,7 @@ from hephaestus.constants import (
     agent_auth_status_timeout,
 )
 from hephaestus.io.utils import write_secure
-from hephaestus.utils.helpers import strip_null_bytes
+from hephaestus.utils.helpers import run_subprocess, strip_null_bytes
 
 LOG = logging.getLogger(__name__)
 
@@ -622,6 +622,8 @@ def is_agent_authenticated(
     *,
     auth_status_timeout: int | None = None,
     pi_dir: Path | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
+    shutdown: threading.Event | None = None,
 ) -> bool:
     """Return True when the provider CLI is installed and reports logged-in auth."""
     if shutil.which(agent) is None:
@@ -637,19 +639,35 @@ def is_agent_authenticated(
             "opencode": _platform_child_env,
         }[agent]()
         try:
-            result = subprocess.run(
-                list(cmd),
-                text=True,
-                capture_output=True,
-                timeout=(
-                    agent_auth_status_timeout()
-                    if auth_status_timeout is None
-                    else auth_status_timeout
-                ),
-                check=False,
-                env=child_env,
+            timeout_s = (
+                agent_auth_status_timeout() if auth_status_timeout is None else auth_status_timeout
             )
-        except (OSError, subprocess.TimeoutExpired):
+            if remaining_timeout is not None:
+                timeout_s = min(timeout_s, remaining_timeout())
+            if remaining_timeout is not None or shutdown is not None:
+                result = run_subprocess(
+                    list(cmd),
+                    timeout=timeout_s,
+                    check=False,
+                    log_on_error=False,
+                    env=child_env,
+                    shutdown=shutdown,
+                    remaining_timeout=remaining_timeout,
+                )
+            else:
+                result = subprocess.run(
+                    list(cmd),
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout_s,
+                    check=False,
+                    env=child_env,
+                )
+        except (InterruptedError, subprocess.TimeoutExpired):
+            if remaining_timeout is not None or shutdown is not None:
+                raise
+            continue
+        except OSError:
             continue
         if result.returncode == 0:
             if agent == "pi":
@@ -882,6 +900,8 @@ def resolve_agent(
     pi_isolation_adapter: str | None = None,
     pi_dir: Path | None = None,
     model_references: Sequence[str] | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
+    shutdown: threading.Event | None = None,
 ) -> AgentName:
     """Resolve an optional provider selection into a concrete backend.
 
@@ -890,6 +910,11 @@ def resolve_agent(
     process. An empty reference resolves the trusted operator-global default.
     """
     effective_cwd = Path.cwd() if cwd is None else cwd
+    authentication_options: dict[str, Any] = {}
+    if remaining_timeout is not None:
+        authentication_options["remaining_timeout"] = remaining_timeout
+    if shutdown is not None:
+        authentication_options["shutdown"] = shutdown
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
@@ -909,6 +934,7 @@ def resolve_agent(
             agent,
             auth_status_timeout=auth_status_timeout,
             pi_dir=pi_dir if agent == "pi" else None,
+            **authentication_options,
         )
         if not authenticated:
             if shutil.which(agent) is None:
@@ -948,7 +974,11 @@ def resolve_agent(
         )
 
     for agent_name in installed_agents:
-        if is_agent_authenticated(agent_name, auth_status_timeout=auth_status_timeout):
+        if is_agent_authenticated(
+            agent_name,
+            auth_status_timeout=auth_status_timeout,
+            **authentication_options,
+        ):
             _validate_fixed_provider_model_references(agent_name, model_references)
             return agent_name
 
