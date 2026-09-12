@@ -303,9 +303,9 @@ def test_existing_intake_rejects_unsafe_worktree_routing_before_external_action(
     receipt = first_manager.prepare()
     gitfile_line = (receipt.path / ".git").read_text(encoding="utf-8").strip()
     admin_value = Path(gitfile_line.removeprefix("gitdir: "))
-    admin_dir = (
-        admin_value if admin_value.is_absolute() else receipt.path / admin_value
-    ).resolve(strict=True)
+    admin_dir = (admin_value if admin_value.is_absolute() else receipt.path / admin_value).resolve(
+        strict=True
+    )
     worktree_config = admin_dir / "config.worktree"
     unsafe_config = b'[url "file:///attacker/"]\n\tinsteadOf = https://github.com/\n'
     worktree_config.write_bytes(unsafe_config)
