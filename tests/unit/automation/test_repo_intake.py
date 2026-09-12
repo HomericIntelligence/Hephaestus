@@ -294,6 +294,72 @@ def test_existing_intake_rejects_unbound_git_pointer_before_checkout_git(
     assert _caller_state(caller) == caller_state
 
 
+def test_existing_intake_rejects_unsafe_worktree_routing_before_external_action(
+    tmp_path: Path,
+) -> None:
+    """Unsafe worktree routing stops intake before checkout or external commands."""
+    caller, remote = _make_repository(tmp_path)
+    first_manager = _manager(caller, remote)
+    receipt = first_manager.prepare()
+    gitfile_line = (receipt.path / ".git").read_text(encoding="utf-8").strip()
+    admin_value = Path(gitfile_line.removeprefix("gitdir: "))
+    admin_dir = (
+        admin_value if admin_value.is_absolute() else receipt.path / admin_value
+    ).resolve(strict=True)
+    worktree_config = admin_dir / "config.worktree"
+    unsafe_config = (
+        '[url "file:///attacker/"]\n'
+        "\tinsteadOf = https://github.com/\n"
+    ).encode()
+    worktree_config.write_bytes(unsafe_config)
+    receipt_content = first_manager.receipt_path.read_bytes()
+    registrations = _run_git(caller, "worktree", "list", "--porcelain").stdout
+    caller_state = _caller_state(caller)
+    intake_head = _run_git(receipt.path, "rev-parse", "HEAD").stdout
+    intake_status = _run_git(
+        receipt.path,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    ).stdout
+    tracked_content = (receipt.path / "tracked.txt").read_bytes()
+
+    manager = _manager(caller, remote)
+    original_runner = manager._run_command
+    prohibited_commands: list[tuple[tuple[str, ...], Path | None]] = []
+
+    def record_external_action(
+        command: list[str],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        cwd = kwargs.get("cwd")
+        if cwd == receipt.path or command[0] == "gh" or "fetch" in command:
+            prohibited_commands.append((tuple(command), cwd))
+        return original_runner(command, **kwargs)
+
+    manager._run_command = record_external_action
+
+    with pytest.raises(RepoIntakeError):
+        manager.prepare()
+
+    assert prohibited_commands == []
+    assert first_manager.receipt_path.read_bytes() == receipt_content
+    assert worktree_config.read_bytes() == unsafe_config
+    assert _run_git(caller, "worktree", "list", "--porcelain").stdout == registrations
+    assert _run_git(receipt.path, "rev-parse", "HEAD").stdout == intake_head
+    assert (
+        _run_git(
+            receipt.path,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ).stdout
+        == intake_status
+    )
+    assert (receipt.path / "tracked.txt").read_bytes() == tracked_content
+    assert _caller_state(caller) == caller_state
+
+
 def test_direct_scope_from_detached_linked_worktree_prepares_isolated_intake(
     tmp_path: Path,
 ) -> None:
