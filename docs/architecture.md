@@ -773,8 +773,8 @@ Repo intake has three separate worktree layers:
 
 Before intake preparation starts, the main worker pool takes an exclusive
 nonblocking run lease for the Git common directory. The lease path is stable
-for the common directory. The pool keeps the entered lease across all loop
-passes. Thus, a second process cannot remove or rebind the fixed intake path
+for the common directory. The pool holds the lease across all loop passes.
+Thus, a second process cannot remove or rebind the fixed intake path
 while the first coordinator uses it. The second process fails immediately with
 `repository_intake_in_use` and tells the operator to wait for the active run.
 
@@ -2008,8 +2008,8 @@ across processes.
 
 `prepare_intake` first takes a nonblocking run-lifetime lease at
 `<git-common-dir>/hephaestus-repository-intake.run.lock`. The main worker pool
-keeps one entered lease context for each Git common directory. A repeated
-preparation in the same pool uses that context and does not take a nested file
+holds one lease for each Git common directory. A repeated preparation in the
+same pool uses that lease and does not take a nested file
 lock. If the first preparation fails, the pool releases the new lease. The
 coordinator releases retained leases after its final run report. A separate
 process that owns the lease causes an immediate `repository_intake_in_use`

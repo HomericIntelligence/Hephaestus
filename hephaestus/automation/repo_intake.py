@@ -867,7 +867,7 @@ class RepoIntakeManager:
             raise RepoIntakeError("repository-intake Git configuration is unsafe")
 
     def _validate_intake_git_pointer(self) -> None:
-        """Bind the intake gitfile to its registered common-directory admin entry."""
+        """Verify the intake gitfile against its common-directory admin entry."""
         worktree_fd = common_fd = worktrees_fd = admin_fd = -1
         try:
             worktree_fd = os.open(self.worktree_path, self._directory_open_flags())

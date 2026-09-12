@@ -11,7 +11,8 @@ Steps:
    when it already exists. Intake validates the expected remote, creates or
    reuses a detached clean worktree, and binds it to the fetched default-branch
    SHA. A clone-created checkout retains the strict synchronization proof.
-   Both operations are logged-skipped under dry-run — the
+   Clone, checkout synchronization, and intake preparation jobs are
+   logged-skipped under dry-run — the
    coordinator's ``_submit`` asserts no job is ever submitted in dry-run.
    Budget ``clone`` = 2; exhaustion -> finished(fail).
 2. [M] LABELS: ``ctx.github.ensure_state_labels()`` only after checkout

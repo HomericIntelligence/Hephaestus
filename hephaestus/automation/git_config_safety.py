@@ -55,7 +55,7 @@ def unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
             return key
         # A checkout-specific URL rewrite can transform the validated literal
         # GitHub origin when it is later passed to ``git fetch``. Any local HTTP
-        # configuration can proxy traffic or change TLS verification and trust.
+        # configuration can proxy traffic or change TLS verification or certificate trust.
         if normalized.startswith(("http.", "url.")):
             return key
     return None
