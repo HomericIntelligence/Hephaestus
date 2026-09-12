@@ -7145,6 +7145,42 @@ class TestAuditPublication:
         assert isinstance(result, StageOutcome)
         assert item.attempts.get("pr_review_iter", 0) == 0
 
+    @pytest.mark.precommit
+    def test_valid_advisory_without_a_publication_surface_is_not_publishable(self) -> None:
+        """A valid advisory does not claim publication without an audit write."""
+        findings = [
+            {
+                "path": "a.py",
+                "line": 1,
+                "side": "RIGHT",
+                "severity": "major",
+                "body": "Blocking finding.",
+                "finding_id": "a" * 64,
+            },
+            {
+                "path": "a.py",
+                "line": 2,
+                "side": "RIGHT",
+                "severity": "minor",
+                "body": "Advisory finding.",
+                "finding_id": "b" * 64,
+            },
+        ]
+
+        records = pr_review_jobs._build_review_finding_records(
+            source_head="c" * 40,
+            initial_valid=findings,
+            corrections=[],
+            corrected_inline=[],
+            corrected_audit=[],
+            not_publishable=[],
+        )
+
+        assert [(record["status"], record["surface"], record["reason"]) for record in records] == [
+            ("published", "inline", None),
+            ("not_publishable", "not_publishable", "audit_surface_unavailable"),
+        ]
+
     def test_invalid_anchor_starts_one_dedicated_correction_before_post(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

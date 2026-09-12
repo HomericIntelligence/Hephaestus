@@ -35,6 +35,7 @@ _FINDING_REASONS = frozenset(
         "path_not_in_diff",
         "line_not_in_diff",
         "unsupported_side",
+        "audit_surface_unavailable",
     }
 )
 

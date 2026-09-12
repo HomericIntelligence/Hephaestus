@@ -107,11 +107,11 @@ def _build_review_finding_records(
             _finding_record(
                 finding,
                 source_head=source_head,
-                status="published",
-                surface="inline" if blocking else "audit",
+                status="published" if blocking else "not_publishable",
+                surface="inline" if blocking else "not_publishable",
                 original_anchor=_finding_anchor(finding),
                 final_anchor=_finding_anchor(finding) if blocking else None,
-                reason=None,
+                reason=None if blocking else "audit_surface_unavailable",
             )
         )
     outcomes: dict[str, tuple[str, str, dict[str, object], dict[str, object] | None]] = {}
