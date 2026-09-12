@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -87,15 +90,170 @@ def _facts(issue: int) -> IssueFacts:
     )
 
 
-def test_explicit_scope_syncs_before_labels_and_classification(
+def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A scoped run gates direct source admission on a clean-main sync job."""
-    events: list[str] = []
+    """A direct scope admits work only after a real isolated intake succeeds."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", "--initial-branch=master", str(remote)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     checkout = tmp_path / "repo-a"
     checkout.mkdir()
-    pool = _RecordingPool(events)
+    for arguments in (
+        ("init", "--initial-branch=master"),
+        ("config", "user.name", "Test User"),
+        ("config", "user.email", "test@example.invalid"),
+    ):
+        subprocess.run(
+            ["git", *arguments],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    (checkout / "tracked.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "tracked.txt"], cwd=checkout, check=True, capture_output=True, text=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "base"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "master"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/org/repo-a.git"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    updater = tmp_path / "updater"
+    subprocess.run(
+        ["git", "clone", str(remote), str(updater)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for arguments in (
+        ("config", "user.name", "Test User"),
+        ("config", "user.email", "test@example.invalid"),
+    ):
+        subprocess.run(
+            ["git", *arguments],
+            cwd=updater,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    (updater / "remote.txt").write_text("remote\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "remote.txt"], cwd=updater, check=True, capture_output=True, text=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "remote update"],
+        cwd=updater,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "master"],
+        cwd=updater,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    remote_head = subprocess.run(
+        ["git", "rev-parse", "refs/heads/master"],
+        cwd=remote,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (checkout / "tracked.txt").write_text("staged\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "tracked.txt"], cwd=checkout, check=True, capture_output=True, text=True
+    )
+    (checkout / "tracked.txt").write_text("unstaged\n", encoding="utf-8")
+    (checkout / "untracked.txt").write_text("keep\n", encoding="utf-8")
+
+    def caller_state() -> tuple[str, str, str, str, str]:
+        def output(*arguments: str) -> str:
+            return subprocess.run(
+                ["git", *arguments],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+        return (
+            output("rev-parse", "HEAD"),
+            output("symbolic-ref", "--quiet", "--short", "HEAD"),
+            output("diff", "--cached"),
+            output("diff"),
+            output("status", "--porcelain", "--untracked-files=all"),
+        )
+
+    before = caller_state()
+    events: list[str] = []
     github = _RecordingGitHub(events)
+    auxiliary = FakeWorkerPool()
+    auxiliary._auxiliary = True
+
+    class RecordingWorkerPool(WorkerPool):
+        """Record only a successful real intake preparation."""
+
+        def _git_prepare_intake(self, job: GitJob) -> JobResult:
+            result = super()._git_prepare_intake(job)
+            if result.ok:
+                events.append("intake-prepared")
+            return result
+
+    def pool_factory(
+        size: int,
+        shutdown: threading.Event,
+        completion_q: Any,
+    ) -> RecordingWorkerPool:
+        return RecordingWorkerPool(size=size, shutdown=shutdown, completion_q=completion_q)
+
+    gh = tmp_path / "gh"
+    gh.write_text("#!/bin/sh\nprintf 'master\\n'\n", encoding="utf-8")
+    gh.chmod(0o755)
+    remote_rewrite = (
+        "-c",
+        f"url.{remote.as_uri()}.insteadOf=https://github.com/org/repo-a.git",
+    )
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.worker_pool._trusted_gh_executable",
+        lambda _root: str(gh),
+    )
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.worker_pool._trusted_remote_git_config",
+        lambda _gh: remote_rewrite,
+    )
 
     def classify(issue: int, github_arg: Any) -> IssueFacts:
         del github_arg
@@ -113,57 +271,37 @@ def test_explicit_scope_syncs_before_labels_and_classification(
             repos=["repo-a"],
             issues=[101],
             projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+            scope=PipelineScope(frozenset({StageName.PLANNING})),
             rate_guard_enabled=False,
         ),
         github=github,
-        **fake_worker_factories(pool, None),
+        pool_factory=pool_factory,
+        auxiliary_pool_factory=auxiliary.factory,
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
 
     assert coordinator.run() == 0
-    assert events[:3] == ["intake", "labels", "classify"]
+    assert events == ["intake-prepared", "labels", "classify"]
     issue_item = next(item for item in coordinator.items if item.issue == 101)
-    assert issue_item.payload["_direct_scope_base_sha"] == "a" * 40
-    assert coordinator.config.repo_roots["repo-a"] == tmp_path / ".repo-a-intake" / "worktree"
+    intake_root = coordinator.config.repo_roots["repo-a"]
+    receipt = coordinator.config.repo_intake_receipts["repo-a"]
+    intake_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=intake_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert receipt["revision"] == intake_head == remote_head
+    assert issue_item.payload["_direct_scope_base_sha"] == remote_head
     assert coordinator.config.repo_caller_roots["repo-a"] == checkout
-    assert coordinator.config.repo_state_roots["repo-a"] == tmp_path / ".repo-a-intake"
-
-
-def test_direct_scope_uses_isolated_intake_when_primary_has_tracked_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A direct scope prepares intake without synchronizing the caller checkout."""
-    checkout = tmp_path / "repo-a"
-    checkout.mkdir()
-    (checkout / "tracked.txt").write_text("local work\n", encoding="utf-8")
-    events: list[str] = []
-    pool = _RecordingPool(events)
-    github = _RecordingGitHub(events)
-
-    monkeypatch.setattr(
-        "hephaestus.automation.pipeline.admission._filter_open_issues",
-        lambda _repo, issues: list(issues),
-    )
-    coordinator = Coordinator(
-        PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            issues=[101],
-            projects_dir=tmp_path,
-            scope=PipelineScope(frozenset({StageName.PLANNING})),
-        ),
-        github=github,
-        **fake_worker_factories(pool, None),
-        install_signals=False,
-    )
-    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
-
-    coordinator.run()
-
-    first_git_job = next(handle.job for handle in pool.submitted if isinstance(handle.job, GitJob))
-    assert first_git_job.op == "prepare_intake"
+    assert coordinator.config.repo_state_roots["repo-a"] == Path(str(receipt["state_root"]))
+    assert intake_root == Path(str(receipt["path"]))
+    assert auxiliary.submitted == []
+    assert caller_state() == before
+    assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "unstaged\n"
+    assert (checkout / "untracked.txt").read_text(encoding="utf-8") == "keep\n"
 
 
 def test_missing_direct_scope_checkout_clones_then_syncs_before_classification(

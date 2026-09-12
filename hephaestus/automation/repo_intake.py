@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -144,6 +145,7 @@ class RepoIntakeReceipt:
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _KNOWN_WORKTREE_LINES = ("locked", "prunable")
 _DURABLE_STATE_NAMES = (".automation-state", ".issue_implementer")
+_GIT_METADATA_TEXT_LIMIT = 4096
 
 
 def _validate_receipt_values(receipt: RepoIntakeReceipt) -> None:
@@ -295,6 +297,8 @@ class RepoIntakeManager:
         self._validate_state_authority(records)
         old = self._read_receipt()
         record = self._validate_existing(old, records)
+        if old is not None:
+            self._validate_intake_git_pointer()
         default_branch = self._read_default_branch()
         if old is None:
             if record is not None:
@@ -305,12 +309,15 @@ class RepoIntakeManager:
             records = self._worktree_records()
             record = self._record_for_path(records)
         else:
-            self._assert_clean_detached(record)
+            self._validate_intake_git_pointer()
             self._fetch(default_branch, checkout=self.worktree_path)
             target = self._remote_head(default_branch, checkout=self.worktree_path)
         physical_head = self._head(self.worktree_path)
         if physical_head != target:
-            record = self._record_for_path(self._worktree_records())
+            records = self._worktree_records()
+            record = self._record_for_path(records)
+            self._assert_no_registered_descendants(records)
+            self._validate_intake_git_pointer()
             self._assert_clean_detached(record)
             current_head = self._head(self.worktree_path)
             if record is None or record.head != current_head or current_head != physical_head:
@@ -318,6 +325,7 @@ class RepoIntakeManager:
             self._assert_fast_forward(current_head, target)
             self._remove_worktree()
             self._add_worktree(target)
+        self._validate_intake_git_pointer()
         self._assert_clean_detached(self._record_for_path(self._worktree_records()))
         final_head = self._head(self.worktree_path)
         remote_head = self._remote_head(default_branch, checkout=self.worktree_path)
@@ -718,6 +726,125 @@ class RepoIntakeManager:
         if record.head != receipt.revision:
             raise RepoIntakeError("repository-intake receipt and worktree HEAD do not match")
         return record
+
+    @staticmethod
+    def _directory_open_flags() -> int:
+        """Return flags that open one directory without following its final link."""
+        if os.name != "posix" or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+            raise RepoIntakeError(
+                "repository-intake linked-worktree proof requires no-follow descriptors"
+            )
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    @staticmethod
+    def _read_metadata_text(directory_fd: int, name: str) -> str:
+        """Read one bounded regular metadata file without following a link."""
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        file_fd = -1
+        try:
+            file_fd = os.open(name, flags, dir_fd=directory_fd)
+            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                raise RepoIntakeError("repository-intake Git metadata is not a regular file")
+            chunks: list[bytes] = []
+            remaining = _GIT_METADATA_TEXT_LIMIT + 1
+            while remaining:
+                chunk = os.read(file_fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            if len(payload) > _GIT_METADATA_TEXT_LIMIT:
+                raise RepoIntakeError("repository-intake Git metadata is too large")
+            return payload.decode("utf-8")
+        except RepoIntakeError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise RepoIntakeError("repository-intake Git metadata is unavailable") from exc
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+
+    @staticmethod
+    def _normalized_metadata_path(value: str, *, relative_to: Path) -> Path:
+        """Return an absolute lexical path from one Git metadata value."""
+        raw = Path(value)
+        candidate = raw if raw.is_absolute() else relative_to / raw
+        return Path(os.path.abspath(candidate))
+
+    @staticmethod
+    def _metadata_line(payload: str) -> str:
+        """Return one canonical metadata line or fail closed."""
+        lines = payload.splitlines()
+        if len(lines) != 1 or not lines[0] or lines[0] != lines[0].strip():
+            raise RepoIntakeError("repository-intake Git metadata is malformed")
+        return lines[0]
+
+    def _validate_intake_git_pointer(self) -> None:
+        """Bind the intake gitfile to its registered common-directory admin entry."""
+        worktree_fd = common_fd = worktrees_fd = admin_fd = -1
+        try:
+            worktree_fd = os.open(self.worktree_path, self._directory_open_flags())
+            gitfile = self._read_metadata_text(worktree_fd, ".git")
+            gitfile_line = self._metadata_line(gitfile)
+            if not gitfile_line.startswith("gitdir: "):
+                raise RepoIntakeError("repository-intake Git pointer is malformed")
+            gitdir_value = gitfile_line.removeprefix("gitdir: ")
+            if not gitdir_value:
+                raise RepoIntakeError("repository-intake Git pointer is malformed")
+            admin_path = self._normalized_metadata_path(
+                gitdir_value,
+                relative_to=self.worktree_path,
+            )
+            worktrees_path = self.common_dir / "worktrees"
+            if admin_path.parent != worktrees_path or admin_path.name in {"", ".", ".."}:
+                raise RepoIntakeError(
+                    "repository-intake Git pointer is outside the selected common directory"
+                )
+
+            common_fd = os.open(self.common_dir, self._directory_open_flags())
+            worktrees_fd = os.open("worktrees", self._directory_open_flags(), dir_fd=common_fd)
+            admin_fd = os.open(admin_path.name, self._directory_open_flags(), dir_fd=worktrees_fd)
+            backlink = self._metadata_line(self._read_metadata_text(admin_fd, "gitdir"))
+            commondir = self._metadata_line(self._read_metadata_text(admin_fd, "commondir"))
+            backlink_path = self._normalized_metadata_path(backlink, relative_to=admin_path)
+            if backlink_path != self.worktree_path / ".git":
+                raise RepoIntakeError("repository-intake Git pointer is not bound to its worktree")
+            common_path = self._normalized_metadata_path(commondir, relative_to=admin_path)
+            try:
+                resolved_common_path = common_path.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise RepoIntakeError(
+                    "repository-intake Git common-directory pointer is unavailable"
+                ) from exc
+            if resolved_common_path != self.common_dir:
+                raise RepoIntakeError(
+                    "repository-intake Git pointer is bound to a different common directory"
+                )
+        except RepoIntakeError:
+            raise
+        except OSError as exc:
+            raise RepoIntakeError("repository-intake Git metadata is unavailable") from exc
+        finally:
+            for file_descriptor in (admin_fd, worktrees_fd, common_fd, worktree_fd):
+                if file_descriptor >= 0:
+                    os.close(file_descriptor)
+
+    def _assert_no_registered_descendants(
+        self,
+        records: tuple[_WorktreeRecord, ...],
+    ) -> None:
+        """Preserve each registered worktree below an intake that needs rebind."""
+        intake_path = Path(os.path.abspath(self.worktree_path))
+        for record in records:
+            registered_path = Path(os.path.abspath(record.path))
+            if registered_path != intake_path and registered_path.is_relative_to(intake_path):
+                raise RepoIntakeError(
+                    "repository-intake has a registered descendant worktree; "
+                    f"preserve and relocate or remove it before retry: {record.path}"
+                )
 
     def _assert_clean_detached(self, record: _WorktreeRecord | None) -> None:
         """Require the owned intake worktree to be clean and detached."""

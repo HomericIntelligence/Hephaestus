@@ -779,9 +779,21 @@ while the first coordinator uses it. The second process fails immediately with
 `repository_intake_in_use` and tells the operator to wait for the active run.
 
 The intake worktree is created or rebound only under the separate shared Git
-metadata lock. A valid clean receipt is reused. A dirty, symlinked,
-unregistered, foreign, or mismatched path is preserved and fails closed.
-Intake never attaches the default branch a second time.
+metadata lock. Before a Git command uses an existing intake, a filesystem-only
+check verifies that its regular no-follow `.git` pointer identifies one direct
+child of the selected common directory's `worktrees` directory. The check also
+verifies that the admin directory's `gitdir` back-pointer identifies the intake
+and its `commondir` pointer identifies the selected common directory. A valid
+clean receipt is reused. A dirty, symlinked, special, malformed, unregistered,
+foreign, or mismatched path is preserved and fails closed. Intake never
+attaches the default branch a second time.
+
+Before intake replaces an outdated checkout, it reads the shared worktree
+registry again. If another registered worktree is below the intake path, the
+operation stops and preserves both worktrees and the receipt. The operator must
+relocate or remove the descendant through the verified worktree recovery
+process before a later run can rebind the intake. Intake does not use a path
+name to decide ownership, and it does not delete the descendant.
 
 The coordinator releases all intake run leases after both worker lanes stop,
 completion results drain, resumable records are complete, and the final summary

@@ -66,6 +66,18 @@ command does not use shell substitution for the path.
 If the intake receipt and registered path are both valid but the checkout is
 dirty, preserve the path and inspect it before a later run. If the path is
 foreign, symlinked, or ambiguously registered, stop and recover it manually.
+The same rule applies when the intake `.git` pointer is a symlink, special file,
+malformed pointer, or pointer to a different worktree admin directory. Do not
+run Git from the intake path until its regular `.git` pointer, admin `gitdir`
+back-pointer, and admin `commondir` pointer agree with the caller's selected Git
+common directory.
+
+An outdated intake also fails closed when a registered worktree is below its
+path. Use `git -C <caller-repo> worktree list --porcelain` to identify the
+descendant. Preserve clean and dirty descendants. Relocate or remove the
+descendant through the verified recovery process, and then retry intake. Do not
+delete the parent intake while the descendant is registered.
+
 The automation process holds an exclusive intake run lease while it uses this
 path. A second process fails immediately with `repository_intake_in_use`. It
 does not wait and it does not allocate, remove, or rebind the intake worktree.

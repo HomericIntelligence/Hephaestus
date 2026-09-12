@@ -7,6 +7,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -205,6 +206,92 @@ def test_stale_clean_owned_intake_is_rebound_under_common_dir_lock(tmp_path: Pat
     assert second.revision != first.revision
     assert second.generation == first.generation + 1
     assert second.revision == _run_git(second.path, "rev-parse", "HEAD").stdout.strip()
+
+
+@pytest.mark.parametrize("descendant_is_dirty", [False, True])
+def test_rebind_preserves_registered_descendant_worktree(
+    tmp_path: Path,
+    descendant_is_dirty: bool,
+) -> None:
+    """A rebind stops when a registered worktree is below the intake path."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    first = manager.prepare()
+    child = first.path / "build" / "registered-child"
+    _run_git(caller, "worktree", "add", "--detach", str(child), "HEAD")
+    if descendant_is_dirty:
+        (child / "tracked.txt").write_text("child work\n", encoding="utf-8")
+    child_content = (child / "tracked.txt").read_bytes()
+    child_status = _run_git(child, "status", "--porcelain", "--untracked-files=all").stdout
+    receipt_content = manager.receipt_path.read_bytes()
+    registrations = _run_git(caller, "worktree", "list", "--porcelain").stdout
+    caller_state = _caller_state(caller)
+    _advance_remote(tmp_path, remote)
+
+    with pytest.raises(RepoIntakeError, match="registered descendant worktree"):
+        _manager(caller, remote).prepare()
+
+    assert child.is_dir()
+    assert (child / "tracked.txt").read_bytes() == child_content
+    assert _run_git(child, "status", "--porcelain", "--untracked-files=all").stdout == child_status
+    assert _run_git(caller, "worktree", "list", "--porcelain").stdout == registrations
+    assert _run_git(first.path, "rev-parse", "HEAD").stdout.strip() == first.revision
+    assert manager.receipt_path.read_bytes() == receipt_content
+    assert _caller_state(caller) == caller_state
+
+
+@pytest.mark.parametrize("pointer_kind", ["symlink", "foreign_admin"])
+def test_existing_intake_rejects_unbound_git_pointer_before_checkout_git(
+    tmp_path: Path,
+    pointer_kind: str,
+) -> None:
+    """An unsafe intake gitfile fails before a command uses that checkout."""
+    caller, remote = _make_repository(tmp_path)
+    first_manager = _manager(caller, remote)
+    receipt = first_manager.prepare()
+    gitfile = receipt.path / ".git"
+    receipt_content = first_manager.receipt_path.read_bytes()
+    caller_state = _caller_state(caller)
+    tracked_content = (receipt.path / "tracked.txt").read_bytes()
+    expected_pointer: Path | str
+    if pointer_kind == "symlink":
+        foreign_pointer = tmp_path / "foreign-git-pointer"
+        foreign_pointer.write_text(gitfile.read_text(encoding="utf-8"), encoding="utf-8")
+        gitfile.unlink()
+        gitfile.symlink_to(foreign_pointer)
+        expected_pointer = foreign_pointer
+    else:
+        foreign_worktree = tmp_path / "foreign-worktree"
+        _run_git(caller, "worktree", "add", "--detach", str(foreign_worktree), "HEAD")
+        foreign_pointer_content = (foreign_worktree / ".git").read_text(encoding="utf-8")
+        gitfile.write_text(foreign_pointer_content, encoding="utf-8")
+        expected_pointer = foreign_pointer_content
+    registrations = _run_git(caller, "worktree", "list", "--porcelain").stdout
+
+    manager = _manager(caller, remote)
+    original_runner = manager._run_command
+    intake_git_calls: list[list[str]] = []
+
+    def record_intake_git(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if kwargs.get("cwd") == receipt.path:
+            intake_git_calls.append(command)
+        return original_runner(command, **kwargs)
+
+    manager._run_command = record_intake_git
+
+    with pytest.raises(RepoIntakeError, match=r"Git (metadata|pointer)"):
+        manager.prepare()
+
+    assert intake_git_calls == []
+    assert first_manager.receipt_path.read_bytes() == receipt_content
+    assert (receipt.path / "tracked.txt").read_bytes() == tracked_content
+    assert _run_git(caller, "worktree", "list", "--porcelain").stdout == registrations
+    if pointer_kind == "symlink":
+        assert gitfile.is_symlink()
+        assert gitfile.readlink() == expected_pointer
+    else:
+        assert gitfile.read_text(encoding="utf-8") == expected_pointer
+    assert _caller_state(caller) == caller_state
 
 
 def test_direct_scope_from_detached_linked_worktree_prepares_isolated_intake(
