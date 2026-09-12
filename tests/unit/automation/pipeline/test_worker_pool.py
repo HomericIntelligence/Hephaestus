@@ -20302,3 +20302,95 @@ def test_failed_first_intake_preparation_releases_new_run_lease(
     assert events == ["enter", "exit"]
     pool.release_repo_intake_leases()
     assert events == ["enter", "exit"]
+
+
+class _RecordingIntakeLease:
+    """Record only explicit entry and exit calls for an intake lease."""
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    def __enter__(self) -> None:
+        """Record lease acquisition."""
+        self._events.append("enter")
+
+    def __exit__(self, *_args: object) -> None:
+        """Record lease release."""
+        self._events.append("exit")
+
+
+@pytest.mark.parametrize(
+    "failure_type",
+    [Exception, KeyboardInterrupt, SystemExit, BaseException],
+)
+def test_first_intake_preparation_releases_lease_before_control_flow_propagates(
+    pool: WorkerPool,
+    tmp_path: Path,
+    failure_type: type[BaseException],
+) -> None:
+    """A control-flow failure releases a new lease before it propagates."""
+    events: list[str] = []
+    lease = _RecordingIntakeLease(events)
+
+    manager = MagicMock()
+    manager.common_dir = tmp_path / ".git"
+    manager.run_lease.return_value = lease
+    manager.prepare.side_effect = failure_type("injected preparation failure")
+    job = GitJob(
+        repo="acme/repo",
+        op="prepare_intake",
+        timeout_s=30,
+        kwargs={"repo": "acme/repo", "caller_root": str(tmp_path)},
+    )
+
+    with (
+        patch(f"{_WP}._checkout_preflight_error", return_value=None),
+        patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+        patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+        patch(f"{_WP}.RepoIntakeManager", return_value=manager),
+        pytest.raises(failure_type, match="injected preparation failure"),
+    ):
+        pool._git_prepare_intake(job)
+
+    assert events == ["enter", "exit"]
+    pool.release_repo_intake_leases()
+    assert events == ["enter", "exit"]
+
+
+def test_first_intake_preparation_releases_lease_when_retention_fails(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """A failed lease-map write releases the new lease before propagation."""
+    events: list[str] = []
+    lease = _RecordingIntakeLease(events)
+
+    class FailingLeaseStore(dict[Path, Any]):
+        """Reject a new lease to exercise the retention boundary."""
+
+        def __setitem__(self, key: Path, value: Any) -> None:
+            raise RuntimeError("injected lease retention failure")
+
+    receipt = MagicMock()
+    receipt.to_dict.return_value = {"revision": "a" * 40}
+    manager = MagicMock()
+    manager.common_dir = tmp_path / ".git"
+    manager.run_lease.return_value = lease
+    manager.prepare.return_value = receipt
+    pool._repo_intake_leases = FailingLeaseStore()
+    job = GitJob(
+        repo="acme/repo",
+        op="prepare_intake",
+        timeout_s=30,
+        kwargs={"repo": "acme/repo", "caller_root": str(tmp_path)},
+    )
+
+    with (
+        patch(f"{_WP}._checkout_preflight_error", return_value=None),
+        patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+        patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+        patch(f"{_WP}.RepoIntakeManager", return_value=manager),
+        pytest.raises(RuntimeError, match="injected lease retention failure"),
+    ):
+        pool._git_prepare_intake(job)
+
+    assert events == ["enter", "exit"]

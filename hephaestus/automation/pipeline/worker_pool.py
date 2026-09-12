@@ -8377,15 +8377,16 @@ class WorkerPool:
                 if lease is None:
                     lease = manager.run_lease()
                     lease.__enter__()
+                lease_retained = not acquired_lease
                 try:
                     receipt = manager.prepare()
-                except BaseException as exc:
                     if acquired_lease:
-                        lease.__exit__(type(exc), exc, exc.__traceback__)
-                    raise
-                if acquired_lease:
-                    with self._repo_intake_leases_guard:
-                        self._repo_intake_leases[common_dir] = lease
+                        with self._repo_intake_leases_guard:
+                            self._repo_intake_leases[common_dir] = lease
+                        lease_retained = True
+                finally:
+                    if not lease_retained:
+                        lease.__exit__(*sys.exc_info())
         except RepoIntakeError as exc:
             return JobResult(ok=False, error=str(exc))
         return JobResult(ok=True, value=receipt.to_dict())

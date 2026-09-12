@@ -47,7 +47,7 @@ class MainWorker(WorkerLane, Protocol):
 
     def release_repo_intake_leases(self) -> None:
         """Release run-lifetime repository-intake leases."""
-        ...
+        raise NotImplementedError
 
 
 class AuxiliaryWorker(WorkerLane, Protocol):
