@@ -1479,7 +1479,7 @@ def test_intake_lock_interruption_preserves_shutdown_signal(
             del args
 
     monkeypatch.setattr(
-        "hephaestus.automation.repo_intake.file_lock",
+        "hephaestus.automation.repo_intake.operation_file_lock",
         lambda *_args, **_kwargs: _InterruptedLock(),
     )
 

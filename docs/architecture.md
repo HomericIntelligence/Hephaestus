@@ -518,8 +518,11 @@ mapping or `finished(fail)` rather than raising `KeyError`.
 
 Stage-originated JSONL events use the closed schema in
 [`events.py`](../hephaestus/automation/pipeline/events.py). The event surface is
-intentionally minimal: `encode_stage_event` currently rejects every event, so
-no stage event can carry reviewer text, GitHub bodies, or authorization facts.
+intentionally minimal. `encode_stage_event` accepts only
+`RepositoryBusyEvent`. This event contains the repository, checkout operation,
+elapsed contention time, and cumulative lock-wait time. The encoder rejects all
+other event types, so a stage event cannot carry reviewer text, GitHub bodies,
+or authorization facts.
 
 ### Scope trimming
 
