@@ -22,6 +22,17 @@ logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
 _PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in ct.StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
+_INTAKE_STABLE_RECEIPT_FIELDS = (
+    "schema_version",
+    "repository",
+    "repository_identity",
+    "ownership_key",
+    "common_dir",
+    "path",
+    "state_root",
+    "detached",
+    "branch",
+)
 
 
 def _intake_materialization_error(receipt: RepoIntakeReceipt) -> str | None:
@@ -51,8 +62,32 @@ def _intake_reuse_error(
     """Reject a receipt that changes an adopted intake identity or its roots."""
     if previous_receipt is None:
         return None
-    if previous_receipt != receipt.to_dict():
+    current_receipt = receipt.to_dict()
+    if set(previous_receipt) != set(current_receipt) or any(
+        previous_receipt[field] != current_receipt[field] for field in _INTAKE_STABLE_RECEIPT_FIELDS
+    ):
         return "repository-intake re-adoption changed ownership identity"
+    previous_generation = previous_receipt.get("generation")
+    previous_revision = previous_receipt.get("revision")
+    previous_default_branch = previous_receipt.get("default_branch")
+    if (
+        not isinstance(previous_generation, int)
+        or isinstance(previous_generation, bool)
+        or not isinstance(previous_revision, str)
+        or not isinstance(previous_default_branch, str)
+    ):
+        return "repository-intake previous receipt has invalid dynamic fields"
+    dynamic_values_changed = (
+        previous_revision != receipt.revision or previous_default_branch != receipt.default_branch
+    )
+    generation_unchanged = receipt.generation == previous_generation
+    generation_advanced = receipt.generation == previous_generation + 1
+    if (generation_unchanged and dynamic_values_changed) or (
+        generation_advanced and not dynamic_values_changed
+    ):
+        return "repository-intake re-adoption has invalid generation continuity"
+    if not generation_unchanged and not generation_advanced:
+        return "repository-intake re-adoption has invalid generation continuity"
     try:
         if receipt_root != current_root.resolve():
             return "repository-intake receipt changed the verified intake path"

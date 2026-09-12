@@ -385,9 +385,6 @@ def test_intake_preparation_failure_preserves_legacy_state_for_recovery(
         ("repository_identity", "org/repo-a:other"),
         ("ownership_key", "org/repo-a:identity:other"),
         ("common_dir", None),
-        ("default_branch", "stable"),
-        ("revision", "b" * 40),
-        ("generation", 2),
     ],
 )
 def test_intake_re_adoption_requires_the_exact_verified_receipt(
@@ -423,6 +420,89 @@ def test_intake_re_adoption_requires_the_exact_verified_receipt(
     assert coordinator.config.repo_state_roots == original_state_roots
     assert coordinator.config.repo_caller_roots == original_caller_roots
     assert coordinator.config.repo_intake_receipts == original_receipts
+
+
+@pytest.mark.parametrize(
+    ("revision", "default_branch"),
+    [
+        ("b" * 40, "main"),
+        ("a" * 40, "stable"),
+        ("b" * 40, "stable"),
+    ],
+)
+def test_intake_re_adoption_accepts_the_next_verified_generation(
+    tmp_path: Path,
+    revision: str,
+    default_branch: str,
+) -> None:
+    """A verified intake generation can advance without changing authority."""
+    caller_root = tmp_path / "repo-a"
+    intake_root = tmp_path / "intake-owner" / "worktree"
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path),
+        github=FakeStageGitHub(),
+        **fake_worker_factories(),
+        install_signals=False,
+    )
+    item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
+    first_result = _intake_result(caller_root, intake_root)
+    assert coordinator._adopt_repo_intake(item, first_result) is None
+    assert isinstance(first_result.value, dict)
+    changed_value = dict(first_result.value)
+    changed_value.update(
+        revision=revision,
+        default_branch=default_branch,
+        generation=2,
+    )
+
+    error = coordinator._adopt_repo_intake(item, JobResult(ok=True, value=changed_value))
+
+    assert error is None
+    assert coordinator.config.repo_intake_receipts["repo-a"] == changed_value
+
+
+@pytest.mark.parametrize(
+    ("first_generation", "revision", "default_branch", "next_generation"),
+    [
+        (1, "b" * 40, "main", 1),
+        (1, "a" * 40, "main", 2),
+        (1, "b" * 40, "main", 3),
+        (2, "b" * 40, "main", 1),
+    ],
+)
+def test_intake_re_adoption_rejects_invalid_generation_continuity(
+    tmp_path: Path,
+    first_generation: int,
+    revision: str,
+    default_branch: str,
+    next_generation: int,
+) -> None:
+    """A receipt update must match one manager generation transition."""
+    caller_root = tmp_path / "repo-a"
+    intake_root = tmp_path / "intake-owner" / "worktree"
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path),
+        github=FakeStageGitHub(),
+        **fake_worker_factories(),
+        install_signals=False,
+    )
+    item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
+    first_result = _intake_result(caller_root, intake_root)
+    assert isinstance(first_result.value, dict)
+    first_value = dict(first_result.value)
+    first_value["generation"] = first_generation
+    assert coordinator._adopt_repo_intake(item, JobResult(ok=True, value=first_value)) is None
+    changed_value = dict(first_value)
+    changed_value.update(
+        revision=revision,
+        default_branch=default_branch,
+        generation=next_generation,
+    )
+
+    error = coordinator._adopt_repo_intake(item, JobResult(ok=True, value=changed_value))
+
+    assert error == "repository-intake re-adoption has invalid generation continuity"
+    assert coordinator.config.repo_intake_receipts["repo-a"] == first_value
 
 
 @pytest.mark.parametrize(
@@ -477,6 +557,14 @@ def test_full_discovery_reseed_reuses_original_caller_checkout(
     caller_root.mkdir()
     events: list[tuple[str, int]] = []
     pool = FakeWorkerPool()
+    first_result = _intake_result(
+        caller_root,
+        tmp_path / ".repo-a-intake" / "worktree",
+    )
+    assert isinstance(first_result.value, dict)
+    second_value = dict(first_result.value)
+    second_value.update(revision="b" * 40, generation=2)
+    pool.script(first_result, JobResult(ok=True, value=second_value))
 
     class _FailThenPassStage(Stage):
         def on_enter(self, item: WorkItem, ctx: Any) -> None:
@@ -531,6 +619,8 @@ def test_full_discovery_reseed_reuses_original_caller_checkout(
     assert coordinator.config.repo_roots["repo-a"] == tmp_path / ".repo-a-intake" / "worktree"
     assert coordinator.config.repo_caller_roots["repo-a"] == caller_root
     assert coordinator.config.repo_state_roots["repo-a"] == tmp_path / ".repo-a-intake"
+    assert coordinator.config.repo_intake_receipts["repo-a"]["revision"] == "b" * 40
+    assert coordinator.config.repo_intake_receipts["repo-a"]["generation"] == 2
     assert events == [("fail", 101), ("pass", 101)]
 
 
