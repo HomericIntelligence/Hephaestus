@@ -148,11 +148,6 @@ _KNOWN_WORKTREE_LINES = ("locked", "prunable")
 _DURABLE_STATE_NAMES = (".automation-state", ".issue_implementer")
 _GIT_METADATA_TEXT_LIMIT = 4096
 _GIT_CONFIG_TEXT_LIMIT = 1024 * 1024
-_GIT_CONFIG_SECTION_RE = re.compile(
-    r'^\s*\[([A-Za-z0-9][A-Za-z0-9.-]*)(?:\s+"((?:\\.|[^"\\])*)")?\]'
-    r"\s*(?:[#;].*)?$"
-)
-_GIT_CONFIG_KEY_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9-]*)(?:\s*=\s*(.*))?$")
 
 
 def _validate_receipt_values(receipt: RepoIntakeReceipt) -> None:
@@ -305,7 +300,7 @@ class RepoIntakeManager:
         old = self._read_receipt()
         record = self._validate_existing(old, records)
         if old is not None:
-            self._validate_intake_git_pointer()
+            self._validate_intake_checkout()
         default_branch = self._read_default_branch()
         if old is None:
             if record is not None:
@@ -316,7 +311,7 @@ class RepoIntakeManager:
             records = self._worktree_records()
             record = self._record_for_path(records)
         else:
-            self._validate_intake_git_pointer()
+            self._validate_intake_checkout()
             self._fetch(default_branch, checkout=self.worktree_path)
             target = self._remote_head(default_branch, checkout=self.worktree_path)
         physical_head = self._head(self.worktree_path)
@@ -324,7 +319,7 @@ class RepoIntakeManager:
             records = self._worktree_records()
             record = self._record_for_path(records)
             self._assert_no_registered_descendants(records)
-            self._validate_intake_git_pointer()
+            self._validate_intake_checkout()
             self._assert_clean_detached(record)
             current_head = self._head(self.worktree_path)
             if record is None or record.head != current_head or current_head != physical_head:
@@ -332,7 +327,7 @@ class RepoIntakeManager:
             self._assert_fast_forward(current_head, target)
             self._remove_worktree()
             self._add_worktree(target)
-        self._validate_intake_git_pointer()
+        self._validate_intake_checkout()
         self._assert_clean_detached(self._record_for_path(self._worktree_records()))
         final_head = self._head(self.worktree_path)
         remote_head = self._remote_head(default_branch, checkout=self.worktree_path)
@@ -391,7 +386,7 @@ class RepoIntakeManager:
         """Run a controlled command and map subprocess failures safely."""
         intake_path = getattr(self, "worktree_path", None)
         if intake_path is not None and cwd == intake_path and intake_path.exists():
-            self._validate_intake_git_pointer()
+            self._validate_intake_checkout()
         try:
             return self._run_command(
                 command,
@@ -818,56 +813,27 @@ class RepoIntakeManager:
             raise RepoIntakeError("repository-intake Git metadata is malformed")
         return lines[0]
 
-    @staticmethod
-    def _config_line_continues(line: str) -> bool:
-        """Return whether a Git config line continues on the next line."""
-        trailing_backslashes = len(line) - len(line.rstrip("\\"))
-        return bool(trailing_backslashes % 2)
-
-    @classmethod
-    def _git_config_key_stream(cls, payload: str) -> str:
-        """Parse raw Git config into the key stream used by the safety classifier."""
-        if "\0" in payload:
-            raise RepoIntakeError("repository-intake Git configuration is malformed")
-        section: str | None = None
-        subsection: str | None = None
-        continuing = False
-        entries: list[str] = []
-        for line in payload.splitlines():
-            if continuing:
-                continuing = cls._config_line_continues(line)
-                continue
-            stripped = line.strip()
-            if not stripped or stripped.startswith(("#", ";")):
-                continue
-            section_match = _GIT_CONFIG_SECTION_RE.fullmatch(line)
-            if section_match is not None:
-                section = section_match.group(1)
-                subsection = section_match.group(2)
-                continue
-            if section is None:
-                raise RepoIntakeError("repository-intake Git configuration is malformed")
-            key_match = _GIT_CONFIG_KEY_RE.fullmatch(line)
-            if key_match is None:
-                raise RepoIntakeError("repository-intake Git configuration is malformed")
-            key = key_match.group(1)
-            value = key_match.group(2) or ""
-            prefix = section if subsection is None else f"{section}.{subsection}"
-            entries.append(f"{prefix}.{key}\n{value}\0")
-            continuing = cls._config_line_continues(line)
-        if continuing:
-            raise RepoIntakeError("repository-intake Git configuration is malformed")
-        return "".join(entries)
-
-    @classmethod
-    def _validate_local_git_config(cls, payload: str) -> None:
+    def _validate_local_git_config(self, payload: str) -> None:
         """Reject local Git configuration that can change trusted commands."""
-        config = cls._git_config_key_stream(payload)
-        if unsafe_local_git_config_key(config) is not None:
+        try:
+            result = self._run_command(
+                ["git", "config", "--file", "-", "--no-includes", "--null", "--list"],
+                cwd=Path(self.common_dir.anchor),
+                check=False,
+                timeout=self.timeout_s,
+                env=self._git_env,
+                log_errors=False,
+                input_text=payload,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RepoIntakeError("repository-intake Git configuration parser failed") from exc
+        if result.returncode != 0 or not isinstance(result.stdout, str):
+            raise RepoIntakeError("repository-intake Git configuration is malformed")
+        if unsafe_local_git_config_key(result.stdout) is not None:
             raise RepoIntakeError("repository-intake Git configuration is unsafe")
 
-    def _validate_intake_git_pointer(self) -> None:
-        """Verify the intake gitfile against its common-directory admin entry."""
+    def _validate_intake_git_pointer(self) -> tuple[str, str | None]:
+        """Verify the intake gitfile and capture its no-follow local configs."""
         worktree_fd = common_fd = worktrees_fd = admin_fd = -1
         try:
             worktree_fd = os.open(self.worktree_path, self._directory_open_flags())
@@ -917,9 +883,7 @@ class RepoIntakeManager:
                 "config.worktree",
                 max_bytes=_GIT_CONFIG_TEXT_LIMIT,
             )
-            self._validate_local_git_config(common_config)
-            if worktree_config is not None:
-                self._validate_local_git_config(worktree_config)
+            return common_config, worktree_config
         except RepoIntakeError:
             raise
         except OSError as exc:
@@ -928,6 +892,13 @@ class RepoIntakeManager:
             for file_descriptor in (admin_fd, worktrees_fd, common_fd, worktree_fd):
                 if file_descriptor >= 0:
                     os.close(file_descriptor)
+
+    def _validate_intake_checkout(self) -> None:
+        """Verify the intake pointer and the exact captured local configs."""
+        common_config, worktree_config = self._validate_intake_git_pointer()
+        self._validate_local_git_config(common_config)
+        if worktree_config is not None:
+            self._validate_local_git_config(worktree_config)
 
     def _assert_no_registered_descendants(
         self,

@@ -59,6 +59,7 @@ def _manager(caller: Path, remote: Path) -> RepoIntakeManager:
         timeout: int | None = None,
         env: dict[str, str] | None = None,
         log_errors: bool = True,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         del log_errors
         if command[0] == "gh":
@@ -74,6 +75,7 @@ def _manager(caller: Path, remote: Path) -> RepoIntakeManager:
             check=check,
             timeout=timeout,
             env=env,
+            input=input_text,
         )
 
     return RepoIntakeManager(

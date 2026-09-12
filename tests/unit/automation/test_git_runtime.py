@@ -102,6 +102,7 @@ class TestRun:
             check=False,
             log_on_error=False,
             env=None,
+            input_text=None,
             retries=0,
         )
 

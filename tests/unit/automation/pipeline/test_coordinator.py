@@ -159,6 +159,7 @@ class _LocalIntakeGitRunner:
         timeout: int | None = None,
         env: dict[str, str] | None = None,
         log_errors: bool = True,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Replace the GitHub and fetch boundaries with local operations."""
         del log_errors
@@ -175,6 +176,7 @@ class _LocalIntakeGitRunner:
             check=check,
             timeout=timeout,
             env=env,
+            input=input_text,
         )
 
 
