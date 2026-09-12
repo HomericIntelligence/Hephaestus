@@ -50,6 +50,7 @@ from hephaestus.automation.pipeline.reply_handoff import (
     journaled_implementation_remediation_reply_handoff,
     journaled_implementation_reply_handoff,
 )
+from hephaestus.automation.pipeline.scope_retraction import normalize_scope_retraction_paths
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
@@ -536,7 +537,10 @@ class PipelineGitHubJobRunner:
             for thread in live_threads
             if (thread_id := _durable_thread_id(thread)) is not None
         }
-        missing_projection = _without_duplicate_live_findings(projection, live_by_id)
+        try:
+            missing_projection = _without_duplicate_live_findings(projection, live_by_id)
+        except ValueError:
+            return receipt("operator_required")
         if missing_projection:
             if first_record.reviewed_head_sha != request.source_head_sha:
                 return receipt("operator_required")
@@ -958,6 +962,7 @@ class PipelineGitHubJobRunner:
         )
         from hephaestus.automation.pipeline.stages.pr_review_threads import (
             _durable_thread_id,
+            _finding_content_key,
             _finding_key,
             _is_postable_finding,
             _normalize_remediation_threads,
@@ -1165,16 +1170,18 @@ class PipelineGitHubJobRunner:
         all_live_finding_identities = {
             identity
             for thread in live_by_id.values()
-            if (identity := _finding_key(thread)) is not None
+            if (identity := _finding_content_key(thread)) is not None
         }
         invalid_live_finding_identities = {
             identity
             for thread in live_by_id.values()
-            if (identity := _finding_key(thread)) is not None and recovery_key(thread) is None
+            if (identity := _finding_content_key(thread)) is not None
+            and recovery_key(thread) is None
         }
-        all_live_finding_keys = {
-            recovery
+        all_live_recoveries = {
+            (identity, recovery)
             for thread in live_by_id.values()
+            if (identity := _finding_content_key(thread)) is not None
             if (recovery := recovery_key(thread)) is not None
         }
         owned_live_finding_keys = {
@@ -1187,6 +1194,8 @@ class PipelineGitHubJobRunner:
         for record in finding_records:
             if record["status"] != "pending":
                 continue
+            if record["source_head"] != request.reviewed_head_sha:
+                return receipt("audit_failure")
             anchor = record["final_anchor"]
             if not isinstance(anchor, dict):
                 return receipt("audit_failure")
@@ -1197,23 +1206,32 @@ class PipelineGitHubJobRunner:
                     "side": anchor["side"],
                     "body": record["body"],
                     "severity": record["severity"],
+                    "scope_retraction_paths": record.get("scope_retraction_paths"),
                 }
             )
-            if pending_key is None:
+            pending_identity = _finding_content_key(
+                {
+                    "path": anchor["path"],
+                    "line": anchor["line"],
+                    "side": anchor["side"],
+                    "body": record["body"],
+                }
+            )
+            if pending_key is None or pending_identity is None:
                 return receipt("audit_failure")
             finding_id = str(record["finding_id"])
             pending_keys[finding_id] = pending_key
-            if pending_key[0] in invalid_live_finding_identities:
+            if pending_identity in invalid_live_finding_identities:
                 return receipt("audit_failure")
-            conflicting_live_severity = any(
-                key[0] == pending_key[0] and key[1] != pending_key[1]
-                for key in all_live_finding_keys
+            conflicting_live_identity = any(
+                identity == pending_identity and recovery != pending_key
+                for identity, recovery in all_live_recoveries
             )
-            if conflicting_live_severity:
+            if conflicting_live_identity:
                 return receipt("audit_failure")
             if pending_key in owned_live_finding_keys:
                 visible_pending_ids.add(finding_id)
-            elif pending_key[0] in all_live_finding_identities:
+            elif pending_identity in all_live_finding_identities:
                 return receipt("audit_failure")
         if visible_pending_ids:
             finding_records = normalize_review_finding_records(
@@ -1253,8 +1271,23 @@ class PipelineGitHubJobRunner:
             finding = findings_by_id[finding_id]
             record = inline_records[finding_id]
             anchor = record["final_anchor"]
+            finding_scope_value = finding.get("scope_retraction_paths")
+            finding_scope = (
+                ()
+                if finding_scope_value is None
+                else normalize_scope_retraction_paths(finding_scope_value)
+            )
+            record_scope_value = record.get("scope_retraction_paths")
+            record_scope = (
+                ()
+                if record_scope_value is None
+                else normalize_scope_retraction_paths(record_scope_value)
+            )
             if (
                 not isinstance(anchor, dict)
+                or finding_scope is None
+                or record_scope is None
+                or finding_scope != record_scope
                 or recovery_key(finding) != pending_keys[finding_id]
                 or str(finding.get("path") or "").strip() != anchor["path"]
                 or finding.get("line") != anchor["line"]
@@ -1271,7 +1304,10 @@ class PipelineGitHubJobRunner:
         )
         if validation.corrections or len(validation.valid) != len(raw_findings):
             return receipt("audit_failure")
-        findings = _without_duplicate_live_findings(list(validation.valid), live_by_id)
+        try:
+            findings = _without_duplicate_live_findings(list(validation.valid), live_by_id)
+        except ValueError:
+            return receipt("audit_failure")
         posting_ids = {str(finding["finding_id"]) for finding in findings}
         prepublication_records = normalize_review_finding_records(
             [
