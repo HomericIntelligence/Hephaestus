@@ -32,7 +32,7 @@ def _run_git(cwd: Path, *arguments: str, check: bool = True) -> subprocess.Compl
 def _make_repository(tmp_path: Path) -> tuple[Path, Path]:
     """Create a master checkout and a local bare remote with a GitHub URL."""
     remote = tmp_path / "remote.git"
-    _run_git(tmp_path, "init", "--bare", str(remote))
+    _run_git(tmp_path, "init", "--bare", "--initial-branch=master", str(remote))
     caller = tmp_path / "caller"
     caller.mkdir()
     _run_git(caller, "init", "--initial-branch=master")
