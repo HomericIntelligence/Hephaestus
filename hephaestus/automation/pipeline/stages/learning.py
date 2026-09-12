@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from hephaestus.agents.workspace import SourceLane, WorkspaceBindingError
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import learn_claude_timeout, learn_model
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
-from hephaestus.automation.source_worktree import SourceWorkspaceError
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..job_results import JobResult
@@ -111,17 +110,29 @@ class LearningStage:
             workspace = source_workspace_binding(
                 item,
                 ctx,
-                SourceLane.IMPLEMENTATION,
+                SourceLane.REVIEW,
                 revision=revision or None,
-                branch=item.branch or None,
+                branch=None,
             )
         except InterruptedError:
             self.on_cancelled_before_start(item, ctx)
             return StageOutcome(Disposition.RETRY, "learning preparation interrupted")
-        except (WorkspaceBindingError, SourceWorkspaceError) as exc:
+        except AttributeError as exc:
             self.on_job_done(
                 item,
                 JobResult(ok=False, error=f"learning source preparation failed: {exc}"),
+                ctx,
+            )
+            return Continue(next_state=CLAIM)
+        except RuntimeError as exc:
+            error = (
+                "learning_source_preparation_unavailable"
+                if str(exc) == "source workspace manager is required"
+                else f"learning source preparation failed: {exc}"
+            )
+            self.on_job_done(
+                item,
+                JobResult(ok=False, error=error),
                 ctx,
             )
             return Continue(next_state=CLAIM)
@@ -153,12 +164,20 @@ class LearningStage:
         if intent is None:
             return
         succeeded = bool(
-            result.ok
-            and isinstance(result.value, AthenaSkillResult)
+            isinstance(result.value, AthenaSkillResult)
             and result.value.ok
             and valid_delivery_receipt(result.value.delivery_receipt)
         )
-        error = "" if succeeded else (result.error or "invalid Athena learn result")
+        cleanup_failed = bool(
+            result.error and result.error.startswith("learning_workspace_cleanup_failed:")
+        )
+        error = (
+            "learning_workspace_cleanup_failed"
+            if succeeded and cleanup_failed
+            else ""
+            if succeeded
+            else (result.error or "invalid Athena learn result")
+        )
         receipt = result.value.delivery_receipt if succeeded else None
         journal = self._journal(ctx)
         if not succeeded and error.startswith("learning_deferred:"):
@@ -183,6 +202,11 @@ class LearningStage:
                 else None
             ),
         )
+        if succeeded and cleanup_failed:
+            item.payload.setdefault("learning_failures", []).append(
+                {"key": intent.key, "error": error}
+            )
+            return
         if not succeeded:
             item.payload.setdefault("learning_failures", []).append(
                 {"key": intent.key, "error": error[:1000]}

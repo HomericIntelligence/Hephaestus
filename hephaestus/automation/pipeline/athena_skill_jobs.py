@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -144,3 +145,35 @@ def athena_workspace_lease(
     )
     with manager.acquire(binding, allowed_tools="Read,Glob,Grep", deadline=deadline) as leased:
         yield leased
+
+
+def cleanup_athena_workspace(job: AthenaSkillJob) -> None:
+    """Remove the exact source workspace that one host skill job owned."""
+    binding = job.request.workspace
+    if binding is None or binding.kind is not WorkspaceKind.SOURCE:
+        return
+    WorkspaceBinding.from_dict(binding.to_dict())
+    if binding.cwd != job.request.cwd:
+        raise RuntimeError("Athena request cwd does not match its workspace binding")
+    if (
+        binding.reusable_root is None
+        or binding.repository is None
+        or binding.item_number is None
+        or binding.lane is None
+        or binding.revision is None
+    ):
+        raise RuntimeError("source workspace binding is incomplete")
+    manager = SourceWorkspaceManager(
+        binding.reusable_root,
+        repository=binding.repository,
+        base_dir=binding.cwd.parent,
+    )
+    manager.cleanup(
+        binding.item_number,
+        binding.lane,
+        expected_revision=binding.revision,
+        expected_detached=binding.detached,
+        expected_generation=binding.generation,
+        missing_ok=True,
+        deadline=_PreparationDeadline(time.monotonic() + 45.0, time.monotonic),
+    )

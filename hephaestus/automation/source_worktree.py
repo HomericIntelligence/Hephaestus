@@ -1834,6 +1834,22 @@ class SourceWorkspaceManager:
                 )
             )
 
+    def _cleanup_missing_receipt(
+        self,
+        item_number: int,
+        lane: SourceLane,
+        *,
+        missing_ok: bool,
+        physical_cleanup: Callable[[], None] | None,
+    ) -> None:
+        """Handle an absent cleanup receipt without weakening path checks."""
+        path = self.path_for(item_number, lane)
+        if missing_ok and not path.exists() and not path.is_symlink():
+            return
+        if physical_cleanup is None:
+            raise SourceWorkspaceError("source workspace receipt does not exist")
+        physical_cleanup()
+
     def cleanup(
         self,
         item_number: int,
@@ -1841,6 +1857,8 @@ class SourceWorkspaceManager:
         *,
         expected_revision: str | None = None,
         expected_detached: bool | None = None,
+        expected_generation: int | None = None,
+        missing_ok: bool = False,
         physical_cleanup: Callable[[], None] | None = None,
         deadline: _PreparationDeadline | None = None,
     ) -> None:
@@ -1857,9 +1875,12 @@ class SourceWorkspaceManager:
         ):
             receipt = self._read_receipt(item_number, lane)
             if receipt is None:
-                if physical_cleanup is None:
-                    raise SourceWorkspaceError("source workspace receipt does not exist")
-                physical_cleanup()
+                self._cleanup_missing_receipt(
+                    item_number,
+                    lane,
+                    missing_ok=missing_ok,
+                    physical_cleanup=physical_cleanup,
+                )
                 return
             self._reject_foreign_owner(receipt, item_number, lane)
             expected_path = self.path_for(item_number, lane).resolve()
@@ -1875,6 +1896,8 @@ class SourceWorkspaceManager:
                 raise SourceWorkspaceError("source workspace receipt revision changed")
             if expected_detached is not None and receipt.detached is not expected_detached:
                 raise SourceWorkspaceError("source workspace receipt checkout changed")
+            if expected_generation is not None and receipt.generation != expected_generation:
+                raise SourceWorkspaceError("source workspace receipt generation changed")
             if receipt.obligations:
                 raise SourceWorkspaceError("source workspace still has active obligations")
             if receipt.path.exists() and self._is_dirty(receipt.path, deadline=deadline):

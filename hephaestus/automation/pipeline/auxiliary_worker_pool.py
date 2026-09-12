@@ -12,7 +12,13 @@ from dataclasses import replace
 
 from hephaestus.automation.source_worktree import _PreparationDeadline
 
-from .athena_skill_jobs import AthenaSkillExecutor, AthenaSkillJob, athena_workspace_lease
+from .athena_skill_jobs import (
+    AthenaSkillExecutor,
+    AthenaSkillJob,
+    AthenaSkillResult,
+    athena_workspace_lease,
+    cleanup_athena_workspace,
+)
 from .git_jobs import GitJob
 from .job_results import JobHandle, JobResult
 from .worker_completion import resolve_worker_future
@@ -80,24 +86,12 @@ class AuxiliaryWorkerPool:
     def _run(self, job: AuxiliaryJob) -> JobResult:
         start = time.monotonic()
         if self._shutdown.is_set():
-            return JobResult(ok=False, interrupted=True, error="interrupted_before_start")
+            result = JobResult(ok=False, interrupted=True, error="interrupted_before_start")
+            return self._cleanup_cancelled_learning(job, result)
         host_started = False
         try:
             if isinstance(job, AthenaSkillJob):
-                if self._athena_skill_executor is None:
-                    raise RuntimeError("auxiliary learning is disabled")
-                deadline = _PreparationDeadline(
-                    start + job.timeout_s, time.monotonic, self._shutdown
-                )
-                with athena_workspace_lease(job, deadline=deadline):
-                    remaining = int(deadline.remaining())
-                    if remaining <= 0:
-                        raise subprocess.TimeoutExpired("Athena operation deadline", 0)
-                    host_started = True
-                    value = self._athena_skill_executor.execute(
-                        replace(job.request, timeout_s=remaining)
-                    )
-                result = JobResult(ok=value.ok, value=value, error=value.error)
+                result, host_started = self._run_learning(job, start)
             else:
                 if self._cleanup_runner is None:
                     raise RuntimeError("cleanup job submitted without a cleanup runner")
@@ -108,7 +102,9 @@ class AuxiliaryWorkerPool:
                 interrupted=host_started,
                 error=f"{type(exc).__name__}: {exc}",
             )
-        if self._shutdown.is_set():
+        if self._shutdown.is_set() and not (
+            isinstance(job, AthenaSkillJob) and isinstance(result.value, AthenaSkillResult)
+        ):
             if isinstance(job, AthenaSkillJob) and not host_started:
                 result = replace(
                     result,
@@ -121,6 +117,67 @@ class AuxiliaryWorkerPool:
             duration_s=time.monotonic() - start,
             worker_id=threading.current_thread().name,
         )
+
+    def _run_learning(self, job: AthenaSkillJob, start: float) -> tuple[JobResult, bool]:
+        """Run one learning delivery and always release its exact workspace."""
+        if self._athena_skill_executor is None:
+            raise RuntimeError("auxiliary learning is disabled")
+        deadline = _PreparationDeadline(start + job.timeout_s, time.monotonic, self._shutdown)
+        host_started = False
+        value: AthenaSkillResult | None = None
+        execution_error: BaseException | None = None
+        try:
+            with athena_workspace_lease(job, deadline=deadline):
+                remaining = int(deadline.remaining())
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired("Athena operation deadline", 0)
+                host_started = True
+                value = self._athena_skill_executor.execute(
+                    replace(job.request, timeout_s=remaining)
+                )
+        except (Exception, KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
+            execution_error = exc
+
+        cleanup_error = self._learning_cleanup_error(job)
+        if execution_error is not None:
+            return (
+                JobResult(
+                    ok=False,
+                    interrupted=host_started,
+                    error=f"{type(execution_error).__name__}: {execution_error}",
+                    stderr_tail=cleanup_error or "",
+                ),
+                host_started,
+            )
+        if value is None:
+            raise RuntimeError("auxiliary learning returned no result")
+        if cleanup_error is not None:
+            if value.ok:
+                return JobResult(ok=False, value=value, error=cleanup_error), host_started
+            return (
+                JobResult(ok=False, value=value, error=value.error, stderr_tail=cleanup_error),
+                host_started,
+            )
+        return JobResult(ok=value.ok, value=value, error=value.error), host_started
+
+    @staticmethod
+    def _learning_cleanup_error(job: AthenaSkillJob) -> str | None:
+        """Return a stable cleanup failure without discarding its cause."""
+        try:
+            cleanup_athena_workspace(job)
+        except (Exception, KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
+            return f"learning_workspace_cleanup_failed: {type(exc).__name__}: {exc}"
+        return None
+
+    @classmethod
+    def _cleanup_cancelled_learning(cls, job: object, result: JobResult) -> JobResult:
+        """Release a prepared workspace when its host job did not start."""
+        if not isinstance(job, AthenaSkillJob):
+            return result
+        cleanup_error = cls._learning_cleanup_error(job)
+        if cleanup_error is None:
+            return result
+        return replace(result, stderr_tail=cleanup_error)
 
     def _publish(self, handle: JobHandle, future: Future[JobResult]) -> None:
         result = resolve_worker_future(
@@ -135,6 +192,8 @@ class AuxiliaryWorkerPool:
                 error="interrupted_before_start",
             ),
         )
+        if result.error == "interrupted_before_start":
+            result = self._cleanup_cancelled_learning(handle.job, result)
         with self._futures_guard:
             self._futures.discard(future)
         try:
