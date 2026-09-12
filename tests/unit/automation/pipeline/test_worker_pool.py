@@ -11685,7 +11685,10 @@ class TestGitOps:
         assert result.error == "legacy rebase options are not allowed"
 
     def test_conflict_receipt_binds_index_head_base_and_remote_head(
-        self, pool: WorkerPool, tmp_path: Path
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        require_git_worktree_list_z: None,
     ) -> None:
         """The host captures the complete index before agent file editing."""
         root, predecessor, base = _worker_repository(tmp_path)
@@ -11717,14 +11720,19 @@ class TestGitOps:
                 (binding.cwd / "host-staged.py").write_text("host change\n")
                 _git(binding.cwd, "add", "host-staged.py")
                 index_state = _git(binding.cwd, "ls-files", "--stage", "-z")
-                receipt = pool._conflict_receipt(
-                    binding.cwd,
-                    remote="origin",
-                    base_branch="main",
-                    expected_repo="test/repo",
-                    expected_remote_sha=writer_head,
-                    timeout=60,
-                )
+                with patch.object(
+                    pool,
+                    "_authenticated_remote_git_configuration",
+                    return_value=({}, ()),
+                ):
+                    receipt = pool._conflict_receipt(
+                        binding.cwd,
+                        remote="origin",
+                        base_branch="main",
+                        expected_repo="test/repo",
+                        expected_remote_sha=writer_head,
+                        timeout=60,
+                    )
             finally:
                 _git(binding.cwd, "rebase", "--abort")
 
@@ -12119,6 +12127,15 @@ class TestGitOps:
                 return MagicMock(stdout="x.py\0")
             if argv == ["git", "ls-files", "--stage", "-z"]:
                 return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ]:
+                return MagicMock(stdout="")
             if argv == ["git", "rev-parse", "HEAD"]:
                 return MagicMock(stdout=("c" * 40) + "\n")
             if argv == ["git", "rev-parse", "origin/main"]:
@@ -12235,6 +12252,17 @@ class TestGitOps:
                 return MagicMock(stdout="x.py\0")
             if argv == ["git", "ls-files", "--stage", "-z"]:
                 return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == ["git", "ls-files", "--stage", "-z", "--", "x.py"]:
+                return MagicMock(stdout="100644 deadbeef 1\tx.py\0")
+            if argv == [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ]:
+                return MagicMock(stdout="")
             if argv == ["git", "rev-parse", "HEAD"]:
                 return MagicMock(stdout=("c" * 40) + "\n")
             if argv == ["git", "rev-parse", "origin/main"]:
@@ -12288,6 +12316,15 @@ class TestGitOps:
                 return MagicMock(stdout="\0".join(paths) + "\0")
             if argv == ["git", "ls-files", "--stage", "-z"]:
                 return MagicMock(stdout="100644 deadbeef 1\tconflict_0.py\0")
+            if argv == [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ]:
+                return MagicMock(stdout="")
             if argv == ["git", "rev-parse", "HEAD"]:
                 return MagicMock(stdout=("c" * 40) + "\n")
             if argv == ["git", "rev-parse", "origin/main"]:

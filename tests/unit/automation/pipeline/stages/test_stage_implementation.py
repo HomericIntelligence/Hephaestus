@@ -2826,8 +2826,8 @@ class TestWorktreeAndAdvise:
     @pytest.mark.parametrize(
         ("field", "value"),
         [
-            ("status", "x" * (64 * 1024 + 1)),
-            ("diff", "x" * (256 * 1024 + 1)),
+            pytest.param("status", "x" * (64 * 1024 + 1), id="status-overflow"),
+            pytest.param("diff", "x" * (256 * 1024 + 1), id="diff-overflow"),
         ],
     )
     def test_remediation_inspection_rejects_oversized_prompt_data(
@@ -2839,7 +2839,7 @@ class TestWorktreeAndAdvise:
     ) -> None:
         """Writer output cannot put oversized text in an agent prompt."""
         stage = ImplementationStage()
-        item = make_work_item(issue=1, pr=1001, state="REMEDIATION_REPLY_RECOVERY_WAIT")
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/implementation-writer"
         inspection = {
@@ -2849,21 +2849,27 @@ class TestWorktreeAndAdvise:
             "status": " M module.py\n",
             "diff": "+change\n",
             "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
-            "status_sha256": "4" * 64,
-            "diff_sha256": "5" * 64,
+            "candidate_tree_sha": "c" * 40,
+            "candidate_add_paths": ["module.py"],
+            "candidate_update_paths": [],
             "changed_file_count": 1,
             "worktree_path": item.worktree,
         }
         inspection[field] = value
+        inspection["status_sha256"] = hashlib.sha256(
+            cast(str, inspection["status"]).encode("utf-8", "surrogateescape")
+        ).hexdigest()
+        inspection["diff_sha256"] = hashlib.sha256(
+            cast(str, inspection["diff"]).encode("utf-8", "surrogateescape")
+        ).hexdigest()
         item.payload.update(
             {
                 "implementation_remediation": True,
                 "_impl_source_revision": "a" * 40,
-                "remediation_thread_snapshots": [{"id": "thread-1"}],
-                "remediation_failure_diagnostic": "file_change failed",
-                "remediation_writer_inspection": inspection,
+                "remediation_writer_inspection_inflight": True,
             }
         )
+        stage.on_job_done(item, JobResult(ok=True, value=inspection), make_ctx())
 
         assert stage.step(item, make_ctx()) == StageOutcome(
             Disposition.FINISH_FAIL,
