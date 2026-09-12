@@ -3178,7 +3178,6 @@ def _repository_git_root(
         base_identity=repo_identity,
         error="repository root gitfile is invalid",
     )
-    common_fd = -1
     try:
         back_pointer, back_pointer_identity = _read_bounded_git_pointer_at(admin_fd, "gitdir")
         back_path, back_identity = _root_metadata_file_identity_no_follow(
