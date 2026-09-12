@@ -722,7 +722,7 @@ def source_workspace_binding(
     if callable(manager):
         manager = manager()
         ctx.paths.source_workspaces = manager
-    if manager is None:
+    if manager is None or not callable(getattr(manager, "prepare_bounded", None)):
         raise RuntimeError("source workspace manager is required")
     item_number = item.issue or item.pr
     if item_number is None:

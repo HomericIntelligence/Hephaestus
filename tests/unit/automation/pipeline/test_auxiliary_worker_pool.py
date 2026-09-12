@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -20,6 +21,7 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
 from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.automation.worktree_manager import WorktreeManager
 from tests.unit.automation.test_source_worktree import _repository
 
 
@@ -43,12 +45,38 @@ class _Host:
         self.cancelled.set()
 
 
+@pytest.fixture(autouse=True)
+def _registered_worktree_compatibility(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Control inventory parsing that requires a newer host Git version."""
+    repository = Path(__file__).resolve().parents[4]
+    probe = subprocess.run(
+        ["git", "worktree", "list", "--porcelain", "-z"],
+        cwd=repository,
+        check=False,
+        capture_output=True,
+    )
+    if probe.returncode == 0:
+        return
+
+    def registered(
+        _manager: WorktreeManager,
+        path: Path,
+        *,
+        timeout: int | None = None,
+        shutdown: threading.Event | None = None,
+    ) -> dict[str, str] | None:
+        del timeout, shutdown
+        return {"path": str(path)} if path.exists() else None
+
+    monkeypatch.setattr(WorktreeManager, "_registered_worktree_at_path", registered)
+
+
 @pytest.fixture
 def learning_request(tmp_path: Path) -> AthenaSkillRequest:
     """Bind host work to a real prepared source workspace."""
     root, revision, _second = _repository(tmp_path)
     manager = SourceWorkspaceManager(root, repository="HomericIntelligence/Hephaestus")
-    binding = manager.prepare_bounded(1, SourceLane.IMPLEMENTATION, revision)
+    binding = manager.prepare_bounded(1, SourceLane.REVIEW, revision)
     return AthenaSkillRequest(
         kind="learn",
         repo="HomericIntelligence/Hephaestus",
@@ -83,6 +111,7 @@ def test_learning_workers_are_distinct_and_reject_generic_agents(
 
         assert done is handle
         assert result.ok
+        assert not learning_request.cwd.exists()
         assert host.started.is_set()
         assert host.calls[0].workspace == learning_request.workspace
         learning_worker = result.value.receipt["worker"]
@@ -193,6 +222,7 @@ def test_host_started_exception_is_interrupted_without_shutdown(
         assert not result.ok
         assert result.interrupted
         assert result.error == f"{error_type.__name__}: host stopped"
+        assert not learning_request.cwd.exists()
         assert len(host.calls) == 1
         assert host.calls[0].workspace == learning_request.workspace
         assert not forced.is_set()
@@ -230,7 +260,41 @@ def test_typed_host_failure_remains_retryable(
         assert not result.interrupted
         assert result.error == "delivery rejected"
         assert isinstance(result.value, AthenaSkillResult)
+        assert not learning_request.cwd.exists()
         assert not forced.is_set()
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+
+def test_cleanup_failure_preserves_a_successful_delivery_result(
+    monkeypatch: pytest.MonkeyPatch,
+    learning_request: AthenaSkillRequest,
+) -> None:
+    """A local cleanup fault cannot discard a completed host result."""
+    auxiliary = importlib.import_module("hephaestus.automation.pipeline.auxiliary_worker_pool")
+    completions = CompletionQueue(maxsize=1)
+    host = _Host()
+
+    def fail_cleanup(_job: AthenaSkillJob) -> None:
+        raise RuntimeError("cleanup blocked")
+
+    monkeypatch.setattr(auxiliary, "cleanup_athena_workspace", fail_cleanup)
+    pool = auxiliary.AuxiliaryWorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=completions,
+        athena_skill_executor=host,
+    )
+    try:
+        pool.submit(AthenaSkillJob(request=learning_request), "DONE")
+        _handle, result = completions.get(timeout=2)
+
+        assert not result.ok
+        assert not result.interrupted
+        assert isinstance(result.value, AthenaSkillResult)
+        assert result.value.ok
+        assert result.error == "learning_workspace_cleanup_failed: RuntimeError: cleanup blocked"
+        assert learning_request.cwd.exists()
     finally:
         pool.shutdown(mark_interrupted=False)
 
@@ -276,11 +340,15 @@ def test_forced_shutdown_publishes_cancelled_queued_job(
         results = dict(completions.get(timeout=2) for _ in range(2))
 
         assert set(results) == {running, queued}
-        assert all(result.interrupted and not result.ok for result in results.values())
+        assert results[running].ok
+        assert not results[running].interrupted
+        assert results[queued].interrupted
+        assert not results[queued].ok
         assert results[queued].error == "interrupted_before_start"
         assert len(host.calls) == 1
         assert host.calls[0].workspace == learning_request.workspace
         assert host.cancelled.is_set()
+        assert not learning_request.cwd.exists()
         assert completions.empty()
     finally:
         host.release.set()

@@ -2513,6 +2513,27 @@ def test_review_cleanup_rejects_invalid_present_receipt(tmp_path: Path) -> None:
     assert receipt_path.exists()
 
 
+def test_review_cleanup_rejects_a_replaced_binding_generation(tmp_path: Path) -> None:
+    """Cleanup preserves a lane that another source operation replaced."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    stale = manager.prepare(9, SourceLane.REVIEW, second)
+    receipt = manager._require_receipt(9, SourceLane.REVIEW)
+    manager._write_receipt(replace(receipt, generation=receipt.generation + 1))
+
+    with pytest.raises(SourceWorkspaceError, match="generation changed"):
+        manager.cleanup(
+            9,
+            SourceLane.REVIEW,
+            expected_revision=stale.revision,
+            expected_detached=stale.detached,
+            expected_generation=stale.generation,
+        )
+
+    assert stale.cwd.exists()
+    assert manager._require_receipt(9, SourceLane.REVIEW).generation == stale.generation + 1
+
+
 def test_review_cleanup_receipt_error_names_operation_path_and_cause(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

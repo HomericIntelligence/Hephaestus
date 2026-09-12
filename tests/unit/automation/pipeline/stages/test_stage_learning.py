@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.agents.workspace import WorkspaceBinding
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
@@ -194,7 +194,7 @@ def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
 ) -> None:
     """A restored direct item retains enough revision evidence for learning."""
     revision = "a" * 40
-    prepared: list[str] = []
+    prepared: list[tuple[str, SourceLane, str | None]] = []
 
     class SourceWorkspaces:
         def prepare_bounded(
@@ -208,7 +208,7 @@ def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
         ) -> Any:
             assert deadline.shutdown is not None
             assert deadline.remaining() > 0
-            prepared.append(target)
+            prepared.append((target, _lane, branch))
             return WorkspaceBinding.source(
                 cwd=tmp_path,
                 reusable_root=tmp_path,
@@ -258,7 +258,89 @@ def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
     request = stage.step(item, ctx)
 
     assert isinstance(request, JobRequest)
-    assert prepared == [revision]
+    assert prepared == [(revision, SourceLane.REVIEW, None)]
+
+
+@pytest.mark.parametrize(
+    "source_workspaces",
+    [None, object(), lambda: None],
+    ids=["missing", "invalid", "empty-factory"],
+)
+def test_missing_source_manager_fails_before_learning_dispatch(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    source_workspaces: object,
+) -> None:
+    """Learning does not fall back to the implementation writer workspace."""
+    journal = LearningJournalStore(lambda: tmp_path / "learning")
+    writer = tmp_path / "writer"
+    writer.mkdir()
+    sentinel = writer / "preserve.txt"
+    sentinel.write_text("writer state\n", encoding="utf-8")
+    ctx = make_ctx(
+        learning_journal=journal,
+        budget_fn=lambda _name: 1,
+        paths=SimpleNamespace(
+            repo_root=tmp_path,
+            worktree=writer,
+            source_workspaces=source_workspaces,
+        ),
+    )
+    item = make_work_item(issue=2705, state="ENTER")
+    intent = LearningIntent.post_merge(repo=item.repo, issue=2705, pr=99)
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.FINISHED
+    stage = LearningStage()
+    stage.on_enter(item, ctx)
+    item.state = "CLAIM"
+
+    result = stage.step(item, ctx)
+
+    assert result == Continue(next_state="CLAIM")
+    record = journal.load(intent.key)
+    assert record is not None
+    assert record["status"] == "failed"
+    assert record["error"] == "learning_source_preparation_unavailable"
+    assert sentinel.read_text(encoding="utf-8") == "writer state\n"
+
+
+def test_source_manager_internal_attribute_error_preserves_specific_cause(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+) -> None:
+    """An internal manager fault is not reported as a missing manager."""
+
+    class SourceWorkspaces:
+        def prepare_bounded(self, *_args: object, **_kwargs: object) -> WorkspaceBinding:
+            raise AttributeError("manager internals unavailable")
+
+    journal = LearningJournalStore(lambda: tmp_path / "learning")
+    ctx = make_ctx(
+        learning_journal=journal,
+        budget_fn=lambda _name: 1,
+        paths=SimpleNamespace(
+            repo_root=tmp_path,
+            worktree=tmp_path,
+            source_workspaces=SourceWorkspaces(),
+        ),
+    )
+    item = make_work_item(issue=2705, state="ENTER")
+    intent = LearningIntent.post_merge(repo=item.repo, issue=2705, pr=99)
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.FINISHED
+    stage = LearningStage()
+    stage.on_enter(item, ctx)
+    item.state = "CLAIM"
+
+    result = stage.step(item, ctx)
+
+    assert result == Continue(next_state="CLAIM")
+    record = journal.load(intent.key)
+    assert record is not None
+    assert record["status"] == "failed"
+    assert record["error"] == "learning source preparation failed: manager internals unavailable"
 
 
 def _claimed_learning(
@@ -333,6 +415,45 @@ def test_valid_receipt_terminalizes_learning_success(
     assert record is not None
     assert record["status"] == "succeeded"
     assert record["receipt_summary"]["pr_number"] == 1
+
+
+def test_valid_receipt_is_not_replayed_after_workspace_cleanup_failure(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A confirmed delivery stays terminal when local cleanup fails."""
+    stage, item, ctx, journal = _claimed_learning(tmp_path, make_ctx, make_work_item)
+    sha = "a" * 40
+    delivery = AthenaSkillResult(
+        kind="learn",
+        delivery_receipt={
+            "pr_url": "https://github.com/HomericIntelligence/Mnemosyne/pull/1",
+            "pr_number": 1,
+            "commit_sha": sha,
+            "readback_head_sha": sha,
+        },
+    )
+
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=False,
+            value=delivery,
+            error="learning_workspace_cleanup_failed: source workspace changed",
+        ),
+        ctx,
+    )
+
+    record = journal.load(item.learning_intents[0].key)
+    assert record is not None
+    assert record["status"] == "succeeded"
+    assert record["receipt_summary"]["pr_number"] == 1
+    assert record["error"] == "learning_workspace_cleanup_failed"
+    assert item.payload["learning_failures"] == [
+        {
+            "key": item.learning_intents[0].key,
+            "error": "learning_workspace_cleanup_failed",
+        }
+    ]
 
 
 def test_restart_does_not_repeat_inactive_unknown_claim(
