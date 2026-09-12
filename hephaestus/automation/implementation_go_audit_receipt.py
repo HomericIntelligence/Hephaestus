@@ -9,11 +9,7 @@ from dataclasses import dataclass
 from html import escape
 
 from hephaestus.automation.github_api.diff import (
-    MAX_REVIEW_FINDING_AGGREGATE_CHARS,
-    MAX_REVIEW_FINDING_BODY_CHARS,
-    MAX_REVIEW_FINDING_EVIDENCE_CHARS,
-    MAX_REVIEW_FINDING_PATH_CHARS,
-    MAX_REVIEW_FINDINGS,
+    normalize_review_finding_records as normalize_review_finding_records,
 )
 from hephaestus.automation.review_audit import (
     MAX_RAW_FEEDBACK_CHARS,
@@ -42,14 +38,6 @@ _FINDING_JOURNAL_RE = re.compile(
     r"head=(?P<head>[0-9a-f]{40}(?:[0-9a-f]{24})?) -->"
 )
 _PUBLIC_FINDING_PAYLOAD_PREFIX = "<!-- hephaestus-review-finding-records:"
-_FINDING_REASONS = frozenset(
-    {
-        "reviewed_diff_unavailable",
-        "path_not_in_diff",
-        "line_not_in_diff",
-        "unsupported_side",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -75,114 +63,6 @@ def _full_sha(value: object) -> bool:
     return (
         isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", value) is not None
     )
-
-
-def _normalize_anchor(value: object, *, final: bool) -> dict[str, object] | None:
-    if value is None and final:
-        return None
-    if not isinstance(value, dict) or set(value) != {"path", "line", "side"}:
-        raise ValueError("review finding record anchor is invalid")
-    path = value.get("path")
-    line = value.get("line")
-    side = value.get("side")
-    if (
-        not isinstance(path, str)
-        or not path.strip()
-        or len(path) > MAX_REVIEW_FINDING_PATH_CHARS
-        or not isinstance(side, str)
-        or not side.strip()
-        or (final and side != "RIGHT")
-        or (line is not None and (isinstance(line, bool) or not isinstance(line, int) or line < 1))
-    ):
-        raise ValueError("review finding record anchor is invalid")
-    if final and line is None:
-        raise ValueError("review finding record final anchor is invalid")
-    return {"path": path.strip(), "line": line, "side": side.strip()}
-
-
-def normalize_review_finding_records(
-    records: object,
-) -> tuple[dict[str, object], ...]:
-    """Validate and normalize one bounded finding-journal collection."""
-    if not isinstance(records, (list, tuple)) or len(records) > MAX_REVIEW_FINDINGS:
-        raise ValueError("review finding record count is invalid")
-    normalized: list[dict[str, object]] = []
-    ids: set[str] = set()
-    required = {
-        "finding_id",
-        "source_head",
-        "severity",
-        "body",
-        "original_anchor",
-        "final_anchor",
-        "status",
-        "surface",
-        "reason",
-    }
-    for record in records:
-        if (
-            not isinstance(record, dict)
-            or not required.issubset(record)
-            or set(record) - (required | {"evidence"})
-        ):
-            raise ValueError("review finding record shape is invalid")
-        finding_id = record.get("finding_id")
-        source_head = record.get("source_head")
-        severity = record.get("severity")
-        body = record.get("body")
-        evidence = record.get("evidence")
-        status = record.get("status")
-        surface = record.get("surface")
-        reason = record.get("reason")
-        if (
-            not isinstance(finding_id, str)
-            or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None
-            or finding_id in ids
-            or not _full_sha(source_head)
-            or severity not in {"critical", "major", "minor", "nitpick"}
-            or not isinstance(body, str)
-            or not body.strip()
-            or len(body) > MAX_REVIEW_FINDING_BODY_CHARS
-            or (
-                evidence is not None
-                and (
-                    not isinstance(evidence, str)
-                    or not evidence.strip()
-                    or len(evidence) > MAX_REVIEW_FINDING_EVIDENCE_CHARS
-                )
-            )
-            or status not in {"published", "corrected", "not_publishable"}
-            or surface not in {"inline", "audit", "not_publishable"}
-            or (reason is not None and reason not in _FINDING_REASONS)
-            or (surface == "audit" and severity not in {"minor", "nitpick"})
-            or (status == "not_publishable") != (surface == "not_publishable")
-        ):
-            raise ValueError("review finding record value is invalid")
-        original_anchor = _normalize_anchor(record.get("original_anchor"), final=False)
-        final_anchor = _normalize_anchor(record.get("final_anchor"), final=True)
-        if surface == "inline" and final_anchor is None:
-            raise ValueError("review finding record inline anchor is invalid")
-        if surface != "inline" and final_anchor is not None:
-            raise ValueError("review finding record non-inline anchor is invalid")
-        value: dict[str, object] = {
-            "finding_id": finding_id,
-            "source_head": source_head,
-            "severity": severity,
-            "body": body.strip(),
-            "original_anchor": original_anchor,
-            "final_anchor": final_anchor,
-            "status": status,
-            "surface": surface,
-            "reason": reason,
-        }
-        if evidence is not None:
-            value["evidence"] = evidence.strip()
-        normalized.append(value)
-        ids.add(finding_id)
-    encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    if len(encoded) > MAX_REVIEW_FINDING_AGGREGATE_CHARS:
-        raise ValueError("review finding records exceed their aggregate size limit")
-    return tuple(normalized)
 
 
 def render_review_finding_journal(

@@ -870,7 +870,7 @@ class TestSeedIssueFetchLayer:
 
     def test_finding_journal_is_recovered_for_the_next_review(self) -> None:
         """Restart seeding keeps exact finding outcomes for the next audit."""
-        record = {
+        record: dict[str, object] = {
             "finding_id": "f" * 64,
             "source_head": "a" * 40,
             "severity": "minor",

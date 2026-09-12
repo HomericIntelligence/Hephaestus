@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 
 import hephaestus.automation.pipeline_github_reply_recovery as reply_recovery
+from hephaestus.automation.github_api.diff import ReviewAnchorCorrection
 
 from .pipeline.github_jobs import ImplementationReplyProgress
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -19,8 +20,8 @@ class ReviewPublicationResult(list[dict[str, Any]]):
         receipts: Sequence[dict[str, Any]],
         *,
         validated_findings: Sequence[dict[str, Any]] = (),
-        corrections: Sequence[object] = (),
-        unpublishable: Sequence[object] = (),
+        corrections: Sequence[ReviewAnchorCorrection] = (),
+        unpublishable: Sequence[ReviewAnchorCorrection] = (),
     ) -> None:
         """Create a result for one immutable review publication attempt."""
         super().__init__(dict(receipt) for receipt in receipts)
@@ -34,12 +35,12 @@ class ReviewPublicationResult(list[dict[str, Any]]):
         return tuple(self)
 
     @property
-    def anchor_corrections(self) -> tuple[object, ...]:
+    def anchor_corrections(self) -> tuple[ReviewAnchorCorrection, ...]:
         """Return findings that need a valid anchor selected by the reviewer."""
         return self.corrections
 
     @property
-    def not_publishable(self) -> tuple[object, ...]:
+    def not_publishable(self) -> tuple[ReviewAnchorCorrection, ...]:
         """Return findings that the current review cannot publish inline."""
         return self.unpublishable
 

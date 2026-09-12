@@ -5316,9 +5316,14 @@ class TestEvalVerdicts:
 
         class AuditWriteFailsGitHub(FakeStageGitHub):
             def publish_implementation_go_audit(
-                self, pr_number: int, head_sha: str, audit: ReviewAudit
+                self,
+                pr_number: int,
+                head_sha: str,
+                audit: ReviewAudit,
+                *,
+                finding_records: object = (),
             ) -> None:
-                del pr_number, head_sha, audit
+                del pr_number, head_sha, audit, finding_records
                 raise RuntimeError("comment unavailable")
 
         stage = PrReviewStage()
@@ -5342,9 +5347,14 @@ class TestEvalVerdicts:
 
         class AuditWriteFailsGitHub(FakeStageGitHub):
             def publish_implementation_go_audit(
-                self, pr_number: int, head_sha: str, audit: ReviewAudit
+                self,
+                pr_number: int,
+                head_sha: str,
+                audit: ReviewAudit,
+                *,
+                finding_records: object = (),
             ) -> None:
-                del pr_number, head_sha, audit
+                del pr_number, head_sha, audit, finding_records
                 raise RuntimeError("comment unavailable")
 
         stage = PrReviewStage()
@@ -7280,7 +7290,7 @@ class TestAuditPublication:
         assert isinstance(reconciliation, JobRequest)
         assert isinstance(reconciliation.job, GitHubJob)
         receipt = PipelineGitHubJobRunner._reconcile_pr_review(
-            reconciliation.job.request,
+            cast(ReconcilePrReviewRequest, reconciliation.job.request),
             github,
         )
         stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)

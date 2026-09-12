@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Literal, cast
 
+from hephaestus.automation.github_api.diff import normalize_review_finding_records
+
 if TYPE_CHECKING:
     from hephaestus.automation.github_api.diff import ReviewAnchorCorrection
 
@@ -416,10 +418,6 @@ def render_implementation_go_audit(
     body = f"{marker}\n\n{render_review_audit(audit)}\n\nReviewed head: `{head_sha}`."
     if finding_records:
         import base64
-
-        from hephaestus.automation.implementation_go_audit_receipt import (
-            normalize_review_finding_records,
-        )
 
         records = normalize_review_finding_records(finding_records)
         lines = ["## Retained review findings"]
