@@ -307,10 +307,7 @@ def test_existing_intake_rejects_unsafe_worktree_routing_before_external_action(
         admin_value if admin_value.is_absolute() else receipt.path / admin_value
     ).resolve(strict=True)
     worktree_config = admin_dir / "config.worktree"
-    unsafe_config = (
-        '[url "file:///attacker/"]\n'
-        "\tinsteadOf = https://github.com/\n"
-    ).encode()
+    unsafe_config = b'[url "file:///attacker/"]\n\tinsteadOf = https://github.com/\n'
     worktree_config.write_bytes(unsafe_config)
     receipt_content = first_manager.receipt_path.read_bytes()
     registrations = _run_git(caller, "worktree", "list", "--porcelain").stdout
