@@ -2146,8 +2146,14 @@ class WorktreeManager:
                     )
                 except (InterruptedError, subprocess.TimeoutExpired):
                     raise
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "Could not prune metadata for absent worktree issue #%s at %s "
+                        "(error type: %s)",
+                        issue_number,
+                        worktree_path,
+                        type(exc).__name__,
+                    )
                 del self.worktrees[issue_number]
                 return
 
