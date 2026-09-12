@@ -17,7 +17,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Self, TypeGuard
+from typing import Any, NoReturn, Self, TypeGuard
 
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.io.utils import write_secure
@@ -46,12 +46,13 @@ class RepoIntakeReceipt:
     ownership_key: str
     common_dir: Path
     path: Path
+    state_root: Path
     default_branch: str
     revision: str
     generation: int
     detached: bool = True
     branch: str | None = None
-    schema_version: int = 1
+    schema_version: int = 2
 
     def to_dict(self) -> dict[str, object]:
         """Return the receipt in its closed JSON representation."""
@@ -62,6 +63,7 @@ class RepoIntakeReceipt:
             "ownership_key": self.ownership_key,
             "common_dir": str(self.common_dir),
             "path": str(self.path),
+            "state_root": str(self.state_root),
             "default_branch": self.default_branch,
             "revision": self.revision,
             "generation": self.generation,
@@ -79,6 +81,7 @@ class RepoIntakeReceipt:
             "ownership_key",
             "common_dir",
             "path",
+            "state_root",
             "default_branch",
             "revision",
             "generation",
@@ -91,6 +94,8 @@ class RepoIntakeReceipt:
             payload["schema_version"], bool
         ):
             raise RepoIntakeError("repository-intake receipt schema version is invalid")
+        if payload["schema_version"] != 2:
+            raise RepoIntakeError("repository-intake receipt schema mismatch")
         if not isinstance(payload["generation"], int) or isinstance(payload["generation"], bool):
             raise RepoIntakeError("repository-intake receipt generation is invalid")
         if not isinstance(payload["detached"], bool):
@@ -101,6 +106,7 @@ class RepoIntakeReceipt:
             "ownership_key",
             "common_dir",
             "path",
+            "state_root",
             "default_branch",
             "revision",
         )
@@ -117,6 +123,7 @@ class RepoIntakeReceipt:
                 ownership_key=payload["ownership_key"],
                 common_dir=Path(payload["common_dir"]),
                 path=Path(payload["path"]),
+                state_root=Path(payload["state_root"]),
                 default_branch=payload["default_branch"],
                 revision=payload["revision"],
                 generation=payload["generation"],
@@ -125,25 +132,35 @@ class RepoIntakeReceipt:
             )
         except (TypeError, ValueError) as exc:
             raise RepoIntakeError(f"invalid repository-intake receipt: {exc}") from exc
-        if (
-            receipt.schema_version != 1
-            or receipt.generation < 1
-            or not receipt.common_dir.is_absolute()
-            or not receipt.path.is_absolute()
-            or not receipt.detached
-            or receipt.branch is not None
-            or not is_full_commit_sha(receipt.revision)
-            or not _is_valid_branch(receipt.default_branch)
-        ):
-            raise RepoIntakeError("repository-intake receipt values are unsafe")
-        for candidate in (receipt.common_dir, receipt.path):
-            if candidate.is_symlink():
-                raise RepoIntakeError("repository-intake receipt contains a symlinked path")
+        _validate_receipt_values(receipt)
         return receipt
 
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _KNOWN_WORKTREE_LINES = ("locked", "prunable")
+_DURABLE_STATE_NAMES = (".automation-state", ".issue_implementer")
+
+
+def _validate_receipt_values(receipt: RepoIntakeReceipt) -> None:
+    """Validate receipt values and their durable-state relationship."""
+    if (
+        receipt.generation < 1
+        or not receipt.common_dir.is_absolute()
+        or not receipt.path.is_absolute()
+        or not receipt.state_root.is_absolute()
+        or not receipt.detached
+        or receipt.branch is not None
+        or not is_full_commit_sha(receipt.revision)
+        or not _is_valid_branch(receipt.default_branch)
+    ):
+        raise RepoIntakeError("repository-intake receipt values are unsafe")
+    if receipt.state_root != receipt.path.parent:
+        raise RepoIntakeError("repository-intake receipt ownership does not match")
+    for candidate in (receipt.common_dir, receipt.path, receipt.state_root):
+        if candidate.is_symlink():
+            raise RepoIntakeError("repository-intake receipt contains a symlinked path")
+    if receipt.state_root.exists() and not receipt.state_root.is_dir():
+        raise RepoIntakeError("repository-intake receipt state root is unsafe")
 
 
 def _is_valid_branch(value: object) -> TypeGuard[str]:
@@ -242,6 +259,7 @@ class RepoIntakeManager:
         self._validate_origin()
         records = self._worktree_records()
         self._validate_state_paths(records)
+        self._validate_state_authority()
         old = self._read_receipt()
         record = self._validate_existing(old, records)
         default_branch = self._read_default_branch()
@@ -287,6 +305,7 @@ class RepoIntakeManager:
             ownership_key=self.ownership_key,
             common_dir=self.common_dir,
             path=self.worktree_path.resolve(),
+            state_root=self.state_dir.resolve(),
             default_branch=default_branch,
             revision=final_head,
             generation=generation,
@@ -415,9 +434,146 @@ class RepoIntakeManager:
             or receipt.ownership_key != self.ownership_key
             or receipt.common_dir != self.common_dir
             or receipt.path != self.worktree_path.resolve()
+            or receipt.state_root != self.state_dir.resolve()
         ):
             raise RepoIntakeError("repository-intake receipt ownership does not match")
         return receipt
+
+    def _validate_state_authority(self) -> None:
+        """Reject legacy or conflicting durable state before intake changes."""
+        destination_root = self.state_dir / "build"
+        legacy_sources: list[Path] = []
+        for name in _DURABLE_STATE_NAMES:
+            source = self.caller_root / "build" / name
+            destination = destination_root / name
+            if self._state_directory_has_entries(
+                source,
+                root=self.caller_root,
+                source=source,
+                destination=destination_root,
+                label="legacy",
+            ):
+                legacy_sources.append(source)
+            self._state_directory_has_entries(
+                destination,
+                root=self.state_dir,
+                source=source,
+                destination=destination_root,
+                label="destination",
+            )
+        destination_has_state = self._destination_has_state(
+            destination_root,
+            source=legacy_sources[0]
+            if legacy_sources
+            else self.caller_root / "build" / _DURABLE_STATE_NAMES[0],
+        )
+        if not legacy_sources:
+            return
+        sources = ", ".join(str(path) for path in legacy_sources)
+        if destination_has_state:
+            raise RepoIntakeError(
+                "repository-intake conflicting state requires manual reconciliation; "
+                f"preserve source {sources} and destination {destination_root}, "
+                "then reconcile them manually"
+            )
+        raise RepoIntakeError(
+            "repository-intake legacy state requires manual reconciliation; "
+            f"preserve source {sources} and destination {destination_root}, "
+            "then reconcile them manually"
+        )
+
+    def _state_directory_has_entries(
+        self,
+        path: Path,
+        *,
+        root: Path,
+        source: Path,
+        destination: Path,
+        label: str,
+    ) -> bool:
+        """Validate one state path and report whether it contains an entry."""
+        self._validate_state_path_chain(
+            path,
+            root=root,
+            source=source,
+            destination=destination,
+            label=label,
+        )
+        if not path.exists():
+            return False
+        if not path.is_dir():
+            self._raise_unsafe_state_path(label, path, source, destination)
+        try:
+            return next(path.iterdir(), None) is not None
+        except OSError as exc:
+            raise RepoIntakeError(
+                "repository-intake state inspection failed; "
+                f"preserve source {source} and destination {destination}, "
+                "then reconcile them manually"
+            ) from exc
+
+    def _validate_state_path_chain(
+        self,
+        path: Path,
+        *,
+        root: Path,
+        source: Path,
+        destination: Path,
+        label: str,
+    ) -> None:
+        """Require a lexical, nonsymlinked state path below its owner root."""
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            self._raise_unsafe_state_path(label, path, source, destination)
+        current = root
+        for component in relative.parts:
+            current /= component
+            if current.is_symlink():
+                self._raise_unsafe_state_path(label, current, source, destination)
+            if current.exists() and not current.is_dir():
+                self._raise_unsafe_state_path(label, current, source, destination)
+        if path.exists() and not path.is_dir():
+            self._raise_unsafe_state_path(label, path, source, destination)
+
+    @staticmethod
+    def _raise_unsafe_state_path(
+        label: str,
+        path: Path,
+        source: Path,
+        destination: Path,
+    ) -> NoReturn:
+        """Raise one actionable state-path error without changing either side."""
+        raise RepoIntakeError(
+            f"repository-intake {label} state path is unsafe: {path}; "
+            f"preserve source {source} and destination {destination}, "
+            "then reconcile them manually"
+        )
+
+    def _destination_has_state(self, root: Path, *, source: Path) -> bool:
+        """Return whether the destination durable area contains state."""
+        self._validate_state_path_chain(
+            root,
+            root=self.state_dir,
+            source=source,
+            destination=root,
+            label="destination",
+        )
+        if not root.exists():
+            return False
+        try:
+            for child in root.iterdir():
+                if child.name not in _DURABLE_STATE_NAMES:
+                    return True
+                if next(child.iterdir(), None) is not None:
+                    return True
+        except OSError as exc:
+            raise RepoIntakeError(
+                "repository-intake destination state inspection failed; "
+                f"preserve source {source} and destination {root}, "
+                "then reconcile them manually"
+            ) from exc
+        return False
 
     def _worktree_records(self) -> tuple[_WorktreeRecord, ...]:
         """Read the registered worktrees from the shared Git metadata."""

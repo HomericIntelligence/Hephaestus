@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
+from hephaestus.automation.repo_intake import (
+    RepoIntakeError,
+    RepoIntakeManager,
+    RepoIntakeReceipt,
+)
 
 
 def _run_git(cwd: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -150,6 +154,40 @@ def test_isolated_intake_is_bound_to_fetched_default_head(tmp_path: Path) -> Non
 
     assert receipt.revision == fetched_head
     assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == fetched_head
+
+
+def test_receipt_v2_round_trips_manager_owned_state_root(tmp_path: Path) -> None:
+    """The receipt identifies its stable durable-state owner directory."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+
+    receipt = manager.prepare()
+    payload = receipt.to_dict()
+
+    assert receipt.schema_version == 2
+    assert receipt.state_root == manager.state_dir.resolve()
+    assert payload["state_root"] == str(manager.state_dir.resolve())
+    assert RepoIntakeReceipt.from_dict(payload) == receipt
+
+
+def test_receipt_v1_fails_closed_as_a_schema_mismatch(tmp_path: Path) -> None:
+    """An unreleased receipt schema cannot omit durable-state authority."""
+    caller, remote = _make_repository(tmp_path)
+    payload = _manager(caller, remote).prepare().to_dict()
+    payload["schema_version"] = 1
+
+    with pytest.raises(RepoIntakeError, match="receipt schema mismatch"):
+        RepoIntakeReceipt.from_dict(payload)
+
+
+def test_receipt_rejects_relative_state_root(tmp_path: Path) -> None:
+    """Durable-state authority cannot use a relative path."""
+    caller, remote = _make_repository(tmp_path)
+    payload = _manager(caller, remote).prepare().to_dict()
+    payload["state_root"] = "relative-state"
+
+    with pytest.raises(RepoIntakeError, match="receipt values are unsafe"):
+        RepoIntakeReceipt.from_dict(payload)
 
 
 def test_stale_clean_owned_intake_is_rebound_under_common_dir_lock(tmp_path: Path) -> None:
@@ -294,6 +332,159 @@ def test_mismatched_receipt_is_preserved_and_fails_closed(tmp_path: Path) -> Non
 
     assert manager.receipt_path.read_text(encoding="utf-8") == changed
     assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == receipt.revision
+
+
+def test_mismatched_state_root_is_preserved_and_fails_closed(tmp_path: Path) -> None:
+    """A receipt cannot redirect durable state outside its owner directory."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    receipt = manager.prepare()
+    payload = json.loads(manager.receipt_path.read_text(encoding="utf-8"))
+    payload["state_root"] = str((tmp_path / "foreign-state").resolve())
+    changed = json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    manager.receipt_path.write_text(changed, encoding="utf-8")
+
+    with pytest.raises(RepoIntakeError, match="receipt ownership does not match"):
+        manager.prepare()
+
+    assert manager.receipt_path.read_text(encoding="utf-8") == changed
+    assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == receipt.revision
+
+
+@pytest.mark.parametrize("directory_name", [".automation-state", ".issue_implementer"])
+def test_legacy_caller_state_blocks_before_intake_and_is_preserved(
+    tmp_path: Path,
+    directory_name: str,
+) -> None:
+    """Legacy caller state requires manual reconciliation before intake."""
+    caller, remote = _make_repository(tmp_path)
+    source = caller / "build" / directory_name
+    source.mkdir(parents=True)
+    marker = source / "state.json"
+    marker.write_bytes(b'{"preserve":true}\n')
+    manager = _manager(caller, remote)
+    destination = manager.state_dir / "build"
+    before = _caller_state(caller)
+
+    with pytest.raises(RepoIntakeError, match="legacy state") as caught:
+        manager.prepare()
+
+    assert str(source) in str(caught.value)
+    assert str(destination) in str(caught.value)
+    assert "preserve" in str(caught.value)
+    assert "reconcile" in str(caught.value)
+    assert marker.read_bytes() == b'{"preserve":true}\n'
+    assert not destination.exists()
+    assert not manager.worktree_path.exists()
+    assert _caller_state(caller) == before
+
+
+def test_empty_legacy_caller_state_does_not_block_intake(tmp_path: Path) -> None:
+    """Empty ordinary legacy directories do not claim state authority."""
+    caller, remote = _make_repository(tmp_path)
+    for directory_name in (".automation-state", ".issue_implementer"):
+        (caller / "build" / directory_name).mkdir(parents=True)
+
+    receipt = _manager(caller, remote).prepare()
+
+    assert receipt.path.is_dir()
+
+
+def test_current_destination_state_is_preserved_during_reuse(tmp_path: Path) -> None:
+    """Current durable state does not conflict without legacy caller state."""
+    caller, remote = _make_repository(tmp_path)
+    first = _manager(caller, remote).prepare()
+    destination = first.state_root / "build" / ".automation-state"
+    destination.mkdir(parents=True)
+    marker = destination / "current.json"
+    marker.write_bytes(b"current\n")
+
+    second = _manager(caller, remote).prepare()
+
+    assert second == first
+    assert marker.read_bytes() == b"current\n"
+
+
+@pytest.mark.parametrize("path_kind", ["file", "symlink"])
+def test_unsafe_legacy_state_path_blocks_before_intake(
+    tmp_path: Path,
+    path_kind: str,
+) -> None:
+    """A legacy state path must be an ordinary confined directory."""
+    caller, remote = _make_repository(tmp_path)
+    source = caller / "build" / ".automation-state"
+    source.parent.mkdir()
+    if path_kind == "file":
+        source.write_bytes(b"preserve\n")
+    else:
+        foreign = tmp_path / "foreign-state"
+        foreign.mkdir()
+        source.symlink_to(foreign, target_is_directory=True)
+    manager = _manager(caller, remote)
+    destination = manager.state_dir / "build"
+    before = _caller_state(caller)
+
+    with pytest.raises(RepoIntakeError, match="legacy state path is unsafe") as caught:
+        manager.prepare()
+
+    assert str(source) in str(caught.value)
+    assert str(destination) in str(caught.value)
+    assert source.is_symlink() if path_kind == "symlink" else source.read_bytes() == b"preserve\n"
+    assert not destination.exists()
+    assert not manager.worktree_path.exists()
+    assert _caller_state(caller) == before
+
+
+def test_symlinked_destination_state_path_blocks_before_intake(tmp_path: Path) -> None:
+    """A destination state path cannot redirect durable state."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    manager.state_parent.mkdir(mode=0o700, parents=True)
+    manager.state_dir.mkdir(mode=0o700)
+    destination_root = manager.state_dir / "build"
+    destination_root.mkdir()
+    foreign = tmp_path / "foreign-destination"
+    foreign.mkdir()
+    destination = destination_root / ".automation-state"
+    destination.symlink_to(foreign, target_is_directory=True)
+    before = _caller_state(caller)
+
+    with pytest.raises(RepoIntakeError, match="destination state path is unsafe") as caught:
+        manager.prepare()
+
+    assert str(destination) in str(caught.value)
+    assert destination.is_symlink()
+    assert not manager.worktree_path.exists()
+    assert _caller_state(caller) == before
+
+
+def test_conflicting_legacy_and_destination_state_is_preserved(tmp_path: Path) -> None:
+    """Legacy and destination state cannot be reconciled automatically."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    source = caller / "build" / ".automation-state"
+    source.mkdir(parents=True)
+    source_marker = source / "source.json"
+    source_marker.write_bytes(b"source\n")
+    destination = manager.state_dir / "build" / ".issue_implementer"
+    manager.state_parent.mkdir(mode=0o700, parents=True)
+    manager.state_dir.mkdir(mode=0o700)
+    destination.mkdir(parents=True)
+    destination_marker = destination / "destination.json"
+    destination_marker.write_bytes(b"destination\n")
+    before = _caller_state(caller)
+
+    with pytest.raises(RepoIntakeError, match="conflicting state") as caught:
+        manager.prepare()
+
+    assert str(source) in str(caught.value)
+    assert str(manager.state_dir / "build") in str(caught.value)
+    assert "preserve" in str(caught.value)
+    assert "reconcile" in str(caught.value)
+    assert source_marker.read_bytes() == b"source\n"
+    assert destination_marker.read_bytes() == b"destination\n"
+    assert not manager.worktree_path.exists()
+    assert _caller_state(caller) == before
 
 
 def test_fetch_failure_preserves_attached_caller_state(tmp_path: Path) -> None:
