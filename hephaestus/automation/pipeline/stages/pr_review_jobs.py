@@ -161,9 +161,11 @@ def _carry_review_finding_records(
     item: WorkItem, current: list[dict[str, object]]
 ) -> list[dict[str, object]]:
     """Combine recovered history with current outcomes by stable finding ID."""
-    recovered = normalize_review_finding_records(
-        item.payload.get("carried_review_finding_records", [])
+    recovered = list(
+        normalize_review_finding_records(item.payload.get("carried_review_finding_records", []))
     )
+    if item.payload.get("review_finding_journal_head") != item.payload.get("reviewed_pr_head_sha"):
+        recovered = [record for record in recovered if record["status"] != "pending"]
     combined = {str(record["finding_id"]): dict(record) for record in recovered}
     for record in current:
         finding_id = str(record["finding_id"])
@@ -171,6 +173,8 @@ def _carry_review_finding_records(
         value = dict(record)
         if prior is not None:
             value["source_head"] = prior["source_head"]
+            if prior["status"] == "pending" and value["surface"] == "inline":
+                value["status"] = "pending"
         combined[finding_id] = value
     return [dict(record) for record in normalize_review_finding_records(list(combined.values()))]
 
@@ -1406,8 +1410,13 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         if receipt.action == "audit_failure":
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
+        record_source = (
+            receipt.final_finding_records
+            if receipt.final_finding_records is not None
+            else receipt.request.finding_records
+        )
         try:
-            records = normalize_review_finding_records(receipt.request.finding_records.thaw())
+            records = normalize_review_finding_records(record_source.thaw())
         except ValueError:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
@@ -1418,11 +1427,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 dict(record) for record in records if record["status"] == "not_publishable"
             ],
         }
-        not_publishable = item.payload.get("review_not_publishable_findings", [])
-        if isinstance(not_publishable, list) and any(
-            isinstance(finding, dict)
-            and str(finding.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
-            for finding in not_publishable
+        if any(
+            record["status"] == "not_publishable" and record["severity"] in BLOCKING_SEVERITIES
+            for record in records
         ):
             no_go_outcome = PrReviewGate._write_no_go(item, ctx)
             if no_go_outcome is not None:

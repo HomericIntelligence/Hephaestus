@@ -998,6 +998,7 @@ class PrReviewReconciled:
     remediation_threads: FrozenJson
     anchor_corrections: FrozenJson = field(default_factory=_empty_frozen_list)
     unpublishable_findings: FrozenJson = field(default_factory=_empty_frozen_list)
+    final_finding_records: FrozenJson | None = None
 
     def __post_init__(self) -> None:
         """Validate immutable review response snapshots."""
@@ -1008,6 +1009,8 @@ class PrReviewReconciled:
         _json_root(self.remediation_threads, list, "remediation_threads")
         _json_root(self.anchor_corrections, list, "anchor_corrections")
         _json_root(self.unpublishable_findings, list, "unpublishable_findings")
+        if self.final_finding_records is not None:
+            _json_root(self.final_finding_records, list, "final_finding_records")
 
     @property
     def corrections(self) -> FrozenJson:

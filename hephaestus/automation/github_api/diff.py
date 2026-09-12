@@ -116,11 +116,12 @@ def normalize_review_finding_records(
                     or len(evidence) > MAX_REVIEW_FINDING_EVIDENCE_CHARS
                 )
             )
-            or status not in {"published", "corrected", "not_publishable"}
+            or status not in {"pending", "published", "corrected", "not_publishable"}
             or surface not in {"inline", "audit", "not_publishable"}
             or (reason is not None and reason not in _FINDING_REASONS)
             or (surface == "audit" and severity not in {"minor", "nitpick"})
             or (status == "not_publishable") != (surface == "not_publishable")
+            or (status == "pending" and surface != "inline")
         ):
             raise ValueError("review finding record value is invalid")
         original_anchor = _normalize_finding_anchor(record.get("original_anchor"), final=False)

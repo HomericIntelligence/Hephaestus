@@ -958,11 +958,16 @@ class PipelineGitHubJobRunner:
         )
         from hephaestus.automation.pipeline.stages.pr_review_threads import (
             _durable_thread_id,
+            _finding_key,
             _is_postable_finding,
             _normalize_remediation_threads,
             _validation_pr_metadata_fingerprint,
             _validation_receipt_fingerprints,
             _without_duplicate_live_findings,
+        )
+        from hephaestus.automation.prompts.pr_review import (
+            SEVERITY_MARKER_PREFIX,
+            VALID_SEVERITIES,
         )
 
         def receipt(
@@ -973,6 +978,7 @@ class PipelineGitHubJobRunner:
             remediation: Any = (),
             corrections: Any = (),
             unpublishable: Any = (),
+            final_finding_records: Any = None,
         ) -> PrReviewReconciled:
             return PrReviewReconciled(
                 request=request,
@@ -982,6 +988,11 @@ class PipelineGitHubJobRunner:
                 remediation_threads=FrozenJson.snapshot(list(remediation)),
                 anchor_corrections=FrozenJson.snapshot(list(corrections)),
                 unpublishable_findings=FrozenJson.snapshot(list(unpublishable)),
+                final_finding_records=(
+                    None
+                    if final_finding_records is None
+                    else FrozenJson.snapshot(list(final_finding_records))
+                ),
             )
 
         def correction_data(value: object) -> dict[str, object] | None:
@@ -1100,6 +1111,77 @@ class PipelineGitHubJobRunner:
             finding_records = normalize_review_finding_records(raw_records)
         except ValueError:
             return receipt("audit_failure")
+        recovered_pending_ids = {
+            str(record["finding_id"]) for record in finding_records if record["status"] == "pending"
+        }
+
+        def recovery_key(value: dict[str, object]) -> tuple[object, str] | None:
+            """Bind visible publication evidence to content and severity."""
+            key = _finding_key(value)
+            severity = str(value.get("severity") or "").strip().lower()
+            body = value.get("body")
+            marker_lines = (
+                [
+                    line.strip()
+                    for line in body.splitlines()
+                    if line.strip().startswith(SEVERITY_MARKER_PREFIX)
+                ]
+                if isinstance(body, str)
+                else []
+            )
+            if marker_lines:
+                if len(marker_lines) != 1 or not marker_lines[0].endswith("-->"):
+                    return None
+                marker_severity = (
+                    marker_lines[0]
+                    .removeprefix(SEVERITY_MARKER_PREFIX)
+                    .removesuffix("-->")
+                    .strip()
+                    .lower()
+                )
+                if marker_severity not in VALID_SEVERITIES or (
+                    severity in VALID_SEVERITIES and severity != marker_severity
+                ):
+                    return None
+                severity = marker_severity
+            return None if key is None or severity not in VALID_SEVERITIES else (key, severity)
+
+        live_finding_keys = {
+            key for thread in live_by_id.values() if (key := recovery_key(thread)) is not None
+        }
+        for record in finding_records:
+            if record["status"] != "pending":
+                continue
+            anchor = record["final_anchor"]
+            if not isinstance(anchor, dict):
+                return receipt("audit_failure")
+            pending_key = recovery_key(
+                {
+                    "path": anchor["path"],
+                    "line": anchor["line"],
+                    "side": anchor["side"],
+                    "body": record["body"],
+                    "severity": record["severity"],
+                }
+            )
+            if pending_key is None or pending_key not in live_finding_keys:
+                return receipt("audit_failure")
+        if recovered_pending_ids:
+            finding_records = normalize_review_finding_records(
+                [
+                    {
+                        **record,
+                        "status": (
+                            "corrected"
+                            if record["status"] == "pending" and record["reason"] is not None
+                            else "published"
+                            if record["status"] == "pending"
+                            else record["status"]
+                        ),
+                    }
+                    for record in finding_records
+                ]
+            )
         inline_records = {
             str(record["finding_id"]): record
             for record in finding_records
@@ -1120,10 +1202,17 @@ class PipelineGitHubJobRunner:
         if validation.corrections or len(validation.valid) != len(raw_findings):
             return receipt("audit_failure")
         findings = _without_duplicate_live_findings(list(validation.valid), live_by_id)
-        prepublication_records = tuple(
-            record
-            for record in finding_records
-            if not (record["surface"] == "inline" and record["status"] == "published")
+        prepublication_records = normalize_review_finding_records(
+            [
+                {
+                    **record,
+                    "status": "pending",
+                }
+                if record["surface"] == "inline"
+                and str(record["finding_id"]) not in recovered_pending_ids
+                else record
+                for record in finding_records
+            ]
         )
         github.persist_review_finding_journal(
             request.pr_number,
@@ -1173,6 +1262,7 @@ class PipelineGitHubJobRunner:
             remediation=remediation_threads,
             corrections=corrections,
             unpublishable=unpublishable,
+            final_finding_records=finding_records,
         )
 
     @staticmethod

@@ -85,7 +85,7 @@ from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.prompts.pr_review import (
     MAX_PR_REVIEW_RENDERED_CHARS,
-    get_review_anchor_correction_prompt,
+    build_bounded_review_anchor_correction_prompt,
 )
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.review_journal import IssueComment
@@ -7190,7 +7190,7 @@ class TestAuditPublication:
 
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, AgentJob)
-        assert request.job.prompt_builder is get_review_anchor_correction_prompt
+        assert request.job.prompt_builder is build_bounded_review_anchor_correction_prompt
         assert request.job.execution_request is not None
         assert request.job.execution_request.operation is AgentOperation.REVIEW_VALIDATE
         assert request.job.resume_session_id == "review-session-id"
@@ -7416,6 +7416,50 @@ class TestAuditPublication:
         assert summary["published"] == []
         assert summary["corrected"] == []
         assert [record["finding_id"] for record in summary["could_not_publish"]] == ["f" * 64]
+
+    def test_recovered_blocking_not_publishable_record_still_stops(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart uses the durable record for the blocking NO-GO decision."""
+        item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        self._not_publishable_receipt(item)
+        item.payload.pop("review_not_publishable_findings")
+        github = FakeStageGitHub()
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "review_finding_not_publishable")
+        assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
+
+    def test_pending_record_from_old_head_does_not_bind_current_publication(
+        self, make_work_item: Any
+    ) -> None:
+        """A pending write intent applies only to its exact journal head."""
+        item = make_work_item(issue=50, pr=1001)
+        pending = {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "major",
+            "body": "Guard this value.",
+            "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "status": "pending",
+            "surface": "inline",
+            "reason": None,
+        }
+        current = {**pending, "source_head": "b" * 40, "status": "published"}
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "b" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": [pending],
+            }
+        )
+
+        records = pr_review_jobs._carry_review_finding_records(item, [current])
+
+        assert records == [current]
 
     def test_blocking_not_publishable_finding_does_not_label_a_changed_head(
         self, make_ctx: Any, make_work_item: Any

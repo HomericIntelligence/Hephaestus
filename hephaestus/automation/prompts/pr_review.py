@@ -271,11 +271,11 @@ def get_pr_review_analysis_prompt(
     pr_description: str = "",
     advise_findings: str = "",
     host_verifications_json: str = "",
-    host_verification_bootstrap_json: str = "",
-    anchor_corrections_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
     reviewer_provider: str = "",
+    host_verification_bootstrap_json: str = "",
+    anchor_corrections_json: str = "",
 ) -> str:
     """Get the `$athena:pr-review` analysis prompt for inline review comments.
 
@@ -407,11 +407,11 @@ def build_bounded_pr_review_analysis_prompt(
     pr_description: str = "",
     advise_findings: str = "",
     host_verifications_json: str = "",
-    host_verification_bootstrap_json: str = "",
-    anchor_corrections_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
     reviewer_provider: str = "",
+    host_verification_bootstrap_json: str = "",
+    anchor_corrections_json: str = "",
 ) -> str:
     """Render a direct analysis prompt within the provider-safe limit."""
     fenced = fence_content()
@@ -568,9 +568,31 @@ def get_review_anchor_correction_prompt(
     diff_text: str,
     review_context_kind: str = "issue",
 ) -> str:
-    """Get one bounded prompt that corrects invalid review anchors."""
-    fenced = fence_content()
-    rendered = PromptCatalog.current().render(
+    """Get one prompt that corrects invalid review anchors."""
+    rendered = _render_review_anchor_correction_prompt(
+        pr_number=pr_number,
+        issue_number=issue_number,
+        invalid_findings_json=invalid_findings_json,
+        diff_text=diff_text,
+        review_context_kind=review_context_kind,
+        fenced=fence_content(),
+    )
+    if len(rendered) > MAX_PR_REVIEW_RENDERED_CHARS:
+        raise PrReviewPromptSizeError(_prompt_limit_error(MAX_PR_REVIEW_RENDERED_CHARS))
+    return rendered
+
+
+def _render_review_anchor_correction_prompt(
+    *,
+    pr_number: int,
+    issue_number: int,
+    invalid_findings_json: str,
+    diff_text: str,
+    review_context_kind: str,
+    fenced: FencedContent,
+) -> str:
+    """Render one correction prompt with a caller-owned fence nonce."""
+    return PromptCatalog.current().render(
         "pr_review/anchor_correction.j2",
         pr_number=pr_number,
         issue_number=issue_number,
@@ -584,12 +606,39 @@ def get_review_anchor_correction_prompt(
             )
         ),
     )
-    if len(rendered) > MAX_PR_REVIEW_RENDERED_CHARS:
+
+
+def build_bounded_review_anchor_correction_prompt(
+    pr_number: int,
+    issue_number: int,
+    invalid_findings_json: str,
+    diff_text: str,
+    review_context_kind: str = "issue",
+) -> str:
+    """Render one correction prompt within the provider-safe limit."""
+    fenced = fence_content()
+
+    def render(diff: str) -> str:
+        return _render_review_anchor_correction_prompt(
+            pr_number=pr_number,
+            issue_number=issue_number,
+            invalid_findings_json=invalid_findings_json,
+            diff_text=diff,
+            review_context_kind=review_context_kind,
+            fenced=fenced,
+        )
+
+    prompt = render(diff_text)
+    if len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS:
+        return prompt
+    fixed_prompt = render("")
+    remaining = MAX_PR_REVIEW_RENDERED_CHARS - len(fixed_prompt)
+    if remaining < 0:
         raise PrReviewPromptSizeError(_prompt_limit_error(MAX_PR_REVIEW_RENDERED_CHARS))
-    return rendered
-
-
-build_bounded_review_anchor_correction_prompt = get_review_anchor_correction_prompt
+    prompt = render(_budget_review_diff(diff_text, max_chars=remaining))
+    if len(prompt) > MAX_PR_REVIEW_RENDERED_CHARS:
+        raise PrReviewPromptSizeError(_prompt_limit_error(MAX_PR_REVIEW_RENDERED_CHARS))
+    return prompt
 
 
 def _render_review_validation_prompt(

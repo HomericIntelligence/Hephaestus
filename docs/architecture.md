@@ -1279,9 +1279,9 @@ validates a corrected inline anchor against the same diff. It then sends all
 valid blocking findings in one GitHub review request.
 
 Before that GitHub review request, the host writes one actor-owned finding
-journal for the exact reviewed head. This first write does not mark an inline
-finding as published. After GitHub confirms the review request, the host writes
-the published inline outcomes to the journal. The journal also records
+journal for the exact reviewed head. This first write marks each inline
+finding as pending, not published. After GitHub confirms the review request,
+the host writes the published inline outcomes to the journal. The journal also records
 corrected and not-publishable outcomes, the original and final anchors, and the
 typed failure reason. Restart seeding keeps these bounded records for a new
 review. A final public GO audit includes the retained records. Only a confirmed
