@@ -1146,8 +1146,26 @@ class PipelineGitHubJobRunner:
                 severity = marker_severity
             return None if key is None or severity not in VALID_SEVERITIES else (key, severity)
 
+        def is_owned_exact_head_thread(value: dict[str, object]) -> bool:
+            """Return whether the root review comment proves this actor and head."""
+            comments = value.get("comments")
+            if not isinstance(comments, list) or not comments:
+                return False
+            root = comments[0]
+            return (
+                isinstance(root, dict)
+                and root.get("body") == value.get("body")
+                and root.get("viewer_did_author") is True
+                and root.get("review_commit_sha") == request.reviewed_head_sha
+                and isinstance(root.get("review_id"), str)
+                and bool(str(root["review_id"]).strip())
+                and root.get("review_state") == "COMMENTED"
+            )
+
         live_finding_keys = {
-            key for thread in live_by_id.values() if (key := recovery_key(thread)) is not None
+            key
+            for thread in live_by_id.values()
+            if is_owned_exact_head_thread(thread) and (key := recovery_key(thread)) is not None
         }
         for record in finding_records:
             if record["status"] != "pending":
@@ -1202,14 +1220,14 @@ class PipelineGitHubJobRunner:
         if validation.corrections or len(validation.valid) != len(raw_findings):
             return receipt("audit_failure")
         findings = _without_duplicate_live_findings(list(validation.valid), live_by_id)
+        posting_ids = {str(finding["finding_id"]) for finding in findings}
         prepublication_records = normalize_review_finding_records(
             [
                 {
                     **record,
                     "status": "pending",
                 }
-                if record["surface"] == "inline"
-                and str(record["finding_id"]) not in recovered_pending_ids
+                if record["surface"] == "inline" and str(record["finding_id"]) in posting_ids
                 else record
                 for record in finding_records
             ]

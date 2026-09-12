@@ -85,6 +85,8 @@ def _finding_record(
     }
     if finding.get("evidence") is not None:
         record["evidence"] = finding["evidence"]
+    if finding.get("scope_retraction_paths") is not None:
+        record["scope_retraction_paths"] = finding["scope_retraction_paths"]
     return record
 
 
@@ -1419,6 +1421,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         except ValueError:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
+        item.payload["review_finding_records"] = [dict(record) for record in records]
         item.payload["review_publication_summary"] = {
             "published": [dict(record) for record in records if record["status"] == "published"],
             "corrected": [dict(record) for record in records if record["status"] == "corrected"],

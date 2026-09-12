@@ -70,6 +70,29 @@ def test_review_finding_journal_rejects_oversized_or_unknown_records() -> None:
         audit_receipts.render_review_finding_journal(7, "a" * 40, (unknown,))
 
 
+@pytest.mark.parametrize("status", ["corrected", "not_publishable"])
+def test_review_finding_journal_requires_reason_for_corrected_outcome(status: str) -> None:
+    """A corrected outcome keeps the typed reason that caused correction."""
+    record = {**_finding_record(status=status), "reason": None}
+
+    with pytest.raises(ValueError, match="finding record"):
+        audit_receipts.render_review_finding_journal(7, "a" * 40, (record,))
+
+
+def test_review_finding_journal_preserves_normalized_source_scope() -> None:
+    """A durable finding record keeps its complete normalized source scope."""
+    record = {
+        **_finding_record(status="corrected"),
+        "scope_retraction_paths": ["z.py", "a.py", "z.py"],
+    }
+
+    _marker, body = audit_receipts.render_review_finding_journal(7, "a" * 40, (record,))
+    journal = audit_receipts.parse_review_finding_journal(body)
+
+    assert journal is not None
+    assert journal.finding_records[0]["scope_retraction_paths"] == ["a.py", "z.py"]
+
+
 def test_pending_go_receipt_preserves_cumulative_finding_records() -> None:
     """Publication recovery keeps advisory evidence from an earlier review head."""
     records = (_finding_record(status="corrected"),)

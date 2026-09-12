@@ -93,7 +93,7 @@ def normalize_review_finding_records(
         if (
             not isinstance(record, dict)
             or not required.issubset(record)
-            or set(record) - (required | {"evidence"})
+            or set(record) - (required | {"evidence", "scope_retraction_paths"})
         ):
             raise ValueError("review finding record shape is invalid")
         finding_id = record.get("finding_id")
@@ -101,6 +101,7 @@ def normalize_review_finding_records(
         severity = record.get("severity")
         body = record.get("body")
         evidence = record.get("evidence")
+        scope_retraction_paths = record.get("scope_retraction_paths")
         status = record.get("status")
         surface = record.get("surface")
         reason = record.get("reason")
@@ -121,9 +122,24 @@ def normalize_review_finding_records(
                     or len(evidence) > MAX_REVIEW_FINDING_EVIDENCE_CHARS
                 )
             )
+            or (
+                scope_retraction_paths is not None
+                and (
+                    not isinstance(scope_retraction_paths, (list, tuple))
+                    or not scope_retraction_paths
+                    or any(
+                        not isinstance(path, str)
+                        or not path.strip()
+                        or len(path) > MAX_REVIEW_FINDING_PATH_CHARS
+                        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+                        for path in scope_retraction_paths
+                    )
+                )
+            )
             or status not in {"pending", "published", "corrected", "not_publishable"}
             or surface not in {"inline", "audit", "not_publishable"}
             or (reason is not None and reason not in _FINDING_REASONS)
+            or (status in {"corrected", "not_publishable"} and reason is None)
             or (surface == "audit" and severity not in {"minor", "nitpick"})
             or (status == "not_publishable") != (surface == "not_publishable")
             or (status == "pending" and surface != "inline")
@@ -148,6 +164,10 @@ def normalize_review_finding_records(
         }
         if evidence is not None:
             value["evidence"] = evidence.strip()
+        if scope_retraction_paths is not None:
+            value["scope_retraction_paths"] = sorted(
+                {str(path).strip() for path in scope_retraction_paths}
+            )
         normalized.append(value)
         ids.add(finding_id)
     encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

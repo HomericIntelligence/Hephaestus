@@ -7216,6 +7216,7 @@ class TestAuditPublication:
             "severity": "major",
             "body": "invalid anchor",
             "evidence": "preserve this evidence",
+            "scope_retraction_paths": ("a.py",),
         }
         item = make_work_item(issue=50, pr=1001, state="VALIDATE_WAIT")
         item.worktree = "/tmp/review-worktree"
@@ -7272,6 +7273,7 @@ class TestAuditPublication:
             "invalid anchor",
         ]
         assert item.payload["review_threads"][1]["evidence"] == "preserve this evidence"
+        assert item.payload["review_threads"][1]["scope_retraction_paths"] == ("a.py",)
         assert item.payload["review_threads"][1]["line"] == 2
         assert item.attempts.get("pr_review_iter", 0) == 0
 
@@ -7307,6 +7309,7 @@ class TestAuditPublication:
             "corrected",
         ]
         assert journal.finding_records[1]["evidence"] == "preserve this evidence"
+        assert journal.finding_records[1]["scope_retraction_paths"] == ["a.py"]
 
     def test_audit_anchor_correction_is_recorded_as_not_publishable(
         self, make_ctx: Any, make_work_item: Any
@@ -7528,6 +7531,51 @@ class TestAuditPublication:
         records = pr_review_jobs._carry_review_finding_records(item, [current])
 
         assert records == [current]
+
+    def test_recovered_publication_updates_terminal_finding_records(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A promoted pending record becomes the terminal finding outcome."""
+        item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
+        pending = {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "major",
+            "body": "Guard this value.",
+            "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "status": "pending",
+            "surface": "inline",
+            "reason": None,
+        }
+        published = {**pending, "status": "published"}
+        request = ReconcilePrReviewRequest(
+            pr_number=1001,
+            reviewed_head_sha="a" * 40,
+            validated_receipt_fingerprints=None,
+            validated_metadata_fingerprint=None,
+            resolved_thread_ids=(),
+            feedback=FrozenJson.snapshot({}),
+            findings=FrozenJson.snapshot([]),
+            finding_records=FrozenJson.snapshot([pending]),
+            review_diff="diff",
+            deadline_s=time.monotonic() + 60,
+        )
+        receipt = PrReviewReconciled(
+            request=request,
+            action="apply",
+            posted_receipts=FrozenJson.snapshot([]),
+            unresolved_threads=FrozenJson.snapshot([]),
+            remediation_threads=FrozenJson.snapshot([]),
+            final_finding_records=FrozenJson.snapshot([published]),
+        )
+        item.payload[pr_review_jobs._PENDING_GITHUB_REQUEST] = request
+        item.payload[pr_review_jobs._PR_REVIEW_RECEIPT] = receipt
+        item.payload["review_finding_records"] = [pending]
+
+        PrReviewStage().step(item, make_ctx(github=FakeStageGitHub()))
+
+        assert item.payload["review_finding_records"] == [published]
 
     def test_blocking_not_publishable_finding_does_not_label_a_changed_head(
         self, make_ctx: Any, make_work_item: Any

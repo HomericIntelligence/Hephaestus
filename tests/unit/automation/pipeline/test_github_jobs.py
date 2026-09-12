@@ -1617,6 +1617,12 @@ def test_pr_reconciliation_keeps_pending_finding_after_ambiguous_publication() -
         "surface": "inline",
         "reason": None,
     }
+    historical_record = {
+        **record,
+        "finding_id": "b" * 64,
+        "source_head": "9" * 40,
+        "body": "Retain this historical finding.",
+    }
     request = ReconcilePrReviewRequest(
         pr_number=7,
         reviewed_head_sha="a" * 40,
@@ -1625,7 +1631,7 @@ def test_pr_reconciliation_keeps_pending_finding_after_ambiguous_publication() -
         resolved_thread_ids=(),
         feedback=FrozenJson.snapshot({}),
         findings=FrozenJson.snapshot([finding]),
-        finding_records=FrozenJson.snapshot([record]),
+        finding_records=FrozenJson.snapshot([historical_record, record]),
         review_diff=diff,
         deadline_s=time.monotonic() + 60,
     )
@@ -1647,12 +1653,25 @@ def test_pr_reconciliation_keeps_pending_finding_after_ambiguous_publication() -
     github.persist_review_finding_journal.assert_called_once_with(
         7,
         "a" * 40,
-        ({**record, "status": "pending"},),
+        (historical_record, {**record, "status": "pending"}),
     )
 
 
-def test_pr_reconciliation_recovers_visible_pending_finding_without_repost() -> None:
-    """A visible pending write is promoted without a duplicate review post."""
+@pytest.mark.parametrize(
+    ("viewer_did_author", "review_commit_sha", "expected_action"),
+    [
+        (True, "a" * 40, "apply"),
+        (False, "a" * 40, "audit_failure"),
+        (True, "b" * 40, "audit_failure"),
+    ],
+    ids=("owned-current-head", "foreign-author", "other-head"),
+)
+def test_pr_reconciliation_recovers_only_owned_exact_head_pending_finding(
+    viewer_did_author: bool,
+    review_commit_sha: str,
+    expected_action: str,
+) -> None:
+    """Only this actor's exact-head thread proves an ambiguous review write."""
     from unittest.mock import MagicMock
 
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
@@ -1700,6 +1719,15 @@ def test_pr_reconciliation_recovers_visible_pending_finding_without_repost() -> 
         {
             "id": "thread-1",
             "body": "[Review] Guard this value.\n<!-- hephaestus-severity: major -->",
+            "comments": [
+                {
+                    "body": "[Review] Guard this value.\n<!-- hephaestus-severity: major -->",
+                    "viewer_did_author": viewer_did_author,
+                    "review_commit_sha": review_commit_sha,
+                    "review_id": "review-1",
+                    "review_state": "COMMENTED",
+                }
+            ],
         }
     )
     github = MagicMock()
@@ -1713,16 +1741,20 @@ def test_pr_reconciliation_recovers_visible_pending_finding_without_repost() -> 
 
     receipt = PipelineGitHubJobRunner._reconcile_pr_review(request, github)
 
-    assert receipt.action == "apply"
+    assert receipt.action == expected_action
     assert receipt.request == request
-    assert receipt.final_finding_records is not None
-    assert receipt.final_finding_records.thaw() == [{**pending_record, "status": "published"}]
     github.post_review_threads.assert_not_called()
-    github.persist_review_finding_journal.assert_called_once_with(
-        7,
-        "a" * 40,
-        ({**pending_record, "status": "published"},),
-    )
+    if expected_action == "apply":
+        assert receipt.final_finding_records is not None
+        assert receipt.final_finding_records.thaw() == [{**pending_record, "status": "published"}]
+        github.persist_review_finding_journal.assert_called_once_with(
+            7,
+            "a" * 40,
+            ({**pending_record, "status": "published"},),
+        )
+    else:
+        assert receipt.final_finding_records is None
+        github.persist_review_finding_journal.assert_not_called()
 
 
 def test_pr_reconciliation_does_not_promote_pending_from_other_severity() -> None:
@@ -1775,6 +1807,15 @@ def test_pr_reconciliation_does_not_promote_pending_from_other_severity() -> Non
         {
             "id": "thread-1",
             "body": "[Review] Guard this value.\n<!-- hephaestus-severity: minor -->",
+            "comments": [
+                {
+                    "body": "[Review] Guard this value.\n<!-- hephaestus-severity: minor -->",
+                    "viewer_did_author": True,
+                    "review_commit_sha": "a" * 40,
+                    "review_id": "review-1",
+                    "review_state": "COMMENTED",
+                }
+            ],
         }
     )
     github.list_unresolved_review_threads.return_value = [live]
