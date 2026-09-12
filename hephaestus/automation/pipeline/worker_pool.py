@@ -269,8 +269,7 @@ _CONFLICT_PATHS_MAX_BYTES = 64 * 1024
 _CONFLICT_INDEX_MAX_BYTES = 1024 * 1024
 _CONFLICT_PATH_INDEX_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
 _CONFLICT_IGNORED_PATHS_MAX_BYTES = 1024 * 1024
-_CONFLICT_IGNORED_CONTENT_MAX_BYTES = 8 * 1024 * 1024
-_CONFLICT_IGNORED_FILE_MAX = 512
+_CONFLICT_IGNORED_FILE_MAX = 20_000
 _CONFLICT_FILE_MAX_BYTES = _CONFLICT_HUNK_MAX * 4
 _CONFLICT_RESOLUTION_OUTCOMES = frozenset(
     {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
@@ -7186,14 +7185,14 @@ class WorkerPool:
         )
         if index_result.byte_count == 0:
             return JobResult(ok=False, error="paused rebase conflict index invalid")
-        ignored_snapshot = self._conflict_ignored_content_snapshot(cwd, timeout=timeout)
+        ignored_snapshot = self._conflict_ignored_state_snapshot(cwd, timeout=timeout)
         host_state = hashlib.sha256(
             f"{index_result.sha256}\0{ignored_snapshot}".encode()
         ).hexdigest()
         return paths, host_state
 
-    def _conflict_ignored_content_snapshot(self, cwd: Path, *, timeout: int) -> str:
-        """Return a bounded content identity for ignored worktree files."""
+    def _conflict_ignored_state_snapshot(self, cwd: Path, *, timeout: int) -> str:
+        """Return ignored-file metadata while the source-lane lease is active."""
         ignored_paths = _run_bounded_git_output(
             ("git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
             cwd=cwd,
@@ -7208,7 +7207,7 @@ class WorkerPool:
         return _path_content_identity(
             cwd,
             ignored_paths.text,
-            remaining_content_bytes=[_CONFLICT_IGNORED_CONTENT_MAX_BYTES],
+            include_file_content=False,
             timeout=timeout,
             shutdown=self._shutdown,
         )

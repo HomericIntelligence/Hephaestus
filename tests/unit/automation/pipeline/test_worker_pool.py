@@ -11633,7 +11633,7 @@ class TestGitOps:
         assert " 0\thost-staged.py\0" in index_state
         assert all(f" {stage}\ttracked.txt\0" in index_state for stage in (1, 2, 3))
         index_digest = hashlib.sha256(index_state.encode()).hexdigest()
-        ignored_digest = pool._conflict_ignored_content_snapshot(binding.cwd, timeout=60)
+        ignored_digest = pool._conflict_ignored_state_snapshot(binding.cwd, timeout=60)
         assert (
             receipt["conflict_index_snapshot"]
             == hashlib.sha256(f"{index_digest}\0{ignored_digest}".encode()).hexdigest()
@@ -11840,7 +11840,7 @@ class TestGitOps:
             patch.object(pool, "_read_remote_branch_head", return_value="b" * 40),
             patch.object(
                 pool,
-                "_conflict_ignored_content_snapshot",
+                "_conflict_ignored_state_snapshot",
                 return_value=ignored_digest,
             ),
             patch(f"{_WP}._dirty_worktree_content_snapshot", return_value={}),
@@ -12654,10 +12654,10 @@ class TestGitOps:
         ignored = tmp_path / "outside.log"
         ignored.write_text("preexisting\n", encoding="utf-8")
 
-        before = pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
-        unchanged = pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
+        before = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+        unchanged = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
         ignored.write_text("agent output\n", encoding="utf-8")
-        changed = pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
+        changed = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
 
         assert unchanged == before
         assert changed != before
@@ -12676,19 +12676,19 @@ class TestGitOps:
             patch(f"{_WP}._run_bounded_git_output", return_value=bounded) as capture,
             patch(f"{_WP}._path_content_identity", return_value="a" * 64) as identity,
         ):
-            result = pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
+            result = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
 
         assert result == "a" * 64
         assert capture.call_args.kwargs["max_bytes"] == 1024 * 1024
         assert capture.call_args.kwargs["shutdown"] is pool._shutdown
-        assert identity.call_args.kwargs["remaining_content_bytes"] == [8 * 1024 * 1024]
+        assert identity.call_args.kwargs["include_file_content"] is False
         assert identity.call_args.kwargs["shutdown"] is pool._shutdown
 
     def test_conflict_ignored_snapshot_rejects_too_many_files(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
         """An ignored tree cannot exceed the fixed file-count limit."""
-        paths = "".join(f"cache/{index}\0" for index in range(513))
+        paths = "".join(f"cache/{index}\0" for index in range(20_001))
         bounded = _BoundedGitOutput(
             text=paths,
             sha256=hashlib.sha256(paths.encode()).hexdigest(),
@@ -12698,7 +12698,30 @@ class TestGitOps:
             patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
             pytest.raises(_GitInspectionResourceLimitError, match="file limit"),
         ):
-            pool._conflict_ignored_content_snapshot(tmp_path, timeout=60)
+            pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+
+    def test_conflict_ignored_snapshot_accepts_a_managed_virtual_environment(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A normal ignored virtual environment fits the metadata receipt."""
+        _git(tmp_path, "init", "-b", "main")
+        _git(tmp_path, "config", "user.email", "test@example.invalid")
+        _git(tmp_path, "config", "user.name", "Test User")
+        (tmp_path / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+        _git(tmp_path, "add", ".gitignore")
+        _git(tmp_path, "commit", "-m", "base")
+        environment = tmp_path / ".venv"
+        environment.mkdir()
+        for index in range(513):
+            (environment / f"module-{index}.py").write_text("value = 1\n", encoding="utf-8")
+        with (environment / "large.bin").open("wb") as stream:
+            stream.truncate(9 * 1024 * 1024)
+
+        before = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+        (environment / "module-0.py").write_text("value = 2\n", encoding="utf-8")
+        after = pool._conflict_ignored_state_snapshot(tmp_path, timeout=60)
+
+        assert after != before
 
     def test_residual_marker_check_uses_the_secure_bounded_reader(
         self, pool: WorkerPool, tmp_path: Path
