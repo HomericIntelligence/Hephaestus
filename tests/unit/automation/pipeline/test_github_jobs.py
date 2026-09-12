@@ -1757,8 +1757,131 @@ def test_pr_reconciliation_recovers_only_owned_exact_head_pending_finding(
         github.persist_review_finding_journal.assert_not_called()
 
 
-def test_pr_reconciliation_does_not_promote_pending_from_other_severity() -> None:
-    """A different-severity live thread cannot prove a pending publication."""
+def test_pr_reconciliation_retries_exact_missing_pending_finding() -> None:
+    """A missing pending thread is retried only from its exact finding batch."""
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+one\n"
+    finding = dict(
+        _validate_comments_to_diff(
+            [
+                {
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "major",
+                    "body": "Guard this value.",
+                    "evidence": "The pending receipt has no visible thread.",
+                }
+            ],
+            diff,
+        ).valid[0]
+    )
+    pending_record = {
+        "finding_id": finding["finding_id"],
+        "source_head": "a" * 40,
+        "severity": "major",
+        "body": "Guard this value.",
+        "evidence": "The pending receipt has no visible thread.",
+        "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "status": "pending",
+        "surface": "inline",
+        "reason": None,
+    }
+
+    def request_for(raw_findings: list[dict[str, object]]) -> ReconcilePrReviewRequest:
+        return ReconcilePrReviewRequest(
+            pr_number=7,
+            reviewed_head_sha="a" * 40,
+            validated_receipt_fingerprints=None,
+            validated_metadata_fingerprint=None,
+            resolved_thread_ids=(),
+            feedback=FrozenJson.snapshot({}),
+            findings=FrozenJson.snapshot(raw_findings),
+            finding_records=FrozenJson.snapshot([pending_record]),
+            review_diff=diff,
+            deadline_s=time.monotonic() + 60,
+        )
+
+    github = MagicMock()
+    github.list_unresolved_review_threads.return_value = []
+    github.reviewer_validation_receipts.return_value = []
+    github.pr_review_context.return_value = {
+        "pr_head_sha": "a" * 40,
+        "pr_title": "fix: example",
+        "pr_description": "body",
+    }
+    github.post_review_threads.return_value = ReviewPublicationResult(
+        [{**finding, "id": "thread-1"}], validated_findings=[finding]
+    )
+
+    receipt = PipelineGitHubJobRunner._reconcile_pr_review(request_for([finding]), github)
+
+    assert receipt.action == "apply"
+    github.post_review_threads.assert_called_once_with(
+        7,
+        [finding],
+        expected_head_sha="a" * 40,
+        review_diff=diff,
+    )
+    assert receipt.final_finding_records is not None
+    assert receipt.final_finding_records.thaw() == [{**pending_record, "status": "published"}]
+    assert github.persist_review_finding_journal.call_args_list == [
+        ((7, "a" * 40, (pending_record,)), {}),
+        ((7, "a" * 40, ({**pending_record, "status": "published"},)), {}),
+    ]
+
+    for invalid_findings in (
+        [],
+        [{**finding, "body": "Changed content."}],
+        [{**finding, "evidence": "Changed evidence."}],
+        [{**finding, "line": 2}],
+        [{**finding, "severity": "critical"}],
+    ):
+        github.reset_mock()
+        github.list_unresolved_review_threads.return_value = []
+        github.reviewer_validation_receipts.return_value = []
+        github.pr_review_context.return_value = {
+            "pr_head_sha": "a" * 40,
+            "pr_title": "fix: example",
+            "pr_description": "body",
+        }
+
+        invalid_receipt = PipelineGitHubJobRunner._reconcile_pr_review(
+            request_for(invalid_findings), github
+        )
+
+        assert invalid_receipt.action == "audit_failure"
+        github.post_review_threads.assert_not_called()
+        github.persist_review_finding_journal.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "live_specs",
+    [
+        ((None, "minor"),),
+        ((None, "major"), (None, "minor")),
+        ((None, None),),
+        ((None, "urgent"),),
+        (("major", "minor"),),
+        ((None, "major"), (None, "urgent")),
+    ],
+    ids=(
+        "different-severity",
+        "expected-and-conflicting-severity",
+        "missing-severity",
+        "malformed-severity",
+        "contradictory-severity",
+        "expected-and-malformed-severity",
+    ),
+)
+def test_pr_reconciliation_does_not_promote_pending_from_other_severity(
+    live_specs: tuple[tuple[str | None, str | None], ...],
+) -> None:
+    """Conflicting or invalid live severity cannot prove publication."""
     from unittest.mock import MagicMock
 
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
@@ -1802,23 +1925,31 @@ def test_pr_reconciliation_does_not_promote_pending_from_other_severity() -> Non
         deadline_s=time.monotonic() + 60,
     )
     github = MagicMock()
-    live = {key: value for key, value in finding.items() if key != "severity"}
-    live.update(
-        {
-            "id": "thread-1",
-            "body": "[Review] Guard this value.\n<!-- hephaestus-severity: minor -->",
-            "comments": [
-                {
-                    "body": "[Review] Guard this value.\n<!-- hephaestus-severity: minor -->",
-                    "viewer_did_author": True,
-                    "review_commit_sha": "a" * 40,
-                    "review_id": "review-1",
-                    "review_state": "COMMENTED",
-                }
-            ],
-        }
-    )
-    github.list_unresolved_review_threads.return_value = [live]
+    live_threads = []
+    for index, (thread_severity, marker_severity) in enumerate(live_specs, start=1):
+        body = "[Review] Guard this value."
+        if marker_severity is not None:
+            body += f"\n<!-- hephaestus-severity: {marker_severity} -->"
+        live = {key: value for key, value in finding.items() if key != "severity"}
+        if thread_severity is not None:
+            live["severity"] = thread_severity
+        live.update(
+            {
+                "id": f"thread-{index}",
+                "body": body,
+                "comments": [
+                    {
+                        "body": body,
+                        "viewer_did_author": True,
+                        "review_commit_sha": "a" * 40,
+                        "review_id": f"review-{index}",
+                        "review_state": "COMMENTED",
+                    }
+                ],
+            }
+        )
+        live_threads.append(live)
+    github.list_unresolved_review_threads.return_value = live_threads
     github.reviewer_validation_receipts.return_value = []
     github.pr_review_context.return_value = {
         "pr_head_sha": "a" * 40,

@@ -1111,7 +1111,7 @@ class PipelineGitHubJobRunner:
             finding_records = normalize_review_finding_records(raw_records)
         except ValueError:
             return receipt("audit_failure")
-        recovered_pending_ids = {
+        pending_finding_ids = {
             str(record["finding_id"]) for record in finding_records if record["status"] == "pending"
         }
 
@@ -1162,11 +1162,28 @@ class PipelineGitHubJobRunner:
                 and root.get("review_state") == "COMMENTED"
             )
 
-        live_finding_keys = {
-            key
+        all_live_finding_identities = {
+            identity
             for thread in live_by_id.values()
-            if is_owned_exact_head_thread(thread) and (key := recovery_key(thread)) is not None
+            if (identity := _finding_key(thread)) is not None
         }
+        invalid_live_finding_identities = {
+            identity
+            for thread in live_by_id.values()
+            if (identity := _finding_key(thread)) is not None and recovery_key(thread) is None
+        }
+        all_live_finding_keys = {
+            recovery
+            for thread in live_by_id.values()
+            if (recovery := recovery_key(thread)) is not None
+        }
+        owned_live_finding_keys = {
+            recovery
+            for thread in live_by_id.values()
+            if is_owned_exact_head_thread(thread) and (recovery := recovery_key(thread)) is not None
+        }
+        visible_pending_ids: set[str] = set()
+        pending_keys: dict[str, tuple[object, str]] = {}
         for record in finding_records:
             if record["status"] != "pending":
                 continue
@@ -1182,18 +1199,35 @@ class PipelineGitHubJobRunner:
                     "severity": record["severity"],
                 }
             )
-            if pending_key is None or pending_key not in live_finding_keys:
+            if pending_key is None:
                 return receipt("audit_failure")
-        if recovered_pending_ids:
+            finding_id = str(record["finding_id"])
+            pending_keys[finding_id] = pending_key
+            if pending_key[0] in invalid_live_finding_identities:
+                return receipt("audit_failure")
+            conflicting_live_severity = any(
+                key[0] == pending_key[0] and key[1] != pending_key[1]
+                for key in all_live_finding_keys
+            )
+            if conflicting_live_severity:
+                return receipt("audit_failure")
+            if pending_key in owned_live_finding_keys:
+                visible_pending_ids.add(finding_id)
+            elif pending_key[0] in all_live_finding_identities:
+                return receipt("audit_failure")
+        if visible_pending_ids:
             finding_records = normalize_review_finding_records(
                 [
                     {
                         **record,
                         "status": (
                             "corrected"
-                            if record["status"] == "pending" and record["reason"] is not None
+                            if str(record["finding_id"]) in visible_pending_ids
+                            and record["status"] == "pending"
+                            and record["reason"] is not None
                             else "published"
-                            if record["status"] == "pending"
+                            if str(record["finding_id"]) in visible_pending_ids
+                            and record["status"] == "pending"
                             else record["status"]
                         ),
                     }
@@ -1206,12 +1240,30 @@ class PipelineGitHubJobRunner:
             if record["surface"] == "inline"
         }
         finding_ids = [str(finding.get("finding_id") or "") for finding in raw_findings]
+        findings_by_id = {str(finding.get("finding_id") or ""): finding for finding in raw_findings}
+        missing_pending_ids = pending_finding_ids - visible_pending_ids
         if (
             len(set(finding_ids)) != len(finding_ids)
             or not set(finding_ids).issubset(inline_records)
+            or not missing_pending_ids.issubset(finding_ids)
             or any(not _is_postable_finding(finding) for finding in raw_findings)
         ):
             return receipt("audit_failure")
+        for finding_id in missing_pending_ids:
+            finding = findings_by_id[finding_id]
+            record = inline_records[finding_id]
+            anchor = record["final_anchor"]
+            if (
+                not isinstance(anchor, dict)
+                or recovery_key(finding) != pending_keys[finding_id]
+                or str(finding.get("path") or "").strip() != anchor["path"]
+                or finding.get("line") != anchor["line"]
+                or str(finding.get("side") or "").strip().upper() != anchor["side"]
+                or str(finding.get("severity") or "").strip().lower() != record["severity"]
+                or str(finding.get("body") or "").strip() != record["body"]
+                or str(finding.get("evidence") or "").strip() != str(record.get("evidence") or "")
+            ):
+                return receipt("audit_failure")
         validation = _validate_comments_to_diff(
             raw_findings,
             request.review_diff,
@@ -1263,11 +1315,22 @@ class PipelineGitHubJobRunner:
                 corrections=corrections,
                 unpublishable=unpublishable,
             )
-        if prepublication_records != finding_records:
+        final_finding_records = normalize_review_finding_records(
+            [
+                {
+                    **record,
+                    "status": ("corrected" if record["reason"] is not None else "published"),
+                }
+                if str(record["finding_id"]) in posting_ids and record["status"] == "pending"
+                else record
+                for record in prepublication_records
+            ]
+        )
+        if prepublication_records != final_finding_records:
             github.persist_review_finding_journal(
                 request.pr_number,
                 request.reviewed_head_sha,
-                finding_records,
+                final_finding_records,
             )
         live_threads = github.list_unresolved_review_threads(request.pr_number)
         remediation_threads = _normalize_remediation_threads(live_threads)
@@ -1280,7 +1343,7 @@ class PipelineGitHubJobRunner:
             remediation=remediation_threads,
             corrections=corrections,
             unpublishable=unpublishable,
-            final_finding_records=finding_records,
+            final_finding_records=final_finding_records,
         )
 
     @staticmethod
