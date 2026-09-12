@@ -3,7 +3,8 @@
 import queue
 import threading
 import time
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
@@ -34,7 +35,7 @@ def test_git_job_budget_includes_the_repository_lock(
     def run_job() -> None:
         started.set()
         try:
-            results.append(pool._run_git(GitJob("repo", "clone", 1)))
+            results.append(pool._run_git(GitJob("repo", "commit_push", 1)))
         finally:
             completed.set()
 
@@ -73,7 +74,7 @@ def test_git_job_children_use_the_remaining_total_budget(
 
     monkeypatch.setattr(pool, "_dispatch_git_op", dispatch)
     try:
-        result = pool._run_git(GitJob("repo", "clone", 1))
+        result = pool._run_git(GitJob("repo", "commit_push", 1))
         assert not result.ok
         assert result.error == "timeout"
     finally:
@@ -162,6 +163,52 @@ def test_intake_common_dir_lock_uses_git_job_budget(
     assert first_results and first_results[0].ok
     assert second_results and second_results[0].error == "lock_timeout"
     second_manager.prepare.assert_not_called()
+
+
+def test_checkout_network_budget_starts_after_repository_lock_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkout admission time does not reduce the Git operation budget."""
+    clock = {"now": 10.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    pool = worker_pool.WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path,
+    )
+
+    @contextmanager
+    def repo_lock(*args: object, **kwargs: object) -> Iterator[None]:
+        del args, kwargs
+        clock["now"] += 20.0
+        yield
+
+    @contextmanager
+    def advisory_lock(*args: object, **kwargs: object) -> Iterator[None]:
+        del args, kwargs
+        clock["now"] += 30.0
+        yield
+
+    def dispatch(job: GitJob) -> JobResult:
+        assert job.deadline_s == 120.0
+        return JobResult(ok=True)
+
+    monkeypatch.setattr(pool, "_repo_lock", repo_lock)
+    monkeypatch.setattr(pool, "_advisory_repo_lock", advisory_lock)
+    monkeypatch.setattr(pool, "_dispatch_git_op", dispatch)
+    try:
+        result = pool._run_git(
+            GitJob(
+                "repo",
+                "clone",
+                60,
+                repository_lock_wait_timeout_s=120,
+            )
+        )
+        assert result.ok
+    finally:
+        pool.shutdown(mark_interrupted=False)
 
 
 def test_github_job_budget_includes_the_repository_lock(tmp_path: Path) -> None:

@@ -36,6 +36,47 @@ class TestGitJobValidation:
         with pytest.raises(ValueError, match=r"clone.*commit_push.*create_worktree"):
             GitJob(repo="test/repo", op="invalid", timeout_s=60)
 
+    @pytest.mark.parametrize("field", ("repository_lock_wait_timeout_s", "deadline_s"))
+    @pytest.mark.parametrize("value", (0, -1, float("inf")))
+    def test_invalid_checkout_lock_limits_raise(self, field: str, value: float) -> None:
+        """Checkout lock limits must be finite positive values."""
+        with pytest.raises(ValueError, match=field):
+            if field == "repository_lock_wait_timeout_s":
+                GitJob(
+                    repo="test/repo",
+                    op="clone",
+                    timeout_s=60,
+                    repository_lock_wait_timeout_s=value,
+                )
+            else:
+                GitJob(
+                    repo="test/repo",
+                    op="clone",
+                    timeout_s=60,
+                    deadline_s=value,
+                )
+
+    def test_repository_lock_wait_rejects_operation_deadline(self) -> None:
+        """Checkout admission and ordinary job deadlines cannot be combined."""
+        with pytest.raises(ValueError, match="cannot be combined"):
+            GitJob(
+                repo="test/repo",
+                op="clone",
+                timeout_s=60,
+                deadline_s=10.0,
+                repository_lock_wait_timeout_s=5.0,
+            )
+
+    def test_repository_lock_wait_rejects_an_ordinary_git_job(self) -> None:
+        """Only repository checkout jobs can request separate lock admission."""
+        with pytest.raises(ValueError, match="only for repository checkout"):
+            GitJob(
+                repo="test/repo",
+                op="commit_push",
+                timeout_s=60,
+                repository_lock_wait_timeout_s=5.0,
+            )
+
 
 class TestJobDataclassesFrozen:
     """Tests that job dataclasses are frozen."""

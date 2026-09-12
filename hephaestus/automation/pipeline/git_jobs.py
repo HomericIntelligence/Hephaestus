@@ -49,6 +49,7 @@ WORKTREE_MATERIALIZED_KEY = "worktree_materialized"
 IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES = 64 * 1024
 IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES = 64 * 1024
 IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES = 256 * 1024
+REPOSITORY_CHECKOUT_OPS = frozenset({"clone", "prepare_intake", "sync_checkout"})
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class GitJob:
     expected_repository: str | None = None
     deadline_s: float | None = None
     workspace: WorkspaceBinding | None = None
+    repository_lock_wait_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         """Reject an operation outside the closed Git vocabulary."""
@@ -77,6 +79,20 @@ class GitJob:
             or self.deadline_s <= 0
         ):
             raise ValueError("deadline_s must be a finite positive monotonic time")
+        lock_wait = self.repository_lock_wait_timeout_s
+        if lock_wait is not None and (
+            isinstance(lock_wait, bool)
+            or not isinstance(lock_wait, (int, float))
+            or not math.isfinite(lock_wait)
+            or lock_wait <= 0
+        ):
+            raise ValueError("repository_lock_wait_timeout_s must be a finite positive value")
+        if lock_wait is not None and self.deadline_s is not None:
+            raise ValueError("repository_lock_wait_timeout_s cannot be combined with deadline_s")
+        if lock_wait is not None and self.op not in REPOSITORY_CHECKOUT_OPS:
+            raise ValueError(
+                "repository_lock_wait_timeout_s is valid only for repository checkout jobs"
+            )
 
     @property
     def transport_repository(self) -> str:

@@ -29,6 +29,7 @@ from hephaestus.automation.git_runtime import (
     operation_file_lock,
     remaining_operation_timeout,
 )
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import (
@@ -156,7 +157,7 @@ class RepoIntakeReceipt:
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _KNOWN_WORKTREE_LINES = ("locked", "prunable")
-_DURABLE_STATE_NAMES = (".automation-state", ".issue_implementer")
+_DURABLE_STATE_NAMES = (".automation-state", Path(DEFAULT_STATE_DIR).name)
 _GIT_METADATA_TEXT_LIMIT = 4096
 _GIT_CONFIG_TEXT_LIMIT = 1024 * 1024
 
@@ -282,6 +283,8 @@ class RepoIntakeManager:
                 "repository-intake lease; wait for the active automation run to "
                 "finish and retry"
             ) from exc
+        except InterruptedError:
+            raise
         except (OSError, RuntimeError) as exc:
             raise RepoIntakeError("repository-intake run lease is unavailable") from exc
         try:
@@ -313,6 +316,8 @@ class RepoIntakeManager:
         except ExclusiveLockUnavailableError as exc:
             raise RepoIntakeError("exclusive Git metadata locking is unavailable") from exc
         except RepoIntakeError:
+            raise
+        except InterruptedError:
             raise
         except (OSError, RuntimeError) as exc:
             raise RepoIntakeError("repository-intake preparation failed safely") from exc
