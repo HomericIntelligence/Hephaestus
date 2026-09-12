@@ -58,7 +58,7 @@ For EACH conflicted file:
 
 Resolution heuristics (from batch-pr-rebase-workflow v2.8.0, verified-ci):
 - `.github/workflows/**` → prefer trunk's version unless this branch is ADDING the workflow
-- `uv.lock` → `git -C {{ shell_quote(worktree_path) }} show {{ shell_quote("origin/" ~ trunk ~ ":uv.lock") }} > {{ shell_quote(worktree_path / "uv.lock") }}`;
+- `uv.lock` → `git -C {{ shell_quote(worktree_path) }} show {{ shell_quote("origin/" ~ trunk ~ ":uv.lock") }} > {{ shell_quote(worktree_path ~ "/uv.lock") }}`;
   then run `uv sync` inside the worktree to regenerate
 - Feature code, tests → keep both sides' genuine additions; do NOT blindly take either side
 - Generated/binary files → take trunk's version
