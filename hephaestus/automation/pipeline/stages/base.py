@@ -480,6 +480,8 @@ class StageGitHub(Protocol):
         GitHub accepts a review bound to the older commit and marks affected
         comments outdated when appropriate.  Eligibility for the GO label is
         checked separately against the current head.
+        The production result is list-compatible and carries typed anchor
+        corrections for findings that the reviewed diff cannot publish.
         """
         ...
 
@@ -494,12 +496,38 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def publish_implementation_go_audit(self, pr_number: int, head_sha: str, audit: Any) -> None:
+    def persist_review_finding_journal(
+        self, pr_number: int, head_sha: str, finding_records: object
+    ) -> None:
+        """Persist the exact-head finding journal before review publication."""
+        pass
+
+    def pending_review_finding_journal(self, pr_number: int) -> Any:
+        """Return the actor-owned finding journal, if one exists."""
+        pass
+
+    def clear_review_finding_journal(self, pr_number: int, head_sha: str) -> None:
+        """Remove an exact-head journal after public audit readback."""
+        pass
+
+    def publish_implementation_go_audit(
+        self,
+        pr_number: int,
+        head_sha: str,
+        audit: Any,
+        *,
+        finding_records: object = (),
+    ) -> None:
         """Publish the public audit, then remove exact-head reply journals."""
         pass
 
     def persist_pending_implementation_go_audit(
-        self, pr_number: int, head_sha: str, audit: Any
+        self,
+        pr_number: int,
+        head_sha: str,
+        audit: Any,
+        *,
+        finding_records: object = (),
     ) -> None:
         """Persist and read back the exact-head audit recovery receipt."""
         pass

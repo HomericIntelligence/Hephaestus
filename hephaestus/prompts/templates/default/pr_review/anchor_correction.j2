@@ -1,0 +1,28 @@
+Correct invalid review anchors for pull request #{{ pr_number }} and {{ review_context_kind }} #{{ issue_number }}.
+
+{{ untrusted_notice }}
+
+Invalid findings:
+{{ invalid_findings_block }}
+
+Immutable reviewed diff:
+{{ diff_block }}
+
+For each supplied finding ID, return exactly one correction. Do not omit or add an ID.
+Do not change the finding body, evidence, severity, or scope-retraction paths.
+
+Select a valid changed-line anchor from the current diff or select one supported non-inline surface:
+
+- Use `inline` only with a valid changed-line `path`, positive `line`, and `side` equal to `RIGHT`.
+- Use `audit` only for a `minor` or `nitpick` finding that needs no inline thread.
+- Use `not_publishable` when no supported surface is valid.
+
+Use this exact JSON shape for an inline result:
+
+```json
+{"corrections":[{"finding_id":"<64-lowercase-hex>","surface":"inline","path":"path.py","line":1,"side":"RIGHT"}]}
+```
+
+For `audit` and `not_publishable`, include only `finding_id` and `surface` in the result item.
+
+{{ terse_output_directive }}

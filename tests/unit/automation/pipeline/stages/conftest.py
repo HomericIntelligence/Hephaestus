@@ -22,7 +22,11 @@ import pytest
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.github_api import issue_body_digest
-from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
+from hephaestus.automation.implementation_go_audit_receipt import (
+    PendingImplementationGoAudit,
+    PendingReviewFindingJournal,
+    normalize_review_finding_records,
+)
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
@@ -196,6 +200,7 @@ class FakeStageGitHub(FakeGitHub):
         self._thread_replies: dict[str, list[dict[str, str]]] = {}
         self.review_rebase_records: dict[int, RebaseReviewRecord] = {}
         self.pending_go_audits: dict[int, PendingImplementationGoAudit] = {}
+        self.pending_finding_journals: dict[int, PendingReviewFindingJournal] = {}
         self.operation_deadlines: list[tuple[float, threading.Event | None]] = []
         self._dependency_fact_batches = deque(dependency_fact_batches or [])
         self.dependency_fact_requests: list[tuple[int, ...]] = []
@@ -694,10 +699,20 @@ class FakeStageGitHub(FakeGitHub):
         self._log("mark_pr_implementation_go", pr_number)
 
     def publish_implementation_go_audit(
-        self, pr_number: int, head_sha: str, audit: ReviewAudit
+        self,
+        pr_number: int,
+        head_sha: str,
+        audit: ReviewAudit,
+        *,
+        finding_records: object = (),
     ) -> None:
         """Mirror public audit publication and exact-head handoff cleanup."""
-        marker, body = render_implementation_go_audit(audit, pr_number=pr_number, head_sha=head_sha)
+        marker, body = render_implementation_go_audit(
+            audit,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            finding_records=finding_records,
+        )
         self.upsert_issue_comment(pr_number, marker, body)
         handoff_prefix = (
             f"<!-- hephaestus-implementation-reply-handoff:pr={pr_number}:head={head_sha}:"
@@ -712,15 +727,43 @@ class FakeStageGitHub(FakeGitHub):
         self._log("publish_implementation_go_audit", pr_number, head_sha)
 
     def persist_pending_implementation_go_audit(
-        self, pr_number: int, head_sha: str, audit: ReviewAudit
+        self,
+        pr_number: int,
+        head_sha: str,
+        audit: ReviewAudit,
+        *,
+        finding_records: object = (),
     ) -> None:
         """Persist the exact-head recovery record before the label transition."""
         self.pending_go_audits[pr_number] = PendingImplementationGoAudit(
             pr_number=pr_number,
             head_sha=head_sha,
             audit=audit,
+            finding_records=normalize_review_finding_records(finding_records),
         )
         self._log("persist_pending_implementation_go_audit", pr_number, head_sha)
+
+    def persist_review_finding_journal(
+        self, pr_number: int, head_sha: str, finding_records: object
+    ) -> None:
+        """Persist the fake exact-head finding journal."""
+        self.pending_finding_journals[pr_number] = PendingReviewFindingJournal(
+            pr_number=pr_number,
+            head_sha=head_sha,
+            finding_records=normalize_review_finding_records(finding_records),
+        )
+        self._log("persist_review_finding_journal", pr_number, head_sha)
+
+    def pending_review_finding_journal(self, pr_number: int) -> PendingReviewFindingJournal | None:
+        """Return the fake exact-head finding journal."""
+        return self.pending_finding_journals.get(pr_number)
+
+    def clear_review_finding_journal(self, pr_number: int, head_sha: str) -> None:
+        """Clear one matching fake finding journal."""
+        journal = self.pending_finding_journals.get(pr_number)
+        if journal is not None and journal.head_sha == head_sha:
+            del self.pending_finding_journals[pr_number]
+        self._log("clear_review_finding_journal", pr_number, head_sha)
 
     def pending_implementation_go_audit(
         self, pr_number: int

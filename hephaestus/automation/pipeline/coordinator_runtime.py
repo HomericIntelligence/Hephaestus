@@ -17,6 +17,9 @@ from hephaestus.automation.direct_review_recovery import (
     is_inspection_only_detached_push_failure,
     list_direct_review_recovery_paths,
 )
+from hephaestus.automation.implementation_go_audit_receipt import (
+    normalize_review_finding_records,
+)
 from hephaestus.automation.issue_waves import IssueWaveError, IssueWaveStore
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
@@ -139,6 +142,37 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     def _record_event(self, event: str, *fields: ct.Any) -> None:
         """Append an event to memory and, when configured, to JSONL on disk."""
         _observability.record_event(self, event, *fields, now_fn=self._wall_time, logger=logger)
+
+    def _record_review_finding_events(self, item: ct.WorkItem) -> None:
+        """Stream bounded finding identities without review text."""
+        try:
+            records = normalize_review_finding_records(
+                item.payload.get("review_finding_records", [])
+            )
+        except ValueError:
+            logger.warning(
+                "terminal:%s: invalid review finding records; "
+                "the coordinator did not write finding events",
+                self._item_key(item),
+            )
+            return
+        for record in records:
+            self._record_event(
+                "review_finding_outcome",
+                {
+                    "repo": item.repo,
+                    "issue": item.issue,
+                    "pr": item.pr,
+                    "finding_id": record["finding_id"],
+                    "source_head": record["source_head"],
+                    "severity": record["severity"],
+                    "status": record["status"],
+                    "surface": record["surface"],
+                    "original_anchor": record["original_anchor"],
+                    "final_anchor": record["final_anchor"],
+                    "reason": record["reason"],
+                },
+            )
 
     def _observability_snapshot(self) -> dict[str, ct.Any]:
         """Read the coordinator lifecycle values that observability exposes."""
@@ -450,6 +484,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if item.result is None or item.payload.get("_summary_recorded", False):
             return
         item.payload["_summary_recorded"] = True
+        self._record_review_finding_events(item)
         self._terminal_summary.record(item)
         self._seen_item_ids.discard(id(item))
 

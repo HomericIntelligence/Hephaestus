@@ -65,6 +65,30 @@ def _review_run_reasons(items: Sequence[WorkItem]) -> dict[str, int]:
     return dict(sorted(reasons.items()))
 
 
+def _review_finding_outcomes(item: WorkItem) -> Counter[str]:
+    """Count valid unique finding outcomes on one terminal item."""
+    outcomes: Counter[str] = Counter()
+    seen: set[str] = set()
+    raw = item.payload.get("review_finding_records", [])
+    if not isinstance(raw, list):
+        return outcomes
+    for record in raw:
+        if not isinstance(record, dict):
+            continue
+        finding_id = record.get("finding_id")
+        status = record.get("status")
+        if (
+            not isinstance(finding_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None
+            or finding_id in seen
+            or status not in {"published", "corrected", "not_publishable"}
+        ):
+            continue
+        seen.add(finding_id)
+        outcomes[status] += 1
+    return outcomes
+
+
 def record_summary_action(item: WorkItem, action: str) -> None:
     """Record one idempotent, bounded planning action on a work item."""
     normalized = action.strip()
@@ -216,6 +240,7 @@ class TerminalSummary:
     _per_stage: Counter[str] = field(default_factory=Counter)
     _planning_actions: Counter[str] = field(default_factory=Counter)
     _review_run_reasons: Counter[str] = field(default_factory=Counter)
+    _review_finding_outcomes: Counter[str] = field(default_factory=Counter)
 
     def record(self, item: WorkItem) -> None:
         """Add one terminal or resumable item outcome to the aggregate."""
@@ -226,6 +251,7 @@ class TerminalSummary:
         review_run = _review_run(item)
         if review_run is not None:
             self._review_run_reasons[review_run[0]] += 1
+        self._review_finding_outcomes.update(_review_finding_outcomes(item))
 
     def reset(self) -> None:
         """Start a fresh reseed-pass aggregate without retaining item identities."""
@@ -234,6 +260,7 @@ class TerminalSummary:
         self._per_stage.clear()
         self._planning_actions.clear()
         self._review_run_reasons.clear()
+        self._review_finding_outcomes.clear()
 
     @property
     def dispositions(self) -> dict[str, int]:
@@ -254,6 +281,11 @@ class TerminalSummary:
     def review_run_reasons(self) -> dict[str, int]:
         """Return counts of bounded review-run completion reasons."""
         return dict(sorted(self._review_run_reasons.items()))
+
+    @property
+    def review_finding_outcomes(self) -> dict[str, int]:
+        """Return run-wide counts for review finding publication outcomes."""
+        return dict(sorted(self._review_finding_outcomes.items()))
 
 
 def _json_message(exit_code: int) -> str:
@@ -278,7 +310,56 @@ def _item_row(item: WorkItem) -> str:
     )
 
 
-def print_summary(
+def _review_publication_targets(item: WorkItem) -> dict[str, list[str]]:
+    """Return safe target labels for the review publication summary."""
+    raw_summary = item.payload.get("review_publication_summary")
+    if not isinstance(raw_summary, dict):
+        return {}
+    targets: dict[str, list[str]] = {}
+    for bucket in ("published", "corrected", "could_not_publish"):
+        raw_entries = raw_summary.get(bucket)
+        if not isinstance(raw_entries, list):
+            continue
+        labels: list[str] = []
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            finding_id = entry.get("finding_id")
+            if not isinstance(finding_id, str) or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None:
+                continue
+            original = _review_anchor_target(entry.get("original_anchor"))
+            final = _review_anchor_target(entry.get("final_anchor"))
+            if original is None:
+                continue
+            target = f"{finding_id} original={original} final={final or '-'}"
+            reason = entry.get("reason")
+            if isinstance(reason, str) and reason:
+                target = f"{target} [{reason}]"
+            labels.append(target)
+        if labels:
+            targets[bucket] = labels
+    return targets
+
+
+def _review_anchor_target(value: object) -> str | None:
+    """Return one bounded anchor label without review text."""
+    if not isinstance(value, dict):
+        return None
+    path = value.get("path")
+    line = value.get("line")
+    side = value.get("side")
+    if (
+        not isinstance(path, str)
+        or not path
+        or (line is not None and (isinstance(line, bool) or not isinstance(line, int)))
+        or not isinstance(side, str)
+        or not side
+    ):
+        return None
+    return f"{path}:{line if line is not None else '?'}:{side}"
+
+
+def print_summary(  # noqa: C901
     items: list[WorkItem],
     stats: RunStats,
     preserved: list[PreservedWorktree],
@@ -321,6 +402,14 @@ def print_summary(
                 review_run[0],
                 review_run[1],
             )
+        publication_targets = _review_publication_targets(item)
+        if publication_targets:
+            logger.info(
+                "    review-publication: published=%s corrected=%s could-not-publish=%s",
+                publication_targets.get("published", []),
+                publication_targets.get("corrected", []),
+                publication_targets.get("could_not_publish", []),
+            )
         cycle_id = item.payload.get("plan_review_cycle_id")
         if cycle_id:
             logger.info(
@@ -344,12 +433,17 @@ def print_summary(
         total_items = len(items)
         planning_actions = dict(sorted(planning_action_counter.items()))
         review_run_reasons = _review_run_reasons(items)
+        finding_outcome_counter: Counter[str] = Counter()
+        for item in items:
+            finding_outcome_counter.update(_review_finding_outcomes(item))
+        review_finding_outcomes = dict(sorted(finding_outcome_counter.items()))
     else:
         dispositions = terminal_summary.dispositions
         per_stage = terminal_summary.per_stage
         total_items = terminal_summary.total
         planning_actions = terminal_summary.planning_actions
         review_run_reasons = terminal_summary.review_run_reasons
+        review_finding_outcomes = terminal_summary.review_finding_outcomes
 
     logger.info("")
     logger.info("=== Aggregates ===")
@@ -359,6 +453,8 @@ def print_summary(
         logger.info("  planning-actions: %s", planning_actions)
     if review_run_reasons:
         logger.info("  review-run reasons: %s", review_run_reasons)
+    if review_finding_outcomes:
+        logger.info("  review-finding outcomes: %s", review_finding_outcomes)
     if terminal_summary is not None and total_items > len(items):
         logger.info("  detailed terminal rows retained: %d of %d", len(items), total_items)
     logger.info(
@@ -401,12 +497,23 @@ def print_summary(
             for item in items
             if item.result is not None and item.result.reason.startswith("resumable")
         ]
+        review_publication = [
+            {
+                "repo": item.repo,
+                "issue": item.issue,
+                "pr": item.pr,
+                **_review_publication_targets(item),
+            }
+            for item in items
+            if _review_publication_targets(item)
+        ]
         emit_json_status(
             stats.exit_code,
             message=_json_message(stats.exit_code),
             dispositions=dict(sorted(dispositions.items())),
             planning_actions=planning_actions,
             review_run_reasons=review_run_reasons,
+            review_finding_outcomes=review_finding_outcomes,
             loops_run=stats.loops_run,
             agent_jobs=stats.agent_job_count,
             agent_job_time_s=round(stats.agent_job_time_s, 1),
@@ -419,4 +526,5 @@ def print_summary(
             preserved_worktrees=[[number, path] for _, number, path in preserved],
             recovery_worktrees=[[number, path] for _, number, path in recovery_preserved],
             plan_review_sessions=review_sessions,
+            review_publication=review_publication,
         )

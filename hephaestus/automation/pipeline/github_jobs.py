@@ -11,7 +11,7 @@ import json
 import math
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
@@ -258,6 +258,11 @@ class ImplementationReplyProgress:
         )
 
 
+def _empty_frozen_list() -> FrozenJson:
+    """Create an empty immutable JSON list for optional receipt data."""
+    return FrozenJson.snapshot([])
+
+
 @dataclass(frozen=True)
 class RecoverReplyJournalRequest:
     """Recover a version-one reply journal for exact source threads."""
@@ -399,6 +404,7 @@ class ReconcilePrReviewRequest:
     resolved_thread_ids: tuple[str, ...]
     feedback: FrozenJson
     findings: FrozenJson
+    finding_records: FrozenJson
     review_diff: str
     deadline_s: float
     issue_number: int | None = None
@@ -423,6 +429,7 @@ class ReconcilePrReviewRequest:
             raise ValueError("resolved_thread_ids must be a tuple of non-empty strings")
         _json_root(self.feedback, dict, "feedback")
         _json_root(self.findings, list, "findings")
+        _json_root(self.finding_records, list, "finding_records")
         if not isinstance(self.review_diff, str):
             raise ValueError("review_diff must be a string")
         _deadline(self.deadline_s)
@@ -989,6 +996,9 @@ class PrReviewReconciled:
     posted_receipts: FrozenJson
     unresolved_threads: FrozenJson
     remediation_threads: FrozenJson
+    anchor_corrections: FrozenJson = field(default_factory=_empty_frozen_list)
+    unpublishable_findings: FrozenJson = field(default_factory=_empty_frozen_list)
+    final_finding_records: FrozenJson | None = None
 
     def __post_init__(self) -> None:
         """Validate immutable review response snapshots."""
@@ -997,6 +1007,15 @@ class PrReviewReconciled:
         _json_root(self.posted_receipts, list, "posted_receipts")
         _json_root(self.unresolved_threads, list, "unresolved_threads")
         _json_root(self.remediation_threads, list, "remediation_threads")
+        _json_root(self.anchor_corrections, list, "anchor_corrections")
+        _json_root(self.unpublishable_findings, list, "unpublishable_findings")
+        if self.final_finding_records is not None:
+            _json_root(self.final_finding_records, list, "final_finding_records")
+
+    @property
+    def corrections(self) -> FrozenJson:
+        """Return the typed-correction data under its shorter compatibility name."""
+        return self.anchor_corrections
 
 
 @dataclass(frozen=True)

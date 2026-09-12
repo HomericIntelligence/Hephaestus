@@ -15,8 +15,26 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 **PR Diff (untrusted):**
 {{ pr_diff_block }}
 
+**Host bootstrap grant (coordinator-bound identity, untrusted content):**
+{{ host_verification_bootstrap_block }}
+
+A validated bootstrap permits source review only. The skipped commands did not
+run. Keep the skipped receipt as missing local execution evidence. CI does not
+authorize source review. The bootstrap does not grant a GO label or merge authority.
+
 **Host-run validation receipts (untrusted output, coordinator-bound commands and head):**
 {{ host_verifications_block }}
+
+{% if anchor_corrections_json != "[]" %}
+**Findings that need anchor correction (untrusted host data):**
+{{ anchor_corrections_block }}
+
+For each finding in this block, keep its text and evidence.
+Select a valid changed-line anchor from the current diff and emit the finding with that
+anchor. Copy its `finding_id` without a change. If no valid inline anchor exists,
+do not invent one. Keep the finding
+in your analysis so the host can report it as not publishable.
+{% endif %}
 
 The supplied receipts are the complete coordinator-bound host plan for this
 review. When every receipt has `ok: true` and `status: passed` for the reviewed
@@ -111,6 +129,9 @@ Rules for the JSON block:
   - `acceptance_criteria`: bounded child acceptance criteria
 - `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
 - `body`: the review comment text (string)
+- `evidence`: optional supporting evidence (string)
+- `finding_id`: optional lowercase SHA-256 identity. It is required and must
+  stay unchanged when you re-anchor a supplied correction.
 - `scope_retraction_paths`: REQUIRED only when the body asks to drop, remove,
   or split a change because it is unrelated or out of scope. It must be a
   complete non-empty list of every repo-relative path that must be restored to

@@ -36,6 +36,7 @@ from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.github_api.graphql import GraphQLSpec
 from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
+    render_review_finding_journal,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
@@ -6418,6 +6419,105 @@ class TestMutatorMapping:
 
         delete.assert_called_once_with(12)
 
+    def test_review_finding_journal_persist_requires_exact_readback(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The adapter confirms the actor-owned journal before review publication."""
+        head = "a" * 40
+        records = (
+            {
+                "finding_id": "f" * 64,
+                "source_head": head,
+                "severity": "minor",
+                "body": "Retain this finding.",
+                "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
+                "final_anchor": None,
+                "status": "corrected",
+                "surface": "audit",
+                "reason": "line_not_in_diff",
+            },
+        )
+        marker, body = render_review_finding_journal(5, head, records)
+        upsert = MagicMock()
+        monkeypatch.setattr(adapter, "upsert_issue_comment", upsert)
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(return_value=[{"body": body, "databaseId": 12, "viewerDidAuthor": True}]),
+        )
+
+        adapter.persist_review_finding_journal(5, head, records)
+
+        upsert.assert_called_once_with(5, marker, body)
+        journal = adapter.pending_review_finding_journal(5)
+        assert journal is not None
+        assert journal.finding_records == records
+
+    def test_review_finding_journal_read_rejects_ambiguous_owned_records(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two actor-owned finding journals cannot become restart authority."""
+        record = {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "minor",
+            "body": "Retain this finding.",
+            "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "corrected",
+            "surface": "audit",
+            "reason": "line_not_in_diff",
+        }
+        _marker_a, body_a = render_review_finding_journal(5, "a" * 40, (record,))
+        _marker_b, body_b = render_review_finding_journal(5, "b" * 40, (record,))
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                return_value=[
+                    {"body": body_a, "databaseId": 12, "viewerDidAuthor": True},
+                    {"body": body_b, "databaseId": 13, "viewerDidAuthor": True},
+                ]
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="finding journals are ambiguous"):
+            adapter.pending_review_finding_journal(5)
+
+    def test_review_finding_journal_cleanup_preserves_ambiguous_records(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cleanup does not delete evidence when owned journals are ambiguous."""
+        record = {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "minor",
+            "body": "Retain this finding.",
+            "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "corrected",
+            "surface": "audit",
+            "reason": "line_not_in_diff",
+        }
+        _marker, body = render_review_finding_journal(5, "a" * 40, (record,))
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                return_value=[
+                    {"body": body, "databaseId": 12, "viewerDidAuthor": True},
+                    {"body": body, "databaseId": 13, "viewerDidAuthor": True},
+                ]
+            ),
+        )
+        delete = MagicMock()
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
+
+        with pytest.raises(RuntimeError, match="finding journals are ambiguous"):
+            adapter.clear_review_finding_journal(5, "a" * 40)
+
+        delete.assert_not_called()
+
 
 def test_mark_go_uses_adapter_labels_and_readback(
     adapter: PipelineGitHub,
@@ -8483,17 +8583,19 @@ class TestRepoScoping:
             }
         ]
 
-    def test_repo_scoped_review_post_rejects_mixed_anchor_batch_before_write(
+    def test_repo_scoped_review_post_rejects_the_complete_batch_before_writing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
-        """An invalid anchor must not leave a partially posted review batch."""
+        """One invalid anchor stops the full review batch before publication."""
         calls: list[list[str]] = []
+        review_payloads: list[dict[str, object]] = []
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(argv)
-            if argv[:2] == ["pr", "diff"]:
-                return SimpleNamespace(stdout=diff)
+            if argv[:3] == ["api", "-X", "POST"]:
+                review_payloads.append(json.loads(Path(argv[-1]).read_text()))
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
             raise AssertionError(f"unexpected GitHub write/query: {argv}")
 
         command_runner.side_effect = fake_gh_call
@@ -8506,17 +8608,168 @@ class TestRepoScoping:
             "gh_pr_state",
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
-        with pytest.raises(RuntimeError, match="anchor outside the reviewed diff"):
-            adapter.post_review_threads(
-                7,
-                [
-                    {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
-                    {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
-                ],
-                expected_head_sha="a" * 40,
-                review_diff=diff,
-            )
+        monkeypatch.setattr(
+            adapter,
+            "_repo_review_thread_receipts_for_review",
+            lambda *_args: [
+                {
+                    "id": "thread-valid",
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "body": "valid",
+                }
+            ],
+        )
 
+        result = adapter.post_review_threads(
+            7,
+            [
+                {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
+                {
+                    "path": "a.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": "stale",
+                    "evidence": "descriptor state is not propagated",
+                },
+            ],
+            expected_head_sha="a" * 40,
+            review_diff=diff,
+        )
+
+        assert result == []
+        assert len(result.corrections) == 1
+        correction = result.corrections[0]
+        assert correction.path == "a.py"
+        assert correction.line == 2
+        assert correction.side == "RIGHT"
+        assert correction.reason == "line_not_in_diff"
+        assert correction.finding["body"] == "stale"
+        assert correction.finding["evidence"] == "descriptor state is not propagated"
+        assert review_payloads == []
+        assert calls == []
+
+    def test_repo_scoped_review_post_reports_all_invalid_findings_without_writing(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
+        """An all-invalid batch keeps every finding without creating a review."""
+        calls: list[list[str]] = []
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            raise AssertionError(f"unexpected GitHub write: {argv}")
+
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
+        result = adapter.post_review_threads(
+            7,
+            [
+                {
+                    "path": "a.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": "stale one",
+                    "evidence": "evidence one",
+                },
+                {
+                    "path": "missing.py",
+                    "line": 4,
+                    "side": "RIGHT",
+                    "body": "stale two",
+                    "evidence": "evidence two",
+                },
+            ],
+            expected_head_sha="a" * 40,
+            review_diff=diff,
+        )
+
+        assert result == []
+        assert len(result.corrections) == 2
+        assert [correction.path for correction in result.corrections] == [
+            "a.py",
+            "missing.py",
+        ]
+        assert [correction.finding["evidence"] for correction in result.corrections] == [
+            "evidence one",
+            "evidence two",
+        ]
+        assert result.unpublishable == result.corrections
+        assert calls == []
+
+    def test_repo_scoped_review_post_uses_the_supplied_snapshot_for_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+    ) -> None:
+        """Validation uses the reviewed snapshot when the remote head changed."""
+        review_payloads: list[dict[str, object]] = []
+        snapshot_diff = (
+            "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+snapshot\n"
+        )
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[:3] == ["api", "-X", "POST"]:
+                review_payloads.append(json.loads(Path(argv[-1]).read_text()))
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
+            raise AssertionError(f"unexpected GitHub call: {argv}")
+
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_repo_review_thread_receipts_for_review",
+            lambda *_args: [{"id": "snapshot-thread"}],
+        )
+
+        result = adapter.post_review_threads(
+            7,
+            [
+                {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
+                {
+                    "path": "b.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "body": "valid only on a later head",
+                    "evidence": "new head evidence",
+                },
+            ],
+            expected_head_sha="a" * 40,
+            review_diff=snapshot_diff,
+        )
+
+        assert result == []
+        assert result.corrections[0].path == "b.py"
+        assert result.corrections[0].reason == "path_not_in_diff"
+        assert review_payloads == []
+
+    def test_repo_scoped_review_post_reports_missing_snapshot_as_unpublishable(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
+        """A missing immutable diff never permits an inline review write."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            raise AssertionError(f"unexpected GitHub write: {argv}")
+
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
+        result = adapter.post_review_threads(
+            7,
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+            expected_head_sha="a" * 40,
+            review_diff="",
+        )
+
+        assert result == []
+        assert len(result.corrections) == 1
+        assert result.corrections[0].reason == "reviewed_diff_unavailable"
         assert calls == []
 
     def test_repo_scoped_review_post_does_not_reject_a_reviewed_commit_after_a_push(
@@ -8605,9 +8858,17 @@ class TestRepoScoping:
         caplog: pytest.LogCaptureFixture,
         command_runner: MagicMock,
     ) -> None:
-        """A posted review without matching thread receipts logs a warning."""
+        """A posted review with comments that matches no GraphQL thread logs a warning.
+
+        The diff contains the proposed source line, so ``review_comments``
+        stays non-empty — required for the warning branch (posted comments
+        but zero matched threads) to trigger.
+        """
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["pr", "diff"]:
+                return SimpleNamespace(stdout=diff)
             if argv[:2] == ["api", "graphql"]:
                 payload = {
                     "data": {
@@ -8678,9 +8939,7 @@ class TestRepoScoping:
                 7,
                 [{"path": "a.py", "line": 1, "body": "x"}],
                 expected_head_sha="a" * 40,
-                review_diff=(
-                    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
-                ),
+                review_diff=diff,
             )
 
         assert posted == []

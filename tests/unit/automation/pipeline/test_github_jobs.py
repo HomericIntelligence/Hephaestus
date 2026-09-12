@@ -15,6 +15,7 @@ from typing import Any, ClassVar, Literal, cast
 
 import pytest
 
+from hephaestus.automation.github_api import _validate_comments_to_diff
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -47,6 +48,7 @@ from hephaestus.automation.pipeline.scope_expansion_records import (
     render_scope_expansion_child_body,
     render_scope_expansion_lifecycle_comment,
 )
+from hephaestus.automation.pipeline_github_reviews import ReviewPublicationResult
 from hephaestus.automation.remediation_recovery import (
     RemediationReplyResult,
     RemediationReviewInput,
@@ -1480,13 +1482,28 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
 ) -> None:
     """A late thread is returned to the stage and therefore cannot permit GO."""
     module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
-    finding = {
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1,3 @@\n+one\n+two\n+three\n"
+    raw_finding = {
         "path": "a.py",
         "line": 3,
         "side": "RIGHT",
         "severity": "major",
         "body": "guard None",
     }
+    finding = dict(_validate_comments_to_diff([raw_finding], diff).valid[0])
+    finding_record = {
+        "finding_id": finding["finding_id"],
+        "source_head": "a" * 40,
+        "severity": "major",
+        "body": "guard None",
+        "original_anchor": {"path": "a.py", "line": 3, "side": "RIGHT"},
+        "final_anchor": {"path": "a.py", "line": 3, "side": "RIGHT"},
+        "status": "published",
+        "surface": "inline",
+        "reason": None,
+    }
+    events: list[str] = []
+    journals: list[tuple[dict[str, object], ...]] = []
     posted = {
         **finding,
         "id": "posted-thread",
@@ -1520,8 +1537,16 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
                 "pr_description": "body",
             }
 
-        def post_review_threads(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
-            return [posted]
+        def post_review_threads(self, *_args: object, **_kwargs: object) -> object:
+            events.append("post")
+            return ReviewPublicationResult(
+                [posted],
+                validated_findings=[finding],
+            )
+
+        def persist_review_finding_journal(self, _pr: int, _head: str, records: object) -> None:
+            events.append("journal")
+            journals.append(tuple(cast(list[dict[str, object]], records)))
 
     monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
     request = ReconcilePrReviewRequest(
@@ -1532,7 +1557,8 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
         resolved_thread_ids=(),
         feedback=FrozenJson.snapshot({}),
         findings=FrozenJson.snapshot([finding]),
-        review_diff="diff",
+        finding_records=FrozenJson.snapshot([finding_record]),
+        review_diff=diff,
         deadline_s=time.monotonic() + 60,
     )
     job = GitHubJob(
@@ -1553,6 +1579,571 @@ def test_pr_reconciliation_reads_back_late_threads_before_apply(
         "late-thread",
     ]
     assert len(remediation) == 2
+    assert receipt.anchor_corrections.thaw() == []
+    assert events == ["journal", "post", "journal"]
+    pending_record = {**finding_record, "status": "pending"}
+    assert journals == [(pending_record,), (finding_record,)]
+
+
+def test_pr_reconciliation_keeps_pending_finding_after_ambiguous_publication() -> None:
+    """An unproved external write keeps its complete pending finding journal."""
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+one\n"
+    finding = dict(
+        _validate_comments_to_diff(
+            [
+                {
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "major",
+                    "body": "Guard this value.",
+                }
+            ],
+            diff,
+        ).valid[0]
+    )
+    record = {
+        "finding_id": finding["finding_id"],
+        "source_head": "a" * 40,
+        "severity": "major",
+        "body": "Guard this value.",
+        "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "status": "published",
+        "surface": "inline",
+        "reason": None,
+    }
+    historical_record = {
+        **record,
+        "finding_id": "b" * 64,
+        "source_head": "9" * 40,
+        "body": "Retain this historical finding.",
+    }
+    request = ReconcilePrReviewRequest(
+        pr_number=7,
+        reviewed_head_sha="a" * 40,
+        validated_receipt_fingerprints=None,
+        validated_metadata_fingerprint=None,
+        resolved_thread_ids=(),
+        feedback=FrozenJson.snapshot({}),
+        findings=FrozenJson.snapshot([finding]),
+        finding_records=FrozenJson.snapshot([historical_record, record]),
+        review_diff=diff,
+        deadline_s=time.monotonic() + 60,
+    )
+    github = MagicMock()
+    github.list_unresolved_review_threads.return_value = []
+    github.reviewer_validation_receipts.return_value = []
+    github.pr_review_context.return_value = {
+        "pr_head_sha": "a" * 40,
+        "pr_title": "fix: example",
+        "pr_description": "body",
+    }
+    github.post_review_threads.return_value = ReviewPublicationResult(
+        [], validated_findings=[finding]
+    )
+
+    receipt = PipelineGitHubJobRunner._reconcile_pr_review(request, github)
+
+    assert receipt.action == "audit_failure"
+    github.persist_review_finding_journal.assert_called_once_with(
+        7,
+        "a" * 40,
+        (historical_record, {**record, "status": "pending"}),
+    )
+
+
+@pytest.mark.parametrize(
+    ("viewer_did_author", "review_commit_sha", "expected_action"),
+    [
+        (True, "a" * 40, "apply"),
+        (False, "a" * 40, "audit_failure"),
+        (True, "b" * 40, "audit_failure"),
+    ],
+    ids=("owned-current-head", "foreign-author", "other-head"),
+)
+def test_pr_reconciliation_recovers_only_owned_exact_head_pending_finding(
+    viewer_did_author: bool,
+    review_commit_sha: str,
+    expected_action: str,
+) -> None:
+    """Only this actor's exact-head thread proves an ambiguous review write."""
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+one\n"
+    finding = dict(
+        _validate_comments_to_diff(
+            [
+                {
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "major",
+                    "body": "Guard this value.",
+                }
+            ],
+            diff,
+        ).valid[0]
+    )
+    pending_record = {
+        "finding_id": finding["finding_id"],
+        "source_head": "a" * 40,
+        "severity": "major",
+        "body": "Guard this value.",
+        "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "status": "pending",
+        "surface": "inline",
+        "reason": None,
+    }
+    request = ReconcilePrReviewRequest(
+        pr_number=7,
+        reviewed_head_sha="a" * 40,
+        validated_receipt_fingerprints=None,
+        validated_metadata_fingerprint=None,
+        resolved_thread_ids=(),
+        feedback=FrozenJson.snapshot({}),
+        findings=FrozenJson.snapshot([finding]),
+        finding_records=FrozenJson.snapshot([pending_record]),
+        review_diff=diff,
+        deadline_s=time.monotonic() + 60,
+    )
+    live = {
+        key: value
+        for key, value in finding.items()
+        if key not in {"severity", "scope_retraction_paths"}
+    }
+    live.update(
+        {
+            "id": "thread-1",
+            "body": "[Review] Guard this value.\n<!-- hephaestus-severity: major -->",
+            "comments": [
+                {
+                    "body": "[Review] Guard this value.\n<!-- hephaestus-severity: major -->",
+                    "viewer_did_author": viewer_did_author,
+                    "review_commit_sha": review_commit_sha,
+                    "review_id": "review-1",
+                    "review_state": "COMMENTED",
+                }
+            ],
+        }
+    )
+    github = MagicMock()
+    github.list_unresolved_review_threads.return_value = [live]
+    github.reviewer_validation_receipts.return_value = []
+    github.pr_review_context.return_value = {
+        "pr_head_sha": "a" * 40,
+        "pr_title": "fix: example",
+        "pr_description": "body",
+    }
+
+    receipt = PipelineGitHubJobRunner._reconcile_pr_review(request, github)
+
+    assert receipt.action == expected_action
+    assert receipt.request == request
+    github.post_review_threads.assert_not_called()
+    if expected_action == "apply":
+        assert receipt.final_finding_records is not None
+        assert receipt.final_finding_records.thaw() == [{**pending_record, "status": "published"}]
+        github.persist_review_finding_journal.assert_called_once_with(
+            7,
+            "a" * 40,
+            ({**pending_record, "status": "published"},),
+        )
+    else:
+        assert receipt.final_finding_records is None
+        github.persist_review_finding_journal.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("scope_marker", "expected_action"),
+    [
+        ('<!-- hephaestus-scope-retraction-paths: ["a.py"] -->', "apply"),
+        ("", "audit_failure"),
+        ('<!-- hephaestus-scope-retraction-paths: ["b.py"] -->', "audit_failure"),
+        ("<!-- hephaestus-scope-retraction-paths: not-json -->", "audit_failure"),
+    ],
+    ids=("matching", "missing", "mismatched", "malformed"),
+)
+@pytest.mark.parametrize("record_status", ["pending", "published"])
+def test_pr_reconciliation_accepts_only_matching_scope_marker(
+    scope_marker: str,
+    expected_action: str,
+    record_status: str,
+) -> None:
+    """A live scoped finding proves only the same durable scope manifest."""
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+one\n"
+    finding = dict(
+        _validate_comments_to_diff(
+            [
+                {
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "major",
+                    "body": "Guard this value.",
+                    "scope_retraction_paths": ["a.py"],
+                }
+            ],
+            diff,
+        ).valid[0]
+    )
+    pending_record = {
+        "finding_id": finding["finding_id"],
+        "source_head": "a" * 40,
+        "severity": "major",
+        "body": "Guard this value.",
+        "scope_retraction_paths": ["a.py"],
+        "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "status": record_status,
+        "surface": "inline",
+        "reason": None,
+    }
+    request = ReconcilePrReviewRequest(
+        pr_number=7,
+        reviewed_head_sha="a" * 40,
+        validated_receipt_fingerprints=None,
+        validated_metadata_fingerprint=None,
+        resolved_thread_ids=(),
+        feedback=FrozenJson.snapshot({}),
+        findings=FrozenJson.snapshot([finding]),
+        finding_records=FrozenJson.snapshot([pending_record]),
+        review_diff=diff,
+        deadline_s=time.monotonic() + 60,
+    )
+    body = "[Review] Guard this value.\n<!-- hephaestus-severity: major -->"
+    if scope_marker:
+        body = f"{body}\n{scope_marker}"
+    live = {
+        key: value
+        for key, value in finding.items()
+        if key not in {"severity", "scope_retraction_paths"}
+    }
+    live.update(
+        {
+            "id": "thread-1",
+            "body": body,
+            "comments": [
+                {
+                    "body": body,
+                    "viewer_did_author": True,
+                    "review_commit_sha": "a" * 40,
+                    "review_id": "review-1",
+                    "review_state": "COMMENTED",
+                }
+            ],
+        }
+    )
+    github = MagicMock()
+    github.list_unresolved_review_threads.return_value = [live]
+    github.reviewer_validation_receipts.return_value = []
+    github.pr_review_context.return_value = {
+        "pr_head_sha": "a" * 40,
+        "pr_title": "fix: example",
+        "pr_description": "body",
+    }
+    github.post_review_threads.return_value = ReviewPublicationResult(
+        [{**finding, "id": "thread-2"}], validated_findings=[finding]
+    )
+
+    receipt = PipelineGitHubJobRunner._reconcile_pr_review(request, github)
+
+    assert receipt.action == expected_action
+    github.post_review_threads.assert_not_called()
+    if expected_action == "apply":
+        assert receipt.final_finding_records is not None
+        assert receipt.final_finding_records.thaw() == [{**pending_record, "status": "published"}]
+    else:
+        assert receipt.final_finding_records is None
+
+
+def test_pr_reconciliation_retries_exact_missing_pending_finding() -> None:
+    """A missing pending thread is retried only from its exact finding batch."""
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+one\n"
+    finding = dict(
+        _validate_comments_to_diff(
+            [
+                {
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "major",
+                    "body": "Guard this value.",
+                    "evidence": "The pending receipt has no visible thread.",
+                    "scope_retraction_paths": ["a.py"],
+                }
+            ],
+            diff,
+        ).valid[0]
+    )
+    pending_record = {
+        "finding_id": finding["finding_id"],
+        "source_head": "a" * 40,
+        "severity": "major",
+        "body": "Guard this value.",
+        "evidence": "The pending receipt has no visible thread.",
+        "scope_retraction_paths": ["a.py"],
+        "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "status": "pending",
+        "surface": "inline",
+        "reason": None,
+    }
+
+    def request_for(
+        raw_findings: list[dict[str, object]],
+        finding_record: dict[str, object] = pending_record,
+    ) -> ReconcilePrReviewRequest:
+        return ReconcilePrReviewRequest(
+            pr_number=7,
+            reviewed_head_sha="a" * 40,
+            validated_receipt_fingerprints=None,
+            validated_metadata_fingerprint=None,
+            resolved_thread_ids=(),
+            feedback=FrozenJson.snapshot({}),
+            findings=FrozenJson.snapshot(raw_findings),
+            finding_records=FrozenJson.snapshot([finding_record]),
+            review_diff=diff,
+            deadline_s=time.monotonic() + 60,
+        )
+
+    github = MagicMock()
+    github.list_unresolved_review_threads.return_value = []
+    github.reviewer_validation_receipts.return_value = []
+    github.pr_review_context.return_value = {
+        "pr_head_sha": "a" * 40,
+        "pr_title": "fix: example",
+        "pr_description": "body",
+    }
+    github.post_review_threads.return_value = ReviewPublicationResult(
+        [{**finding, "id": "thread-1"}], validated_findings=[finding]
+    )
+
+    receipt = PipelineGitHubJobRunner._reconcile_pr_review(request_for([finding]), github)
+
+    assert receipt.action == "apply"
+    github.post_review_threads.assert_called_once_with(
+        7,
+        [finding],
+        expected_head_sha="a" * 40,
+        review_diff=diff,
+    )
+    assert receipt.final_finding_records is not None
+    assert receipt.final_finding_records.thaw() == [{**pending_record, "status": "published"}]
+    assert github.persist_review_finding_journal.call_args_list == [
+        ((7, "a" * 40, (pending_record,)), {}),
+        ((7, "a" * 40, ({**pending_record, "status": "published"},)), {}),
+    ]
+
+    for case, invalid_findings, invalid_record in (
+        ("empty", [], pending_record),
+        ("changed-body", [{**finding, "body": "Changed content."}], pending_record),
+        ("changed-evidence", [{**finding, "evidence": "Changed evidence."}], pending_record),
+        ("changed-line", [{**finding, "line": 2}], pending_record),
+        ("changed-severity", [{**finding, "severity": "critical"}], pending_record),
+        ("stale-source-head", [finding], {**pending_record, "source_head": "b" * 40}),
+        (
+            "missing-scope",
+            [{key: value for key, value in finding.items() if key != "scope_retraction_paths"}],
+            pending_record,
+        ),
+    ):
+        github.reset_mock()
+        github.list_unresolved_review_threads.return_value = []
+        github.reviewer_validation_receipts.return_value = []
+        github.pr_review_context.return_value = {
+            "pr_head_sha": "a" * 40,
+            "pr_title": "fix: example",
+            "pr_description": "body",
+        }
+
+        invalid_receipt = PipelineGitHubJobRunner._reconcile_pr_review(
+            request_for(invalid_findings, invalid_record), github
+        )
+
+        assert invalid_receipt.action == "audit_failure", case
+        github.post_review_threads.assert_not_called()
+        github.persist_review_finding_journal.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "live_specs",
+    [
+        ((None, "minor"),),
+        ((None, "major"), (None, "minor")),
+        ((None, None),),
+        ((None, "urgent"),),
+        (("major", "minor"),),
+        ((None, "major"), (None, "urgent")),
+    ],
+    ids=(
+        "different-severity",
+        "expected-and-conflicting-severity",
+        "missing-severity",
+        "malformed-severity",
+        "contradictory-severity",
+        "expected-and-malformed-severity",
+    ),
+)
+def test_pr_reconciliation_does_not_promote_pending_from_other_severity(
+    live_specs: tuple[tuple[str | None, str | None], ...],
+) -> None:
+    """Conflicting or invalid live severity cannot prove publication."""
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+one\n"
+    finding = dict(
+        _validate_comments_to_diff(
+            [
+                {
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "major",
+                    "body": "Guard this value.",
+                }
+            ],
+            diff,
+        ).valid[0]
+    )
+    pending_record = {
+        "finding_id": finding["finding_id"],
+        "source_head": "a" * 40,
+        "severity": "major",
+        "body": "Guard this value.",
+        "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "status": "pending",
+        "surface": "inline",
+        "reason": None,
+    }
+    request = ReconcilePrReviewRequest(
+        pr_number=7,
+        reviewed_head_sha="a" * 40,
+        validated_receipt_fingerprints=None,
+        validated_metadata_fingerprint=None,
+        resolved_thread_ids=(),
+        feedback=FrozenJson.snapshot({}),
+        findings=FrozenJson.snapshot([finding]),
+        finding_records=FrozenJson.snapshot([pending_record]),
+        review_diff=diff,
+        deadline_s=time.monotonic() + 60,
+    )
+    github = MagicMock()
+    live_threads = []
+    for index, (thread_severity, marker_severity) in enumerate(live_specs, start=1):
+        body = "[Review] Guard this value."
+        if marker_severity is not None:
+            body += f"\n<!-- hephaestus-severity: {marker_severity} -->"
+        live = {key: value for key, value in finding.items() if key != "severity"}
+        if thread_severity is not None:
+            live["severity"] = thread_severity
+        live.update(
+            {
+                "id": f"thread-{index}",
+                "body": body,
+                "comments": [
+                    {
+                        "body": body,
+                        "viewer_did_author": True,
+                        "review_commit_sha": "a" * 40,
+                        "review_id": f"review-{index}",
+                        "review_state": "COMMENTED",
+                    }
+                ],
+            }
+        )
+        live_threads.append(live)
+    github.list_unresolved_review_threads.return_value = live_threads
+    github.reviewer_validation_receipts.return_value = []
+    github.pr_review_context.return_value = {
+        "pr_head_sha": "a" * 40,
+        "pr_title": "fix: example",
+        "pr_description": "body",
+    }
+
+    receipt = PipelineGitHubJobRunner._reconcile_pr_review(request, github)
+
+    assert receipt.action == "audit_failure"
+    github.post_review_threads.assert_not_called()
+    github.persist_review_finding_journal.assert_not_called()
+
+
+def test_pr_reconciliation_does_not_post_when_finding_journal_fails() -> None:
+    """A journal failure stops the external review write."""
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+one\n"
+    finding = dict(
+        _validate_comments_to_diff(
+            [
+                {
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "severity": "major",
+                    "body": "Guard this value.",
+                }
+            ],
+            diff,
+        ).valid[0]
+    )
+    record = {
+        "finding_id": finding["finding_id"],
+        "source_head": "a" * 40,
+        "severity": "major",
+        "body": "Guard this value.",
+        "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+        "status": "published",
+        "surface": "inline",
+        "reason": None,
+    }
+    request = ReconcilePrReviewRequest(
+        pr_number=7,
+        reviewed_head_sha="a" * 40,
+        validated_receipt_fingerprints=None,
+        validated_metadata_fingerprint=None,
+        resolved_thread_ids=(),
+        feedback=FrozenJson.snapshot({}),
+        findings=FrozenJson.snapshot([finding]),
+        finding_records=FrozenJson.snapshot([record]),
+        review_diff=diff,
+        deadline_s=time.monotonic() + 60,
+    )
+    github = MagicMock()
+    github.list_unresolved_review_threads.return_value = []
+    github.reviewer_validation_receipts.return_value = []
+    github.pr_review_context.return_value = {
+        "pr_head_sha": "a" * 40,
+        "pr_title": "fix: example",
+        "pr_description": "body",
+    }
+    github.persist_review_finding_journal.side_effect = RuntimeError("journal failed")
+
+    with pytest.raises(RuntimeError, match="journal failed"):
+        PipelineGitHubJobRunner._reconcile_pr_review(request, github)
+
+    github.post_review_threads.assert_not_called()
 
 
 def test_runner_dispatches_merge_cycle_as_a_typed_receipt(

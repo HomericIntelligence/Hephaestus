@@ -12,7 +12,12 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from html import escape
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
+
+from hephaestus.automation.github_api.diff import normalize_review_finding_records
+
+if TYPE_CHECKING:
+    from hephaestus.automation.github_api.diff import ReviewAnchorCorrection
 
 from hephaestus.automation.pipeline.scope_retraction import (
     SCOPE_RETRACTION_MARKER_PREFIX,
@@ -58,6 +63,108 @@ class ReviewAudit:
     valid: bool
     verdict: ReviewVerdict | None = None
     scope_expansions: tuple[ScopeExpansion, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReviewAnchorCorrectionResponse:
+    """Host-owned findings after one typed anchor-correction response."""
+
+    inline_findings: tuple[dict[str, object], ...]
+    audit_findings: tuple[dict[str, object], ...]
+    not_publishable_findings: tuple[dict[str, object], ...]
+
+
+def _corrected_inline_finding(
+    value: Mapping[str, object], finding: dict[str, object]
+) -> dict[str, object] | None:
+    """Apply one valid inline anchor to host-owned finding content."""
+    if set(value) != {"finding_id", "surface", "path", "line", "side"}:
+        return None
+    path = value.get("path")
+    line = value.get("line")
+    if (
+        not isinstance(path, str)
+        or not path.strip()
+        or len(path) > 4_096
+        or isinstance(line, bool)
+        or not isinstance(line, int)
+        or line < 1
+        or value.get("side") != "RIGHT"
+    ):
+        return None
+    finding.update(path=path.strip(), line=line, side="RIGHT")
+    return finding
+
+
+def _correction_item(
+    value: object,
+    expected_by_id: Mapping[str, ReviewAnchorCorrection],
+    seen: set[str],
+) -> tuple[str, str, dict[str, object]] | None:
+    """Validate one response item and retain host-owned finding content."""
+    if not isinstance(value, Mapping):
+        return None
+    finding_id = value.get("finding_id")
+    surface = value.get("surface")
+    if (
+        not isinstance(finding_id, str)
+        or finding_id in seen
+        or finding_id not in expected_by_id
+        or surface not in {"inline", "audit", "not_publishable"}
+    ):
+        return None
+    finding = dict(expected_by_id[finding_id].finding)
+    if surface == "inline":
+        corrected_finding = _corrected_inline_finding(value, finding)
+        if corrected_finding is None:
+            return None
+        finding = corrected_finding
+    else:
+        if set(value) != {"finding_id", "surface"}:
+            return None
+        severity = str(finding.get("severity") or "").lower()
+        if surface == "audit" and severity not in {"minor", "nitpick"}:
+            return None
+    return finding_id, str(surface), finding
+
+
+def parse_review_anchor_correction_response(
+    response: str | Mapping[str, object],
+    expected: tuple[ReviewAnchorCorrection, ...],
+) -> ReviewAnchorCorrectionResponse | None:
+    """Apply one strict correction response without accepting finding-content changes."""
+    _source, payload = _response_payload(response)
+    if payload is None or set(payload) != {"corrections"}:
+        return None
+    values = payload.get("corrections")
+    if not isinstance(values, list) or len(values) != len(expected):
+        return None
+    expected_by_id = {correction.finding_id: correction for correction in expected}
+    if len(expected_by_id) != len(expected):
+        return None
+    seen: set[str] = set()
+    inline: list[dict[str, object]] = []
+    audit: list[dict[str, object]] = []
+    not_publishable: list[dict[str, object]] = []
+    for value in values:
+        item = _correction_item(value, expected_by_id, seen)
+        if item is None:
+            return None
+        finding_id, surface, finding = item
+        if surface == "inline":
+            inline.append(finding)
+        elif surface == "audit":
+            audit.append(finding)
+        else:
+            not_publishable.append(finding)
+        seen.add(finding_id)
+    if seen != set(expected_by_id):
+        return None
+    return ReviewAnchorCorrectionResponse(
+        inline_findings=tuple(inline),
+        audit_findings=tuple(audit),
+        not_publishable_findings=tuple(not_publishable),
+    )
 
 
 def is_clean_go_review(audit: object | None) -> bool:
@@ -201,6 +308,16 @@ def _normalize_finding(comment: object) -> dict[str, object] | None:
         "severity": normalized_severity,
         "body": body.strip(),
     }
+    finding_id = comment.get("finding_id")
+    if finding_id is not None:
+        if not isinstance(finding_id, str) or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None:
+            return None
+        finding["finding_id"] = finding_id
+    evidence = comment.get("evidence")
+    if evidence is not None:
+        if not isinstance(evidence, str) or not evidence.strip():
+            return None
+        finding["evidence"] = evidence.strip()
     if paths:
         finding["scope_retraction_paths"] = paths
     return finding
@@ -284,7 +401,11 @@ def render_review_audit(audit: ReviewAudit) -> str:
 
 
 def render_implementation_go_audit(
-    audit: ReviewAudit, *, pr_number: int, head_sha: str
+    audit: ReviewAudit,
+    *,
+    pr_number: int,
+    head_sha: str,
+    finding_records: object = (),
 ) -> tuple[str, str]:
     """Render one public, idempotent audit comment for an approved PR head."""
     if not is_clean_go_review(audit):
@@ -295,4 +416,26 @@ def render_implementation_go_audit(
         raise ValueError("head_sha must be a full commit SHA")
     marker = f"<!-- hephaestus-implementation-go-audit:pr={pr_number}:head={head_sha} -->"
     body = f"{marker}\n\n{render_review_audit(audit)}\n\nReviewed head: `{head_sha}`."
+    if finding_records:
+        import base64
+
+        records = normalize_review_finding_records(finding_records)
+        lines = ["## Retained review findings"]
+        for record in records:
+            lines.append(
+                "- "
+                f"`{record['status']}` `{record['severity']}` from "
+                f"`{record['source_head']}`: {escape(str(record['body']), quote=False)}"
+            )
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).decode("ascii")
+        body = (
+            f"{body}\n\n" + "\n".join(lines) + "\n\n"
+            f"<!-- hephaestus-review-finding-records:{encoded} -->"
+        )
+    if len(body) > 65_536:
+        raise ValueError("implementation-go audit exceeds the GitHub comment size limit")
     return marker, body

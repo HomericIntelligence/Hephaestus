@@ -43,7 +43,11 @@ from hephaestus.automation.review_audit import (
 )
 from hephaestus.automation.state_labels import STATE_SKIP
 
-from ..scope_retraction import scope_retraction_paths_for_threads
+from ..scope_retraction import (
+    SCOPE_RETRACTION_MARKER_PREFIX,
+    normalize_scope_retraction_paths,
+    scope_retraction_paths_for_threads,
+)
 from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -135,6 +139,7 @@ REVIEW_WAIT = "REVIEW_WAIT"
 REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
 HOST_VERIFICATION_WAIT = "HOST_VERIFICATION_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
+ANCHOR_CORRECTION_WAIT = "ANCHOR_CORRECTION_WAIT"
 POST = "POST"
 SCOPE_EXPANSION_PREPARE_SUBMIT = "SCOPE_EXPANSION_PREPARE_SUBMIT"
 POST_APPLY = "POST_APPLY"
@@ -157,6 +162,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     REVIEW_CHECKOUT_WAIT: "_review_checkout_wait",
     HOST_VERIFICATION_WAIT: "_host_verification_wait",
     VALIDATE_WAIT: "_validate_wait",
+    ANCHOR_CORRECTION_WAIT: "_anchor_correction_wait",
     POST: "_post",
     SCOPE_EXPANSION_PREPARE_SUBMIT: "_scope_expansion_prepare_submit",
     POST_APPLY: "_post_apply",
@@ -190,6 +196,7 @@ REVIEW_CHECKOUT_RETRY_CAP = 2
 
 _HOST_VERIFICATION_PENDING = "host_verification_pending"
 _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
+_ANCHOR_CORRECTION_RETRY = "review_anchor_correction_retry"
 
 
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
@@ -262,8 +269,8 @@ def _durable_thread_id(thread: dict[str, Any]) -> str | None:
     return value or None
 
 
-def _finding_key(thread: dict[str, Any]) -> tuple[str, int, str, str] | None:
-    """Build a stable key for one inline finding without trusting an agent id."""
+def _finding_content_key(thread: dict[str, Any]) -> tuple[str, int, str, str] | None:
+    """Build a stable content key without durable publication markers."""
     path = thread.get("path")
     line = thread.get("line")
     side = thread.get("side")
@@ -281,6 +288,7 @@ def _finding_key(thread: dict[str, Any]) -> tuple[str, int, str, str] | None:
         line_text
         for line_text in body.splitlines()
         if not line_text.strip().startswith("<!-- hephaestus-severity:")
+        and not line_text.strip().startswith(SCOPE_RETRACTION_MARKER_PREFIX)
     )
     # The visible role marker distinguishes the original reviewer in GitHub's
     # conversation but must not make an otherwise identical finding look new.
@@ -289,24 +297,79 @@ def _finding_key(thread: dict[str, Any]) -> tuple[str, int, str, str] | None:
     return (path.strip(), line, side.strip().upper(), re.sub(r"\s+", " ", body).casefold())
 
 
+def _finding_scope_paths(thread: dict[str, Any]) -> tuple[str, ...] | None:
+    """Return one canonical scope manifest from a finding or live marker."""
+    declared_value = thread.get("scope_retraction_paths")
+    declared = () if declared_value is None else normalize_scope_retraction_paths(declared_value)
+    if declared is None:
+        return None
+    body = thread.get("body")
+    if not isinstance(body, str):
+        return None
+    marker_lines = [
+        line.strip()
+        for line in body.splitlines()
+        if line.strip().startswith(SCOPE_RETRACTION_MARKER_PREFIX)
+    ]
+    if not marker_lines:
+        return declared
+    if len(marker_lines) != 1 or not marker_lines[0].endswith("-->"):
+        return None
+    payload = marker_lines[0][len(SCOPE_RETRACTION_MARKER_PREFIX) : -3].strip()
+    try:
+        marked = normalize_scope_retraction_paths(json.loads(payload))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if marked is None or (declared_value is not None and declared != marked):
+        return None
+    return marked
+
+
+def _finding_key(
+    thread: dict[str, Any],
+) -> tuple[str, int, str, str, tuple[str, ...]] | None:
+    """Build a stable finding key with its canonical publication scope."""
+    content = _finding_content_key(thread)
+    scope_paths = _finding_scope_paths(thread)
+    if content is None or scope_paths is None:
+        return None
+    return (*content, scope_paths)
+
+
 def _without_duplicate_live_findings(
     findings: list[dict[str, Any]], live_threads: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Keep genuinely new audit findings while retaining their open-thread twins."""
-    existing = {
-        key for thread in live_threads.values() if (key := _finding_key(thread)) is not None
-    }
-    retained: list[dict[str, Any]] = []
+    """Keep new findings and reject a conflicting live publication identity."""
+    findings_by_content: dict[
+        tuple[str, int, str, str],
+        set[tuple[str, int, str, str, tuple[str, ...]]],
+    ] = {}
+    finding_keys: list[tuple[str, int, str, str, tuple[str, ...]]] = []
     for finding in findings:
+        content = _finding_content_key(finding)
+        key = _finding_key(finding)
+        if content is None or key is None:
+            raise ValueError("review finding identity is invalid")
+        findings_by_content.setdefault(content, set()).add(key)
+        finding_keys.append(key)
+    existing: set[tuple[str, int, str, str, tuple[str, ...]]] = set()
+    for thread in live_threads.values():
+        content = _finding_content_key(thread)
+        if content is None or content not in findings_by_content:
+            continue
+        key = _finding_key(thread)
+        if key is None or key not in findings_by_content[content]:
+            raise ValueError("live review finding identity conflicts with publication")
+        existing.add(key)
+    retained: list[dict[str, Any]] = []
+    for finding, key in zip(findings, finding_keys, strict=True):
         prior_thread_id = finding.get("prior_thread_id")
         if isinstance(prior_thread_id, str) and prior_thread_id in live_threads:
             continue
-        key = _finding_key(finding)
-        if key is not None and key in existing:
+        if key in existing:
             continue
         retained.append(finding)
-        if key is not None:
-            existing.add(key)
+        existing.add(key)
     return retained
 
 
@@ -569,6 +632,7 @@ else:
 __all__ = [
     "ADOPT_WORKTREE_WAIT",
     "AGENT_PR_REVIEWER",
+    "ANCHOR_CORRECTION_WAIT",
     "BLOCKING_SEVERITIES",
     "CLEANUP_REVIEW_WORKTREE_WAIT",
     "COMPACT_REVIEWER_WAIT",
@@ -592,6 +656,7 @@ __all__ = [
     "UNSUPPORTED_HOST_VERIFICATION_ERROR",
     "VALIDATE_WAIT",
     "VALID_SEVERITIES",
+    "_ANCHOR_CORRECTION_RETRY",
     "_COMMENT_VALIDATION_ONLY",
     "_HOST_VERIFICATION_PENDING",
     "_JSON_RESPONSE_BLOCK_RE",
@@ -619,6 +684,7 @@ __all__ = [
     "_PrReviewHost",
     "_clear_round_review_state",
     "_durable_thread_id",
+    "_finding_content_key",
     "_finding_key",
     "_host_verification_failure_kind",
     "_host_verification_receipt_matches",

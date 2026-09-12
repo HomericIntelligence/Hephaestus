@@ -51,6 +51,7 @@ def test_default_templates_resolve_by_filesystem_path_not_package_metadata() -> 
     names = PromptCatalog()._environment.list_templates()
     assert "pr_review/analysis.j2" in names
     assert "pr_review/analysis_opencode.j2" in names
+    assert "pr_review/anchor_correction.j2" in names
 
 
 def test_harness_template_replaces_only_the_matching_default(tmp_path: Path) -> None:

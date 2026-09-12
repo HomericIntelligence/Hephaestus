@@ -7,11 +7,15 @@ from typing import Any
 
 from hephaestus.automation.implementation_go_audit_receipt import (
     IMPLEMENTATION_GO_AUDIT_PENDING_PREFIX,
+    REVIEW_FINDING_JOURNAL_PREFIX,
     LegacyPendingImplementationGoAuditError,
     PendingImplementationGoAudit,
+    PendingReviewFindingJournal,
     parse_pending_implementation_go_audit,
     parse_published_implementation_go_audit,
+    parse_review_finding_journal,
     render_pending_implementation_go_audit,
+    render_review_finding_journal,
 )
 from hephaestus.automation.issue_timeline import _IMPLEMENTATION_REPLY_HANDOFF_MARKER_RE
 from hephaestus.automation.rebase_review_receipt import (
@@ -28,6 +32,76 @@ from .review_journal import has_exact_leading_marker
 
 class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
     """Own durable pending-publication receipts independently of label state."""
+
+    def persist_review_finding_journal(
+        self, pr_number: int, head_sha: str, finding_records: object
+    ) -> None:
+        """Persist and read back one actor-owned exact-head finding journal."""
+        marker, body = render_review_finding_journal(pr_number, head_sha, finding_records)
+        owned = [
+            comment
+            for comment in self._repo_issue_comments(pr_number)
+            if self._comment_owned_by_viewer(comment)
+            and str(comment.get("body", "")).startswith(REVIEW_FINDING_JOURNAL_PREFIX)
+        ]
+        if len(owned) > 1:
+            raise RuntimeError("review finding journals are ambiguous")
+        if owned and str(owned[0].get("body", "")) != body:
+            comment_id = owned[0].get("databaseId")
+            if comment_id is None:
+                raise RuntimeError("review finding journal has no database id")
+            self._patch_issue_comment(int(comment_id), body)
+        else:
+            self.upsert_issue_comment(pr_number, marker, body)
+        expected = parse_review_finding_journal(body)
+        if expected is None:
+            raise RuntimeError("review finding journal rendering failed")
+        if self.pending_review_finding_journal(pr_number) != expected:
+            raise RuntimeError("review finding journal readback failed")
+
+    def pending_review_finding_journal(self, pr_number: int) -> PendingReviewFindingJournal | None:
+        """Read the one actor-owned finding journal for a pull request."""
+        records: list[PendingReviewFindingJournal] = []
+        for comment in self._repo_issue_comments(pr_number):
+            if not self._comment_owned_by_viewer(comment):
+                continue
+            body = str(comment.get("body", ""))
+            if not body.startswith(REVIEW_FINDING_JOURNAL_PREFIX):
+                continue
+            try:
+                journal = parse_review_finding_journal(body)
+            except ValueError as error:
+                raise RuntimeError("review finding journal is invalid") from error
+            if journal is None or journal.pr_number != pr_number:
+                raise RuntimeError("review finding journal is invalid")
+            records.append(journal)
+        if len(records) > 1:
+            raise RuntimeError("review finding journals are ambiguous")
+        return records[0] if records else None
+
+    def clear_review_finding_journal(self, pr_number: int, head_sha: str) -> None:
+        """Delete the exact journal only after its public audit is visible."""
+        records: list[tuple[int, PendingReviewFindingJournal]] = []
+        for comment in self._repo_issue_comments(pr_number):
+            if not self._comment_owned_by_viewer(comment):
+                continue
+            body = str(comment.get("body", ""))
+            if not body.startswith(REVIEW_FINDING_JOURNAL_PREFIX):
+                continue
+            try:
+                journal = parse_review_finding_journal(body)
+            except ValueError as error:
+                raise RuntimeError("review finding journal is invalid") from error
+            if journal is None or journal.pr_number != pr_number:
+                raise RuntimeError("review finding journal is invalid")
+            comment_id = comment.get("databaseId")
+            if comment_id is None:
+                raise RuntimeError("review finding journal has no database id")
+            records.append((int(comment_id), journal))
+        if len(records) > 1:
+            raise RuntimeError("review finding journals are ambiguous")
+        if records and records[0][1].head_sha == head_sha:
+            self._delete_issue_comment(records[0][0])
 
     def publish_review_rebase_record(self, record: RebaseReviewRecord) -> None:
         """Store rebase facts and confirm their authenticated readback."""
@@ -132,10 +206,20 @@ class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
             raise RuntimeError("rebase supersession readback failed")
 
     def persist_pending_implementation_go_audit(
-        self, pr_number: int, head_sha: str, audit: ReviewAudit
+        self,
+        pr_number: int,
+        head_sha: str,
+        audit: ReviewAudit,
+        *,
+        finding_records: object = (),
     ) -> None:
         """Upsert and read back the exact receipt before the GO transition."""
-        marker, body = render_pending_implementation_go_audit(pr_number, head_sha, audit)
+        marker, body = render_pending_implementation_go_audit(
+            pr_number,
+            head_sha,
+            audit,
+            finding_records=finding_records,
+        )
         self.upsert_issue_comment(pr_number, marker, body)
         comments = self._repo_issue_comments(pr_number)
         if not any(
@@ -236,12 +320,25 @@ class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
             self._delete_issue_comment(int(comment_id))
 
     def publish_implementation_go_audit(
-        self, pr_number: int, head_sha: str, audit: ReviewAudit
+        self,
+        pr_number: int,
+        head_sha: str,
+        audit: ReviewAudit,
+        *,
+        finding_records: object = (),
     ) -> None:
         """Publish exactly one public audit, then remove matching recovery journals."""
-        marker, body = render_implementation_go_audit(audit, pr_number=pr_number, head_sha=head_sha)
+        marker, body = render_implementation_go_audit(
+            audit,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            finding_records=finding_records,
+        )
         pending_marker, pending_body = render_pending_implementation_go_audit(
-            pr_number, head_sha, audit
+            pr_number,
+            head_sha,
+            audit,
+            finding_records=finding_records,
         )
         comments = self._promote_pending_implementation_go_audit(
             pr_number,

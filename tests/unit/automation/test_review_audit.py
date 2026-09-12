@@ -6,7 +6,13 @@ import json
 
 import pytest
 
-from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit, render_review_audit
+from hephaestus.automation import review_audit as review_audit_module
+from hephaestus.automation.github_api import ReviewAnchorCorrection
+from hephaestus.automation.review_audit import (
+    ReviewAudit,
+    parse_review_audit,
+    render_review_audit,
+)
 from hephaestus.automation.scope_expansion_domain import ScopeExpansion
 
 
@@ -123,6 +129,132 @@ def test_parse_review_audit_rejects_unpostable_finding() -> None:
     )
 
     assert audit.valid is False
+
+
+def test_parse_review_audit_preserves_finding_evidence() -> None:
+    """Structured evidence remains available when a finding needs re-anchoring."""
+    audit = parse_review_audit(
+        '{"grade":"F","verdict":"NOGO","summary":"Needs work",'
+        '"comments":[{"path":"a.py","line":1,"side":"RIGHT",'
+        '"severity":"major","body":"Fix the worker state",'
+        '"evidence":"The child process receives no descriptor state."}]}'
+    )
+
+    assert audit.valid is True
+    assert audit.findings[0]["body"] == "Fix the worker state"
+    assert audit.findings[0]["evidence"] == "The child process receives no descriptor state."
+
+
+def _anchor_correction(*, severity: str = "major") -> ReviewAnchorCorrection:
+    finding = {
+        "path": "old.py",
+        "line": 99,
+        "side": "RIGHT",
+        "severity": severity,
+        "body": "Preserve the finding body.",
+        "evidence": "Preserve the finding evidence.",
+    }
+    return ReviewAnchorCorrection(
+        finding=finding,
+        path="old.py",
+        line=99,
+        side="RIGHT",
+        reason="line_not_in_diff",
+    )
+
+
+def test_parse_anchor_correction_changes_only_the_inline_anchor() -> None:
+    """The host keeps finding content while it applies an agent-selected anchor."""
+    correction = _anchor_correction()
+    response = json.dumps(
+        {
+            "corrections": [
+                {
+                    "finding_id": correction.finding_id,
+                    "surface": "inline",
+                    "path": "new.py",
+                    "line": 7,
+                    "side": "RIGHT",
+                }
+            ]
+        }
+    )
+
+    result = review_audit_module.parse_review_anchor_correction_response(response, (correction,))
+
+    assert result is not None
+    assert result.inline_findings == (
+        {
+            **correction.finding,
+            "path": "new.py",
+            "line": 7,
+            "side": "RIGHT",
+        },
+    )
+    assert result.audit_findings == ()
+    assert result.not_publishable_findings == ()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"corrections": []},
+        {"corrections": [{"finding_id": "f" * 64, "surface": "not_publishable"}]},
+        {
+            "corrections": [
+                {
+                    "finding_id": "{finding_id}",
+                    "surface": "inline",
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "LEFT",
+                }
+            ]
+        },
+        {
+            "corrections": [
+                {
+                    "finding_id": "{finding_id}",
+                    "surface": "inline",
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "body": "agent replacement",
+                }
+            ]
+        },
+    ],
+)
+def test_parse_anchor_correction_rejects_incomplete_or_unowned_results(
+    response: dict[str, object],
+) -> None:
+    """A correction result cannot omit IDs or change host-owned fields."""
+    correction = _anchor_correction()
+    rendered = json.dumps(response).replace("{finding_id}", correction.finding_id)
+
+    assert (
+        review_audit_module.parse_review_anchor_correction_response(rendered, (correction,)) is None
+    )
+
+
+def test_parse_anchor_correction_allows_audit_only_for_advisory_finding() -> None:
+    """Only an advisory finding can use the non-inline audit surface."""
+    major = _anchor_correction()
+    minor = _anchor_correction(severity="minor")
+    major_response = json.dumps(
+        {"corrections": [{"finding_id": major.finding_id, "surface": "audit"}]}
+    )
+    minor_response = json.dumps(
+        {"corrections": [{"finding_id": minor.finding_id, "surface": "audit"}]}
+    )
+
+    assert (
+        review_audit_module.parse_review_anchor_correction_response(major_response, (major,))
+        is None
+    )
+    result = review_audit_module.parse_review_anchor_correction_response(minor_response, (minor,))
+    assert result is not None
+    assert result.audit_findings == (minor.finding,)
 
 
 def test_parse_review_audit_rejects_reserved_control_text_in_finding() -> None:

@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from hephaestus.automation import implementation_go_audit_receipt as audit_receipts
 from hephaestus.automation.implementation_go_audit_receipt import (
     LegacyPendingImplementationGoAuditError,
     PendingImplementationGoAudit,
@@ -26,6 +27,188 @@ def _clean_audit() -> ReviewAudit:
         valid=True,
         verdict="GO",
     )
+
+
+def _finding_record(*, status: str = "not_publishable") -> dict[str, object]:
+    """Return one bounded journal record."""
+    return {
+        "finding_id": "f" * 64,
+        "source_head": "a" * 40,
+        "severity": "minor",
+        "body": "Preserve this advisory finding.",
+        "evidence": "The worker does not receive the required state.",
+        "original_anchor": {"path": "old.py", "line": 99, "side": "RIGHT"},
+        "final_anchor": None,
+        "status": status,
+        "surface": "audit" if status != "not_publishable" else "not_publishable",
+        "reason": "line_not_in_diff",
+    }
+
+
+def test_review_finding_journal_round_trip_is_exact_head_and_versioned() -> None:
+    """The durable journal preserves one complete bounded finding record."""
+    records = (_finding_record(),)
+
+    marker, body = audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+    journal = audit_receipts.parse_review_finding_journal(body)
+
+    assert marker == f"<!-- hephaestus-review-findings:pr=7:head={'a' * 40} -->"
+    assert journal is not None
+    assert journal.pr_number == 7
+    assert journal.head_sha == "a" * 40
+    assert journal.finding_records == records
+
+
+def test_review_finding_journal_rejects_oversized_or_unknown_records() -> None:
+    """A journal cannot accept an unbounded body or an unknown status."""
+    oversized = {**_finding_record(), "body": "x" * 20_000}
+    unknown = {**_finding_record(), "status": "pending"}
+
+    with pytest.raises(ValueError, match="finding record"):
+        audit_receipts.render_review_finding_journal(7, "a" * 40, (oversized,))
+    with pytest.raises(ValueError, match="finding record"):
+        audit_receipts.render_review_finding_journal(7, "a" * 40, (unknown,))
+
+
+@pytest.mark.parametrize("status", ["corrected", "not_publishable"])
+def test_review_finding_journal_requires_reason_for_corrected_outcome(status: str) -> None:
+    """A corrected outcome keeps the typed reason that caused correction."""
+    record = {**_finding_record(status=status), "reason": None}
+
+    with pytest.raises(ValueError, match="finding record"):
+        audit_receipts.render_review_finding_journal(7, "a" * 40, (record,))
+
+
+def test_review_finding_journal_preserves_normalized_source_scope() -> None:
+    """A durable finding record keeps its complete normalized source scope."""
+    record = {
+        **_finding_record(status="corrected"),
+        "scope_retraction_paths": ["z.py", "a.py", "z.py"],
+    }
+
+    _marker, body = audit_receipts.render_review_finding_journal(7, "a" * 40, (record,))
+    journal = audit_receipts.parse_review_finding_journal(body)
+
+    assert journal is not None
+    assert journal.finding_records[0]["scope_retraction_paths"] == ["a.py", "z.py"]
+
+
+def test_pending_go_receipt_preserves_cumulative_finding_records() -> None:
+    """Publication recovery keeps advisory evidence from an earlier review head."""
+    records = (_finding_record(status="corrected"),)
+
+    _marker, body = render_pending_implementation_go_audit(
+        7, "b" * 40, _clean_audit(), finding_records=records
+    )
+    receipt = parse_pending_implementation_go_audit(body)
+
+    assert receipt is not None
+    assert receipt.finding_records == records
+
+
+def test_public_go_audit_renders_retained_advisory_source_head() -> None:
+    """The public audit shows retained advisory metadata and its source head."""
+    records = (_finding_record(status="corrected"),)
+
+    _marker, body = render_implementation_go_audit(
+        _clean_audit(), pr_number=7, head_sha="b" * 40, finding_records=records
+    )
+
+    assert "Preserve this advisory finding." in body
+    assert "`" + "a" * 40 + "`" in body
+    assert "corrected" in body
+    receipt = parse_published_implementation_go_audit(body)
+    assert receipt is not None
+    assert receipt.finding_records == records
+
+
+def test_review_finding_records_fit_all_github_comment_renderings() -> None:
+    """The aggregate bound leaves room for the public base64 audit payload."""
+    records = (
+        {
+            **_finding_record(status="corrected"),
+            "body": "x" * 16_384,
+            "evidence": "y" * 12_000,
+        },
+    )
+
+    _journal_marker, journal = audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+    _pending_marker, pending = render_pending_implementation_go_audit(
+        7, "a" * 40, _clean_audit(), finding_records=records
+    )
+    _audit_marker, public = render_implementation_go_audit(
+        _clean_audit(), pr_number=7, head_sha="a" * 40, finding_records=records
+    )
+
+    assert len(journal) <= 65_536
+    assert len(pending) <= 65_536
+    assert len(public) <= 65_536
+
+
+def test_review_finding_journal_rejects_oversized_utf8_aggregate() -> None:
+    """The aggregate limit counts encoded bytes before base64 expansion."""
+    records = (
+        {
+            **_finding_record(status="corrected"),
+            "body": "é" * 8_000,
+            "evidence": "é" * 8_000,
+        },
+    )
+
+    with pytest.raises(ValueError, match="aggregate size limit"):
+        audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+
+
+def test_review_finding_renderers_accept_bounded_utf8_records() -> None:
+    """A valid multibyte record fits each GitHub comment rendering."""
+    records = ({**_finding_record(status="corrected"), "body": "🙂" * 7_000},)
+
+    _journal_marker, journal = audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+    _pending_marker, pending = render_pending_implementation_go_audit(
+        7, "a" * 40, _clean_audit(), finding_records=records
+    )
+    _audit_marker, public = render_implementation_go_audit(
+        _clean_audit(), pr_number=7, head_sha="a" * 40, finding_records=records
+    )
+
+    assert len(journal) <= 65_536
+    assert len(pending) <= 65_536
+    assert len(public) <= 65_536
+
+
+def test_review_finding_records_reject_oversized_visible_rendering() -> None:
+    """HTML escaping cannot make an accepted public audit exceed its limit."""
+    records = (
+        {
+            **_finding_record(status="corrected"),
+            "body": "&" * 12_000,
+            "evidence": "y" * 12_000,
+        },
+    )
+
+    with pytest.raises(ValueError, match="public rendering limit"):
+        audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+
+
+def test_public_go_audit_with_escaped_summary_round_trips_retained_findings() -> None:
+    """Rendered summary escapes do not invalidate retained finding readback."""
+    audit = ReviewAudit(
+        grade="A",
+        summary="Value < limit & safe.",
+        findings=(),
+        raw_feedback="",
+        valid=True,
+        verdict="GO",
+    )
+    records = (_finding_record(status="corrected"),)
+
+    _marker, body = render_implementation_go_audit(
+        audit, pr_number=7, head_sha="b" * 40, finding_records=records
+    )
+
+    receipt = parse_published_implementation_go_audit(body)
+    assert receipt is not None
+    assert receipt.finding_records == records
 
 
 def test_pending_audit_round_trip_preserves_bounded_evidence() -> None:
@@ -154,7 +337,7 @@ def test_pending_parser_rejects_adjacent_overlong_identity(head_sha: str) -> Non
     [
         [],
         {},
-        {"format": 3},
+        {"format": 4},
         {
             "format": 2,
             "pr_number": 8,
@@ -255,7 +438,7 @@ def test_pending_parser_rejects_adjacent_overlong_identity(head_sha: str) -> Non
 def test_pending_parser_rejects_invalid_payload_fields(payload: object) -> None:
     """Each identity, verdict, and size field is validated before recovery."""
     message = (
-        "journal format is invalid" if payload in ([], {}, {"format": 3}) else "payload is invalid"
+        "journal format is invalid" if payload in ([], {}, {"format": 4}) else "payload is invalid"
     )
     with pytest.raises(ValueError, match=message):
         parse_pending_implementation_go_audit(_pending_body_with_payload(payload))

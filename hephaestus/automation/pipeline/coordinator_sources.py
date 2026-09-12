@@ -690,6 +690,7 @@ class SourceCoordinator(_CoordinatorHost):
             )
         has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
         pending_audit = _seeding.read_pending_implementation_go_audit(github, pr)
+        finding_journal = _seeding.read_pending_review_finding_journal(github, pr)
         rebase_record = _seeding.read_review_rebase_record(github, pr)
         if rebase_record is not None and rebase_record.issue_number != issue_number:
             raise _seeding.IssueClassificationError("rebase review issue does not match")
@@ -713,6 +714,7 @@ class SourceCoordinator(_CoordinatorHost):
                 issue_number=issue_number,
                 passed=passed,
                 pending_implementation_go_audit=pending_audit,
+                pending_review_finding_journal=finding_journal,
                 pending_review_rebase_record=rebase_record,
                 pending_implementation_go_label_confirmed=has_go,
             )
@@ -754,6 +756,7 @@ class SourceCoordinator(_CoordinatorHost):
                 issue_body=issue_facts.body,
                 pr_description=review_context["pr_description"],
                 passed=passed,
+                pending_review_finding_journal=finding_journal,
             )
 
     @staticmethod
@@ -792,6 +795,9 @@ class SourceCoordinator(_CoordinatorHost):
                 item.payload["pending_implementation_go_audit_head"] = (
                     entry.pending_implementation_go_audit.head_sha
                 )
+                item.payload["pending_implementation_go_audit_findings"] = [
+                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
+                ]
                 item.payload["pending_implementation_go_label_confirmed"] = (
                     entry.pending_implementation_go_label_confirmed
                 )
@@ -818,11 +824,21 @@ class SourceCoordinator(_CoordinatorHost):
                 item.payload["pending_implementation_go_audit_head"] = (
                     entry.pending_implementation_go_audit.head_sha
                 )
+                item.payload["pending_implementation_go_audit_findings"] = [
+                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
+                ]
                 item.payload["pending_implementation_go_label_confirmed"] = (
                     entry.pending_implementation_go_label_confirmed
                 )
         if entry.pending_review_rebase_record is not None:
             item.payload["pending_review_rebase_record"] = entry.pending_review_rebase_record
+        if entry.pending_review_finding_journal is not None:
+            item.payload["carried_review_finding_records"] = [
+                dict(record) for record in entry.pending_review_finding_journal.finding_records
+            ]
+            item.payload["review_finding_journal_head"] = (
+                entry.pending_review_finding_journal.head_sha
+            )
         item.state = "ENTER"
         if item.issue is not None:
             item.payload["dependencies"] = parse_issue_dependencies(entry.issue_body)
