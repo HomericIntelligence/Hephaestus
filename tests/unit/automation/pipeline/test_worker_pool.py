@@ -4896,6 +4896,68 @@ class TestGitOps:
         git("worktree", "add", "-q", "-b", branch, str(writer))
         return repo, writer, head
 
+    @staticmethod
+    def _linked_intake_writer(
+        tmp_path: Path,
+        branch: str = "2973-auto-impl",
+        *,
+        relative_paths: bool = False,
+    ) -> tuple[Path, Path, Path, str]:
+        """Create a linked intake checkout with one contained writer."""
+        repo = tmp_path / "repo"
+        intake = tmp_path / "intake"
+        writer = intake / "build" / "writer"
+
+        def git(*args: str, cwd: Path = repo) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        repo.mkdir(parents=True)
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.invalid")
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+        git("add", ".gitignore", "tracked.txt")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        head = git("rev-parse", "HEAD").stdout.strip()
+        relative_args = ("--relative-paths",) if relative_paths else ()
+        git("worktree", "add", "-q", *relative_args, "--detach", str(intake), head)
+        writer.parent.mkdir(parents=True)
+        git("worktree", "add", "-q", *relative_args, "-b", branch, str(writer), head)
+        return repo, intake, writer, head
+
+    @staticmethod
+    def _linked_intake_metadata_paths(intake: Path) -> dict[str, Path]:
+        """Return the metadata objects that bind one linked intake checkout."""
+        marker = intake / ".git"
+        raw_admin = Path(marker.read_text(encoding="ascii").removeprefix("gitdir: ").strip())
+        admin = raw_admin if raw_admin.is_absolute() else Path(os.path.abspath(intake / raw_admin))
+        return {
+            "gitfile": marker,
+            "admin": admin,
+            "gitdir": admin / "gitdir",
+            "commondir": admin / "commondir",
+        }
+
+    @staticmethod
+    def _replace_git_metadata_path(target: Path, temporary_root: Path, name: str) -> None:
+        """Replace one metadata object with a valid copy at the same path."""
+        replacement = temporary_root / f"replacement-{name}"
+        retained = temporary_root / f"retained-{name}"
+        if target.is_dir():
+            shutil.copytree(target, replacement, symlinks=True)
+            target.rename(retained)
+            replacement.rename(target)
+            return
+        shutil.copy2(target, replacement, follow_symlinks=False)
+        os.replace(replacement, target)
+
     def test_create_worktree_dispatch(
         self,
         pool: WorkerPool,
@@ -6214,6 +6276,354 @@ class TestGitOps:
 
         assert result.ok is True
         assert result.value["outcome"] == "dirty"
+
+    @pytest.mark.parametrize("secure_descriptors", (True, False))
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Linked intake tests require POSIX")
+    def test_linked_binding_accepts_a_registered_intake_root(
+        self,
+        tmp_path: Path,
+        secure_descriptors: bool,
+    ) -> None:
+        """A linked intake root binds a writer in the same Git directory."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        repo, writer, head = self._inspection_writer(tmp_path)
+        intake = tmp_path / "intake"
+        _git(repo, "worktree", "add", "--detach", str(intake), head)
+
+        with patch(
+            f"{_WP}._secure_dir_fd_supported",
+            return_value=secure_descriptors,
+        ):
+            linked = worker_pool_module._linked_worktree_git_env(intake, writer)
+
+        assert linked.binding.repo_root == intake
+        assert linked.binding.worktree == writer
+        assert linked.binding.common_dir == repo / ".git"
+        assert linked.binding.branch_sha == head
+
+    @pytest.mark.parametrize(
+        "secure_descriptors",
+        (
+            pytest.param(True, id="descriptor"),
+            pytest.param(False, id="portable"),
+        ),
+    )
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Linked intake tests require POSIX")
+    def test_linked_binding_accepts_relative_intake_metadata(
+        self,
+        tmp_path: Path,
+        secure_descriptors: bool,
+    ) -> None:
+        """The binding accepts relative Git links for an intake checkout."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        repo, intake, writer, head = self._linked_intake_writer(
+            tmp_path,
+            relative_paths=True,
+        )
+        metadata = self._linked_intake_metadata_paths(intake)
+        marker_pointer = (
+            metadata["gitfile"].read_text(encoding="ascii").removeprefix("gitdir: ").strip()
+        )
+        back_pointer = metadata["gitdir"].read_text(encoding="ascii").strip()
+        assert not Path(marker_pointer).is_absolute()
+        assert ".." in Path(marker_pointer).parts
+        assert not Path(back_pointer).is_absolute()
+        assert ".." in Path(back_pointer).parts
+
+        with patch(
+            f"{_WP}._secure_dir_fd_supported",
+            return_value=secure_descriptors,
+        ):
+            linked = worker_pool_module._linked_worktree_git_env(intake, writer)
+
+        assert linked.binding.repo_root == intake
+        assert linked.binding.worktree == writer
+        assert linked.binding.common_dir == repo / ".git"
+        assert linked.binding.branch_sha == head
+
+    @pytest.mark.parametrize(
+        ("secure_descriptors", "pointer_kind"),
+        (
+            pytest.param(True, "gitfile", id="descriptor-gitfile"),
+            pytest.param(True, "gitdir", id="descriptor-gitdir"),
+            pytest.param(False, "gitfile", id="portable-gitfile"),
+            pytest.param(False, "gitdir", id="portable-gitdir"),
+        ),
+    )
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Linked intake tests require POSIX")
+    def test_linked_binding_rejects_relative_symlink_detour(
+        self,
+        tmp_path: Path,
+        secure_descriptors: bool,
+        pointer_kind: str,
+    ) -> None:
+        """A relative link cannot use a symbolic-link detour."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        _repo, intake, writer, _head = self._linked_intake_writer(
+            tmp_path,
+            relative_paths=True,
+        )
+        intake_metadata = self._linked_intake_metadata_paths(intake)
+        intake_admin = intake_metadata["admin"]
+        if pointer_kind == "gitfile":
+            writer_admin = self._linked_intake_metadata_paths(writer)["admin"]
+            detour = intake / "metadata-detour"
+            detour.symlink_to(writer_admin, target_is_directory=True)
+            pointer = Path(detour.name) / ".." / intake_admin.name
+            intake_metadata["gitfile"].write_text(
+                f"gitdir: {pointer}\n",
+                encoding="ascii",
+            )
+            pointer_base = intake
+            expected = intake_admin
+        else:
+            detour = intake_admin / "metadata-detour"
+            detour.symlink_to(writer.parent, target_is_directory=True)
+            pointer = Path(detour.name) / ".." / ".git"
+            intake_metadata["gitdir"].write_text(f"{pointer}\n", encoding="ascii")
+            pointer_base = intake_admin
+            expected = intake_metadata["gitfile"]
+        assert (pointer_base / pointer).resolve(strict=True) == expected
+
+        with (
+            patch(
+                f"{_WP}._secure_dir_fd_supported",
+                return_value=secure_descriptors,
+            ),
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"repository root (gitfile is invalid|admin back-pointer changed)"
+                    r"|linked worktree metadata "
+                    r"(directory is unsafe|path has a reparse point)"
+                ),
+            ),
+        ):
+            worker_pool_module._linked_worktree_git_env(intake, writer)
+
+    @pytest.mark.parametrize("secure_descriptors", (True, False))
+    @pytest.mark.parametrize(
+        ("damage", "message"),
+        (
+            (
+                "admin-link",
+                "metadata (directory is unsafe|path has a reparse point)",
+            ),
+            ("back-pointer", "repository root admin back-pointer changed"),
+            ("back-pointer-parent", "repository root admin back-pointer changed"),
+            (
+                "back-pointer-link",
+                "metadata (file is unsafe|path has a reparse point)",
+            ),
+            ("common-backslash", "repository root common directory changed"),
+            ("common-parent", "repository root common directory changed"),
+            (
+                "common-pointer-link",
+                "metadata (file is unsafe|path has a reparse point)",
+            ),
+            ("gitfile", "repository root gitfile is invalid"),
+            ("gitfile-parent", "repository root gitfile is invalid"),
+            ("symlink", "repository root Git metadata is unsafe"),
+        ),
+    )
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Linked intake tests require POSIX")
+    def test_linked_binding_rejects_unsafe_intake_metadata(
+        self,
+        tmp_path: Path,
+        secure_descriptors: bool,
+        damage: str,
+        message: str,
+    ) -> None:
+        """An unsafe intake gitfile or administration record fails closed."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        repo, writer, head = self._inspection_writer(tmp_path)
+        intake = tmp_path / "intake"
+        _git(repo, "worktree", "add", "--detach", str(intake), head)
+        marker = intake / ".git"
+        admin_dir = Path(marker.read_text(encoding="ascii").removeprefix("gitdir: ").strip())
+        if damage == "admin-link":
+            retained = tmp_path / "retained-intake-admin"
+            admin_dir.rename(retained)
+            admin_dir.symlink_to(retained, target_is_directory=True)
+        elif damage == "back-pointer":
+            (admin_dir / "gitdir").write_text(f"{tmp_path / 'outside'}\n", encoding="ascii")
+        elif damage == "back-pointer-parent":
+            (intake / "link").symlink_to(tmp_path / "outside")
+            (admin_dir / "gitdir").write_text(
+                f"{intake / 'link'}/../.git\n",
+                encoding="ascii",
+            )
+        elif damage == "back-pointer-link":
+            pointer = admin_dir / "gitdir"
+            retained = admin_dir / "retained-gitdir"
+            pointer.rename(retained)
+            pointer.symlink_to(retained)
+        elif damage == "common-parent":
+            (admin_dir / "link").symlink_to(tmp_path / "outside")
+            (admin_dir / "commondir").write_text("link/../../..\n", encoding="ascii")
+        elif damage == "common-backslash":
+            (admin_dir / "commondir").write_text("..\\..\n", encoding="ascii")
+        elif damage == "common-pointer-link":
+            pointer = admin_dir / "commondir"
+            retained = admin_dir / "retained-commondir"
+            pointer.rename(retained)
+            pointer.symlink_to(retained)
+        elif damage == "gitfile":
+            marker.write_text("invalid\n", encoding="ascii")
+        elif damage == "gitfile-parent":
+            (admin_dir.parent / "link").symlink_to(tmp_path / "outside")
+            marker.write_text(
+                f"gitdir: {admin_dir.parent / 'link'}/../{admin_dir.name}\n",
+                encoding="ascii",
+            )
+        else:
+            retained = intake / "retained-gitfile"
+            marker.rename(retained)
+            marker.symlink_to(retained)
+
+        with (
+            patch(
+                f"{_WP}._secure_dir_fd_supported",
+                return_value=secure_descriptors,
+            ),
+            pytest.raises(RuntimeError, match=message),
+        ):
+            worker_pool_module._linked_worktree_git_env(intake, writer)
+
+    @pytest.mark.parametrize("secure_descriptors", (True, False))
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Linked intake tests require POSIX")
+    @pytest.mark.parametrize("metadata_kind", ("gitfile", "admin", "gitdir", "commondir"))
+    def test_linked_binding_rejects_replaced_intake_metadata(
+        self,
+        tmp_path: Path,
+        secure_descriptors: bool,
+        metadata_kind: str,
+    ) -> None:
+        """Replaced intake metadata cannot pass a private Git rebind."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        repo, writer, head = self._inspection_writer(tmp_path)
+        intake = tmp_path / "intake"
+        _git(repo, "worktree", "add", "--detach", str(intake), head)
+
+        with patch(
+            f"{_WP}._secure_dir_fd_supported",
+            return_value=secure_descriptors,
+        ):
+            linked = worker_pool_module._linked_worktree_git_env(intake, writer)
+            target = self._linked_intake_metadata_paths(intake)[metadata_kind]
+            self._replace_git_metadata_path(target, tmp_path, metadata_kind)
+
+            with pytest.raises(RuntimeError, match="metadata changed before temporary private"):
+                with worker_pool_module._private_linked_worktree_git_env(
+                    linked,
+                    detached_head=head,
+                ):
+                    pytest.fail("replaced intake metadata must fail before private Git use")
+
+    @pytest.mark.parametrize("secure_descriptors", (True, False))
+    @pytest.mark.parametrize("metadata_kind", ("gitfile", "admin", "gitdir", "commondir"))
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Linked intake tests require POSIX")
+    def test_linked_intake_inspection_rejects_replaced_metadata_after_capture(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        secure_descriptors: bool,
+        metadata_kind: str,
+    ) -> None:
+        """Inspection rejects intake metadata replaced after candidate capture."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        _repo, intake, writer, head = self._linked_intake_writer(tmp_path)
+        (writer / "tracked.txt").write_text("changed\n", encoding="utf-8")
+        target = self._linked_intake_metadata_paths(intake)[metadata_kind]
+        original_candidate = worker_pool_module._candidate_commit_tree_evidence
+        replaced = False
+
+        def replace_after_capture(
+            path: Path,
+            revision: str,
+            *,
+            timeout: int,
+            selected: Any,
+            git_env: dict[str, str],
+        ) -> tuple[str, Any]:
+            nonlocal replaced
+            candidate = original_candidate(
+                path,
+                revision,
+                timeout=timeout,
+                selected=selected,
+                git_env=git_env,
+            )
+            self._replace_git_metadata_path(target, tmp_path, metadata_kind)
+            replaced = True
+            return candidate
+
+        with (
+            patch(
+                f"{_WP}._secure_dir_fd_supported",
+                return_value=secure_descriptors,
+            ),
+            patch(
+                f"{_WP}._candidate_commit_tree_evidence",
+                side_effect=replace_after_capture,
+            ),
+        ):
+            result = pool._git_inspect_implementation_worktree(
+                GitJob(
+                    repo="test/repo",
+                    op="inspect_implementation_worktree",
+                    timeout_s=60,
+                    kwargs={
+                        "repo_root": str(intake),
+                        "worktree_path": str(writer),
+                        "branch": "2973-auto-impl",
+                        "expected_head": head,
+                    },
+                )
+            )
+
+        assert replaced is True
+        assert result.ok is False
+        assert result.value["failure_kind"] == "inspection_unavailable"
+
+    @pytest.mark.parametrize("secure_descriptors", (True, False))
+    @pytest.mark.requires_posix
+    @pytest.mark.skipif(os.name != "posix", reason="Linked intake tests require POSIX")
+    def test_linked_binding_rejects_a_writer_from_another_common_directory(
+        self,
+        tmp_path: Path,
+        secure_descriptors: bool,
+    ) -> None:
+        """The intake root cannot bind a writer from a different repository."""
+        from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+        _repo, writer, _head = self._inspection_writer(tmp_path / "writer-repository")
+        intake_repo, _unused_writer, intake_head = self._inspection_writer(
+            tmp_path / "intake-repository"
+        )
+        intake = tmp_path / "intake"
+        _git(intake_repo, "worktree", "add", "--detach", str(intake), intake_head)
+
+        with (
+            patch(
+                f"{_WP}._secure_dir_fd_supported",
+                return_value=secure_descriptors,
+            ),
+            pytest.raises(RuntimeError, match="admin directory is unregistered"),
+        ):
+            worker_pool_module._linked_worktree_git_env(intake, writer)
 
     def test_recovery_cas_materializes_a_packed_nested_branch(
         self,
@@ -19626,7 +20036,11 @@ def test_actual_pretest_completion_persists_for_fresh_worker(
     )
     from hephaestus.automation.source_worktree import SourceWorkspaceManager
 
-    root, _, head = _worker_repository(tmp_path)
+    primary_root, _, head = _worker_repository(tmp_path)
+    root = primary_root
+    if restart_change == "none":
+        root = tmp_path / "intake"
+        _git(primary_root, "worktree", "add", "--detach", str(root), head)
     manager = SourceWorkspaceManager(root, repository="project")
     binding = manager.prepare(7, SourceLane.IMPLEMENTATION, head, branch="pretest-writer")
     _git(binding.cwd, "push", "-u", "origin", "pretest-writer")
