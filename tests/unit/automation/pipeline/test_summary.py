@@ -113,6 +113,24 @@ class TestFormatPreservedWorktrees:
 class TestPrintSummaryRows:
     """Per-item rows and aggregates."""
 
+    def test_repository_busy_reason_remains_visible(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The summary preserves a terminal repository contention cause."""
+        item = _item(
+            2901,
+            StageName.FINISHED,
+            passed=False,
+            reason=(
+                "repository_busy: repository=repo-a operation=clone "
+                "elapsed=600.000s cause=lock_timeout"
+            ),
+        )
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(exit_code=1), [], json_out=False)
+
+        assert "FAIL:repository_busy:" in caplog.text
+        assert "clone exhausted" not in caplog.text
+
     def test_review_run_record_overwrites_previous_head(self) -> None:
         item = _item(7, StageName.PR_REVIEW, passed=False, reason="review failed")
         record_review_run(item, reason="explicit-review", head_sha="a" * 40)

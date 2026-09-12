@@ -32,6 +32,7 @@ without network I/O.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from itertools import chain
@@ -51,6 +52,7 @@ from hephaestus.automation.issue_waves import (
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 
+from ..events import RepositoryBusyEvent
 from .base import (
     GIT_JOB_TIMEOUT_S,
     Continue,
@@ -98,6 +100,65 @@ INTAKE_RECEIPT_KEY = "_repo_intake_receipt"
 WAVE_PLAN_KEY = "_issue_wave_admission_plan"
 WAVE_ANCESTRY_VERIFIED_KEY = "_issue_wave_ancestry_verified"
 WAVE_ANCESTRY_ERROR_KEY = "_issue_wave_ancestry_error"
+CHECKOUT_CONTENTION_STARTED_KEY = "checkout_contention_started_s"
+CHECKOUT_CONTENTION_ATTEMPTS_KEY = "checkout_contention_attempts"
+CHECKOUT_CONTENTION_RESULT_KEY = "checkout_contention_result"
+CHECKOUT_CONTENTION_WAIT_KEY = "checkout_contention_wait_s"
+CHECKOUT_CONTENTION_PENDING_KEY = "checkout_contention_pending"
+_LOCK_RESULT_FIELDS = frozenset(
+    {
+        "repository",
+        "operation",
+        "lock_layer",
+        "lock_path",
+        "configured_lock_wait_s",
+        "attempt_wait_s",
+        "run_identity",
+        "holder_metadata_status",
+        "holder_metadata_advisory",
+        "holder_metadata",
+        "holder_metadata_stale",
+    }
+)
+_REPOSITORY_CONTENTION_BACKOFF_BASE_S = 5.0
+_REPOSITORY_CONTENTION_BACKOFF_CAP_S = 60.0
+
+
+def _clear_checkout_contention(item: WorkItem) -> None:
+    """Remove the state for one completed checkout contention budget."""
+    for key in (
+        CHECKOUT_CONTENTION_STARTED_KEY,
+        CHECKOUT_CONTENTION_ATTEMPTS_KEY,
+        CHECKOUT_CONTENTION_RESULT_KEY,
+        CHECKOUT_CONTENTION_WAIT_KEY,
+        CHECKOUT_CONTENTION_PENDING_KEY,
+        "retry_delay_s",
+    ):
+        item.payload.pop(key, None)
+
+
+def _repository_busy_outcome(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    operation: object,
+    elapsed_s: float,
+    cumulative_lock_wait_s: float,
+) -> StageOutcome:
+    """Emit and summarize one typed terminal checkout contention result."""
+    selected_operation = (
+        operation
+        if isinstance(operation, str) and operation in {"clone", "prepare_intake", "sync_checkout"}
+        else str(item.payload.get("checkout_op", "unknown"))
+    )
+    event = RepositoryBusyEvent(
+        repository=item.repo,
+        operation=selected_operation,
+        elapsed_s=max(0.0, elapsed_s),
+        cumulative_lock_wait_s=max(0.0, cumulative_lock_wait_s),
+    )
+    ctx.emit_event(event)
+    return StageOutcome(Disposition.FINISH_FAIL, event.summary())
 
 
 def is_direct_scope_worktree_nonce(value: object) -> TypeGuard[str]:
@@ -392,6 +453,35 @@ class RepoStage(Stage):
 
     def _clone_or_skip(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Prepare a checkout by cloning or safely synchronizing it."""
+        contention = (
+            item.payload.get(CHECKOUT_CONTENTION_RESULT_KEY)
+            if item.payload.pop(CHECKOUT_CONTENTION_PENDING_KEY, False)
+            else None
+        )
+        if isinstance(contention, dict):
+            started_s = float(item.payload[CHECKOUT_CONTENTION_STARTED_KEY])
+            contention_timeout_s = float(getattr(ctx.config, "repository_contention_timeout", 600))
+            remaining_s = max(0.0, contention_timeout_s - (ctx.now() - started_s))
+            attempts = int(item.payload.get(CHECKOUT_CONTENTION_ATTEMPTS_KEY, 1))
+            candidate_delay_s = min(
+                _REPOSITORY_CONTENTION_BACKOFF_BASE_S * (2 ** max(0, attempts - 1)),
+                _REPOSITORY_CONTENTION_BACKOFF_CAP_S,
+            )
+            if remaining_s <= 0.0:
+                elapsed_s = ctx.now() - started_s
+                cumulative_wait_s = float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0))
+                return _repository_busy_outcome(
+                    item,
+                    ctx,
+                    operation=contention.get("operation"),
+                    elapsed_s=elapsed_s,
+                    cumulative_lock_wait_s=cumulative_wait_s,
+                )
+            item.payload["retry_delay_s"] = min(candidate_delay_s, remaining_s)
+            return StageOutcome(
+                Disposition.RETRY,
+                note="repository contention: lock_timeout",
+            )
         # Checkout preparation failure handling (budget clone=2): on_job_done
         # records the failure while retaining CLONE_WAIT, so retry cannot fall
         # through into label work or discovery after a failed fetch.
@@ -415,15 +505,40 @@ class RepoStage(Stage):
             )
 
         if item.payload.pop("checkout_verified", False):
+            _clear_checkout_contention(item)
             return Continue(next_state="WAVE_ADMIT")
 
         dest = Path(str(ctx.paths.repo_root))
         if ctx.dry_run:
             if dest.exists():
-                logger.info("[dry-run] would synchronize %s/%s at %s", ctx.org, item.repo, dest)
+                logger.info(
+                    "[dry-run] would synchronize %s/%s at %s",
+                    ctx.org,
+                    item.repo,
+                    dest,
+                )
                 return Continue(next_state="WAVE_ADMIT")
             logger.info("[dry-run] would clone %s/%s to %s", ctx.org, item.repo, dest)
             return Continue(next_state="WAVE_ADMIT")
+
+        contention_timeout_s = float(getattr(ctx.config, "repository_contention_timeout", 600))
+        started = item.payload.get(CHECKOUT_CONTENTION_STARTED_KEY)
+        remaining_s = (
+            contention_timeout_s
+            if started is None
+            else max(0.0, contention_timeout_s - (ctx.now() - float(started)))
+        )
+        if started is not None and remaining_s <= 0:
+            cumulative_wait_s = float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0))
+            return _repository_busy_outcome(
+                item,
+                ctx,
+                operation=item.payload.get("checkout_op"),
+                elapsed_s=ctx.now() - float(started),
+                cumulative_lock_wait_s=cumulative_wait_s,
+            )
+        configured_wait_s = float(getattr(ctx.config, "repository_lock_wait_timeout", 120))
+        admission_wait_s = min(configured_wait_s, remaining_s)
 
         if item.payload.pop("checkout_cloned", False):
             item.payload["checkout_op"] = "sync_checkout"
@@ -431,7 +546,11 @@ class RepoStage(Stage):
                 repo=item.repo,
                 op="sync_checkout",
                 timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
-                kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},
+                repository_lock_wait_timeout_s=admission_wait_s,
+                kwargs={
+                    "repo": f"{ctx.org}/{item.repo}",
+                    "dest": str(dest),
+                },
                 descr=f"synchronize {ctx.org}/{item.repo}",
             )
             return JobRequest(job=job, on_done_state="CLONE_WAIT")
@@ -450,7 +569,11 @@ class RepoStage(Stage):
                 repo=item.repo,
                 op="prepare_intake",
                 timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
-                kwargs={"repo": f"{ctx.org}/{item.repo}", "caller_root": str(caller_root)},
+                repository_lock_wait_timeout_s=admission_wait_s,
+                kwargs={
+                    "repo": f"{ctx.org}/{item.repo}",
+                    "caller_root": str(caller_root),
+                },
                 descr=f"prepare isolated intake for {ctx.org}/{item.repo}",
             )
             return JobRequest(job=job, on_done_state="CLONE_WAIT")
@@ -460,9 +583,13 @@ class RepoStage(Stage):
             repo=item.repo,
             op="clone",
             timeout_s=stage_timeout(ctx, "clone", GIT_JOB_TIMEOUT_S),
+            repository_lock_wait_timeout_s=admission_wait_s,
             # worker_pool._dispatch_git_op clone contract: 'repo' (org/name
             # slug for gh repo clone) + 'dest' (checkout path).
-            kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},
+            kwargs={
+                "repo": f"{ctx.org}/{item.repo}",
+                "dest": str(dest),
+            },
             descr=f"clone {ctx.org}/{item.repo}",
         )
         return JobRequest(job=job, on_done_state="CLONE_WAIT")
@@ -518,7 +645,9 @@ class RepoStage(Stage):
                 "title": str(issue_data.get("title") or "durable learning recovery"),
             }
 
-    def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
+    def on_job_done(  # noqa: C901
+        self, item: WorkItem, result: JobResult, ctx: StageContext
+    ) -> None:
         """Record checkout preparation success/failure (state still CLONE_WAIT).
 
         Args:
@@ -537,6 +666,38 @@ class RepoStage(Stage):
             return
         if item.state != "CLONE_WAIT":
             return
+        if result.error == "lock_timeout":
+            value = result.value if isinstance(result.value, dict) else {}
+            raw_attempt_wait = value.get("attempt_wait_s", 0.0)
+            attempt_wait_s = (
+                max(0.0, float(raw_attempt_wait))
+                if isinstance(raw_attempt_wait, (int, float))
+                and not isinstance(raw_attempt_wait, bool)
+                and math.isfinite(float(raw_attempt_wait))
+                else 0.0
+            )
+            item.payload.setdefault(
+                CHECKOUT_CONTENTION_STARTED_KEY,
+                ctx.now(),
+            )
+            item.payload[CHECKOUT_CONTENTION_ATTEMPTS_KEY] = (
+                int(item.payload.get(CHECKOUT_CONTENTION_ATTEMPTS_KEY, 0)) + 1
+            )
+            contention = {key: value[key] for key in _LOCK_RESULT_FIELDS if key in value}
+            contention.setdefault(
+                "operation",
+                str(item.payload.get("checkout_op", "unknown")),
+            )
+            item.payload[CHECKOUT_CONTENTION_WAIT_KEY] = (
+                float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0)) + attempt_wait_s
+            )
+            contention["cumulative_wait_s"] = float(
+                item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0)
+            )
+            contention["retry_count"] = item.payload[CHECKOUT_CONTENTION_ATTEMPTS_KEY]
+            item.payload[CHECKOUT_CONTENTION_RESULT_KEY] = contention
+            item.payload[CHECKOUT_CONTENTION_PENDING_KEY] = True
+            return
         if result.ok:
             operation = item.payload.get("checkout_op")
             if operation == "clone":
@@ -544,6 +705,7 @@ class RepoStage(Stage):
                 logger.info("repo:%s: clone completed; verifying checkout", item.repo)
             elif operation == "sync_checkout":
                 if not is_full_commit_sha(result.value):
+                    _clear_checkout_contention(item)
                     item.attempts["clone"] = item.attempts.get("clone", 0) + 1
                     item.payload["clone_failed"] = True
                     logger.warning(
@@ -560,6 +722,7 @@ class RepoStage(Stage):
                 try:
                     receipt = RepoIntakeReceipt.from_dict(result.value)
                 except (RepoIntakeError, TypeError) as exc:
+                    _clear_checkout_contention(item)
                     item.attempts["clone"] = item.attempts.get("clone", 0) + 1
                     item.payload["clone_failed"] = True
                     item.payload["checkout_error"] = f"invalid intake receipt: {exc}"
@@ -572,11 +735,13 @@ class RepoStage(Stage):
                 item.payload["checkout_verified"] = True
                 logger.info("repo:%s: isolated intake preparation completed", item.repo)
             else:  # pragma: no cover - every checkout JobRequest records its operation
+                _clear_checkout_contention(item)
                 item.payload["clone_failed"] = True
                 item.attempts["clone"] = item.attempts.get("clone", 0) + 1
                 item.payload["checkout_error"] = "checkout operation identity missing"
                 logger.warning("repo:%s: checkout operation identity missing", item.repo)
             return
+        _clear_checkout_contention(item)
         item.attempts["clone"] = item.attempts.get("clone", 0) + 1
         item.payload["clone_failed"] = True
         item.payload["checkout_error"] = result.error or "checkout preparation failed"

@@ -754,6 +754,7 @@ def test_full_discovery_reseed_reuses_original_caller_checkout(
         str(caller_root),
         str(caller_root),
     ]
+    assert [job.repository_lock_wait_timeout_s for job in intake_jobs] == [120.0, 120.0]
     assert coordinator.config.repo_roots["repo-a"] == tmp_path / ".repo-a-intake" / "worktree"
     assert coordinator.config.repo_caller_roots["repo-a"] == caller_root
     assert coordinator.config.repo_state_roots["repo-a"] == tmp_path / ".repo-a-intake"
@@ -788,6 +789,106 @@ def test_explicit_pr_scope_syncs_before_labels_and_pr_classification(
 
     assert coordinator.run() == 0
     assert events[:3] == ["intake", "labels", "classify-pr"]
+
+
+def test_explicit_scope_lock_contention_continues_after_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A direct run retries its intake after repository contention clears."""
+    caller_root = tmp_path / "repo-a"
+    caller_root.mkdir()
+    intake_root = tmp_path / ".repo-a-intake" / "worktree"
+    pool = FakeWorkerPool()
+    pool.script(
+        JobResult(
+            ok=False,
+            error="lock_timeout",
+            value={"operation": "prepare_intake", "attempt_wait_s": 0.25},
+        ),
+        _intake_result(caller_root, intake_root),
+    )
+    now = [100.0]
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[101],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.PLANNING})),
+            repository_contention_timeout=10,
+            rate_guard_enabled=False,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        **fake_worker_factories(pool, None),
+        install_signals=False,
+        monotonic=lambda: now[0],
+    )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage()
+    original_timer_park = coordinator._timer_park
+
+    def park_and_advance(item: WorkItem, delay_s: float) -> None:
+        now[0] += delay_s
+        original_timer_park(item, 0.0)
+
+    monkeypatch.setattr(coordinator, "_timer_park", park_and_advance)
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda issue, _gh: _facts(issue))
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.admission._filter_open_issues",
+        lambda _repo, issues, **_kwargs: list(issues),
+    )
+
+    assert coordinator.run() == 0
+    checkout_jobs = [
+        handle.job
+        for handle in pool.submitted
+        if isinstance(handle.job, GitJob) and handle.job.op == "prepare_intake"
+    ]
+    assert len(checkout_jobs) == 2
+    assert coordinator.ledger[-1].passed is True
+
+
+def test_direct_scope_repository_contention_exhaustion_is_repository_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A direct run reports repository_busy after its final timer wake."""
+    (tmp_path / "repo-a").mkdir()
+    pool = FakeWorkerPool()
+    pool.script(
+        JobResult(
+            ok=False,
+            error="lock_timeout",
+            value={"operation": "prepare_intake", "attempt_wait_s": 0.25},
+        )
+    )
+    now = [100.0]
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[101],
+            projects_dir=tmp_path,
+            repository_contention_timeout=5,
+            rate_guard_enabled=False,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        **fake_worker_factories(pool, None),
+        install_signals=False,
+        monotonic=lambda: now[0],
+    )
+    original_timer_park = coordinator._timer_park
+    timer_delays: list[float] = []
+
+    def park_and_advance(item: WorkItem, delay_s: float) -> None:
+        timer_delays.append(delay_s)
+        now[0] += delay_s
+        original_timer_park(item, 0.0)
+
+    monkeypatch.setattr(coordinator, "_timer_park", park_and_advance)
+
+    assert coordinator.run() == 1
+    assert timer_delays == [5.0]
+    assert len(coordinator.ledger) == 1
+    assert coordinator.ledger[0].reason.startswith("repository_busy:")
 
 
 @pytest.mark.parametrize(
