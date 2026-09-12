@@ -80,6 +80,7 @@ class FakeWorkerPool:
         self.submitted: list[JobHandle] = []
         self.submitted_claims: list[tuple[str, str]] = []
         self.shutdown_calls = 0
+        self.repo_intake_lease_release_calls = 0
         self._scripted: deque[JobResult | Exception] = deque()
         self.github_job_runner = github_job_runner
         self._wakeup = threading.Event()
@@ -237,6 +238,30 @@ class FakeWorkerPool:
             return JobResult(ok=True, value=True)
         if job.op == "sync_checkout":
             return JobResult(ok=True, value="a" * 40)
+        if job.op == "prepare_intake":
+            caller_root = Path(str(job.kwargs.get("caller_root") or ""))
+            intake_path = caller_root.parent / f".{caller_root.name}-intake" / "worktree"
+            common_dir = caller_root / ".git"
+            common_dir.mkdir(parents=True, exist_ok=True)
+            intake_path.mkdir(parents=True, exist_ok=True)
+            (intake_path / ".git").write_text("gitdir: fake\n", encoding="utf-8")
+            return JobResult(
+                ok=True,
+                value={
+                    "schema_version": 2,
+                    "repository": job.kwargs.get("repo", ""),
+                    "repository_identity": "fake:repo",
+                    "ownership_key": "fake:repo:intake",
+                    "common_dir": str(common_dir),
+                    "path": str(intake_path),
+                    "state_root": str(intake_path.parent),
+                    "default_branch": "main",
+                    "revision": "a" * 40,
+                    "generation": 1,
+                    "detached": True,
+                    "branch": None,
+                },
+            )
         if job.op == "verify_pr_review_checkout":
             return JobResult(ok=True, value={"ready": True, "diff": "checkout diff"})
         return JobResult(ok=True)
@@ -269,6 +294,10 @@ class FakeWorkerPool:
         self.shutdown_calls += 1
         if mark_interrupted:
             self.shutdown_event.set()
+
+    def release_repo_intake_leases(self) -> None:
+        """Record release of the test lane's repository-intake leases."""
+        self.repo_intake_lease_release_calls += 1
 
 
 class WorkerFactories(TypedDict):

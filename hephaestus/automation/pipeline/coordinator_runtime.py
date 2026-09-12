@@ -85,7 +85,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return SourceWorkspaceManager(root, repository=repo)
 
         def learning_state_dir() -> Path:
-            return root / "build" / ".automation-state"
+            return self.config.repo_state_roots.get(repo, root) / "build" / ".automation-state"
 
         github_factory = self._github_factory
         ctx = stages_mod.StageContext(
@@ -319,50 +319,52 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             logger.exception("pipeline run failed")
             self._fatal = True
         finally:
-            # Reap the pool on every exit. A fatal exception does not set shutdown,
-            # so the executor and agent subprocesses would leak (#2059). This call is
-            # idempotent, so an earlier signal-path call is a no-op.
-            self._shutdown_pool()
-            self._finalize_resumable()
-            exit_code = self._exit_code()
-            stats = summary_mod.RunStats(
-                exit_code=exit_code,
-                loops_run=self._loops_run,
-                agent_job_count=self._agent_job_count,
-                agent_job_time_s=self._agent_job_time_s,
-                wall_s=self._monotonic() - started,
-                auxiliary_job_count=self._auxiliary_job_count,
-                auxiliary_job_time_s=self._auxiliary_job_time_s,
-                auxiliary_job_failure_count=self._auxiliary_job_failure_count,
-                auxiliary_job_deferred_count=self._auxiliary_job_deferred_count,
-            )
-            summary_items = self._effective_items()
-            preserved = self._active_preserved_worktrees()
-            recovery_preserved = self._active_recovery_worktrees()
             try:
-                self._record_event(
-                    "run_end",
-                    {
-                        "exit_code": exit_code,
-                        "interrupted": stats.interrupted,
-                        "items": len(summary_items),
-                        "agent_jobs": self._agent_job_count,
-                        "wall_s": stats.wall_s,
-                    },
+                # Reap both lanes before final records and reports. The intake
+                # lease remains held while those consumers use its fixed paths.
+                self._shutdown_pool()
+                self._finalize_resumable()
+                exit_code = self._exit_code()
+                stats = summary_mod.RunStats(
+                    exit_code=exit_code,
+                    loops_run=self._loops_run,
+                    agent_job_count=self._agent_job_count,
+                    agent_job_time_s=self._agent_job_time_s,
+                    wall_s=self._monotonic() - started,
+                    auxiliary_job_count=self._auxiliary_job_count,
+                    auxiliary_job_time_s=self._auxiliary_job_time_s,
+                    auxiliary_job_failure_count=self._auxiliary_job_failure_count,
+                    auxiliary_job_deferred_count=self._auxiliary_job_deferred_count,
                 )
-                summary_mod.print_summary(
-                    summary_items,
-                    stats,
-                    preserved,
-                    json_out=self.config.json_out,
-                    recovery_preserved=recovery_preserved,
-                    terminal_summary=(
-                        self._terminal_summary if self._terminal_summary.total else None
-                    ),
-                )
+                summary_items = self._effective_items()
+                preserved = self._active_preserved_worktrees()
+                recovery_preserved = self._active_recovery_worktrees()
+                try:
+                    self._record_event(
+                        "run_end",
+                        {
+                            "exit_code": exit_code,
+                            "interrupted": stats.interrupted,
+                            "items": len(summary_items),
+                            "agent_jobs": self._agent_job_count,
+                            "wall_s": stats.wall_s,
+                        },
+                    )
+                    summary_mod.print_summary(
+                        summary_items,
+                        stats,
+                        preserved,
+                        json_out=self.config.json_out,
+                        recovery_preserved=recovery_preserved,
+                        terminal_summary=(
+                            self._terminal_summary if self._terminal_summary.total else None
+                        ),
+                    )
+                finally:
+                    if self._metrics_server is not None:
+                        self._metrics_server.stop()
             finally:
-                if self._metrics_server is not None:
-                    self._metrics_server.stop()
+                self.pool.release_repo_intake_leases()
         return exit_code
 
     def _effective_items(self) -> list[ct.WorkItem]:
@@ -1052,7 +1054,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 reason=outcome.note or "direct scope checkout preparation failed",
             )
             return
-
         base_sha = item.payload.get(repo_stage_mod.DIRECT_SCOPE_BASE_SHA_KEY)
         if not repo_stage_mod.is_full_commit_sha(base_sha):
             if not self.config.dry_run:
@@ -1072,7 +1073,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             repo_root = Path(str(self._ctx_for_repo(item.repo).paths.repo_root))
             store = None
             if repo_root.is_dir():
-                store = IssueWaveStore(repo_root, self.config.org, item.repo)
+                state_root = ct._effective_repo_state_root(self.config, item.repo)
+                store = IssueWaveStore(state_root, self.config.org, item.repo)
                 checkpoint = store.load()
             elif self.config.dry_run:
                 checkpoint = None

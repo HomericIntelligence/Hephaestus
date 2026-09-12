@@ -158,6 +158,7 @@ class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
         repo: str | None = None,
         dry_run: bool = False,
         repo_root: Path | None = None,
+        state_root: Path | None = None,
         gh_timeout: int = 120,
         command_runner: GitHubCommandRunner | None = None,
     ) -> None:
@@ -169,7 +170,9 @@ class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
                 org-only form is retained solely for discovery setup; review
                 thread reads and all mutations require a concrete repository.
             dry_run: When True, every mutator logs-and-skips.
-            repo_root: Repository checkout root for current journals.
+            repo_root: Repository checkout root for Git operations.
+            state_root: Root for durable local state. Defaults to
+                ``repo_root`` for compatibility.
             gh_timeout: Maximum seconds for one GitHub CLI operation.
 
         """
@@ -177,6 +180,7 @@ class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
         self.repo = repo
         self.dry_run = dry_run
         self._repo_root = repo_root or Path.cwd()
+        self._state_root = state_root or self._repo_root
         self._gh_timeout = gh_timeout
         self._command_runner = command_runner if command_runner is not None else gh_call
         self._viewer_login_cache: str | None = None

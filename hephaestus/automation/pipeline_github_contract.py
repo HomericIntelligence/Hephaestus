@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         repo: str | None
         dry_run: bool
         _repo_root: Path
+        _state_root: Path
         _gh_timeout: int
 
         @property

@@ -328,6 +328,17 @@ class PipelineConfig:
     host_verification_pyxis_quota_root: Path | None = None
     podman_machine: str | None = None
     podman_machine_preflight_failed: bool = False
+    host_verification_bootstrap_comment_id: int | None = None
+    # Durable pipeline state must not live in the replaceable intake
+    # worktree.  The coordinator fills this map from the intake receipt;
+    # keeping it appended preserves positional construction compatibility.
+    repo_state_roots: dict[str, Path] = field(default_factory=dict)
+    # Preserve the checkout that supplied repository identity. Reseeding uses
+    # this root to prepare the same intake after ``repo_roots`` selects it.
+    repo_caller_roots: dict[str, Path] = field(default_factory=dict)
+    # Re-adoption is idempotent only for the exact verified receipt. Retain its
+    # closed representation so a later discovery pass cannot change identity.
+    repo_intake_receipts: dict[str, dict[str, object]] = field(default_factory=dict)
 
     @property
     def enable_advise(self) -> bool:
@@ -429,3 +440,15 @@ class _RepoEntrySource:
 def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
     """Resolve *repo* to its explicit checkout or conventional projects path."""
     return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
+
+
+def _effective_repo_state_root(config: PipelineConfig, repo: str) -> Path:
+    """Resolve durable state to its receipt-owned root when available."""
+    state_roots = getattr(config, "repo_state_roots", {})
+    return Path(state_roots.get(repo, _effective_repo_root(config, repo)))
+
+
+def _effective_repo_caller_root(config: PipelineConfig, repo: str) -> Path:
+    """Return the checkout that supplied the repository intake identity."""
+    caller_roots = getattr(config, "repo_caller_roots", {})
+    return Path(caller_roots.get(repo, _effective_repo_root(config, repo)))

@@ -27,7 +27,7 @@ import time
 import uuid
 from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PureWindowsPath
@@ -82,6 +82,7 @@ from hephaestus.agents.workspace import (
 )
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
+from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
 from hephaestus.automation.git_runtime import current_operation_shutdown, operation_file_lock
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
@@ -186,6 +187,7 @@ from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
+from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
@@ -2519,63 +2521,9 @@ def _trusted_gh_executable(extra_path_root: Path | None = None) -> str | None:
     )
 
 
-def _unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
+def _unsafe_local_git_config_key(config: str) -> str | None:
     """Return an unsafe repository/worktree config key, if *config* contains one."""
-    for entry in config.split("\0"):
-        if not entry:
-            continue
-        key, _separator, _value = entry.partition("\n")
-        normalized = key.lower()
-        if normalized in {
-            "core.askpass",
-            "core.attributesfile",
-            "core.excludesfile",
-            "core.fsmonitor",
-            "core.gitproxy",
-            "core.hookspath",
-            "core.pager",
-            "core.sshcommand",
-            "core.worktree",
-        }:
-            return key
-        if normalized in {"diff.external", "interactive.difffilter"}:
-            return key
-        if normalized.startswith("diff.") and normalized.rsplit(".", 1)[-1] in {
-            "command",
-            "textconv",
-        }:
-            return key
-        if normalized == "credential.helper" or (
-            normalized.startswith("credential.") and normalized.endswith(".helper")
-        ):
-            return key
-        if normalized.startswith("remote.") and normalized.rsplit(".", 1)[-1] in {
-            "proxy",
-            "proxyauthmethod",
-            "pushurl",
-            "receivepack",
-            "uploadpack",
-        }:
-            return key
-        if normalized in {"fetch.recursesubmodules", "submodule.recurse"}:
-            return key
-        if normalized.startswith(("include.", "includeif.")):
-            return key
-        if normalized.startswith("filter.") and normalized.rsplit(".", 1)[-1] in {
-            "clean",
-            "process",
-            "smudge",
-        }:
-            return key
-        if normalized.startswith("merge.") and normalized.endswith(".driver"):
-            return key
-        # A checkout-specific URL rewrite can transform the validated literal
-        # GitHub origin when it is later passed to ``git fetch``.  Any local
-        # HTTP configuration can similarly proxy traffic or override TLS
-        # verification/CA trust, including URL-scoped variants.
-        if normalized.startswith(("http.", "url.")):
-            return key
-    return None
+    return unsafe_local_git_config_key(config)
 
 
 def _checkout_preflight_error(  # noqa: C901
@@ -4102,6 +4050,9 @@ class WorkerPool:
         self._completion_saturation: threading.Event | None = None
         self._repo_locks: dict[str, _RepoLockEntry] = {}
         self._repo_locks_guard = threading.Lock()
+        self._repo_intake_leases: dict[Path, AbstractContextManager[None]] = {}
+        self._repo_intake_lease_locks: dict[Path, threading.Lock] = {}
+        self._repo_intake_leases_guard = threading.Lock()
         self._lock_dir = lock_dir
         self._gh_extra_path_root = gh_extra_path_root
         self._github_job_runner = github_job_runner
@@ -4231,6 +4182,18 @@ class WorkerPool:
         self._executor.shutdown(wait=mark_interrupted, cancel_futures=True)
         if not mark_interrupted:
             subprocess_registry.terminate_all()
+
+    def release_repo_intake_leases(self) -> None:
+        """Release all run-lifetime repository-intake leases once."""
+        with self._repo_intake_leases_guard:
+            leases = tuple(reversed(self._repo_intake_leases.values()))
+            self._repo_intake_leases.clear()
+            self._repo_intake_lease_locks.clear()
+        for lease in leases:
+            try:
+                lease.__exit__(None, None, None)
+            except Exception:
+                logger.exception("repository-intake lease release failed")
 
     def _on_future_done(self, handle: JobHandle, future: Future[JobResult]) -> None:
         """Drain result to completion queue when a job future completes.
@@ -6072,6 +6035,9 @@ class WorkerPool:
 
         elif job.op == "sync_checkout":
             return self._git_sync_checkout(job)
+
+        elif job.op == "prepare_intake":
+            return self._git_prepare_intake(job)
 
         elif job.op == "verify_issue_wave_ancestry":
             return self._git_verify_issue_wave_ancestry(job)
@@ -8311,6 +8277,66 @@ class WorkerPool:
                 expected_repo=expected_repo,
                 timeout_s=job.timeout_s,
             )
+
+    def _git_prepare_intake(self, job: GitJob) -> JobResult:
+        """Prepare an isolated intake worktree without touching the caller."""
+        expected_repo = str(job.kwargs.get("repo") or "")
+        caller_value = job.kwargs.get("caller_root")
+        caller_root = Path(str(caller_value or ""))
+        if not expected_repo or not caller_root.is_dir() or caller_root.is_symlink():
+            return JobResult(
+                ok=False,
+                error="prepare_intake requires a non-empty repo and valid caller_root",
+            )
+        if preflight_error := _checkout_preflight_error(caller_root, job.timeout_s):
+            return JobResult(ok=False, error=preflight_error)
+        gh_command = _trusted_gh_executable(self._gh_extra_path_root)
+        if gh_command is None:
+            return JobResult(
+                ok=False,
+                error=(
+                    "required GitHub executable is unavailable; pass "
+                    "--gh-extra-path-root ROOT when ROOT/bin/gh is the intended installation"
+                ),
+            )
+        remote_config = _trusted_remote_git_config(gh_command)
+        if remote_config is None:
+            return JobResult(ok=False, error="required fetch executable is unavailable")
+        try:
+            manager = RepoIntakeManager(
+                caller_root,
+                repository=expected_repo,
+                gh_command=gh_command,
+                timeout_s=job.timeout_s,
+                git_runner=git_utils.run,
+                git_env=_controlled_git_env(),
+                remote_config=remote_config,
+            )
+            common_dir = manager.common_dir
+            with self._repo_intake_leases_guard:
+                preparation_lock = self._repo_intake_lease_locks.setdefault(
+                    common_dir, threading.Lock()
+                )
+            with preparation_lock:
+                with self._repo_intake_leases_guard:
+                    lease = self._repo_intake_leases.get(common_dir)
+                acquired_lease = lease is None
+                if lease is None:
+                    lease = manager.run_lease()
+                    lease.__enter__()
+                lease_retained = not acquired_lease
+                try:
+                    receipt = manager.prepare()
+                    if acquired_lease:
+                        with self._repo_intake_leases_guard:
+                            self._repo_intake_leases[common_dir] = lease
+                        lease_retained = True
+                finally:
+                    if not lease_retained:
+                        lease.__exit__(*sys.exc_info())
+        except RepoIntakeError as exc:
+            return JobResult(ok=False, error=str(exc))
+        return JobResult(ok=True, value=receipt.to_dict())
 
     def _sync_checkout_locked(
         self,

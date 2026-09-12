@@ -45,6 +45,10 @@ class MainWorker(WorkerLane, Protocol):
         """Run one allowlisted cleanup operation in the auxiliary lane."""
         ...
 
+    def release_repo_intake_leases(self) -> None:
+        """Release run-lifetime repository-intake leases."""
+        raise NotImplementedError
+
 
 class AuxiliaryWorker(WorkerLane, Protocol):
     """Run host learning and terminal cleanup on an independent lane."""

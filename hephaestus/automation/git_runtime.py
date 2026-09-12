@@ -101,8 +101,14 @@ def run(
     log_errors: bool = True,
     env: dict[str, str] | None = None,
     shutdown: threading.Event | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess command with consistent, redacted error handling."""
+    """Run a subprocess command with consistent, redacted error handling.
+
+    Args:
+        input_text: Text to send through standard input. If this value is None, no text is sent.
+
+    """
     logger.debug("Running subprocess")
     timeout = remaining_operation_timeout(timeout)
     shutdown = shutdown or current_operation_shutdown()
@@ -116,6 +122,7 @@ def run(
                 check=check,
                 log_on_error=False,
                 env=env,
+                input_text=input_text,
                 retries=0,
                 **cancellation,
             )
@@ -126,6 +133,7 @@ def run(
             timeout=timeout,
             check=check,
             log_on_error=False,
+            input_text=input_text,
             **cancellation,
         )
     except subprocess.TimeoutExpired:

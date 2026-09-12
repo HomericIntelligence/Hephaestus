@@ -753,16 +753,54 @@ exclusions, and routes each eligible issue or pull request to the stage implied
 by its durable state.
 
 Before it reads a direct `--issues` / `--prs` scope, performs a label mutation,
-or dispatches an agent, repo intake proves its reusable checkout is the
-expected repository, clean, on the remote default branch, and fast-forwarded
-to that branch's fetched head. Here, clean means that
-`git status --porcelain --untracked-files=no` reports no staged or unstaged
-tracked changes. Untracked files stay in place and do not block intake because
-issue implementation runs in isolated worktrees. Writer-worktree commit and
-cleanup checks remain strict and include untracked files. A missing checkout is
-cloned and then subjected to the same synchronization proof. Any failure is
-terminal for that scope; it never falls through to an ambient or stale
-checkout.
+or dispatches an agent, repo intake proves a clean isolated control plane at
+the fetched remote default-branch head. The caller checkout supplies only
+repository identity and the Git common directory. It can be dirty, detached,
+or on a non-default branch; its files, index, branch, and status are not
+changed. A missing repository is cloned and then subjected to the existing
+strict synchronization proof. Any failure is terminal for that scope; it
+never falls through to an ambient or stale checkout.
+
+Repo intake has three separate worktree layers:
+
+- The user checkout is the caller-selected repository identity input.
+- The per-repository intake worktree is an automation-owned detached checkout
+  outside the user checkout. Its receipt records the common directory, exact
+  fetched SHA, default branch, and ownership generation.
+- The per-item implementation and review worktrees are created from the
+  verified intake worktree. They retain their existing strict dirty-state and
+  cleanup checks.
+
+Before intake preparation starts, the main worker pool takes an exclusive
+nonblocking run lease for the Git common directory. The lease path is stable
+for the common directory. The pool holds the lease across all loop passes.
+Thus, a second process cannot remove or rebind the fixed intake path
+while the first coordinator uses it. The second process fails immediately with
+`repository_intake_in_use` and tells the operator to wait for the active run.
+
+The intake worktree is created or rebound only under the separate shared Git
+metadata lock. Before a Git command uses an existing intake, a filesystem-only
+check verifies that its regular no-follow `.git` pointer identifies one direct
+child of the selected common directory's `worktrees` directory. The check also
+verifies that the admin directory's `gitdir` back-pointer identifies the intake
+and its `commondir` pointer identifies the selected common directory. A valid
+clean receipt is reused. A dirty, symlinked, special, malformed, unregistered,
+foreign, or mismatched path is preserved and fails closed. Intake never
+attaches the default branch a second time.
+
+Before intake replaces an outdated checkout, it reads the shared worktree
+registry again. If another registered worktree is below the intake path, the
+operation stops and preserves both worktrees and the receipt. The operator must
+relocate or remove the descendant through the verified worktree recovery
+process before a later run can rebind the intake. Intake does not use a path
+name to decide ownership, and it does not delete the descendant.
+
+The coordinator releases all intake run leases after both worker lanes stop,
+completion results drain, resumable records are complete, and the final summary
+finishes. A nested finalization path releases the leases if final reporting
+fails. `WorkerPool.shutdown()` does not release them. A hard process exit lets
+the kernel release the file locks. The receipt, worktree, and lease sentinel
+stay on disk for the next verified run.
 
 #### Boundary diagram
 
@@ -800,8 +838,9 @@ Architectural contract:
 
 - Exclusions become durable before excluded work leaves the queue.
 - Label-vocabulary setup and source classification occur only after the
-  checkout proof succeeds. Explicit scopes use the same bounded direct cursors
-  after that gate; they do not bypass it or widen their selected stage scope.
+  isolated intake receipt and exact SHA proof succeed. Explicit scopes use the
+  same bounded direct cursors after that gate; they do not bypass it or widen
+  their selected stage scope.
 - Discovery never writes planning, review, implementation, or merge verdicts.
 - Failure of the repository item does not fabricate outcomes for its issues.
 - Runtime repository discovery does not eagerly build `products` or downstream
@@ -1885,7 +1924,9 @@ The exhaustive classification is maintained in the
  worker boundary.
 - [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op` is one operation
  in the canonical [`GIT_OPS`](../hephaestus/automation/pipeline/git_jobs.py)
- inventory. `__post_init__` validates the operation. Before a PR-review
+ inventory. `__post_init__` validates the operation. `prepare_intake` creates
+ or reuses the detached per-repository intake worktree and returns its typed
+ exact-SHA receipt. Before a PR-review
  agent job, `verify_pr_review_checkout` receives the worktree path, branch,
  expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
  synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
@@ -1965,8 +2006,18 @@ operation, enforcing the `StageGitHub` concurrency contract without implying
 cross-process GitHub serialization; exact live-state guards remain authoritative
 across processes.
 
-`sync_checkout` additionally takes the status-safe Git-metadata lock resolved
-by [`WorktreeManager.git_metadata_lock_path`](../hephaestus/automation/worktree_manager.py).
+`prepare_intake` first takes a nonblocking run-lifetime lease at
+`<git-common-dir>/hephaestus-repository-intake.run.lock`. The main worker pool
+holds one lease for each Git common directory. A repeated preparation in the
+same pool uses that lease and does not take a nested file
+lock. If the first preparation fails, the pool releases the new lease. The
+coordinator releases retained leases after its final run report. A separate
+process that owns the lease causes an immediate `repository_intake_in_use`
+result.
+
+`prepare_intake` and `sync_checkout` also take the status-safe Git-metadata
+lock resolved by
+[`WorktreeManager.git_metadata_lock_path`](../hephaestus/automation/worktree_manager.py).
 For linked worktrees this resolves Git's common directory, so the primary
 checkout and every linked worktree serialize synchronization and worktree
 metadata mutations without leaving an untracked sentinel in the worktree.

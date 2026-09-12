@@ -62,6 +62,7 @@ from hephaestus.automation.pipeline.stages.repo import (
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
@@ -117,6 +118,127 @@ def _writer_repository(tmp_path: Path) -> tuple[Path, str]:
     _git(repo, "remote", "add", "origin", str(remote))
     _git(repo, "push", "--set-upstream", "origin", "main")
     return repo, revision
+
+
+@dataclass(frozen=True)
+class _CallerState:
+    """Store the complete caller state that intake must preserve."""
+
+    head: str
+    branch: str
+    index: str
+    tracked_content: bytes
+    untracked_content: bytes
+    status: str
+
+
+def _caller_state(repo: Path) -> _CallerState:
+    """Capture the caller state that repository intake must not change."""
+    return _CallerState(
+        head=_git(repo, "rev-parse", "HEAD"),
+        branch=_git(repo, "symbolic-ref", "--quiet", "--short", "HEAD"),
+        index=_git(repo, "diff", "--cached", "--binary"),
+        tracked_content=(repo / "tracked.txt").read_bytes(),
+        untracked_content=(repo / "untracked.txt").read_bytes(),
+        status=_git(repo, "status", "--porcelain", "--untracked-files=all"),
+    )
+
+
+@dataclass(frozen=True)
+class _LocalIntakeGitRunner:
+    """Run intake Git operations against a local bare remote."""
+
+    remote: Path
+
+    def __call__(
+        self,
+        command: list[str],
+        *,
+        cwd: Path | None = None,
+        check: bool = True,
+        timeout: int | None = None,
+        env: dict[str, str] | None = None,
+        log_errors: bool = True,
+        input_text: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Replace the GitHub and fetch boundaries with local operations."""
+        del log_errors
+        if command[0] == "gh":
+            return subprocess.CompletedProcess(command, 0, "main\n", "")
+        adjusted = list(command)
+        if "fetch" in adjusted:
+            adjusted[adjusted.index("origin")] = str(self.remote)
+        return subprocess.run(
+            adjusted,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=timeout,
+            env=env,
+            input=input_text,
+        )
+
+
+class _OrderedWorkerPool(WorkerPool):
+    """Record terminal calls around a real worker pool."""
+
+    def __init__(self, *, events: list[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._events = events
+
+    def shutdown(self, *, mark_interrupted: bool = True) -> None:
+        """Shut down the real pool and record the completed call."""
+        super().shutdown(mark_interrupted=mark_interrupted)
+        self._events.append("main_shutdown")
+
+    def release_repo_intake_leases(self) -> None:
+        """Release real intake leases and record the completed call."""
+        super().release_repo_intake_leases()
+        self._events.append("main_release")
+
+
+class _OrderedAuxiliaryPool(FakeWorkerPool):
+    """Record terminal calls for the auxiliary test lane."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    def shutdown(self, *, mark_interrupted: bool = True) -> None:
+        """Shut down the fake lane and record the completed call."""
+        super().shutdown(mark_interrupted=mark_interrupted)
+        self._events.append("auxiliary_shutdown")
+
+
+@dataclass(frozen=True)
+class _ExitSeed:
+    """Select one coordinator exit path for a terminal-lifecycle test."""
+
+    case: str
+    coordinator: Coordinator
+
+    def __call__(self) -> int:
+        """Set the selected terminal state or raise its fatal error."""
+        if self.case == "fatal":
+            raise RuntimeError("injected fatal failure")
+        if self.case == "interrupt":
+            self.coordinator.shutdown.set()
+        return 0
+
+
+@dataclass(frozen=True)
+class _SummaryReporter:
+    """Record summary publication and its selected failure path."""
+
+    case: str
+    events: list[str]
+
+    def __call__(self, *_args: object, **_kwargs: object) -> None:
+        """Record the report call or raise its selected error."""
+        self.events.append("summary")
+        if self.case == "report_failure":
+            raise RuntimeError("injected report failure")
 
 
 class StubStage(Stage):
@@ -4728,3 +4850,108 @@ def test_update_plan_same_issue_number_in_two_repositories(
     )
     assert first_stage is StageName.IMPLEMENTATION
     assert second_stage is StageName.PLANNING
+
+
+@pytest.mark.parametrize("case", ["normal", "fatal", "interrupt", "report_failure"])
+def test_run_releases_intake_leases_after_shutdown_and_reporting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """All run exits preserve the caller and release the real intake lease."""
+    events: list[str] = []
+
+    caller, _revision = _writer_repository(tmp_path)
+    remote = tmp_path / "writer-remote.git"
+    _git(caller, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    (caller / "tracked.txt").write_text("staged\n", encoding="utf-8")
+    _git(caller, "add", "tracked.txt")
+    (caller / "tracked.txt").write_text("unstaged\n", encoding="utf-8")
+    (caller / "untracked.txt").write_text("keep\n", encoding="utf-8")
+    before = _caller_state(caller)
+
+    pools: list[_OrderedWorkerPool] = []
+
+    def main_factory(**kwargs: Any) -> _OrderedWorkerPool:
+        pool = _OrderedWorkerPool(
+            events=events,
+            lock_dir=tmp_path / "locks",
+            **kwargs,
+        )
+        pools.append(pool)
+        return pool
+
+    auxiliary = _OrderedAuxiliaryPool(events)
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=[],
+            loops=1,
+            projects_dir=tmp_path,
+            rate_guard_enabled=False,
+        ),
+        github=FakeStageGitHub(),
+        pool_factory=main_factory,
+        auxiliary_pool_factory=auxiliary.factory,
+        install_signals=False,
+    )
+    main = pools[0]
+    run_intake_git = _LocalIntakeGitRunner(remote)
+
+    intake_job = GitJob(
+        repo="repo-a",
+        op="prepare_intake",
+        timeout_s=30,
+        kwargs={"repo": "acme/repo", "caller_root": str(caller)},
+    )
+    with (
+        patch.object(worker_pool_module, "_trusted_gh_executable", return_value="gh"),
+        patch.object(worker_pool_module, "_trusted_remote_git_config", return_value=()),
+        patch("hephaestus.automation.git_utils.run", side_effect=run_intake_git),
+    ):
+        intake_result = main._git_prepare_intake(intake_job)
+    assert intake_result.ok
+    assert isinstance(intake_result.value, dict)
+    intake_path = Path(str(intake_result.value["path"]))
+    manager = RepoIntakeManager(
+        caller,
+        repository="acme/repo",
+        gh_command="gh",
+        timeout_s=30,
+        git_runner=run_intake_git,
+        git_env=worker_pool_module._controlled_git_env(),
+        remote_config=(),
+    )
+    with pytest.raises(RepoIntakeError, match="repository_intake_in_use"):
+        with manager.run_lease():
+            pass
+    original_finalize = coordinator._finalize_resumable
+
+    def finalize() -> None:
+        original_finalize()
+        events.append("resumable")
+
+    monkeypatch.setattr(coordinator, "_seed_pass", _ExitSeed(case, coordinator))
+    monkeypatch.setattr(coordinator, "_finalize_resumable", finalize)
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.coordinator_runtime.summary_mod.print_summary",
+        _SummaryReporter(case, events),
+    )
+
+    if case == "report_failure":
+        with pytest.raises(RuntimeError, match="injected report failure"):
+            coordinator.run()
+    else:
+        coordinator.run()
+
+    assert _caller_state(caller) == before
+    assert intake_path.is_dir()
+    with manager.run_lease():
+        pass
+    assert events == [
+        "main_shutdown",
+        "auxiliary_shutdown",
+        "resumable",
+        "summary",
+        "main_release",
+    ]

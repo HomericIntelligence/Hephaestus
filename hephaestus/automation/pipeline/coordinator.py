@@ -413,11 +413,13 @@ def run_pipeline(config: ct.PipelineConfig) -> int:
     from hephaestus.automation.pipeline_github import PipelineGitHub
 
     def _github_for(repo_name: str, repo_root: Path) -> PipelineGitHub:
+        state_root = Path(str(config.repo_state_roots.get(repo_name, repo_root)))
         return PipelineGitHub(
             config.org,
             repo=repo_name,
             dry_run=config.dry_run,
             repo_root=repo_root,
+            state_root=state_root,
             gh_timeout=config.gh_timeout,
         )
 
