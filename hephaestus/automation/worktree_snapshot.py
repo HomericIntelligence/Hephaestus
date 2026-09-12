@@ -425,6 +425,39 @@ def _path_content_identity(  # noqa: C901
 
     open_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
     root_fd = os.open(root, open_flags | os.O_DIRECTORY)
+    root_identity = identity(os.fstat(root_fd))
+
+    def revalidate_root() -> None:
+        """Confirm that the root path still names the open root directory."""
+        try:
+            current_fd = os.open(root, open_flags | os.O_DIRECTORY)
+            try:
+                current_identity = identity(os.fstat(current_fd))
+            finally:
+                os.close(current_fd)
+        except OSError as exc:
+            raise RuntimeError("dirty snapshot content changed during inspection") from exc
+        if current_identity != root_identity:
+            raise RuntimeError("dirty snapshot content changed during inspection")
+
+    def revalidate_bindings(
+        bindings: list[tuple[int, str, int, tuple[int, int, int, int, int, int]]],
+    ) -> None:
+        """Confirm that each retained descriptor still has its trusted name."""
+        try:
+            for bound_parent, component, descriptor, expected in bindings:
+                named = os.stat(
+                    component,
+                    dir_fd=bound_parent,
+                    follow_symlinks=False,
+                )
+                opened = os.fstat(descriptor)
+                if identity(named) != expected or identity(opened) != expected:
+                    raise RuntimeError("dirty snapshot content changed during inspection")
+        except OSError as exc:
+            raise RuntimeError("dirty snapshot content changed during inspection") from exc
+        revalidate_root()
+
     try:
         for relative in relative_values:
             check_deadline()
@@ -441,7 +474,9 @@ def _path_content_identity(  # noqa: C901
             digest.update(len(encoded_path).to_bytes(8, "big"))
             digest.update(encoded_path)
             descriptors: list[int] = []
+            bindings: list[tuple[int, str, int, tuple[int, int, int, int, int, int]]] = []
             parent_fd = root_fd
+
             try:
                 try:
                     missing_ancestor = False
@@ -458,14 +493,28 @@ def _path_content_identity(  # noqa: C901
                         if not stat.S_ISDIR(component_metadata.st_mode):
                             missing_ancestor = True
                             break
-                        parent_fd = os.open(
+                        child_fd = os.open(
                             component,
                             open_flags | os.O_DIRECTORY,
                             dir_fd=parent_fd,
                         )
-                        descriptors.append(parent_fd)
+                        opened_metadata = os.fstat(child_fd)
+                        if identity(component_metadata) != identity(opened_metadata):
+                            os.close(child_fd)
+                            raise RuntimeError("dirty snapshot content changed during inspection")
+                        bindings.append(
+                            (
+                                parent_fd,
+                                component,
+                                child_fd,
+                                identity(opened_metadata),
+                            )
+                        )
+                        parent_fd = child_fd
+                        descriptors.append(child_fd)
                     if missing_ancestor:
                         digest.update(b"M")
+                        revalidate_bindings(bindings)
                         continue
                     metadata = os.stat(
                         parts[-1],
@@ -474,6 +523,7 @@ def _path_content_identity(  # noqa: C901
                     )
                 except FileNotFoundError:
                     digest.update(b"M")
+                    revalidate_bindings(bindings)
                     continue
                 except NotADirectoryError as exc:
                     raise RuntimeError("dirty snapshot contains an unsafe path") from exc
@@ -565,6 +615,7 @@ def _path_content_identity(  # noqa: C901
                     digest.update(f"{metadata.st_size}:{metadata.st_rdev}".encode())
                     if copy_root is not None:
                         destination_path(parts).mkdir(exist_ok=True)
+                revalidate_bindings(bindings)
             finally:
                 for descriptor in reversed(descriptors):
                     os.close(descriptor)
