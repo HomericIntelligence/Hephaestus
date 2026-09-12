@@ -742,6 +742,7 @@ def test_linked_callers_share_one_concurrent_intake(tmp_path: Path) -> None:
 
 def test_run_lease_blocks_a_second_process_before_intake_rebind(tmp_path: Path) -> None:
     """A live run keeps a second process from changing its intake checkout."""
+    source_root = Path(__file__).resolve().parents[3]
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
     first = manager.prepare()
@@ -773,7 +774,7 @@ except Exception as error:
     with manager.run_lease():
         attempted = subprocess.run(
             [sys.executable, "-c", child, str(caller)],
-            cwd=caller,
+            cwd=source_root,
             capture_output=True,
             text=True,
             check=False,
