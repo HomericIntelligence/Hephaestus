@@ -469,6 +469,54 @@ def test_provider_exit_marks_unknown_and_never_reports_success(worker):
     wait_state(worker, "session-1", "unknown")
 
 
+@pytest.mark.parametrize(
+    ("operation", "provider_method"),
+    [
+        ("start", "thread/start"),
+        ("input", "turn/start"),
+        ("resume", "thread/resume"),
+    ],
+)
+def test_malformed_provider_result_completes_an_uncertain_receipt(
+    worker, operation, provider_method
+):
+    """Keep a durable receipt and reservation for an invalid provider result."""
+    if operation != "start":
+        assert start(worker)["status"] == "completed"
+    if operation == "resume":
+        worker.handle(command("input", number=2, payload={"text": "tool"}))
+        wait_state(worker, "session-1", "tool_running")
+        assert worker.handle(command("interrupt", number=3))["status"] == "accepted"
+        wait_state(worker, "session-1", "idle")
+    worker.provider.request(
+        "fixture/next-result",
+        {"method": provider_method, "result": {}},
+    )
+    number = {"start": 10, "input": 11, "resume": 12}[operation]
+    payload = {"text": "plain"} if operation == "input" else None
+    envelope = command(operation, number=number, payload=payload)
+    if operation == "start":
+        envelope["payload"] = {
+            "workspace": "one",
+            "permissions": "fleet",
+            "agentId": "session-1-agent",
+            "taskId": "task-1",
+            "executionId": "session-1-exec",
+            "stage": "implementation",
+            "issueRefs": ["HomericIntelligence/Hephaestus#1"],
+        }
+
+    result = worker.handle(envelope)
+
+    assert result["status"] == "failed"
+    assert result["receipt"]["error"] == "provider_uncertain"
+    assert worker.handle(envelope) == result
+    session = worker.journal.sessions["session-1"]
+    assert session["activity"] == "unknown"
+    assert session["admissionReserved"] is True
+    assert "result" in worker.journal.commands[envelope["idempotencyKey"]]
+
+
 def test_journal_single_writer_replay_and_uncertain_command(tmp_path):
     """Persist intent before dispatch and fence another journal writer."""
     module = modules()
@@ -663,8 +711,23 @@ def test_worker_rejects_each_operation_for_the_wrong_target_kind(worker, operati
             "method": "item/commandExecution/requestApproval",
             "params": {"threadId": "thread-1", "turnId": "turn-1"},
         },
+        {"method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}},
+        {"method": "turn/completed", "params": {"threadId": "thread-1"}},
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {"id": "turn-1", "status": "unknown"},
+            },
+        },
     ],
-    ids=["lifecycle-params", "server-request-id"],
+    ids=[
+        "lifecycle-params",
+        "server-request-id",
+        "completed-thread-id",
+        "completed-turn",
+        "completed-status",
+    ],
 )
 def test_malformed_provider_frames_fail_the_provider_without_stopping_worker_poll(worker, message):
     """Malformed lifecycle and server-request frames become a bounded provider failure."""

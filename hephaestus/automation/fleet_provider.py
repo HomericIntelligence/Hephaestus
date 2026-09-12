@@ -34,6 +34,12 @@ _FRAME_MAX_BYTES = 1024 * 1024
 _LIFECYCLE_MAX_BYTES = 4 * 1024 * 1024
 _LIFECYCLE_MAX_RECORDS = 256
 _PROTOCOL_ID_MAX_BYTES = 1024
+_RESULT_ID_FIELDS = {
+    "thread/start": ("thread", "id"),
+    "thread/resume": ("thread", "id"),
+    "turn/start": ("turn", "id"),
+}
+_TURN_TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
 
 
 def _valid_protocol_id(value: Any) -> TypeGuard[str]:
@@ -61,6 +67,20 @@ def _validate_provider_params(params: Any) -> dict[str, Any]:
         if isinstance(nested, dict) and "id" in nested and not _valid_protocol_id(nested["id"]):
             raise ValueError("invalid provider identity")
     return params
+
+
+def _validate_provider_result(method: str, result: Any) -> dict[str, Any]:
+    """Return a result only when fields used by the worker are valid."""
+    if not isinstance(result, dict):
+        raise ValueError("invalid provider result")
+    identity_fields = _RESULT_ID_FIELDS.get(method)
+    if identity_fields is None:
+        return result
+    container_name, identity_name = identity_fields
+    container = result.get(container_name)
+    if not isinstance(container, dict) or not _valid_protocol_id(container.get(identity_name)):
+        raise ValueError("invalid provider result identity")
+    return result
 
 
 class ProviderError(RuntimeError):
@@ -206,10 +226,10 @@ class CodexAppServer:
             response = future.result(timeout=max(0, deadline - time.monotonic()))
             if "error" in response:
                 raise ProviderError("provider_rejected_request", rpc_error=response["error"])
-            result = response.get("result")
-            if not isinstance(result, dict):
-                raise ProviderError("provider_invalid_result")
-            return result
+            try:
+                return _validate_provider_result(method, response.get("result"))
+            except ValueError as error:
+                raise ProviderError("provider_invalid_result") from error
         except TimeoutError as error:
             raise ProviderError("provider_timeout") from error
         finally:
@@ -239,7 +259,16 @@ class CodexAppServer:
         method = message["method"]
         if not isinstance(method, str) or not method or len(method) > 256:
             raise ValueError("invalid provider method")
-        _validate_provider_params(message.get("params", {}))
+        params = _validate_provider_params(message.get("params", {}))
+        if method == "turn/completed":
+            turn = params.get("turn")
+            if (
+                not _valid_protocol_id(params.get("threadId"))
+                or not isinstance(turn, dict)
+                or not _valid_protocol_id(turn.get("id"))
+                or turn.get("status") not in _TURN_TERMINAL_STATUSES
+            ):
+                raise ValueError("invalid turn completion")
         if "id" in message:
             request_id = message["id"]
             if type(request_id) not in {int, str} or (

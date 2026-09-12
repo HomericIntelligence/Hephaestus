@@ -130,6 +130,39 @@ def test_live_observation_identity_has_a_utf8_byte_limit(tmp_path: Path) -> None
         )
 
 
+@pytest.mark.parametrize(
+    ("method", "result"),
+    [
+        ("thread/start", {}),
+        ("thread/start", {"thread": None}),
+        ("thread/start", {"thread": {"id": ""}}),
+        ("thread/resume", {"thread": {"id": 1}}),
+        ("thread/resume", {"thread": {"id": "x" * 1025}}),
+        ("turn/start", {"turn": {}}),
+        ("turn/start", {"turn": {"id": None}}),
+    ],
+)
+def test_request_rejects_invalid_method_specific_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    result: dict[str, Any],
+) -> None:
+    """Reject a malformed result before a worker can use its identity."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    provider = CodexAppServer(["codex"], codex_home)
+
+    def complete(message: dict[str, Any], *, deadline: float | None = None) -> None:
+        del deadline
+        provider._pending[message["id"]].set_result({"id": message["id"], "result": result})
+
+    monkeypatch.setattr(provider, "_send", complete)
+
+    with pytest.raises(ProviderError, match="provider_invalid_result"):
+        provider.request(method, {})
+
+
 class _ProbeInput:
     """Accept the probe's initialized notification."""
 

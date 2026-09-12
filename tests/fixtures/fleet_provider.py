@@ -23,6 +23,7 @@ cleanup_mode = {}
 cleanup_requests: dict[str, int] = {}
 turn_counts: dict[str, int] = {}
 last_requests = {}
+next_results: dict[str, object] = {}
 count = 0
 for line in sys.stdin:
     message = json.loads(line)
@@ -31,7 +32,9 @@ for line in sys.stdin:
     request_id = message.get("id")
     if method in {"thread/start", "thread/resume", "turn/start", "turn/steer"}:
         last_requests[method] = params
-    if method == "initialize":
+    if method in next_results:
+        send({"id": request_id, "result": next_results.pop(method)})
+    elif method == "initialize":
         send({"id": request_id, "result": {"userAgent": "fixture/0.153.4"}})
     elif method == "thread/start":
         count += 1
@@ -65,6 +68,9 @@ for line in sys.stdin:
         send({"id": request_id, "result": last_requests.get(params["method"], {})})
     elif method == "fixture/message":
         send(params["message"])
+        send({"id": request_id, "result": {}})
+    elif method == "fixture/next-result":
+        next_results[params["method"]] = params["result"]
         send({"id": request_id, "result": {}})
     elif method == "fixture/environment":
         send({"id": request_id, "result": {key: os.environ.get(key) for key in params["names"]}})
@@ -122,7 +128,12 @@ for line in sys.stdin:
             raise SystemExit(0)
         if text == "orphan":
             child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-            send({"id": request_id, "result": {"childPid": child.pid}})
+            send(
+                {
+                    "id": request_id,
+                    "result": {"turn": {"id": turn_id}, "childPid": child.pid},
+                }
+            )
             raise SystemExit(0)
         send({"id": request_id, "result": {"turn": {"id": turn_id}}})
         send({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id}}})
