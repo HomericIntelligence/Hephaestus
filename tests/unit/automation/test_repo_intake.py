@@ -257,6 +257,41 @@ def test_default_branch_already_checked_out_does_not_create_branch_conflict(
     )
 
 
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "locked",
+        "locked administrative reason",
+        "prunable",
+        "prunable gitdir file points to non-existent location",
+    ],
+)
+def test_worktree_records_accept_known_attributes_with_optional_reasons(
+    tmp_path: Path,
+    attribute: str,
+) -> None:
+    """Known Git worktree attributes can include an optional reason."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    head = _run_git(caller, "rev-parse", "HEAD").stdout.strip()
+
+    def inventory(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command == ["git", "worktree", "list", "--porcelain"]
+        output = (
+            f"worktree {caller.resolve()}\nHEAD {head}\nbranch refs/heads/master\n{attribute}\n\n"
+        )
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    manager._run_command = inventory
+
+    records = manager._worktree_records()
+
+    assert len(records) == 1
+    assert records[0].path == caller.resolve()
+    assert records[0].head == head
+    assert records[0].branch == "refs/heads/master"
+
+
 def test_dirty_owned_intake_is_preserved_and_fails_closed(tmp_path: Path) -> None:
     """A dirty owned intake is never removed or silently rebound."""
     caller, remote = _make_repository(tmp_path)

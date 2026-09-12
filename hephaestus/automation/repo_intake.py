@@ -655,7 +655,14 @@ class RepoIntakeManager:
                 current_head = line.removeprefix("HEAD ")
             elif line.startswith("branch "):
                 current_branch = line.removeprefix("branch ")
-            elif line == "detached" or line in _KNOWN_WORKTREE_LINES or line.startswith("reason "):
+            elif (
+                line == "detached"
+                or line.startswith("reason ")
+                or any(
+                    line == attribute or line.startswith(f"{attribute} ")
+                    for attribute in _KNOWN_WORKTREE_LINES
+                )
+            ):
                 continue
             elif line:
                 raise RepoIntakeError("Git worktree registration contains an unknown record")
