@@ -1462,3 +1462,26 @@ def test_run_lease_uses_a_stable_common_directory_path(tmp_path: Path) -> None:
             with secondary.run_lease():
                 pass
     assert type(caught.value).__name__ == "RepoIntakeInUseError"
+
+
+def test_intake_lock_interruption_preserves_shutdown_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted metadata wait is not converted to an intake failure."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+
+    class _InterruptedLock:
+        def __enter__(self) -> None:
+            raise InterruptedError("stop")
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    monkeypatch.setattr(
+        "hephaestus.automation.repo_intake.operation_file_lock",
+        lambda *_args, **_kwargs: _InterruptedLock(),
+    )
+
+    with pytest.raises(InterruptedError, match="stop"):
+        manager.prepare()

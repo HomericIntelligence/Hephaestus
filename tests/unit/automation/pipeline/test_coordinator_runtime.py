@@ -3,7 +3,18 @@
 import pytest
 
 from hephaestus.automation.pipeline.coordinator_runtime import CoordinatorRuntime
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
+
+
+def test_pipeline_config_generates_one_bounded_run_identity() -> None:
+    """Each pipeline configuration gets a different UUID4 hex identity."""
+    first = PipelineConfig(org="org", repos=["repo"])
+    second = PipelineConfig(org="org", repos=["repo"])
+
+    assert first.run_identity != second.run_identity
+    assert len(first.run_identity) == 32
+    assert all(character in "0123456789abcdef" for character in first.run_identity)
 
 
 def test_github_failure_has_specific_durable_error_class() -> None:
@@ -43,6 +54,38 @@ def test_publish_lease_failure_has_specific_durable_error_class() -> None:
     fields = CoordinatorRuntime._job_result_event_fields(result)
 
     assert fields["error"] == "publish_remote_head_unchanged"
+
+
+def test_lock_timeout_event_retains_bounded_contention_evidence() -> None:
+    """A lock completion keeps its safe holder and attempt diagnostics."""
+    fields = CoordinatorRuntime._job_result_event_fields(
+        JobResult(
+            ok=False,
+            error="lock_timeout",
+            value={
+                "repository": "repo-a",
+                "operation": "sync_checkout",
+                "lock_layer": "advisory",
+                "lock_path": "/tmp/git-repo-a.lock",
+                "configured_lock_wait_s": 2.0,
+                "attempt_wait_s": 1.25,
+                "run_identity": "run-7",
+                "holder_metadata_status": "unverified",
+                "holder_metadata_advisory": True,
+                "holder_metadata": {
+                    "pid": 123,
+                    "run_identity": "run-6",
+                    "repository": "repo-a",
+                    "operation": "commit_push",
+                    "acquired_at_unix_s": 42.0,
+                },
+            },
+        )
+    )
+
+    assert fields["error"] == "lock_timeout"
+    assert fields["lock_contention"]["run_identity"] == "run-7"
+    assert fields["lock_contention"]["holder_metadata"]["operation"] == "commit_push"
 
 
 @pytest.mark.parametrize(

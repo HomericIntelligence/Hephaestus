@@ -31,6 +31,7 @@ from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import _FAIL_BACK_CAP, PipelineConfig
+from hephaestus.automation.pipeline.events import RepositoryBusyEvent
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
@@ -3685,6 +3686,7 @@ class TestDurableEventLog:
         assert run_start["event"] == "run_start"
         assert run_start["fields"][0]["package_version"] == "1.2.3"
         assert run_start["fields"][0]["source_revision"] == "a" * 40
+        assert run_start["fields"][0]["run_identity"] == config.run_identity
         assert "secret-checkout" not in json.dumps(run_start)
 
     def test_observability_tick_zeroes_previous_circuit_breaker_state(self, tmp_path: Path) -> None:
@@ -4038,6 +4040,39 @@ class TestDurableEventLog:
             )
         assert not event_log_path.exists()
 
+    def test_repository_busy_stage_event_is_written_as_structured_jsonl(
+        self, tmp_path: Path
+    ) -> None:
+        """The coordinator persists the typed terminal contention record."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+
+        coordinator._ctx_for_repo("repo-a").emit_event(
+            RepositoryBusyEvent("repo-a", "clone", 15.0, 8.5)
+        )
+
+        record = json.loads(event_log_path.read_text())
+        assert record["event"] == "repository_busy"
+        assert record["fields"] == [
+            {
+                "repository": "repo-a",
+                "operation": "clone",
+                "elapsed_s": 15.0,
+                "cumulative_lock_wait_s": 8.5,
+            }
+        ]
+
     def test_event_log_path_persists_job_completion_records(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4084,6 +4119,85 @@ class TestDurableEventLog:
         ]
         assert "stdout_tail" not in complete["fields"][-1]
         assert "stderr_tail" not in complete["fields"][-1]
+
+    def test_repository_contention_event_serializes_lock_holder_diagnostics(
+        self, tmp_path: Path
+    ) -> None:
+        """A durable completion record keeps bounded lock and holder evidence."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        pool = FakeWorkerPool()
+        pool.queue_result(
+            JobResult(
+                ok=False,
+                error="lock_timeout",
+                value={
+                    "repository": "repo-a",
+                    "operation": "clone",
+                    "lock_layer": "in_process",
+                    "lock_path": "/tmp/git-repo-a.lock",
+                    "configured_lock_wait_s": 120.0,
+                    "attempt_wait_s": 2.5,
+                    "run_identity": "run-123",
+                    "holder_metadata_status": "unverified",
+                    "holder_metadata_advisory": True,
+                    "holder_metadata": {
+                        "pid": 42,
+                        "repository": "repo-a",
+                        "operation": "commit_push",
+                        "run_identity": "holder-run",
+                        "acquired_at_unix_s": 10.0,
+                    },
+                    "ignored": "must not persist",
+                },
+            )
+        )
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(pool, None),
+            stages={StageName.REPO: StubStage()},
+            install_signals=False,
+        )
+        item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
+        job = GitJob(
+            "repo-a",
+            "clone",
+            60,
+            repository_lock_wait_timeout_s=120,
+            kwargs={"repo": "org/repo-a", "dest": str(tmp_path / "repo-a")},
+        )
+
+        coordinator._submit(claim_test_item(coordinator, item), JobRequest(job, "CLONE_WAIT"))
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        complete = next(record for record in records if record["event"] == "complete")
+        contention = complete["fields"][-1]["lock_contention"]
+        assert contention == {
+            "repository": "repo-a",
+            "operation": "clone",
+            "lock_layer": "in_process",
+            "lock_path": "/tmp/git-repo-a.lock",
+            "configured_lock_wait_s": 120.0,
+            "attempt_wait_s": 2.5,
+            "run_identity": "run-123",
+            "holder_metadata_status": "unverified",
+            "holder_metadata_advisory": True,
+            "holder_metadata": {
+                "pid": 42,
+                "repository": "repo-a",
+                "operation": "commit_push",
+                "run_identity": "holder-run",
+                "acquired_at_unix_s": 10.0,
+            },
+        }
+        assert "ignored" not in complete["fields"][-1]
 
     def test_event_log_completion_records_worker_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
