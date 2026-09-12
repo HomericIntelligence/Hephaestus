@@ -245,24 +245,31 @@ class RepoIntakeManager:
         old = self._read_receipt()
         record = self._validate_existing(old, records)
         default_branch = self._read_default_branch()
-        caller_head = self._head(self.caller_root)
         if old is None:
             if record is not None:
                 raise RepoIntakeError("unowned repository-intake worktree is preserved")
-            self._add_worktree(caller_head)
+            self._fetch(default_branch, checkout=self.caller_root)
+            target = self._remote_head(default_branch, checkout=self.caller_root)
+            self._add_worktree(target)
             records = self._worktree_records()
             record = self._record_for_path(records)
-        self._assert_clean_detached(record)
-        self._fetch(default_branch)
-        target = self._remote_head(default_branch)
+        else:
+            self._assert_clean_detached(record)
+            self._fetch(default_branch, checkout=self.worktree_path)
+            target = self._remote_head(default_branch, checkout=self.worktree_path)
         physical_head = self._head(self.worktree_path)
         if physical_head != target:
-            self._assert_clean_detached(self._record_for_path(self._worktree_records()))
+            record = self._record_for_path(self._worktree_records())
+            self._assert_clean_detached(record)
+            current_head = self._head(self.worktree_path)
+            if record is None or record.head != current_head or current_head != physical_head:
+                raise RepoIntakeError("repository-intake worktree HEAD changed before rebind")
+            self._assert_fast_forward(current_head, target)
             self._remove_worktree()
             self._add_worktree(target)
         self._assert_clean_detached(self._record_for_path(self._worktree_records()))
         final_head = self._head(self.worktree_path)
-        remote_head = self._remote_head(default_branch)
+        remote_head = self._remote_head(default_branch, checkout=self.worktree_path)
         if final_head != target or final_head != remote_head:
             raise RepoIntakeError("repository-intake SHA changed during preparation")
         generation = (
@@ -558,7 +565,7 @@ class RepoIntakeManager:
         """Remove only the clean, registered intake worktree."""
         self._run(["git", "worktree", "remove", str(self.worktree_path)], cwd=self.caller_root)
 
-    def _fetch(self, default_branch: str) -> None:
+    def _fetch(self, default_branch: str, *, checkout: Path) -> None:
         """Fetch only the validated remote default branch in controlled mode."""
         command = [
             "git",
@@ -571,17 +578,29 @@ class RepoIntakeManager:
             "origin",
             f"refs/heads/{default_branch}:refs/remotes/origin/{default_branch}",
         ]
-        self._run(command, cwd=self.worktree_path)
+        self._run(command, cwd=checkout)
 
-    def _remote_head(self, default_branch: str) -> str:
+    def _remote_head(self, default_branch: str, *, checkout: Path) -> str:
         """Read the fetched remote branch as a full commit SHA."""
         head = self._run(
             ["git", "rev-parse", "--verify", f"refs/remotes/origin/{default_branch}^{{commit}}"],
-            cwd=self.worktree_path,
+            cwd=checkout,
         ).stdout.strip()
         if not is_full_commit_sha(head):
             raise RepoIntakeError("fetched default branch has a malformed SHA")
         return head
+
+    def _assert_fast_forward(self, current: str, target: str) -> None:
+        """Require the fetched target to descend from the current intake HEAD."""
+        result = self._run(
+            ["git", "merge-base", "--is-ancestor", current, target],
+            cwd=self.worktree_path,
+            check=False,
+        )
+        if result.returncode == 1:
+            raise RepoIntakeError("repository-intake remote update is non-fast-forward")
+        if result.returncode != 0:
+            raise RepoIntakeError("repository-intake ancestry proof failed")
 
     def _write_receipt(self, receipt: RepoIntakeReceipt) -> None:
         """Write the verified receipt atomically with owner-only permissions."""

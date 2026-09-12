@@ -92,6 +92,21 @@ def _advance_remote(tmp_path: Path, remote: Path) -> None:
     _run_git(updater, "push", "origin", "master")
 
 
+def _rewrite_remote(tmp_path: Path, remote: Path) -> str:
+    """Replace the remote default branch with an unrelated commit."""
+    rewriter = tmp_path / "rewriter"
+    rewriter.mkdir()
+    _run_git(rewriter, "init", "--initial-branch=master")
+    _run_git(rewriter, "config", "user.name", "Test User")
+    _run_git(rewriter, "config", "user.email", "test@example.invalid")
+    (rewriter / "rewritten.txt").write_text("rewritten\n", encoding="utf-8")
+    _run_git(rewriter, "add", "rewritten.txt")
+    _run_git(rewriter, "commit", "-m", "rewrite remote")
+    _run_git(rewriter, "remote", "add", "origin", str(remote))
+    _run_git(rewriter, "push", "--force", "origin", "master")
+    return _run_git(rewriter, "rev-parse", "HEAD").stdout.strip()
+
+
 def _caller_state(caller: Path) -> tuple[str, str, str, str, str]:
     """Return the caller identity, index, worktree, and status state."""
     return (
@@ -304,6 +319,52 @@ def test_fetch_failure_preserves_attached_caller_state(tmp_path: Path) -> None:
         manager.prepare()
 
     assert _caller_state(caller) == before
+
+
+def test_first_fetch_failure_can_retry_without_adopting_an_unowned_path(tmp_path: Path) -> None:
+    """A failed first fetch does not strand the intake path on the next prepare."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    run_command = manager._run_command
+
+    def fail_fetch(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "fetch" in command:
+            raise subprocess.CalledProcessError(1, command, stderr="fetch failed")
+        return run_command(command, **kwargs)
+
+    manager._run_command = fail_fetch
+
+    with pytest.raises(RepoIntakeError, match="fetch failed"):
+        manager.prepare()
+
+    receipt = _manager(caller, remote).prepare()
+
+    assert receipt.path == manager.worktree_path
+    assert receipt.revision == _run_git(remote, "rev-parse", "master").stdout.strip()
+
+
+def test_non_fast_forward_remote_rewrite_preserves_owned_intake(tmp_path: Path) -> None:
+    """A rewritten remote cannot replace a clean owned intake worktree."""
+    caller, remote = _make_repository(tmp_path)
+    first = _manager(caller, remote).prepare()
+    rewritten = _rewrite_remote(tmp_path, remote)
+    _run_git(
+        caller,
+        "fetch",
+        "--force",
+        str(remote),
+        "refs/heads/master:refs/remotes/origin/master",
+    )
+
+    with pytest.raises(RepoIntakeError, match="non-fast-forward"):
+        _manager(caller, remote).prepare()
+
+    assert rewritten != first.revision
+    assert _run_git(first.path, "rev-parse", "HEAD").stdout.strip() == first.revision
+    assert (
+        json.loads(_manager(caller, remote).receipt_path.read_text(encoding="utf-8"))["revision"]
+        == first.revision
+    )
 
 
 def test_concurrent_intake_preparation_reuses_one_owned_path(tmp_path: Path) -> None:
