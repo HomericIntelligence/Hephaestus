@@ -39,6 +39,7 @@ def unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
             "pushurl",
             "receivepack",
             "uploadpack",
+            "vcs",
         }:
             return key
         if normalized in {"fetch.recursesubmodules", "submodule.recurse"}:
