@@ -2,21 +2,32 @@
 
 from __future__ import annotations
 
+import builtins
+import errno
 import json
+import os
+import signal
 import subprocess
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from hephaestus.automation import git_runtime
 from hephaestus.automation.repo_intake import (
     RepoIntakeError,
     RepoIntakeManager,
     RepoIntakeReceipt,
 )
+from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.automation.worktree_snapshot import _controlled_git_env
+from hephaestus.utils.file_lock import file_lock
 
 
 def _run_git(cwd: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -116,11 +127,22 @@ def _rewrite_remote(tmp_path: Path, remote: Path) -> str:
     return _run_git(rewriter, "rev-parse", "HEAD").stdout.strip()
 
 
-def _caller_state(caller: Path) -> tuple[str, str, str, str, str]:
+def _caller_state(
+    caller: Path,
+) -> tuple[str, str, bytes, bytes | None, bytes | None, str, str, str]:
     """Return the caller identity, index, worktree, and status state."""
+    raw_index = _run_git(caller, "rev-parse", "--git-path", "index").stdout.strip()
+    index_path = Path(raw_index)
+    if not index_path.is_absolute():
+        index_path = caller / index_path
+    tracked = caller / "tracked.txt"
+    untracked = caller / "untracked.txt"
     return (
         _run_git(caller, "rev-parse", "HEAD").stdout,
         _run_git(caller, "symbolic-ref", "--quiet", "--short", "HEAD").stdout,
+        index_path.read_bytes(),
+        tracked.read_bytes() if tracked.is_file() else None,
+        untracked.read_bytes() if untracked.is_file() else None,
         _run_git(caller, "diff", "--cached").stdout,
         _run_git(caller, "diff").stdout,
         _run_git(caller, "status", "--porcelain", "--untracked-files=all").stdout,
@@ -928,6 +950,455 @@ def test_linked_callers_share_one_concurrent_intake(tmp_path: Path) -> None:
     assert receipts[0].path == receipts[1].path
     assert receipts[0].revision == receipts[1].revision
     assert receipts[0].generation == receipts[1].generation == 1
+
+
+def test_linked_callers_share_one_intake_across_processes(tmp_path: Path) -> None:
+    """Linked processes exclude a live owner and reuse its intake on retry."""
+    pytest.importorskip("fcntl")
+    source_root = Path(__file__).resolve().parents[3]
+    caller, remote = _make_repository(tmp_path)
+    linked = tmp_path / "linked-process-caller"
+    _run_git(caller, "worktree", "add", "-b", "linked-feature", str(linked), "HEAD")
+    caller_before = _caller_state(caller)
+    linked_before = _caller_state(linked)
+    child = r"""
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from hephaestus.automation.git_runtime import operation_deadline
+from hephaestus.automation.repo_intake import RepoIntakeManager
+from hephaestus.automation.worktree_snapshot import _controlled_git_env
+
+caller = Path(sys.argv[1])
+remote = Path(sys.argv[2])
+mode = sys.argv[3]
+ready = Path(sys.argv[4])
+release = Path(sys.argv[5])
+blocked = False
+
+def runner(command, *, cwd=None, check=True, timeout=None, env=None,
+           log_errors=True, input_text=None):
+    global blocked
+    del log_errors
+    if command[0] == "gh":
+        return subprocess.CompletedProcess(command, 0, "master\n", "")
+    if mode == "hold" and command[:3] == ["git", "remote", "get-url"] and not blocked:
+        blocked = True
+        ready.write_text("lock-owned\n", encoding="utf-8")
+        deadline = time.monotonic() + 10.0
+        while not release.is_file():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("parent did not release the lock owner")
+            time.sleep(0.01)
+    adjusted = list(command)
+    if "fetch" in adjusted:
+        adjusted[adjusted.index("origin")] = str(remote)
+    return subprocess.run(
+        adjusted,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=timeout,
+        env=env,
+        input=input_text,
+    )
+
+manager = RepoIntakeManager(
+    caller,
+    repository="acme/repo",
+    gh_command="gh",
+    timeout_s=30,
+    git_runner=runner,
+    git_env=_controlled_git_env(),
+    remote_config=(),
+)
+if mode == "timeout":
+    ready.write_text("attempting\n", encoding="utf-8")
+    try:
+        with operation_deadline(time.monotonic() + 0.5):
+            manager.prepare()
+    except subprocess.TimeoutExpired:
+        print("lock-timeout")
+        raise SystemExit(23)
+    raise SystemExit("contending preparation did not time out")
+print(json.dumps(manager.prepare().to_dict(), sort_keys=True))
+"""
+    owner_ready = tmp_path / "owner.ready"
+    contender_ready = tmp_path / "contender.ready"
+    release = tmp_path / "release"
+    processes: list[subprocess.Popen[str]] = []
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source_root)
+
+    def start(root: Path, mode: str, ready: Path) -> subprocess.Popen[str]:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                child,
+                str(root),
+                str(remote),
+                mode,
+                str(ready),
+                str(release),
+            ],
+            cwd=source_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+        processes.append(process)
+        return process
+
+    def wait_for(path: Path, message: str) -> None:
+        deadline = time.monotonic() + 10.0
+        while not path.is_file():
+            if time.monotonic() >= deadline:
+                pytest.fail(message)
+            time.sleep(0.01)
+
+    try:
+        owner = start(caller, "hold", owner_ready)
+        wait_for(owner_ready, "The first process did not acquire the metadata lock.")
+        contender = start(linked, "timeout", contender_ready)
+        wait_for(contender_ready, "The second process did not attempt preparation.")
+        contender_stdout, contender_stderr = contender.communicate(timeout=10)
+        assert contender.returncode == 23, contender_stderr
+        assert contender_stdout.strip() == "lock-timeout"
+        assert owner.poll() is None
+
+        release.write_text("release\n", encoding="utf-8")
+        owner_stdout, owner_stderr = owner.communicate(timeout=30)
+        assert owner.returncode == 0, owner_stderr
+
+        retry = start(linked, "normal", tmp_path / "unused.ready")
+        retry_stdout, retry_stderr = retry.communicate(timeout=30)
+        assert retry.returncode == 0, retry_stderr
+        receipts = [json.loads(owner_stdout), json.loads(retry_stdout)]
+        assert receipts[0]["path"] == receipts[1]["path"]
+        assert receipts[0]["revision"] == receipts[1]["revision"]
+        assert receipts[0]["generation"] == receipts[1]["generation"] == 1
+        assert _caller_state(caller) == caller_before
+        assert _caller_state(linked) == linked_before
+    finally:
+        release.touch(exist_ok=True)
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+
+
+@pytest.mark.parametrize("failure_type", [InterruptedError, subprocess.TimeoutExpired])
+def test_preparation_command_stop_preserves_caller_state(
+    tmp_path: Path,
+    failure_type: type[BaseException],
+) -> None:
+    """A stop during worktree creation leaves caller state unchanged."""
+    caller, remote = _make_repository(tmp_path)
+    _run_git(caller, "switch", "-c", "feature")
+    (caller / "tracked.txt").write_text("staged\n", encoding="utf-8")
+    _run_git(caller, "add", "tracked.txt")
+    (caller / "tracked.txt").write_text("unstaged\n", encoding="utf-8")
+    (caller / "untracked.txt").write_text("keep\n", encoding="utf-8")
+    before = _caller_state(caller)
+    manager = _manager(caller, remote)
+    run_command = manager._run_command
+
+    def stop_add(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "worktree" in command and "add" in command:
+            if failure_type is subprocess.TimeoutExpired:
+                raise subprocess.TimeoutExpired(command, 1)
+            raise InterruptedError("injected preparation stop")
+        return run_command(command, **kwargs)
+
+    manager._run_command = stop_add
+
+    with pytest.raises(failure_type):
+        manager.prepare()
+
+    assert _caller_state(caller) == before
+    assert not manager.worktree_path.exists()
+    assert not manager.receipt_path.exists()
+
+
+def test_running_worktree_add_interruption_preserves_caller_state(tmp_path: Path) -> None:
+    """A signal during a live worktree-add process preserves caller state."""
+    pytest.importorskip("fcntl")
+    source_root = Path(__file__).resolve().parents[3]
+    caller, remote = _make_repository(tmp_path)
+    _run_git(caller, "switch", "-c", "feature")
+    (caller / "tracked.txt").write_text("staged\n", encoding="utf-8")
+    _run_git(caller, "add", "tracked.txt")
+    (caller / "tracked.txt").write_text("unstaged\n", encoding="utf-8")
+    (caller / "untracked.txt").write_text("keep\n", encoding="utf-8")
+    before = _caller_state(caller)
+    marker = tmp_path / "worktree-add.started"
+    child = r"""
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+from hephaestus.automation.git_runtime import operation_deadline
+from hephaestus.automation.repo_intake import RepoIntakeManager
+from hephaestus.automation.worktree_snapshot import _controlled_git_env
+
+caller = Path(sys.argv[1])
+remote = Path(sys.argv[2])
+marker = Path(sys.argv[3])
+shutdown = threading.Event()
+signal.signal(signal.SIGUSR1, lambda _signum, _frame: shutdown.set())
+
+def runner(command, *, cwd=None, check=True, timeout=None, env=None,
+           log_errors=True, input_text=None):
+    del log_errors
+    if command[0] == "gh":
+        return subprocess.CompletedProcess(command, 0, "master\n", "")
+    adjusted = list(command)
+    if "fetch" in adjusted:
+        adjusted[adjusted.index("origin")] = str(remote)
+    if "worktree" in adjusted and "add" in adjusted:
+        command_shim = r'''
+import os
+import signal
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(f"{os.getpid()}\n", encoding="utf-8")
+while True:
+    signal.pause()
+'''
+        process = subprocess.Popen(
+            [sys.executable, "-c", command_shim, str(marker)],
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+        try:
+            while not shutdown.wait(0.01):
+                pass
+            raise InterruptedError("injected live-command interruption")
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+    return subprocess.run(
+        adjusted,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=timeout,
+        env=env,
+        input=input_text,
+    )
+
+manager = RepoIntakeManager(
+    caller,
+    repository="acme/repo",
+    gh_command="gh",
+    timeout_s=30,
+    git_runner=runner,
+    git_env=_controlled_git_env(),
+    remote_config=(),
+)
+try:
+    with operation_deadline(time.monotonic() + 30.0, shutdown=shutdown):
+        manager.prepare()
+except InterruptedError:
+    raise SystemExit(23)
+raise SystemExit("preparation did not observe interruption")
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source_root)
+    process = subprocess.Popen(
+        [sys.executable, "-c", child, str(caller), str(remote), str(marker)],
+        cwd=source_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    try:
+        deadline = time.monotonic() + 10.0
+        while not marker.is_file():
+            if process.poll() is not None:
+                _stdout, stderr = process.communicate()
+                pytest.fail(f"Preparation stopped before worktree add: {stderr}")
+            if time.monotonic() >= deadline:
+                pytest.fail("Preparation did not start the worktree-add process.")
+            time.sleep(0.01)
+        process.send_signal(signal.SIGUSR1)
+        _stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 23, stderr
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        if marker.is_file():
+            git_pid = int(marker.read_text(encoding="utf-8").strip())
+            with suppress(ProcessLookupError):
+                os.killpg(git_pid, signal.SIGKILL)
+
+    manager = _manager(caller, remote)
+    assert _caller_state(caller) == before
+    assert manager.state_dir.is_dir()
+    assert not manager.worktree_path.exists()
+    assert not manager.receipt_path.exists()
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancellation"])
+def test_intake_metadata_lock_observes_operation_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop: str,
+) -> None:
+    """Metadata contention stops before intake preparation can change state."""
+    fcntl = pytest.importorskip("fcntl")
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    metadata_lock = WorktreeManager.git_metadata_lock_path(caller)
+    with file_lock(metadata_lock, require_exclusive=True):
+        metadata_inode = metadata_lock.stat().st_ino
+        observed = threading.Event()
+        complete = threading.Event()
+        shutdown = threading.Event()
+        clock = [time.monotonic()]
+        deadline = clock[0] + 60.0
+        failures: list[BaseException] = []
+        effects: list[str] = []
+        real_flock = fcntl.flock
+
+        monkeypatch.setattr(
+            git_runtime,
+            "time",
+            SimpleNamespace(monotonic=lambda: clock[0], sleep=time.sleep),
+        )
+        monkeypatch.setattr(
+            manager,
+            "_prepare_locked",
+            lambda: effects.append("prepared"),
+        )
+
+        def observe_flock(fd: int, flags: int) -> None:
+            if (
+                threading.current_thread() is worker
+                and flags & fcntl.LOCK_EX
+                and os.fstat(fd).st_ino == metadata_inode
+            ):
+                if stop == "deadline":
+                    clock[0] = deadline + 1.0
+                else:
+                    shutdown.set()
+                observed.set()
+            real_flock(fd, flags)
+
+        def prepare() -> None:
+            try:
+                with git_runtime.operation_deadline(
+                    deadline,
+                    shutdown=shutdown if stop == "cancellation" else None,
+                ):
+                    manager.prepare()
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                complete.set()
+
+        monkeypatch.setattr(fcntl, "flock", observe_flock)
+        worker = threading.Thread(target=prepare, daemon=True)
+        worker.start()
+        assert observed.wait(5.0)
+        stopped_before_release = complete.wait(1.0)
+
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+    assert stopped_before_release, "Intake waited beyond its operation stop."
+    assert effects == []
+    assert len(failures) == 1
+    expected = subprocess.TimeoutExpired if stop == "deadline" else InterruptedError
+    assert isinstance(failures[0], expected)
+    assert not manager.state_dir.exists()
+
+
+def test_intake_rejects_unavailable_exclusive_lock_without_waiting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host without exclusive locks fails before intake work starts."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    real_import = builtins.__import__
+    effects: list[str] = []
+
+    def import_without_fcntl(name: str, *args: object, **kwargs: object) -> object:
+        if name == "fcntl":
+            raise ImportError("injected host without exclusive file locks")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", import_without_fcntl)
+    monkeypatch.setattr(manager, "_prepare_locked", lambda: effects.append("prepared"))
+
+    with pytest.raises(RepoIntakeError, match="exclusive Git metadata locking is unavailable"):
+        manager.prepare()
+
+    assert effects == []
+    assert not manager.state_dir.exists()
+
+
+@pytest.mark.parametrize("failure", ["missing-module", "unsupported-operation"])
+def test_run_lease_reports_unavailable_exclusive_lock_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """A permanent run-lock failure is not reported as active contention."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    if failure == "missing-module":
+        real_import = builtins.__import__
+
+        def import_without_fcntl(name: str, *args: object, **kwargs: object) -> object:
+            if name == "fcntl":
+                raise ImportError("injected host without exclusive file locks")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(builtins, "__import__", import_without_fcntl)
+    else:
+        fcntl = pytest.importorskip("fcntl")
+
+        def unsupported_flock(*_args: object) -> None:
+            raise OSError(errno.ENOTSUP, "injected unsupported file lock")
+
+        monkeypatch.setattr(fcntl, "flock", unsupported_flock)
+
+    with pytest.raises(
+        RepoIntakeError,
+        match="exclusive repository-intake run locking is unavailable",
+    ):
+        with manager.run_lease():
+            pytest.fail("Unavailable exclusive locking admitted the run lease.")
 
 
 def test_run_lease_blocks_a_second_process_before_intake_rebind(tmp_path: Path) -> None:

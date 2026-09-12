@@ -4051,7 +4051,6 @@ class WorkerPool:
         self._repo_locks: dict[str, _RepoLockEntry] = {}
         self._repo_locks_guard = threading.Lock()
         self._repo_intake_leases: dict[Path, AbstractContextManager[None]] = {}
-        self._repo_intake_lease_locks: dict[Path, threading.Lock] = {}
         self._repo_intake_leases_guard = threading.Lock()
         self._lock_dir = lock_dir
         self._gh_extra_path_root = gh_extra_path_root
@@ -4188,7 +4187,6 @@ class WorkerPool:
         with self._repo_intake_leases_guard:
             leases = tuple(reversed(self._repo_intake_leases.values()))
             self._repo_intake_leases.clear()
-            self._repo_intake_lease_locks.clear()
         for lease in leases:
             try:
                 lease.__exit__(None, None, None)
@@ -8313,11 +8311,8 @@ class WorkerPool:
                 remote_config=remote_config,
             )
             common_dir = manager.common_dir
-            with self._repo_intake_leases_guard:
-                preparation_lock = self._repo_intake_lease_locks.setdefault(
-                    common_dir, threading.Lock()
-                )
-            with preparation_lock:
+            preparation_key = f"repository-intake:{common_dir}"
+            with self._repo_lock(preparation_key, deadline_s=job.deadline_s):
                 with self._repo_intake_leases_guard:
                     lease = self._repo_intake_leases.get(common_dir)
                 acquired_lease = lease is None

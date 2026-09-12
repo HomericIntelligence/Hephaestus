@@ -13,7 +13,11 @@ from typing import Any, cast
 
 from hephaestus.config.child_environments import read_approved_parent_env
 from hephaestus.utils.cache import ThreadSafeCache
-from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+from hephaestus.utils.file_lock import (
+    ExclusiveLockUnavailableError,
+    LockUnavailableError,
+    file_lock,
+)
 from hephaestus.utils.git import run_git as _shared_run_git
 from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subprocess
 
@@ -69,7 +73,7 @@ def remaining_operation_timeout(timeout: int | float | None) -> int | float | No
 
 
 @contextmanager
-def operation_file_lock(path: Path) -> Iterator[None]:
+def operation_file_lock(path: Path, *, require_exclusive: bool = False) -> Iterator[None]:
     """Hold a file lock within the active Git operation's time and stop limits."""
     shutdown = current_operation_shutdown()
     bounded = _operation_deadline_s.get() is not None or shutdown is not None
@@ -77,7 +81,15 @@ def operation_file_lock(path: Path) -> Iterator[None]:
         while True:
             remaining_operation_timeout(None)
             try:
-                stack.enter_context(file_lock(path, blocking=not bounded))
+                stack.enter_context(
+                    file_lock(
+                        path,
+                        blocking=not bounded,
+                        require_exclusive=require_exclusive,
+                    )
+                )
+            except ExclusiveLockUnavailableError:
+                raise
             except LockUnavailableError:
                 if not bounded:
                     raise

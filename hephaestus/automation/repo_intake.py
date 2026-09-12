@@ -15,6 +15,7 @@ import os
 import re
 import stat
 import subprocess
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,9 +23,19 @@ from pathlib import Path
 from typing import Any, NoReturn, Self, TypeGuard
 
 from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
+from hephaestus.automation.git_runtime import (
+    current_operation_shutdown,
+    operation_deadline,
+    operation_file_lock,
+    remaining_operation_timeout,
+)
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.io.utils import write_secure
-from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+from hephaestus.utils.file_lock import (
+    ExclusiveLockUnavailableError,
+    LockUnavailableError,
+    file_lock,
+)
 
 
 class RepoIntakeError(RuntimeError):
@@ -263,6 +274,8 @@ class RepoIntakeManager:
         )
         try:
             lease.__enter__()
+        except ExclusiveLockUnavailableError as exc:
+            raise RepoIntakeError("exclusive repository-intake run locking is unavailable") from exc
         except LockUnavailableError as exc:
             raise RepoIntakeInUseError(
                 "repository_intake_in_use: another automation run holds the "
@@ -279,13 +292,26 @@ class RepoIntakeManager:
     def prepare(self) -> RepoIntakeReceipt:
         """Return a verified intake receipt, creating or rebinding as needed."""
         try:
+            started_s = time.monotonic()
+            remaining_s = remaining_operation_timeout(self.timeout_s)
+            if remaining_s is None:
+                raise RepoIntakeError("repository-intake timeout is unavailable")
+            deadline_s = started_s + float(remaining_s)
             metadata_lock = WorktreeManager.git_metadata_lock_path(self.caller_root)
-            lock_context = file_lock(metadata_lock, require_exclusive=True)
+        except (subprocess.TimeoutExpired, InterruptedError):
+            raise
         except (OSError, RuntimeError) as exc:
             raise RepoIntakeError("Git metadata lock is unavailable") from exc
         try:
-            with lock_context:
+            with (
+                operation_deadline(deadline_s, shutdown=current_operation_shutdown()),
+                operation_file_lock(metadata_lock, require_exclusive=True),
+            ):
                 return self._prepare_locked()
+        except (subprocess.TimeoutExpired, InterruptedError):
+            raise
+        except ExclusiveLockUnavailableError as exc:
+            raise RepoIntakeError("exclusive Git metadata locking is unavailable") from exc
         except RepoIntakeError:
             raise
         except (OSError, RuntimeError) as exc:
@@ -396,6 +422,8 @@ class RepoIntakeManager:
                 env=self._git_env if env is None else env,
                 log_errors=False,
             )
+        except (subprocess.TimeoutExpired, InterruptedError):
+            raise
         except (OSError, subprocess.SubprocessError) as exc:
             label = next(
                 (

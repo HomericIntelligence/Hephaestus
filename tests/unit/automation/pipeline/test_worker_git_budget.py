@@ -3,8 +3,9 @@
 import queue
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -77,6 +78,90 @@ def test_git_job_children_use_the_remaining_total_budget(
         assert result.error == "timeout"
     finally:
         pool.shutdown(mark_interrupted=False)
+
+
+def test_intake_common_dir_lock_uses_git_job_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Intake jobs for one common directory cannot wait past their budget."""
+    pool = worker_pool.WorkerPool(
+        size=2,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+    )
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    common_dir = tmp_path / "common"
+    common_dir.mkdir()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_complete = threading.Event()
+    first_results: list[JobResult] = []
+    second_results: list[JobResult] = []
+
+    receipt = MagicMock()
+    receipt.to_dict.return_value = {"revision": "a" * 40}
+    first_manager = MagicMock(common_dir=common_dir)
+    first_manager.run_lease.return_value = nullcontext()
+
+    def first_prepare() -> object:
+        first_entered.set()
+        assert release_first.wait(5.0)
+        return receipt
+
+    first_manager.prepare.side_effect = first_prepare
+    second_manager = MagicMock(common_dir=common_dir)
+    second_manager.run_lease.return_value = nullcontext()
+    second_manager.prepare.return_value = receipt
+    managers = iter((first_manager, second_manager))
+
+    monkeypatch.setattr(worker_pool, "_checkout_preflight_error", lambda *_args: None)
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda *_args: "gh")
+    monkeypatch.setattr(worker_pool, "_trusted_remote_git_config", lambda *_args: ())
+    monkeypatch.setattr(worker_pool, "RepoIntakeManager", lambda *_args, **_kwargs: next(managers))
+
+    first_job = GitJob(
+        "repo-one",
+        "prepare_intake",
+        5,
+        kwargs={"repo": "acme/repo", "caller_root": str(caller)},
+    )
+    second_job = GitJob(
+        "repo-two",
+        "prepare_intake",
+        1,
+        kwargs={"repo": "acme/repo", "caller_root": str(caller)},
+    )
+
+    def run_first() -> None:
+        first_results.append(pool._run_git(first_job))
+
+    def run_second() -> None:
+        try:
+            second_results.append(pool._run_git(second_job))
+        finally:
+            second_complete.set()
+
+    first = threading.Thread(target=run_first)
+    second = threading.Thread(target=run_second)
+    try:
+        first.start()
+        assert first_entered.wait(2.0)
+        second.start()
+        completed_within_budget = second_complete.wait(2.0)
+    finally:
+        release_first.set()
+        first.join(timeout=5.0)
+        second.join(timeout=5.0)
+        pool.shutdown(mark_interrupted=False)
+
+    assert completed_within_budget
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert first_results and first_results[0].ok
+    assert second_results and second_results[0].error == "lock_timeout"
+    second_manager.prepare.assert_not_called()
 
 
 def test_github_job_budget_includes_the_repository_lock(tmp_path: Path) -> None:
