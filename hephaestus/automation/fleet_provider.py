@@ -14,7 +14,7 @@ import threading
 import time
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from hephaestus.agents.codex_isolation import CODEX_VERSION_OUTPUT
 from hephaestus.agents.pi_plugins import run_bounded_command
@@ -30,6 +30,37 @@ LIVE_ACTIVITY_METHODS = frozenset(
         "thread/tokenUsage/updated",
     }
 )
+_FRAME_MAX_BYTES = 1024 * 1024
+_LIFECYCLE_MAX_BYTES = 4 * 1024 * 1024
+_LIFECYCLE_MAX_RECORDS = 256
+_PROTOCOL_ID_MAX_BYTES = 1024
+
+
+def _valid_protocol_id(value: Any) -> TypeGuard[str]:
+    """Return whether one provider identity fits its private transport bound."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and "\0" not in value
+        and len(value.encode("utf-8")) <= _PROTOCOL_ID_MAX_BYTES
+    )
+
+
+def _validate_provider_params(params: Any) -> dict[str, Any]:
+    """Return provider parameters after bounded identity validation."""
+    if not isinstance(params, dict):
+        raise ValueError("invalid provider parameters")
+    for field in ("thread", "turn", "item"):
+        if field in params and not isinstance(params[field], dict):
+            raise ValueError("invalid provider parameters")
+    for field in ("threadId", "turnId", "itemId"):
+        if field in params and not _valid_protocol_id(params[field]):
+            raise ValueError("invalid provider identity")
+    for field in ("thread", "turn", "item"):
+        nested = params.get(field)
+        if isinstance(nested, dict) and "id" in nested and not _valid_protocol_id(nested["id"]):
+            raise ValueError("invalid provider identity")
+    return params
 
 
 class ProviderError(RuntimeError):
@@ -64,7 +95,9 @@ class CodexAppServer:
         self.command = command
         self.codex_home = codex_home
         self.timeout = timeout
-        self.events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=4096)
+        self.events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_LIFECYCLE_MAX_RECORDS)
+        self._event_bytes = 0
+        self._observation_bytes = 0
         self._observations: dict[tuple[str, str], dict[str, Any]] = {}
         self._receive_sequence = 0
         self._pending: dict[int, Future[dict[str, Any]]] = {}
@@ -136,7 +169,7 @@ class CodexAppServer:
         if self.process is None or self.process.stdin is None:
             raise ProviderError("provider_not_started")
         data = (json.dumps(message, separators=(",", ":")) + "\n").encode()
-        if len(data) > 1024 * 1024:
+        if len(data) > _FRAME_MAX_BYTES:
             raise ProviderError("provider_message_limit")
         try:
             with self._write_lock:
@@ -191,38 +224,89 @@ class CodexAppServer:
         """Reject unsupported server requests without granting permissions."""
         self._send({"id": request_id, "error": {"code": -32601, "message": "unsupported request"}})
 
-    def _enqueue(self, message: dict[str, Any]) -> None:
+    @staticmethod
+    def _validate_incoming_message(message: dict[str, Any]) -> None:
+        """Reject malformed provider frames before worker dispatch."""
+        if "method" not in message:
+            request_id = message.get("id")
+            if type(request_id) is not int or request_id < 0:
+                raise ValueError("invalid response identity")
+            if ("result" in message) == ("error" in message):
+                raise ValueError("invalid response shape")
+            if "error" in message and not isinstance(message["error"], dict):
+                raise ValueError("invalid response error")
+            return
+        method = message["method"]
+        if not isinstance(method, str) or not method or len(method) > 256:
+            raise ValueError("invalid provider method")
+        _validate_provider_params(message.get("params", {}))
+        if "id" in message:
+            request_id = message["id"]
+            if type(request_id) not in {int, str} or (
+                isinstance(request_id, str) and not _valid_protocol_id(request_id)
+            ):
+                raise ValueError("invalid provider request identity")
+
+    def _enqueue(self, message: dict[str, Any], *, frame_bytes: int | None = None) -> None:
+        """Queue one validated frame within aggregate record and byte limits."""
+        self._validate_incoming_message(message)
+        if frame_bytes is None:
+            frame_bytes = len(
+                (json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+            )
+        if frame_bytes > _FRAME_MAX_BYTES:
+            raise queue.Full
         with self._lock:
             self._receive_sequence += 1
             message["_fleetSequence"] = self._receive_sequence
             if message["method"] in LIVE_ACTIVITY_METHODS:
                 params = message.get("params", {})
                 thread_id, turn_id = params.get("threadId"), params.get("turnId")
-                if not isinstance(thread_id, str) or not isinstance(turn_id, str):
+                if not _valid_protocol_id(thread_id) or not _valid_protocol_id(turn_id):
                     raise ValueError("invalid observation identity")
                 key = (thread_id, turn_id)
                 if key not in self._observations and len(self._observations) >= 4096:
                     raise queue.Full
-                self._observations[key] = {
+                observation = {
                     "method": message["method"],
                     "_fleetSequence": self._receive_sequence,
                     "params": {"threadId": thread_id, "turnId": turn_id},
                 }
+                observation_bytes = len(
+                    json.dumps(observation, separators=(",", ":"), ensure_ascii=False).encode()
+                )
+                previous = self._observations.get(key)
+                previous_bytes = previous.get("_fleetBytes", 0) if previous is not None else 0
+                queued_bytes = self._event_bytes + self._observation_bytes - previous_bytes
+                if queued_bytes + observation_bytes > _LIFECYCLE_MAX_BYTES:
+                    raise queue.Full
+                observation["_fleetBytes"] = observation_bytes
+                self._observations[key] = observation
+                self._observation_bytes += observation_bytes - previous_bytes
             else:
+                queued_bytes = self._event_bytes + self._observation_bytes
+                if queued_bytes + frame_bytes > _LIFECYCLE_MAX_BYTES:
+                    raise queue.Full
+                message["_fleetBytes"] = frame_bytes
                 self.events.put_nowait(message)
+                self._event_bytes += frame_bytes
 
     def drain_notifications(self) -> list[dict[str, Any]]:
         """Return ordered lifecycle events and coalesced metadata observations."""
         with self._lock:
             messages = list(self._observations.values())
             self._observations.clear()
+            self._observation_bytes = 0
             while True:
                 try:
-                    messages.append(self.events.get_nowait())
+                    message = self.events.get_nowait()
                 except queue.Empty:
                     break
+                self._event_bytes -= message.pop("_fleetBytes")
+                messages.append(message)
         messages.sort(key=lambda message: message["_fleetSequence"])
         for message in messages:
+            message.pop("_fleetBytes", None)
             del message["_fleetSequence"]
         return messages
 
@@ -232,15 +316,16 @@ class CodexAppServer:
             return
         reason = "provider_disconnected"
         try:
-            while line := process.stdout.readline(1024 * 1024 + 1):
-                if not line.endswith(b"\n") or len(line) > 1024 * 1024:
+            while line := process.stdout.readline(_FRAME_MAX_BYTES + 1):
+                if not line.endswith(b"\n") or len(line) > _FRAME_MAX_BYTES:
                     raise ValueError("message limit")
                 message = json.loads(line)
                 if not isinstance(message, dict):
                     raise ValueError("invalid message")
                 if "method" in message:
-                    self._enqueue(message)
+                    self._enqueue(message, frame_bytes=len(line))
                 else:
+                    self._validate_incoming_message(message)
                     with self._lock:
                         request_id = message.get("id")
                         future = self._pending.get(request_id) if type(request_id) is int else None

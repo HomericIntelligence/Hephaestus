@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import queue
 import sys
 import time
 from pathlib import Path
@@ -48,6 +49,85 @@ def test_provider_start_stops_excess_version_output(tmp_path: Path, descriptor: 
 
     assert time.monotonic() - started < 2
     assert not sentinel.exists()
+
+
+def test_lifecycle_queue_has_an_aggregate_byte_limit_and_recovers_after_drain(
+    tmp_path: Path,
+) -> None:
+    """Several valid frames cannot exceed the lifecycle memory budget."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    provider = CodexAppServer(["codex"], codex_home)
+    payload = "x" * (1024 * 1024 - 4096)
+
+    for index in range(4):
+        provider._enqueue(
+            {
+                "method": "turn/started",
+                "params": {"threadId": "thread-1", "index": index, "payload": payload},
+            }
+        )
+    with pytest.raises(queue.Full):
+        provider._enqueue(
+            {
+                "method": "turn/started",
+                "params": {"threadId": "thread-1", "index": 4, "payload": payload},
+            }
+        )
+
+    assert len(provider.drain_notifications()) == 4
+    provider._enqueue({"method": "turn/started", "params": {"threadId": "thread-1", "index": 5}})
+    assert len(provider.drain_notifications()) == 1
+
+
+def test_live_observations_have_an_aggregate_byte_limit_and_recover_after_drain(
+    tmp_path: Path,
+) -> None:
+    """Coalesced observations cannot retain several gigabytes of identities."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    provider = CodexAppServer(["codex"], codex_home)
+    accepted = 0
+
+    for index in range(4096):
+        try:
+            provider._enqueue(
+                {
+                    "method": "thread/tokenUsage/updated",
+                    "params": {
+                        "threadId": f"thread-{index}-" + ("x" * 1000),
+                        "turnId": "turn-" + ("y" * 1000),
+                    },
+                }
+            )
+        except queue.Full:
+            break
+        accepted += 1
+
+    assert 0 < accepted < 4096
+    assert len(provider.drain_notifications()) == accepted
+    provider._enqueue(
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {"threadId": "thread-recovered", "turnId": "turn-recovered"},
+        }
+    )
+    assert len(provider.drain_notifications()) == 1
+
+
+def test_live_observation_identity_has_a_utf8_byte_limit(tmp_path: Path) -> None:
+    """A multibyte identity cannot bypass the observation field limit."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    provider = CodexAppServer(["codex"], codex_home)
+
+    with pytest.raises(ValueError, match="invalid provider identity"):
+        provider._enqueue(
+            {
+                "method": "thread/tokenUsage/updated",
+                "params": {"threadId": "é" * 513, "turnId": "turn-1"},
+            }
+        )
 
 
 class _ProbeInput:

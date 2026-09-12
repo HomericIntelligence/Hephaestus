@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -30,6 +31,9 @@ _REQUESTS = {
 }
 _TOOLS = {"commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch"}
 _ACTIVITY_REFRESH_SECONDS = 5.0
+_PENDING_REQUEST_MAX_RECORDS = 256
+_PENDING_REQUEST_MAX_BYTES = 4 * 1024 * 1024
+_SESSION_OPERATIONS = frozenset({"start", "input", "respond", "interrupt", "cancel", "resume"})
 
 
 def _text(value: Any) -> str:
@@ -101,6 +105,8 @@ class FleetWorker:
         self.provider = CodexAppServer(provider_command or ["codex"], self.codex_home)
         self.environment_registry = environment_registry
         self.pending: dict[str | int, dict[str, Any]] = {}
+        self._pending_bytes = 0
+        self._pending_sizes: dict[str | int, int] = {}
         self.activity_clock: Callable[[], float] = time.monotonic
         self.storage_guard: Callable[[], None] = lambda: validate_worker_storage(
             self.codex_home, self.journal.directory, self.workspace_root
@@ -148,6 +154,11 @@ class FleetWorker:
             raise ValueError("stale_generation")
         if command.get("targetKind") not in {"sessions", "workers"}:
             raise ValueError("unsupported_target_kind")
+        operation = command.get("operation")
+        if (operation == "drain" and command["targetKind"] != "workers") or (
+            operation in _SESSION_OPERATIONS and command["targetKind"] != "sessions"
+        ):
+            raise ValueError("wrong_target_kind")
         if not isinstance(command.get("payload"), dict):
             raise ValueError("invalid_payload")
 
@@ -376,7 +387,7 @@ class FleetWorker:
         elif not isinstance(response.get("answers"), dict):
             raise ValueError("invalid_answers")
         self.provider.respond(request_id, response)
-        del self.pending[request_id]
+        self._drop_pending(request_id)
         self._activity(session, "model_working")
         return result_for(command, "completed", requestId=request_id)
 
@@ -562,15 +573,51 @@ class FleetWorker:
 
     def _server_request(self, message: dict[str, Any], session: dict[str, Any]) -> None:
         method = message["method"]
+        request_id = message["id"]
+        params = message["params"]
         if (
             method not in _REQUESTS
-            or not _current_turn(session, message.get("params", {}).get("turnId"))
+            or not _current_turn(session, params.get("turnId"))
             or session.get("stopCommandId")
         ):
-            self.provider.reject(message["id"])
+            self.provider.reject(request_id)
             return
-        self.pending[message["id"]] = {**message, "sessionId": session["sessionId"]}
-        self._activity(session, _REQUESTS[method], method, requestId=message["id"])
+        retained = {
+            "id": request_id,
+            "method": method,
+            "params": params,
+            "sessionId": session["sessionId"],
+        }
+        try:
+            request_bytes = len(
+                json.dumps(
+                    retained,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError):
+            self.provider.reject(request_id)
+            self._activity(session, "unknown", "provider_request_invalid")
+            return
+        if (
+            request_id in self.pending
+            or len(self.pending) >= _PENDING_REQUEST_MAX_RECORDS
+            or self._pending_bytes + request_bytes > _PENDING_REQUEST_MAX_BYTES
+        ):
+            self.provider.reject(request_id)
+            self._activity(session, "unknown", "provider_request_limit")
+            return
+        self.pending[request_id] = retained
+        self._pending_sizes[request_id] = request_bytes
+        self._pending_bytes += request_bytes
+        self._activity(session, _REQUESTS[method], method, requestId=request_id)
+
+    def _drop_pending(self, request_id: str | int) -> None:
+        """Remove one pending request and release its memory-budget receipt."""
+        del self.pending[request_id]
+        self._pending_bytes -= self._pending_sizes.pop(request_id)
 
     def _turn_completed(self, session: dict[str, Any], params: dict[str, Any]) -> None:
         turn = params["turn"]
@@ -580,7 +627,7 @@ class FleetWorker:
         outcome = status if status in {"completed", "failed", "interrupted"} else "unknown"
         for request_id, pending in list(self.pending.items()):
             if pending["sessionId"] == session["sessionId"]:
-                del self.pending[request_id]
+                self._drop_pending(request_id)
         if (
             status == "interrupted"
             and session.get("stopCommandId")
@@ -632,10 +679,13 @@ class FleetWorker:
         """Stop the owned provider before releasing its journal writer."""
         if self._closed:
             return
+        confirmed = False
         try:
-            confirmed = self.provider.close()
-            if self._started:
-                self.journal.append("runtime", {"pid": None, "uncertain": not confirmed})
+            try:
+                confirmed = self.provider.close()
+            finally:
+                if self._started:
+                    self.journal.append("runtime", {"pid": None, "uncertain": not confirmed})
         finally:
             self.journal.close()
             self._closed = True

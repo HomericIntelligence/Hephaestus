@@ -454,7 +454,9 @@ def test_cancel_waits_for_provider_completion_and_drain_blocks_input(worker):
     assert result["status"] == "accepted"
     wait_state(worker, "session-1", "idle")
     assert any(event["event"].get("outcome") == "cancelled" for event in worker.events(0)["events"])
-    worker.handle(command("drain", number=4))
+    drain = command("drain", target="worker-a", number=4)
+    drain["targetKind"] = "workers"
+    worker.handle(drain)
     assert worker.handle(command("input", number=5, payload={"text": "new"}))["status"] == "failed"
 
 
@@ -624,6 +626,241 @@ def test_invalid_worker_command_cannot_change_existing_session(worker):
     wrong["workerId"] = "another-worker"
     assert worker.handle(wrong)["receipt"]["error"] == "wrong_worker"
     assert worker.inventory()["sessions"][0]["activity"] == "idle"
+
+
+@pytest.mark.parametrize(
+    ("operation", "target_kind"),
+    [
+        ("drain", "sessions"),
+        ("start", "workers"),
+        ("input", "workers"),
+        ("respond", "workers"),
+        ("interrupt", "workers"),
+        ("cancel", "workers"),
+        ("resume", "workers"),
+    ],
+)
+def test_worker_rejects_each_operation_for_the_wrong_target_kind(worker, operation, target_kind):
+    """A command cannot name one authority target and mutate another target kind."""
+    envelope = command(operation, number=93)
+    envelope["targetKind"] = target_kind
+    receipt_path = worker.journal.directory / "receipts.jsonl"
+    before = receipt_path.read_bytes()
+
+    result = worker.handle(envelope)
+
+    assert result["status"] == "failed"
+    assert result["receipt"]["error"] == "wrong_target_kind"
+    assert receipt_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"method": "turn/started", "params": []},
+        {
+            "id": [],
+            "method": "item/commandExecution/requestApproval",
+            "params": {"threadId": "thread-1", "turnId": "turn-1"},
+        },
+    ],
+    ids=["lifecycle-params", "server-request-id"],
+)
+def test_malformed_provider_frames_fail_the_provider_without_stopping_worker_poll(worker, message):
+    """Malformed lifecycle and server-request frames become a bounded provider failure."""
+    from hephaestus.automation.fleet_provider import ProviderError
+
+    start(worker)
+    with pytest.raises(ProviderError, match="provider_protocol_failure"):
+        worker.provider.request("fixture/message", {"message": message})
+
+    worker.poll()
+
+    assert worker.provider.failed is True
+    assert worker.inventory()["sessions"][0]["activity"] == "unknown"
+
+
+def test_pending_server_requests_keep_bounded_private_request_records(
+    worker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Approval requests keep their contract within a fixed record count."""
+    start(worker)
+    worker.handle(command("input", number=2, payload={"text": "approval"}))
+    wait_state(worker, "session-1", "waiting_approval")
+    session = worker.journal.sessions["session-1"]
+    worker.pending.clear()
+    worker._pending_sizes.clear()
+    worker._pending_bytes = 0
+    rejected: list[str | int] = []
+    monkeypatch.setattr(worker.provider, "reject", rejected.append)
+
+    for index in range(257):
+        worker._server_request(
+            {
+                "id": f"request-{index}",
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": f"item-{index}",
+                    "command": "private command " + ("x" * 4096),
+                },
+            },
+            session,
+        )
+
+    assert len(worker.pending) <= 256
+    assert rejected == ["request-256"]
+    assert all(
+        set(pending) == {"id", "method", "params", "sessionId"}
+        and pending["id"] == request_id
+        and pending["params"]["threadId"] == "thread-1"
+        and pending["params"]["turnId"] == "turn-1"
+        and pending["params"]["itemId"] == f"item-{index}"
+        and pending["params"]["command"].startswith("private command ")
+        for index, (request_id, pending) in enumerate(worker.pending.items())
+    )
+
+
+def test_pending_server_requests_have_an_aggregate_byte_limit(
+    worker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Private request payloads cannot exceed one aggregate memory budget."""
+    start(worker)
+    worker.handle(command("input", number=2, payload={"text": "approval"}))
+    wait_state(worker, "session-1", "waiting_approval")
+    session = worker.journal.sessions["session-1"]
+    worker.pending.clear()
+    worker._pending_sizes.clear()
+    worker._pending_bytes = 0
+    rejected: list[str | int] = []
+    monkeypatch.setattr(worker.provider, "reject", rejected.append)
+
+    for index in range(32):
+        worker._server_request(
+            {
+                "id": f"large-{index}",
+                "method": "item/fileChange/requestApproval",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": f"item-{index}",
+                    "reason": "x" * (256 * 1024),
+                },
+            },
+            session,
+        )
+        if rejected:
+            break
+
+    assert rejected
+    assert len(worker.pending) < 32
+
+
+def test_real_worker_request_can_produce_file_change_evidence(
+    worker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real request path keeps all identities that bind private evidence."""
+    from hephaestus.automation.fleet_request_evidence import read_request_evidence
+
+    start(worker)
+    worker.handle(command("input", number=2, payload={"text": "tool"}))
+    wait_state(worker, "session-1", "tool_running")
+    worker.provider.request(
+        "fixture/message",
+        {
+            "message": {
+                "id": "file-approval-1",
+                "method": "item/fileChange/requestApproval",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "patch-1",
+                    "reason": "private reason",
+                },
+            }
+        },
+    )
+    wait_state(worker, "session-1", "waiting_approval")
+
+    def thread_read(method: str, params: dict[str, object]) -> dict[str, object]:
+        assert method == "thread/read"
+        assert params == {"threadId": "thread-1", "includeTurns": True}
+        return {
+            "thread": {
+                "id": "thread-1",
+                "turns": [
+                    {
+                        "id": "turn-1",
+                        "status": "inProgress",
+                        "items": [
+                            {
+                                "id": "patch-1",
+                                "type": "fileChange",
+                                "status": "inProgress",
+                                "changes": [
+                                    {
+                                        "path": "/workspace/change.py",
+                                        "kind": {"type": "update"},
+                                        "diff": "-old\n+new\n",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(worker.provider, "request", thread_read)
+
+    result = read_request_evidence(worker, "session-1", "file-approval-1")
+
+    assert result["itemId"] == "patch-1"
+    assert result["evidence"] == {
+        "changes": [
+            {
+                "path": "/workspace/change.py",
+                "kind": {"type": "update"},
+                "diff": "-old\n+new\n",
+            }
+        ]
+    }
+
+
+def test_worker_close_persists_cleanup_uncertainty_when_provider_close_raises(
+    worker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart stays fenced when provider cleanup cannot return confirmation."""
+    module = modules()
+    real_close = worker.provider.close
+
+    def fail_close() -> bool:
+        raise module.ProviderError("provider_pipe_cleanup_uncertain")
+
+    monkeypatch.setattr(worker.provider, "close", fail_close)
+    with pytest.raises(module.ProviderError, match="provider_pipe_cleanup_uncertain"):
+        worker.close()
+    real_close()
+
+    restarted = module.FleetWorker(
+        state_dir=worker.journal.directory,
+        workspace_root=worker.workspace_root,
+        codex_home=worker.codex_home,
+        worker_id="worker-a",
+        pool_id="local",
+        host_id="laptop",
+        generation=1,
+        capacity=2,
+        provider_command=[sys.executable, "-u", str(FIXTURE)],
+    )
+    restarted.storage_guard = lambda: None
+    try:
+        assert restarted.journal.runtime_uncertain is True
+        with pytest.raises(RuntimeError, match="cleanup_requires_reconciliation"):
+            restarted.start()
+    finally:
+        restarted.close()
 
 
 def test_journal_limit_and_truncation_are_recovery_failures(tmp_path):
