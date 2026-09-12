@@ -305,6 +305,11 @@ def test_existing_intake_rejects_unbound_git_pointer_before_checkout_git(
             id="url-rewrite",
         ),
         pytest.param(
+            b'[remote "origin"]\n\tvcs = ext\n',
+            True,
+            id="remote-vcs",
+        ),
+        pytest.param(
             b"[core]\n"
             b"\tbare = false # comment\\\n"
             b'[url "file:///attacker/"]\n'
