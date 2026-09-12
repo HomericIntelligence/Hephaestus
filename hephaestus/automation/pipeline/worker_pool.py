@@ -4937,6 +4937,8 @@ class WorkerPool:
             pi_isolation_adapter=job.pi_isolation_adapter,
             pi_dir=job.pi_dir,
             model_references=(job.model,),
+            remaining_timeout=remaining_timeout,
+            shutdown=self._shutdown,
         )
         is_claude = agent == "claude"
         validate_agent_execution_support(agent, job.execution_request)

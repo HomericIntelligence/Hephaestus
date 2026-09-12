@@ -4,6 +4,7 @@ General utility functions that don't fit in other specific modules.
 """
 
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -28,6 +29,26 @@ logger = get_logger(__name__)
 # Callers can override these defaults through explicit timeout parameters.
 METADATA_TIMEOUT: int = 10
 NETWORK_TIMEOUT: int = 120
+
+
+class SubprocessOutputLimitExceeded(subprocess.SubprocessError):
+    """Report that a subprocess exceeded its combined output limit."""
+
+    def __init__(
+        self,
+        cmd: list[str],
+        limit: int,
+        *,
+        output: str,
+        stderr: str,
+    ) -> None:
+        """Keep bounded partial output with the specific failure cause."""
+        super().__init__(f"subprocess output limit exceeded ({limit} bytes)")
+        self.cmd = cmd
+        self.limit = limit
+        self.output = output
+        self.stdout = output
+        self.stderr = stderr
 
 
 def slugify(text: str) -> str:
@@ -266,6 +287,222 @@ def _subprocess_run_input(input_text: str | None) -> dict[str, Any]:
     return {"input": input_text}
 
 
+def _terminate_bounded_process(
+    process: subprocess.Popen[bytes],
+    *,
+    process_group: bool,
+) -> None:
+    """Stop a bounded-output child and reap its direct process."""
+    if process_group:
+        pgid = process.pid
+        with suppress(ProcessLookupError, OSError):
+            os.killpg(pgid, signal.SIGTERM)
+        grace_deadline = time.monotonic() + _PROCESS_GROUP_TERMINATION_GRACE_SECONDS
+        while time.monotonic() < grace_deadline:
+            process.poll()
+            if not _process_group_exists(pgid):
+                break
+            time.sleep(0.01)
+        if _process_group_exists(pgid):
+            with suppress(ProcessLookupError, OSError):
+                os.killpg(pgid, signal.SIGKILL)
+    else:
+        with suppress(ProcessLookupError, OSError):
+            process.terminate()
+    try:
+        process.wait(timeout=_PROCESS_GROUP_TERMINATION_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if not process_group:
+        with suppress(ProcessLookupError, OSError):
+            process.kill()
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=_PROCESS_GROUP_TERMINATION_GRACE_SECONDS)
+
+
+def _read_bounded_process_output(  # noqa: C901
+    process: subprocess.Popen[bytes],
+    *,
+    cmd: list[str],
+    input_text: str | None,
+    timeout: float | None,
+    deadline: float | None,
+    shutdown: threading.Event | None,
+    max_output_bytes: int,
+    process_group: bool,
+) -> tuple[str, str]:
+    """Read both process streams without more than the configured byte count."""
+    if process.stdout is None or process.stderr is None:  # pragma: no cover
+        raise RuntimeError("subprocess output pipes are unavailable")
+    events: queue.Queue[tuple[str, bytes | BaseException | None]] = queue.Queue(maxsize=4)
+    stop = threading.Event()
+    streams = {"stdout": process.stdout, "stderr": process.stderr}
+
+    def put_event(name: str, value: bytes | BaseException | None) -> None:
+        while not stop.is_set():
+            try:
+                events.put((name, value), timeout=0.05)
+                return
+            except queue.Full:
+                continue
+
+    def read_pipe(name: str) -> None:
+        stream = streams[name]
+        try:
+            while not stop.is_set():
+                chunk = os.read(stream.fileno(), min(64 * 1024, max_output_bytes + 1))
+                if not chunk:
+                    break
+                put_event(name, chunk)
+        except BaseException as exc:
+            put_event(name, exc)
+        finally:
+            put_event(name, None)
+
+    def write_input() -> None:
+        if process.stdin is None or input_text is None:
+            return
+        try:
+            process.stdin.write(input_text.encode())
+            process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            with suppress(OSError):
+                process.stdin.close()
+
+    readers = tuple(
+        threading.Thread(
+            target=read_pipe,
+            args=(name,),
+            name=f"hephaestus-subprocess-{process.pid}-{name}",
+            daemon=True,
+        )
+        for name in streams
+    )
+    input_writer = threading.Thread(
+        target=write_input,
+        name=f"hephaestus-subprocess-{process.pid}-stdin",
+        daemon=True,
+    )
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    byte_count = 0
+    ended: set[str] = set()
+    completed = False
+    try:
+        for reader in readers:
+            reader.start()
+        if input_text is not None:
+            input_writer.start()
+        while len(ended) != len(readers):
+            if shutdown is not None and shutdown.is_set():
+                raise InterruptedError("subprocess cancelled")
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, float(timeout or 0))
+            wait_s = min(0.1, remaining) if remaining is not None else 0.1
+            try:
+                name, value = events.get(timeout=wait_s)
+            except queue.Empty:
+                continue
+            if value is None:
+                ended.add(name)
+                continue
+            if isinstance(value, BaseException):
+                raise RuntimeError(f"subprocess {name} pipe read failed") from value
+            remaining_bytes = max_output_bytes - byte_count
+            if len(value) > remaining_bytes:
+                output[name].extend(value[:remaining_bytes])
+                byte_count += remaining_bytes
+                raise SubprocessOutputLimitExceeded(
+                    cmd,
+                    max_output_bytes,
+                    output=output["stdout"].decode(errors="replace"),
+                    stderr=output["stderr"].decode(errors="replace"),
+                )
+            output[name].extend(value)
+            byte_count += len(value)
+        while process.poll() is None:
+            if shutdown is not None and shutdown.is_set():
+                raise InterruptedError("subprocess cancelled")
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, float(timeout or 0))
+            time.sleep(min(0.05, remaining) if remaining is not None else 0.05)
+        completed = True
+    finally:
+        stop.set()
+        if not completed:
+            _terminate_bounded_process(process, process_group=process_group)
+        for stream in streams.values():
+            with suppress(OSError):
+                stream.close()
+        for reader in readers:
+            reader.join(timeout=1.0)
+        if input_writer.is_alive():
+            input_writer.join(timeout=1.0)
+    return (
+        output["stdout"].decode(errors="replace"),
+        output["stderr"].decode(errors="replace"),
+    )
+
+
+def _run_output_bounded_process(
+    cmd: list[str],
+    *,
+    cwd: str | Path | None,
+    timeout: float | None,
+    check: bool,
+    env: dict[str, str],
+    input_text: str | None,
+    shutdown: threading.Event | None,
+    remaining_timeout: Callable[[], int | float] | None,
+    max_output_bytes: int,
+    process_group: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Run one process with a combined standard-output byte limit."""
+    from hephaestus.utils import subprocess_registry
+
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL if input_text is None else subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=process_group,
+    )
+    with subprocess_registry.track_process_group(process.pid):
+        if remaining_timeout is not None:
+            try:
+                operation_timeout = remaining_timeout()
+            except BaseException:
+                _terminate_bounded_process(process, process_group=process_group)
+                raise
+            timeout = operation_timeout if timeout is None else min(timeout, operation_timeout)
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        stdout, stderr = _read_bounded_process_output(
+            process,
+            cmd=cmd,
+            input_text=input_text,
+            timeout=timeout,
+            deadline=deadline,
+            shutdown=shutdown,
+            max_output_bytes=max_output_bytes,
+            process_group=process_group,
+        )
+    result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+    if check and result.returncode:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            cmd,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
+
+
 def _run_tracked_process_group(
     cmd: list[str],
     *,
@@ -276,12 +513,18 @@ def _run_tracked_process_group(
     input_text: str | None = None,
     shutdown: threading.Event | None = None,
     remaining_timeout: Callable[[], int | float] | None = None,
+    max_output_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one command and stop its process group on timeout or cancellation."""
     from hephaestus.utils import subprocess_registry
 
     group_supported = subprocess_registry.supported()
-    if not group_supported and shutdown is None and remaining_timeout is None:
+    if (
+        not group_supported
+        and shutdown is None
+        and remaining_timeout is None
+        and max_output_bytes is None
+    ):
         return subprocess.run(
             cmd,
             cwd=cwd,
@@ -298,6 +541,19 @@ def _run_tracked_process_group(
     if remaining_timeout is not None:
         operation_timeout = remaining_timeout()
         timeout = operation_timeout if timeout is None else min(timeout, operation_timeout)
+    if max_output_bytes is not None:
+        return _run_output_bounded_process(
+            cmd,
+            cwd=cwd,
+            timeout=timeout,
+            check=check,
+            env=env,
+            input_text=input_text,
+            shutdown=shutdown,
+            remaining_timeout=remaining_timeout,
+            max_output_bytes=max_output_bytes,
+            process_group=group_supported,
+        )
     process = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -365,6 +621,7 @@ def run_subprocess(
     shutdown: threading.Event | None = None,
     input_text: str | None = None,
     remaining_timeout: Callable[[], int | float] | None = None,
+    max_output_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run subprocess command with proper error handling.
 
@@ -383,6 +640,7 @@ def run_subprocess(
         input_text: Optional text to send through the child's standard input.
         remaining_timeout: Optional operation budget callback. It is checked
             directly before and after tracked process creation.
+        max_output_bytes: Optional combined standard-output byte limit.
 
     Returns:
         Completed process object
@@ -391,6 +649,10 @@ def run_subprocess(
         subprocess.CalledProcessError: If command fails and check=True
 
     """
+    if max_output_bytes is not None and (
+        type(max_output_bytes) is not int or max_output_bytes <= 0
+    ):
+        raise ValueError("max_output_bytes must be a positive integer")
     if dry_run:
         logger.info("[DRY-RUN] $ %s", " ".join(cmd))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -405,7 +667,12 @@ def run_subprocess(
         effective_env["GH_TRACE_ID"] = cid
 
     try:
-        if track_process_group or shutdown is not None or remaining_timeout is not None:
+        if (
+            track_process_group
+            or shutdown is not None
+            or remaining_timeout is not None
+            or max_output_bytes is not None
+        ):
             result = _run_tracked_process_group(
                 cmd,
                 cwd=cwd,
@@ -415,6 +682,7 @@ def run_subprocess(
                 input_text=input_text,
                 shutdown=shutdown,
                 remaining_timeout=remaining_timeout,
+                max_output_bytes=max_output_bytes,
             )
         else:
             result = subprocess.run(
@@ -433,6 +701,14 @@ def run_subprocess(
             logger.error(
                 "Command timed out after %ds: %s",
                 timeout,
+                _format_cmd_for_log(cmd),
+            )
+        raise
+    except SubprocessOutputLimitExceeded:
+        if log_on_error:
+            logger.error(
+                "Command output exceeded %d bytes: %s",
+                max_output_bytes,
                 _format_cmd_for_log(cmd),
             )
         raise

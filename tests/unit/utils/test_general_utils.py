@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.utils.helpers import (
+    SubprocessOutputLimitExceeded,
     _format_cmd_for_log,
     flatten_dict,
     get_repo_root,
@@ -357,6 +358,84 @@ class TestRunSubprocess:
         assert "stderr:" in rendered
         assert "useful stderr tail" in rendered
         assert "stderr prefix" not in rendered
+
+    @pytest.mark.parametrize("stream_fd", (1, 2))
+    @pytest.mark.skipif(
+        not hasattr(os, "killpg"),
+        reason="requires POSIX process groups",
+    )
+    def test_output_limit_stops_and_reaps_a_streaming_child(self, stream_fd: int) -> None:
+        """Neither child output stream can make captured output unbounded."""
+        started = time.monotonic()
+
+        with pytest.raises(SubprocessOutputLimitExceeded, match="output limit") as raised:
+            run_subprocess(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import os\nwhile True: os.write({stream_fd}, b'x' * 4096)",
+                ],
+                env={"PATH": os.defpath},
+                timeout=10,
+                max_output_bytes=8192,
+            )
+
+        assert time.monotonic() - started < 3
+        assert len(raised.value.stdout.encode()) + len(raised.value.stderr.encode()) == 8192
+
+    def test_output_limit_accepts_the_exact_combined_boundary(self) -> None:
+        """Combined output equal to the limit completes without truncation."""
+        result = run_subprocess(
+            [
+                sys.executable,
+                "-c",
+                "import os; os.write(1, b'out!'); os.write(2, b'err!')",
+            ],
+            env={"PATH": os.defpath},
+            max_output_bytes=8,
+        )
+
+        assert result.stdout == "out!"
+        assert result.stderr == "err!"
+
+    @pytest.mark.skipif(
+        not hasattr(os, "killpg"),
+        reason="requires POSIX process groups",
+    )
+    def test_output_limit_stops_a_same_group_pipe_holder(self, tmp_path: Path) -> None:
+        """Output-limit cleanup stops a descendant that keeps the pipe open."""
+        group_file = tmp_path / "process-group"
+        descendant = (
+            "import os, signal\n"
+            f"open({str(group_file)!r}, 'w').write(str(os.getpgrp()))\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "while True: os.write(1, b'x' * 4096)\n"
+        )
+        parent = (
+            f"import subprocess, sys\nsubprocess.Popen([sys.executable, '-c', {descendant!r}])\n"
+        )
+
+        with pytest.raises(SubprocessOutputLimitExceeded):
+            run_subprocess(
+                [sys.executable, "-c", parent],
+                env={"PATH": os.defpath},
+                timeout=10,
+                max_output_bytes=8192,
+            )
+
+        process_group = int(group_file.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.killpg(process_group, 0)
+
+    @pytest.mark.parametrize("invalid_limit", (0, -1, True, 1.5))
+    def test_output_limit_rejects_invalid_values(self, invalid_limit: object) -> None:
+        """The process does not start when its output limit is invalid."""
+        with pytest.raises(ValueError, match="positive integer"):
+            run_subprocess(
+                [sys.executable, "-c", "raise SystemExit(99)"],
+                env={"PATH": os.defpath},
+                max_output_bytes=invalid_limit,  # type: ignore[arg-type]
+            )
 
 
 class TestFormatCmdForLog:

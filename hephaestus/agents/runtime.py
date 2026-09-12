@@ -78,9 +78,15 @@ from hephaestus.constants import (
     agent_auth_status_timeout,
 )
 from hephaestus.io.utils import write_secure
-from hephaestus.utils.helpers import run_subprocess, strip_null_bytes
+from hephaestus.utils.helpers import (
+    SubprocessOutputLimitExceeded,
+    run_subprocess,
+    strip_null_bytes,
+)
 
 LOG = logging.getLogger(__name__)
+
+_AUTH_STATUS_MAX_OUTPUT_BYTES = 64 * 1024
 
 AgentName = Literal["claude", "codex", "pi", "opencode"]
 ProcessTracker = Callable[[int], contextlib.AbstractContextManager[None]]
@@ -644,30 +650,22 @@ def is_agent_authenticated(
             )
             if remaining_timeout is not None:
                 timeout_s = min(timeout_s, remaining_timeout())
-            if remaining_timeout is not None or shutdown is not None:
-                result = run_subprocess(
-                    list(cmd),
-                    timeout=timeout_s,
-                    check=False,
-                    log_on_error=False,
-                    env=child_env,
-                    shutdown=shutdown,
-                    remaining_timeout=remaining_timeout,
-                )
-            else:
-                result = subprocess.run(
-                    list(cmd),
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout_s,
-                    check=False,
-                    env=child_env,
-                )
+            result = run_subprocess(
+                list(cmd),
+                timeout=timeout_s,
+                check=False,
+                log_on_error=False,
+                env=child_env,
+                track_process_group=True,
+                shutdown=shutdown,
+                remaining_timeout=remaining_timeout,
+                max_output_bytes=_AUTH_STATUS_MAX_OUTPUT_BYTES,
+            )
         except (InterruptedError, subprocess.TimeoutExpired):
             if remaining_timeout is not None or shutdown is not None:
                 raise
             continue
-        except OSError:
+        except (OSError, SubprocessOutputLimitExceeded):
             continue
         if result.returncode == 0:
             if agent == "pi":
