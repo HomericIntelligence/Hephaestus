@@ -294,10 +294,35 @@ def test_existing_intake_rejects_unbound_git_pointer_before_checkout_git(
     assert _caller_state(caller) == caller_state
 
 
-def test_existing_intake_rejects_unsafe_worktree_routing_before_external_action(
+@pytest.mark.parametrize(
+    ("worktree_config_content", "config_is_parseable"),
+    [
+        pytest.param(
+            b'[url "file:///attacker/"]\n\tinsteadOf = https://github.com/\n',
+            True,
+            id="url-rewrite",
+        ),
+        pytest.param(
+            b"[core]\n"
+            b"\tbare = false # comment\\\n"
+            b'[url "file:///attacker/"]\n'
+            b"\tinsteadOf = https://github.com/\n",
+            True,
+            id="comment-backslash-url-rewrite",
+        ),
+        pytest.param(
+            b'[core]\n\tbare = "false\n',
+            False,
+            id="unterminated-quoted-value",
+        ),
+    ],
+)
+def test_existing_intake_rejects_unsafe_or_malformed_worktree_config_before_external_action(
     tmp_path: Path,
+    worktree_config_content: bytes,
+    config_is_parseable: bool,
 ) -> None:
-    """Unsafe worktree routing stops intake before checkout or external commands."""
+    """Unsafe config stops intake before checkout or external commands."""
     caller, remote = _make_repository(tmp_path)
     first_manager = _manager(caller, remote)
     receipt = first_manager.prepare()
@@ -306,10 +331,11 @@ def test_existing_intake_rejects_unsafe_worktree_routing_before_external_action(
     admin_dir = (admin_value if admin_value.is_absolute() else receipt.path / admin_value).resolve(
         strict=True
     )
+    _run_git(caller, "config", "extensions.worktreeConfig", "true")
+    common_config = receipt.common_dir / "config"
     worktree_config = admin_dir / "config.worktree"
-    unsafe_config = b'[url "file:///attacker/"]\n\tinsteadOf = https://github.com/\n'
-    worktree_config.write_bytes(unsafe_config)
     receipt_content = first_manager.receipt_path.read_bytes()
+    common_config_content = common_config.read_bytes()
     registrations = _run_git(caller, "worktree", "list", "--porcelain").stdout
     caller_state = _caller_state(caller)
     intake_head = _run_git(receipt.path, "rev-parse", "HEAD").stdout
@@ -319,7 +345,10 @@ def test_existing_intake_rejects_unsafe_worktree_routing_before_external_action(
         "--porcelain",
         "--untracked-files=all",
     ).stdout
+    admin_head = (admin_dir / "HEAD").read_bytes()
+    admin_index = (admin_dir / "index").read_bytes()
     tracked_content = (receipt.path / "tracked.txt").read_bytes()
+    worktree_config.write_bytes(worktree_config_content)
 
     manager = _manager(caller, remote)
     original_runner = manager._run_command
@@ -341,18 +370,22 @@ def test_existing_intake_rejects_unsafe_worktree_routing_before_external_action(
 
     assert prohibited_commands == []
     assert first_manager.receipt_path.read_bytes() == receipt_content
-    assert worktree_config.read_bytes() == unsafe_config
+    assert common_config.read_bytes() == common_config_content
+    assert worktree_config.read_bytes() == worktree_config_content
     assert _run_git(caller, "worktree", "list", "--porcelain").stdout == registrations
-    assert _run_git(receipt.path, "rev-parse", "HEAD").stdout == intake_head
-    assert (
-        _run_git(
-            receipt.path,
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-        ).stdout
-        == intake_status
-    )
+    assert (admin_dir / "HEAD").read_bytes() == admin_head
+    assert (admin_dir / "index").read_bytes() == admin_index
+    if config_is_parseable:
+        assert _run_git(receipt.path, "rev-parse", "HEAD").stdout == intake_head
+        assert (
+            _run_git(
+                receipt.path,
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ).stdout
+            == intake_status
+        )
     assert (receipt.path / "tracked.txt").read_bytes() == tracked_content
     assert _caller_state(caller) == caller_state
 
