@@ -2650,6 +2650,17 @@ class _LinkedWorktreeBinding:
     structural_identity: tuple[_FilesystemIdentity, ...]
 
 
+@dataclass(frozen=True)
+class _RepositoryGitRootBinding:
+    """Bind a checkout root to its common Git metadata directory."""
+
+    common_dir: Path
+    common_identity: _FilesystemIdentity
+    intake_admin_name: str | None
+    intake_admin_identity: _FilesystemIdentity | None
+    structural_identity: tuple[_FilesystemIdentity, ...]
+
+
 class _LinkedWorktreeGitEnvironment(dict[str, str]):
     """Carry a Git child environment and its structural binding."""
 
@@ -2723,6 +2734,22 @@ def _open_directory_at_no_follow(
         os.close(descriptor)
         raise
     return descriptor, _filesystem_identity(opened)
+
+
+def _open_absolute_directory_no_follow(path: Path) -> tuple[int, _FilesystemIdentity]:
+    """Open each component of an absolute directory without following links."""
+    if not path.is_absolute():
+        raise RuntimeError("linked worktree metadata path is not absolute")
+    descriptor, identity = _open_directory_no_follow(Path(path.anchor))
+    try:
+        for component in path.parts[1:]:
+            next_descriptor, identity = _open_directory_at_no_follow(descriptor, component)
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, identity
 
 
 def _read_bounded_regular_at(
@@ -2937,6 +2964,172 @@ def _normalized_metadata_path(base: Path, value: str) -> Path:
     return Path(os.path.abspath(candidate))
 
 
+def _normalized_root_metadata_path(
+    base: Path,
+    value: str,
+    *,
+    error: str,
+    allow_common_parent: bool = False,
+) -> Path:
+    """Normalize root metadata without hiding a link before parent traversal."""
+    separator_value = value.replace("\\", "/") if os.name == "nt" else value
+    if allow_common_parent and os.name != "nt" and value == "..\\..":
+        raise RuntimeError(error)
+    native_common_parent = value == "../.." or (os.name == "nt" and value == "..\\..")
+    if allow_common_parent and native_common_parent:
+        return base.parent.parent
+    if any(component in {".", ".."} for component in separator_value.split("/")):
+        raise RuntimeError(error)
+    return _normalized_metadata_path(base, value)
+
+
+def _portable_repository_git_root(repo_root: Path) -> _RepositoryGitRootBinding:
+    """Bind a primary or linked checkout to portable common Git metadata."""
+    repo_identity = _portable_path_identity(repo_root, directory=True)
+    marker = repo_root / ".git"
+    marker_metadata = marker.lstat()
+    if stat.S_ISDIR(marker_metadata.st_mode):
+        common_identity = _portable_path_identity(marker, directory=True)
+        return _RepositoryGitRootBinding(
+            common_dir=marker,
+            common_identity=common_identity,
+            intake_admin_name=None,
+            intake_admin_identity=None,
+            structural_identity=(repo_identity, common_identity),
+        )
+    if not stat.S_ISREG(marker_metadata.st_mode):
+        raise RuntimeError("repository root Git metadata is unsafe")
+    pointer, marker_identity = _portable_read_git_pointer(marker)
+    if not pointer.startswith("gitdir: "):
+        raise RuntimeError("repository root gitfile is invalid")
+    admin_dir = _normalized_root_metadata_path(
+        repo_root,
+        pointer.removeprefix("gitdir: "),
+        error="repository root gitfile is invalid",
+    )
+    admin_identity = _portable_path_identity(admin_dir, directory=True)
+    back_pointer, back_pointer_identity = _portable_read_git_pointer(admin_dir / "gitdir")
+    if (
+        _normalized_root_metadata_path(
+            admin_dir,
+            back_pointer,
+            error="repository root admin back-pointer changed",
+        )
+        != marker
+    ):
+        raise RuntimeError("repository root admin back-pointer changed")
+    common_pointer, common_pointer_identity = _portable_read_git_pointer(admin_dir / "commondir")
+    common_dir = _normalized_root_metadata_path(
+        admin_dir,
+        common_pointer,
+        error="repository root common directory changed",
+        allow_common_parent=True,
+    )
+    common_identity = _portable_path_identity(common_dir, directory=True)
+    if admin_dir.parent != common_dir / "worktrees":
+        raise RuntimeError("repository root admin directory is unregistered")
+    return _RepositoryGitRootBinding(
+        common_dir=common_dir,
+        common_identity=common_identity,
+        intake_admin_name=admin_dir.name,
+        intake_admin_identity=admin_identity,
+        structural_identity=(
+            repo_identity,
+            marker_identity,
+            admin_identity,
+            back_pointer_identity,
+            common_pointer_identity,
+            common_identity,
+        ),
+    )
+
+
+def _repository_git_root(
+    repo_fd: int,
+    repo_root: Path,
+    repo_identity: _FilesystemIdentity,
+) -> tuple[int, _RepositoryGitRootBinding]:
+    """Bind a primary or linked checkout to common Git metadata."""
+    marker_metadata = os.stat(".git", dir_fd=repo_fd, follow_symlinks=False)
+    if stat.S_ISDIR(marker_metadata.st_mode):
+        common_fd, common_identity = _open_directory_at_no_follow(repo_fd, ".git")
+        return common_fd, _RepositoryGitRootBinding(
+            common_dir=repo_root / ".git",
+            common_identity=common_identity,
+            intake_admin_name=None,
+            intake_admin_identity=None,
+            structural_identity=(repo_identity, common_identity),
+        )
+    if not stat.S_ISREG(marker_metadata.st_mode):
+        raise RuntimeError("repository root Git metadata is unsafe")
+    pointer, marker_identity = _read_bounded_git_pointer_at(repo_fd, ".git")
+    if not pointer.startswith("gitdir: "):
+        raise RuntimeError("repository root gitfile is invalid")
+    admin_dir = _normalized_root_metadata_path(
+        repo_root,
+        pointer.removeprefix("gitdir: "),
+        error="repository root gitfile is invalid",
+    )
+    admin_fd, admin_identity = _open_absolute_directory_no_follow(admin_dir)
+    try:
+        back_pointer, back_pointer_identity = _read_bounded_git_pointer_at(admin_fd, "gitdir")
+        if (
+            _normalized_root_metadata_path(
+                admin_dir,
+                back_pointer,
+                error="repository root admin back-pointer changed",
+            )
+            != repo_root / ".git"
+        ):
+            raise RuntimeError("repository root admin back-pointer changed")
+        common_pointer, common_pointer_identity = _read_bounded_git_pointer_at(
+            admin_fd, "commondir"
+        )
+        common_dir = _normalized_root_metadata_path(
+            admin_dir,
+            common_pointer,
+            error="repository root common directory changed",
+            allow_common_parent=True,
+        )
+    finally:
+        os.close(admin_fd)
+    common_fd, common_identity = _open_absolute_directory_no_follow(common_dir)
+    if admin_dir.parent != common_dir / "worktrees":
+        os.close(common_fd)
+        raise RuntimeError("repository root admin directory is unregistered")
+    return common_fd, _RepositoryGitRootBinding(
+        common_dir=common_dir,
+        common_identity=common_identity,
+        intake_admin_name=admin_dir.name,
+        intake_admin_identity=admin_identity,
+        structural_identity=(
+            repo_identity,
+            marker_identity,
+            admin_identity,
+            back_pointer_identity,
+            common_pointer_identity,
+            common_identity,
+        ),
+    )
+
+
+def _open_registered_repository_admin(
+    registry_fd: int,
+    root: _RepositoryGitRootBinding,
+) -> int | None:
+    """Reopen and verify the linked repository root administration directory."""
+    if root.intake_admin_name is None:
+        return None
+    descriptor, identity = _open_directory_at_no_follow(
+        registry_fd,
+        root.intake_admin_name,
+    )
+    if identity != root.intake_admin_identity:
+        os.close(descriptor)
+        raise RuntimeError("repository root admin directory changed")
+    return descriptor
+
+
 def _portable_read_branch_ref(common_dir: Path, branch_ref: str) -> str:
     """Read one loose or packed branch through portable validated paths."""
     components = tuple(branch_ref.split("/"))
@@ -3009,12 +3202,19 @@ def _linked_worktree_git_env_portable(
     worktree: Path,
 ) -> _LinkedWorktreeGitEnvironment:
     """Bind a linked worktree on a host without descriptor-relative traversal."""
-    repo_identity = _portable_path_identity(repo_root, directory=True)
+    root = _portable_repository_git_root(repo_root)
     worktree_identity = _portable_path_identity(worktree, directory=True)
-    common_dir = repo_root / ".git"
-    common_identity = _portable_path_identity(common_dir, directory=True)
+    common_dir = root.common_dir
+    common_identity = root.common_identity
     registered_root = common_dir / "worktrees"
     registry_identity = _portable_path_identity(registered_root, directory=True)
+    if root.intake_admin_name is not None:
+        intake_admin_identity = _portable_path_identity(
+            registered_root / root.intake_admin_name,
+            directory=True,
+        )
+        if intake_admin_identity != root.intake_admin_identity:
+            raise RuntimeError("repository root admin directory changed")
     pointer, marker_identity = _portable_read_git_pointer(worktree / ".git")
     if not pointer.startswith("gitdir: "):
         raise RuntimeError("linked worktree gitfile is invalid")
@@ -3050,9 +3250,8 @@ def _linked_worktree_git_env_portable(
         common_identity=common_identity,
         index_identity=index_identity,
         structural_identity=(
-            repo_identity,
+            *root.structural_identity,
             worktree_identity,
-            common_identity,
             registry_identity,
             admin_identity,
             marker_identity,
@@ -3077,15 +3276,19 @@ def _linked_worktree_git_env(
     try:
         worktree_fd, worktree_identity = _open_directory_no_follow(worktree)
         descriptors.append(worktree_fd)
-        common_fd, common_identity = _open_directory_at_no_follow(repo_fd, ".git")
+        common_fd, root = _repository_git_root(repo_fd, repo_root, repo_identity)
         descriptors.append(common_fd)
+        common_dir = root.common_dir
+        common_identity = root.common_identity
         registry_fd, registry_identity = _open_directory_at_no_follow(common_fd, "worktrees")
         descriptors.append(registry_fd)
+        intake_admin_fd = _open_registered_repository_admin(registry_fd, root)
+        if intake_admin_fd is not None:
+            descriptors.append(intake_admin_fd)
         pointer, marker_identity = _read_bounded_git_pointer_at(worktree_fd, ".git")
         prefix = "gitdir: "
         if not pointer.startswith(prefix):
             raise RuntimeError("linked worktree gitfile is invalid")
-        common_dir = repo_root / ".git"
         registered_root = common_dir / "worktrees"
         raw_admin = Path(pointer.removeprefix(prefix))
         if not raw_admin.is_absolute():
@@ -3133,9 +3336,8 @@ def _linked_worktree_git_env(
             common_identity=common_identity,
             index_identity=index_identity,
             structural_identity=(
-                repo_identity,
+                *root.structural_identity,
                 worktree_identity,
-                common_identity,
                 registry_identity,
                 admin_identity,
                 marker_identity,
