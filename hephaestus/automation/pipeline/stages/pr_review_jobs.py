@@ -162,10 +162,11 @@ def _build_review_finding_records(
 def _carry_review_finding_records(
     item: WorkItem, current: list[dict[str, object]]
 ) -> list[dict[str, object]]:
-    """Combine recovered history with current outcomes by stable finding ID."""
+    """Combine current outcomes with the bounded necessary review history."""
     recovered = list(
         normalize_review_finding_records(item.payload.get("carried_review_finding_records", []))
     )
+    current = [dict(record) for record in normalize_review_finding_records(current)]
     if item.payload.get("review_finding_journal_head") != item.payload.get("reviewed_pr_head_sha"):
         recovered = [record for record in recovered if record["status"] != "pending"]
     combined = {str(record["finding_id"]): dict(record) for record in recovered}
@@ -178,7 +179,21 @@ def _carry_review_finding_records(
             if prior["status"] == "pending" and value["surface"] == "inline":
                 value["status"] = "pending"
         combined[finding_id] = value
-    return [dict(record) for record in normalize_review_finding_records(list(combined.values()))]
+    current_ids = {str(record["finding_id"]) for record in current}
+    removable_ids = [
+        str(record["finding_id"])
+        for record in recovered
+        if record["status"] != "pending" and str(record["finding_id"]) not in current_ids
+    ]
+    while True:
+        try:
+            return [
+                dict(record) for record in normalize_review_finding_records(list(combined.values()))
+            ]
+        except ValueError:
+            if not removable_ids:
+                raise
+            combined.pop(removable_ids.pop(0), None)
 
 
 def empty_diff_outcome(item: WorkItem) -> StageOutcome | None:

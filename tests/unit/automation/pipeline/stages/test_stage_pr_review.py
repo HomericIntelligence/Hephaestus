@@ -7568,6 +7568,44 @@ class TestAuditPublication:
 
         assert records == [current]
 
+    def test_carried_terminal_records_make_room_for_a_new_finding(
+        self, make_work_item: Any
+    ) -> None:
+        """A full terminal journal retains the new outcome within its bound."""
+        item = make_work_item(issue=50, pr=1001)
+
+        def record(index: int) -> dict[str, object]:
+            return {
+                "finding_id": f"{index:064x}",
+                "source_head": "a" * 40,
+                "severity": "major",
+                "body": f"Finding {index}.",
+                "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+                "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+                "status": "published",
+                "surface": "inline",
+                "reason": None,
+            }
+
+        carried = [record(index) for index in range(64)]
+        current = record(64)
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": carried,
+            }
+        )
+
+        records = pr_review_jobs._carry_review_finding_records(item, [current])
+
+        assert len(records) == 64
+        assert [entry["finding_id"] for entry in records] == [
+            *(f"{index:064x}" for index in range(1, 64)),
+            current["finding_id"],
+        ]
+        assert sum(entry["status"] == "published" for entry in records) == 64
+
     def test_recovered_publication_updates_terminal_finding_records(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
