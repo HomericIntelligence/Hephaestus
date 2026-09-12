@@ -4145,6 +4145,8 @@ class TestImplementBudget:
         assert result.on_done_state == "TEST_WAIT"
         assert result.job.prompt_kwargs["advise_findings"] == "use helpers"
         assert result.job.prompt_kwargs["branch_name"] == "1-auto-impl"
+        prompt = result.job.prompt_builder(**result.job.prompt_kwargs)
+        assert "use helpers" in prompt
         sandbox, codex_tools, workspace_write = _codex_implementation_grants(result.job)
         assert sandbox == "workspace-write"
         assert codex_tools == ("Bash", "Edit", "Glob", "Grep", "Read", "Write")

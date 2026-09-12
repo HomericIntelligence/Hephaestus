@@ -2708,8 +2708,6 @@ class ImplementationStage(Stage):
                 "branch_name": item.branch,
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
-                "rebase_conflict": bool(item.payload.get("rebase_conflict")),
-                "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
             },
             **_codex_isolation_job_kwargs(ctx),
             descr="implement",

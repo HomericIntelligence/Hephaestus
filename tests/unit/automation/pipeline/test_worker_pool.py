@@ -410,7 +410,9 @@ def _executable_path(name: str, *, path: str | None = None) -> str:
 
 def _prepare_one_file_rebase_conflict(
     tmp_path: Path,
-) -> tuple[Path, dict[str, str], str, str, str]:
+    *,
+    delete_topic: bool = False,
+) -> tuple[Path, dict[str, str], str, str, str | None]:
     """Create one signed-policy rebase with a textual conflict in one file."""
     origin = tmp_path / "origin.git"
     checkout = tmp_path / "checkout"
@@ -474,12 +476,17 @@ def _prepare_one_file_rebase_conflict(
     run_git("push", "-u", "origin", "main")
 
     run_git("switch", "-c", "7-auto-impl")
-    topic_content = (
-        "wait_for(lambda: active_path.is_file() and "
-        "active_path.read_text().strip() == str(second))\n"
-    )
-    source.write_text(topic_content, encoding="utf-8")
-    run_git("commit", "-am", "test(gateway): wait for active release publication")
+    topic_content: str | None = None
+    if delete_topic:
+        run_git("rm", str(source.relative_to(checkout)))
+        run_git("commit", "-m", "test(gateway): remove obsolete lifecycle check")
+    else:
+        topic_content = (
+            "wait_for(lambda: active_path.is_file() and "
+            "active_path.read_text().strip() == str(second))\n"
+        )
+        source.write_text(topic_content, encoding="utf-8")
+        run_git("commit", "-am", "test(gateway): wait for active release publication")
     run_git("push", "-u", "origin", "7-auto-impl")
     expected_remote_sha = run_git("rev-parse", "HEAD")
 
@@ -12871,14 +12878,16 @@ class TestGitOps:
         )
 
     @pytest.mark.usefixtures("require_git_path_format")
+    @pytest.mark.parametrize("delete_topic", [False, True], ids=["text", "delete"])
     def test_one_file_textual_conflict_is_validated_then_host_continued(
         self,
         pool: WorkerPool,
         tmp_path: Path,
+        delete_topic: bool,
     ) -> None:
-        """A semantic one-file edit is staged and continued only by the host."""
+        """A semantic one-file resolution is staged and continued only by the host."""
         checkout, signing, expected_remote_sha, base_sha, topic_content = (
-            _prepare_one_file_rebase_conflict(tmp_path)
+            _prepare_one_file_rebase_conflict(tmp_path, delete_topic=delete_topic)
         )
         relative_path = "tests/test_gateway_lifecycle.py"
         source = checkout / relative_path
@@ -12916,9 +12925,14 @@ class TestGitOps:
             assert isinstance(conflict_hunks, dict)
             conflict_hunk = conflict_hunks.get(relative_path)
             assert isinstance(conflict_hunk, str)
-            assert "<<<<<<<" in conflict_hunk
-            assert "active_path.is_file()" in conflict_hunk
-            assert "active_path.exists()" in conflict_hunk
+            if delete_topic:
+                assert "Base:" in conflict_hunk
+                assert "Ours:" in conflict_hunk
+                assert "Theirs:\n_(absent)_" in conflict_hunk
+            else:
+                assert "<<<<<<<" in conflict_hunk
+                assert "active_path.is_file()" in conflict_hunk
+                assert "active_path.exists()" in conflict_hunk
 
             continuation_kwargs = {
                 key: value for key, value in paused.value.items() if key != "rebased"
@@ -12932,7 +12946,10 @@ class TestGitOps:
                 timeout_s=60,
                 kwargs=continuation_kwargs,
             )
-            source.write_text(topic_content, encoding="utf-8")
+            if topic_content is None:
+                source.unlink()
+            else:
+                source.write_text(topic_content, encoding="utf-8")
             status_before_validation = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=checkout,
@@ -12966,7 +12983,10 @@ class TestGitOps:
 
         assert continued.ok is True
         assert isinstance(continued.value, dict)
-        assert source.read_text(encoding="utf-8") == topic_content
+        if topic_content is None:
+            assert not source.exists()
+        else:
+            assert source.read_text(encoding="utf-8") == topic_content
         assert (
             subprocess.run(
                 ["git", "status", "--porcelain"],

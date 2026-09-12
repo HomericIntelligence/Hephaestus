@@ -7345,21 +7345,22 @@ class WorkerPool:
         """Return complete validated context for one conflict path."""
         try:
             raw = _read_bounded_conflict_file(cwd, path)
-        except FileNotFoundError as exc:
-            raise _RebaseConflictContextError("conflict source cannot be read") from exc
-        if b"\0" in raw:
-            raise _RebaseConflictContextError("conflict source is binary")
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
-        lines = text.splitlines(keepends=True)
-        blocks = self._conflict_marker_blocks(lines)
-        context = (
-            "\n...\n".join(blocks)
-            if blocks
-            else self._marker_free_conflict_context(cwd, path, timeout=timeout)
-        )
+        except FileNotFoundError:
+            context = self._marker_free_conflict_context(cwd, path, timeout=timeout)
+        else:
+            if b"\0" in raw:
+                raise _RebaseConflictContextError("conflict source is binary")
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _RebaseConflictContextError("conflict source is not valid UTF-8") from exc
+            lines = text.splitlines(keepends=True)
+            blocks = self._conflict_marker_blocks(lines)
+            context = (
+                "\n...\n".join(blocks)
+                if blocks
+                else self._marker_free_conflict_context(cwd, path, timeout=timeout)
+            )
         if not context:
             raise _RebaseConflictContextError("conflict context is incomplete")
         if redact_diagnostic_text(context) != context:
