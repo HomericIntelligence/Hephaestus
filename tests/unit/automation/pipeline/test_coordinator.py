@@ -4917,7 +4917,7 @@ def test_run_releases_intake_leases_after_shutdown_and_reporting(
         gh_command="gh",
         timeout_s=30,
         git_runner=run_intake_git,
-        git_env={},
+        git_env=worker_pool_module._controlled_git_env(),
         remote_config=(),
     )
     with pytest.raises(RepoIntakeError, match="repository_intake_in_use"):
