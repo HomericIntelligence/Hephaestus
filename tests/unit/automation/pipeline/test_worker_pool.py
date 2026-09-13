@@ -3853,7 +3853,17 @@ class TestWorkerPoolSubmitComplete:
         scratch_entry = f'(subpath "{scratch.resolve()}")'
         pi_smoke_logs_entry = f'(subpath "{pi_smoke_logs.resolve()}")'
         assert '(import "system.sb")' in profile
-        assert "(deny network*)" in profile
+        network_bind_rules = tuple(
+            line.strip()
+            for line in profile.splitlines()
+            if line.strip().startswith("(allow network-bind ")
+        )
+        assert network_bind_rules == (f"(allow network-bind (local unix-socket {scratch_entry}))",)
+        assert "(allow system-socket (socket-domain AF_UNIX))" in profile
+        assert "(allow system-socket)" not in profile
+        assert "(deny network-inbound)" in profile
+        assert "(deny network-outbound)" in profile
+        assert "(deny network*)" not in profile
         assert "(allow signal (target same-sandbox))" in profile
         assert "(allow signal)" not in profile
         assert '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))' in profile

@@ -1744,7 +1744,11 @@ def _host_verification_profile(
             f'(allow file-read-metadata (literal "{_sandbox_string(canonical_tmp)}"))',
             f'(allow file-write* (subpath "{_sandbox_string(scratch)}"))',
             f'(allow file-write* (subpath "{_sandbox_string(pi_smoke_logs)}"))',
-            "(deny network*)",
+            # Permit Unix socket creation. Limit its bind path to scratch.
+            "(allow system-socket (socket-domain AF_UNIX))",
+            f'(allow network-bind (local unix-socket (subpath "{_sandbox_string(scratch)}")))',
+            "(deny network-inbound)",
+            "(deny network-outbound)",
         )
     )
 
@@ -1761,14 +1765,15 @@ def _host_verification_command(
     git_exec_path: Path,
     git_system_config: Path,
 ) -> tuple[str, ...]:
-    """Return a command that denies network and host writes to PR code.
+    """Return a command that denies network access and host writes to PR code.
 
     A disposable Git archive protects the reviewer checkout, but it is not a
     complete trust boundary by itself: test code could still access the host.
     On supported macOS hosts, ``sandbox-exec`` supplies the remaining boundary
-    (no network, read-only source, write access only to ``scratch``).  We fail
-    closed when that primitive is unavailable rather than quietly widening a
-    reviewer-stage capability.
+    (no inbound or outbound network access, read-only source, write access
+    only to ``scratch``). The profile permits a Unix socket bind only in
+    ``scratch``. We fail closed when that primitive is unavailable rather than
+    quietly widen a reviewer-stage capability.
     """
     if sys.platform != "darwin":
         raise _HostVerificationBoundaryError("unsupported_host_verification_boundary")
