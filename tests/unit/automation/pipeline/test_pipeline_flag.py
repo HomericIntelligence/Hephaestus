@@ -91,10 +91,15 @@ def test_build_pipeline_config_maps_cli_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_build_pipeline_config carries the CLI scope into PipelineConfig."""
+    projects_dir = tmp_path / "projects"
     user_home = tmp_path / "user-home"
+    host_temp = tmp_path / "host-temp"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
     loop_runner.main(
         [
+            "--projects-dir",
+            str(projects_dir),
             "--loops",
             "3",
             "--max-workers",
@@ -125,6 +130,7 @@ def test_build_pipeline_config_maps_cli_fields(
     assert config.serialize_file_overlap is False
     assert config.nitpick is True
     assert config.scope is None
+    assert config.projects_dir == projects_dir.resolve()
     assert config.event_log_path is not None
     assert config.event_log_path.name.startswith("pipeline-events-")
     assert config.event_log_path.parent == (
