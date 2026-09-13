@@ -2494,6 +2494,12 @@ Collaborators must not import their assembly module. Tests inject the
 transport command runner or patch the actual external boundary. Facade symbol
 copies and runtime monkeypatch translators are removed.
 
+`pipeline_github_merge_policy.py` owns the immutable `EffectiveMergePolicy`
+value and its derived queue wait limits. `pipeline_github_check_policy.py`
+keeps the public type import and owns the stable classic and ruleset reads.
+The value module has no reader, transport, or process dependency. Existing
+consumers share one type, so policy equality and identity checks are unchanged.
+
 `review_anchors.py` owns review finding values, bounds, and diff validation.
 `review_finding_history.py` validates compacted outcomes and bounded history
 collections. Both modules have no transport or logging dependency.

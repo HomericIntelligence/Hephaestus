@@ -192,6 +192,15 @@ def _policy_transport(
     return MagicMock(side_effect=call)
 
 
+def test_effective_policy_public_imports_share_one_value_type() -> None:
+    """Keep existing policy consumers on the same immutable value class."""
+    from hephaestus.automation.pipeline_github_merge_policy import (
+        EffectiveMergePolicy as PolicyValue,
+    )
+
+    assert EffectiveMergePolicy is PolicyValue
+
+
 def test_effective_policy_combines_classic_and_applicable_ruleset_checks(
     command_runner: MagicMock,
 ) -> None:
