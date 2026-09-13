@@ -14381,6 +14381,123 @@ class TestGitOps:
         assert result.stdout_tail == "hook stdout"
         assert "private" not in result.stderr_tail
 
+    def test_direct_reservation_hook_failure_preserves_head_and_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A rejected direct push keeps its exact head and safe hook output."""
+        source = "b" * 40
+        baseline = "a" * 40
+        command_failure = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="direct hook stdout",
+            stderr="password=private direct hook stderr",
+        )
+        wrapper = RuntimeError("Failed to publish direct-scope branch")
+        wrapper.__cause__ = command_failure
+        with (
+            patch.object(pool, "_read_publish_head", return_value=source),
+            patch.object(pool, "_read_remote_branch_head", return_value=baseline),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=Mock(return_value=({}, ())),
+            ),
+            patch(
+                f"{_WP}.git_utils.push_branch_if_remote_matches",
+                side_effect=wrapper,
+            ),
+        ):
+            result = pool._publish_commit_push(
+                GitJob(
+                    "test/repo",
+                    "commit_push",
+                    60,
+                    kwargs={"expected_remote_sha": baseline},
+                ),
+                "writer",
+                tmp_path,
+            )
+
+        assert result.ok is False
+        assert result.value == {
+            "failure_kind": "publish_remote_head_unchanged",
+            "publication_failure_diagnostic": {
+                "failure_kind": "publication",
+                "phase": "push",
+                "head_sha": source,
+                "returncode": 1,
+                "exception_class": "CalledProcessError",
+                "remote_state": "unchanged",
+            },
+        }
+        assert result.stdout_tail == "direct hook stdout"
+        assert "private" not in result.stderr_tail
+
+    def test_direct_reservation_probe_failure_uses_probe_metadata(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An unverified direct push reports the failed probe as decisive."""
+        source = "b" * 40
+        baseline = "a" * 40
+        command_failure = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="direct push stdout",
+            stderr="password=private push stderr",
+        )
+        wrapper = RuntimeError("Failed to publish direct-scope branch")
+        wrapper.__cause__ = command_failure
+        probe = JobResult(
+            ok=False,
+            value={"exception_class": "CalledProcessError", "returncode": 9},
+            error="cannot verify remote writer head",
+            stdout_tail="direct probe stdout",
+            stderr_tail="token=private probe stderr",
+        )
+        with (
+            patch.object(pool, "_read_publish_head", return_value=source),
+            patch.object(pool, "_read_remote_branch_head", return_value=probe),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=Mock(return_value=({}, ())),
+            ),
+            patch(
+                f"{_WP}.git_utils.push_branch_if_remote_matches",
+                side_effect=wrapper,
+            ),
+        ):
+            result = pool._publish_commit_push(
+                GitJob(
+                    "test/repo",
+                    "commit_push",
+                    60,
+                    kwargs={"expected_remote_sha": baseline},
+                ),
+                "writer",
+                tmp_path,
+            )
+
+        assert result.ok is False
+        assert result.value == {
+            "failure_kind": "publish_remote_probe_failed",
+            "publication_failure_diagnostic": {
+                "failure_kind": "publication",
+                "phase": "remote_probe",
+                "head_sha": source,
+                "returncode": 9,
+                "exception_class": "CalledProcessError",
+                "remote_state": "unverified",
+            },
+        }
+        assert result.stdout_tail.index("direct push stdout") < result.stdout_tail.index(
+            "direct probe stdout"
+        )
+        assert "private" not in result.stderr_tail
+        assert "publication_state" not in result.value
+        assert "refresh_phase" not in result.value
+
     def test_run_git_redacts_generic_subprocess_tails(self, pool: WorkerPool) -> None:
         """The generic Git boundary applies the same redaction and tail bound."""
         secret = "https://" + "writer:private@example.invalid/repository.git"

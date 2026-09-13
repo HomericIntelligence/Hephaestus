@@ -12755,12 +12755,24 @@ class WorkerPool:
                 "remote_config": remote_config,
                 "source_sha": source_sha,
             }
-            git_utils.push_branch_if_remote_matches(
-                branch,
-                expected_remote_sha,
-                worktree_path,
-                **strict_push_kwargs,
-            )
+            try:
+                git_utils.push_branch_if_remote_matches(
+                    branch,
+                    expected_remote_sha,
+                    worktree_path,
+                    **strict_push_kwargs,
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                return self._writer_publication_failure(
+                    job,
+                    worktree_path,
+                    branch,
+                    source_sha,
+                    expected_remote_sha,
+                    failure=exc,
+                    refresh_phase=None,
+                    direct_reservation=True,
+                )
         elif publication_bound:
             git_utils.push_branch(
                 branch,
@@ -12964,6 +12976,7 @@ class WorkerPool:
         *,
         failure: BaseException,
         refresh_phase: str | None,
+        direct_reservation: bool = False,
     ) -> JobResult:
         """Classify a failed push from an authoritative remote read."""
         _, _, push_stdout, push_stderr = _git_exception_diagnostics(failure)
@@ -13001,7 +13014,7 @@ class WorkerPool:
         receipt = self._writer_publication_receipt(
             state, head, baseline, remote_head, refresh_phase=refresh_phase
         )
-        return replace(
+        result = replace(
             receipt,
             stdout_tail=_ordered_git_diagnostics(
                 push_stdout, observed.stdout_tail if isinstance(observed, JobResult) else ""
@@ -13009,6 +13022,47 @@ class WorkerPool:
             stderr_tail=_ordered_git_diagnostics(
                 push_stderr, observed.stderr_tail if isinstance(observed, JobResult) else ""
             ),
+        )
+        if not direct_reservation:
+            return result
+        if result.ok:
+            return JobResult(ok=True, value={"pushed": True, "head_sha": head})
+        phase, remote_state, failure_kind = {
+            "remote_changed": ("push", "changed", "publish_remote_head_changed"),
+            "remote_unchanged": ("push", "unchanged", "publish_remote_head_unchanged"),
+            "probe_failed": ("remote_probe", "unverified", "publish_remote_probe_failed"),
+        }[state]
+        if isinstance(observed, JobResult):
+            probe_value = observed.value if isinstance(observed.value, dict) else {}
+            probe_exception_class = probe_value.get("exception_class")
+            if (
+                not isinstance(probe_exception_class, str)
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", probe_exception_class) is None
+            ):
+                probe_exception_class = "RuntimeError"
+            diagnostic: dict[str, object] = {
+                "failure_kind": "publication",
+                "phase": phase,
+                "head_sha": head,
+                "exception_class": probe_exception_class,
+                "remote_state": remote_state,
+            }
+            returncode = probe_value.get("returncode")
+            if isinstance(returncode, int) and not isinstance(returncode, bool):
+                diagnostic["returncode"] = returncode
+        else:
+            diagnostic, _, _ = _publication_failure_diagnostic(
+                failure,
+                phase=phase,
+                remote_state=remote_state,
+                head_sha=head,
+            )
+        return replace(
+            result,
+            value={
+                "failure_kind": failure_kind,
+                "publication_failure_diagnostic": diagnostic,
+            },
         )
 
     @staticmethod
