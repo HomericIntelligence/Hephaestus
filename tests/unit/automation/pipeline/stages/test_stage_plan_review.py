@@ -1974,6 +1974,162 @@ class TestPlanScopeAdmission:
         assert github.labels[1] == {STATE_NEEDS_PLAN}
         assert github.mutation_log == []
 
+    @pytest.mark.parametrize(
+        ("replacement_plan", "replacement_revision"),
+        [
+            ("## Files to Modify\n- `tests/unit/two.py`", 1),
+            ("## Exact file scope and ownership\n- `tests/unit/one.py`", 2),
+        ],
+    )
+    def test_scope_block_keeps_blocked_when_plan_changes_after_label_write(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        replacement_plan: str,
+        replacement_revision: int,
+    ) -> None:
+        """A plan change after the block label requires external recovery."""
+
+        class PlanChangesAfterLabelGitHub(FakeStageGitHub):
+            changed = False
+
+            def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+                super().edit_labels(issue_number, add=add, remove=remove)
+                if STATE_PLAN_BLOCKED in add and not self.changed:
+                    self.changed = True
+                    self.comments[issue_number] = [
+                        render_current_plan(replacement_plan, revision=replacement_revision),
+                        render_pending_review(revision=replacement_revision),
+                    ]
+
+        stage = PlanReviewStage()
+        github = PlanChangesAfterLabelGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(
+            github,
+            1,
+            "## Exact file scope and ownership\n- `tests/unit/one.py`",
+        )
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        outcome = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+        snapshot = journal_snapshot(github.issue_comments(1))
+        assert snapshot.current_plan == replacement_plan
+        assert snapshot.revision == replacement_revision
+        assert [entry[0] for entry in github.mutation_log] == [
+            "edit_labels",
+        ]
+
+    @pytest.mark.parametrize(
+        ("replacement_plan", "replacement_revision"),
+        [
+            ("## Files to Modify\n- `tests/unit/two.py`", 1),
+            ("## Exact file scope and ownership\n- `tests/unit/one.py`", 2),
+        ],
+    )
+    def test_scope_block_keeps_blocked_when_plan_changes_after_audit_write(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        replacement_plan: str,
+        replacement_revision: int,
+    ) -> None:
+        """A stale same-revision audit cannot resume autonomous planning."""
+
+        class PlanChangesAfterAuditGitHub(FakeStageGitHub):
+            changed = False
+
+            def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+                super().upsert_issue_comment(*args, **kwargs)
+                if not self.changed:
+                    self.changed = True
+                    issue_number = int(args[0])
+                    self.comments[issue_number][0] = render_current_plan(
+                        replacement_plan,
+                        revision=replacement_revision,
+                    )
+
+        stage = PlanReviewStage()
+        github = PlanChangesAfterAuditGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(
+            github,
+            1,
+            "## Exact file scope and ownership\n- `tests/unit/one.py`",
+        )
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        outcome = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+        snapshot = journal_snapshot(github.issue_comments(1))
+        assert snapshot.current_plan == replacement_plan
+        assert snapshot.revision == replacement_revision
+        comment_bodies = [
+            comment.body if isinstance(comment, IssueComment) else comment
+            for comment in github.comments[1]
+        ]
+        assert any(body.endswith(STATE_PLAN_BLOCKED) for body in comment_bodies)
+        assert [entry[0] for entry in github.mutation_log] == [
+            "edit_labels",
+            "gh_issue_upsert_comment",
+        ]
+
+    def test_scope_block_preserves_a_concurrent_operator_block(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An operator BLOCKED write before drift handling keeps control."""
+        replacement_plan = "## Files to Modify\n- `tests/unit/two.py`"
+
+        class OperatorBlockWinsGitHub(FakeStageGitHub):
+            plan_changed = False
+
+            def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+                super().edit_labels(issue_number, add=add, remove=remove)
+                if STATE_PLAN_BLOCKED in add and not self.plan_changed:
+                    self.plan_changed = True
+                    self.comments[issue_number] = [
+                        render_current_plan(replacement_plan),
+                        render_pending_review(revision=1),
+                    ]
+                    super().edit_labels(
+                        issue_number,
+                        add=[STATE_PLAN_BLOCKED],
+                        remove=[],
+                    )
+
+        stage = PlanReviewStage()
+        github = OperatorBlockWinsGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(
+            github,
+            1,
+            "## Exact file scope and ownership\n- `tests/unit/one.py`",
+        )
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        outcome = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+        assert [entry[0] for entry in github.mutation_log] == [
+            "edit_labels",
+            "edit_labels",
+        ]
+
 
 class TestDurableWriteOrdering:
     """The load-bearing invariant: durable writes precede advancing outcomes."""
