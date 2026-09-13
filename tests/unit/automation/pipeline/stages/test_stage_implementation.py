@@ -1675,6 +1675,56 @@ class TestGate:
             "remote_state=unchanged; returncode=1; stderr=hook rejected",
         )
 
+    @pytest.mark.parametrize("queue_state", ["REBASE_WAIT", "REBASE_CONTINUE_WAIT"])
+    @pytest.mark.parametrize(
+        ("failure_kind", "error"),
+        [
+            ("publish_lease_drift", "publish failed: lease drift"),
+            ("publish_remote_head_changed", "publish failed: remote head changed"),
+        ],
+    )
+    def test_rebase_publication_remote_change_is_terminal(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        queue_state: str,
+        failure_kind: str,
+        error: str,
+    ) -> None:
+        """A changed exact-publication head stops each rebase completion route."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=queue_state)
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=error,
+                value={
+                    "failure_kind": failure_kind,
+                    "publication_failure_diagnostic": {
+                        "failure_kind": "publication",
+                        "phase": "push",
+                        "head_sha": "b" * 40,
+                        "returncode": 1,
+                        "exception_class": "CalledProcessError",
+                        "remote_state": "changed",
+                    },
+                },
+                stderr_tail="remote moved",
+            ),
+            ctx,
+        )
+
+        assert "rebase_head_drift" not in item.payload
+        assert item.payload["publication_failure_diagnostic"]["remote_state"] == "changed"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_rebase_failed: failure_kind=publication; phase=push; "
+            "remote_state=changed; returncode=1; stderr=remote moved",
+        )
+
     def test_successful_conflict_agent_requires_host_completion_before_flags_clear(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

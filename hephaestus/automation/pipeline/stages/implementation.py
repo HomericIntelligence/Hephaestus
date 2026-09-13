@@ -2416,6 +2416,8 @@ class ImplementationStage(Stage):
         recovery = recover_rebase_review(item, ctx, on_done_state=REBASE_WAIT)
         if recovery is not None:
             return recovery
+        if item.payload.pop("rebase_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         reason = item.payload.get("rebase_reason")
         if reason not in {"implementation_start", "review_conflict", "manual"}:
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_reason_unavailable")
@@ -2423,8 +2425,6 @@ class ImplementationStage(Stage):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         if item.payload.pop(_REBASE_HEAD_DRIFT, None):
             return self._finish_rebase(item, ctx)
-        if item.payload.pop("rebase_error", None):
-            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         if item.payload.pop("rebase_complete", None):
             return self._finish_rebase(item, ctx)
         if reason == "implementation_start" and (
@@ -2558,10 +2558,10 @@ class ImplementationStage(Stage):
 
     def _rebase_continue_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Let the host validate, complete, sign, and lease-publish a paused rebase."""
-        if item.payload.pop(_REBASE_HEAD_DRIFT, None):
-            return self._finish_rebase(item, ctx)
         if item.payload.pop("rebase_error", None):
             return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
+        if item.payload.pop(_REBASE_HEAD_DRIFT, None):
+            return self._finish_rebase(item, ctx)
         if item.payload.pop("rebase_complete", None):
             for key in (
                 "rebase_conflict",
@@ -3735,8 +3735,10 @@ class ImplementationStage(Stage):
             elif (
                 isinstance(result.value, dict)
                 and result.value.get("rebase_admission_changed") is True
-            ) or _publication_remote_changed(result):
+            ):
                 item.payload[_REBASE_HEAD_DRIFT] = True
+            elif _publication_remote_changed(result):
+                self._record_rebase_failure(item, result)
             elif result.error == "rebase conflict restart required":
                 value = result.value if isinstance(result.value, dict) else {}
                 if (
@@ -3774,7 +3776,7 @@ class ImplementationStage(Stage):
                         item.payload["_post_remediation_review_head_sha"] = head_sha
                 item.payload["rebase_complete"] = True
             elif _publication_remote_changed(result):
-                item.payload[_REBASE_HEAD_DRIFT] = True
+                self._record_rebase_failure(item, result)
             elif (result.error or "").startswith("rebase conflict resolution required"):
                 self._record_rebase_conflict(item, result)
                 item.payload.pop("rebase_conflict_agent_complete", None)
