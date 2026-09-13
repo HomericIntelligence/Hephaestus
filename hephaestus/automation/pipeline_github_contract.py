@@ -85,6 +85,9 @@ if TYPE_CHECKING:
         def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
             pass
 
+        def verified_repository_default_branch(self) -> Any:
+            pass
+
         def required_checks_pass_for_head(
             self,
             head_sha: str,

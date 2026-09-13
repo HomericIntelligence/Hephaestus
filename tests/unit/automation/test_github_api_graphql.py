@@ -23,10 +23,14 @@ from hephaestus.automation.github_api.graphql import (
     enqueue_pull_request_mutation,
     pipeline_thread_snapshot_page_query,
     pull_request_queue_entry_query,
+    repository_default_branch_query,
     resolve_thread_mutation,
     run_graphql,
     submit_review_mutation,
     update_review_comment_mutation,
+)
+from hephaestus.automation.pipeline.merge_wait_admission import (
+    VerifiedRepositoryDefaultBranch,
 )
 from hephaestus.github.client import (
     GitHubUnavailableError,
@@ -57,6 +61,82 @@ def query_spec() -> GraphQLQuerySpec[dict[str, object]]:
             data if data.get("ok") is True else (_ for _ in ()).throw(ValueError("missing ok"))
         ),
     )
+
+
+def test_repository_default_branch_query_returns_exact_typed_identity() -> None:
+    """The repository query validates identity and a nonblank default branch."""
+    spec = repository_default_branch_query("HomericIntelligence", "Hephaestus")
+    payload = {
+        "repository": {
+            "owner": {"login": "HomericIntelligence"},
+            "name": "Hephaestus",
+            "nameWithOwner": "HomericIntelligence/Hephaestus",
+            "defaultBranchRef": {"name": "master"},
+        }
+    }
+
+    assert spec.validate(payload) == VerifiedRepositoryDefaultBranch(
+        "HomericIntelligence",
+        "Hephaestus",
+        "HomericIntelligence/Hephaestus",
+        "master",
+    )
+    assert "owner{login}" in spec.query
+    assert "nameWithOwner" in spec.query
+    assert "defaultBranchRef{name}" in spec.query
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        None,
+        {},
+        {
+            "owner": {"login": "Other"},
+            "name": "Hephaestus",
+            "nameWithOwner": "Other/Hephaestus",
+            "defaultBranchRef": {"name": "main"},
+        },
+        {
+            "owner": {"login": "HomericIntelligence"},
+            "name": "Other",
+            "nameWithOwner": "HomericIntelligence/Other",
+            "defaultBranchRef": {"name": "main"},
+        },
+        {
+            "owner": {"login": "HomericIntelligence"},
+            "name": "Hephaestus",
+            "nameWithOwner": "Other/Hephaestus",
+            "defaultBranchRef": {"name": "main"},
+        },
+        {
+            "owner": {"login": "HomericIntelligence"},
+            "name": "Hephaestus",
+            "nameWithOwner": "HomericIntelligence/Hephaestus",
+            "defaultBranchRef": None,
+        },
+        {
+            "owner": {"login": "HomericIntelligence"},
+            "name": "Hephaestus",
+            "nameWithOwner": "HomericIntelligence/Hephaestus",
+            "defaultBranchRef": {"name": ""},
+        },
+        {
+            "owner": {"login": "HomericIntelligence"},
+            "name": "Hephaestus",
+            "nameWithOwner": "HomericIntelligence/Hephaestus",
+            "defaultBranchRef": {"name": 3},
+        },
+    ],
+)
+def test_repository_default_branch_query_rejects_malformed_metadata(
+    repository: object,
+) -> None:
+    """Missing or mismatched repository metadata fails closed."""
+    spec = repository_default_branch_query("HomericIntelligence", "Hephaestus")
+
+    with pytest.raises(ValueError):
+        spec.validate({"repository": repository})
 
 
 def test_valid_query_uses_one_non_sleeping_transport_attempt() -> None:

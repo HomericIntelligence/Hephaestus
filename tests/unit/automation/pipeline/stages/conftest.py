@@ -29,6 +29,9 @@ from hephaestus.automation.implementation_go_audit_receipt import (
 )
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.events import StageEvent
+from hephaestus.automation.pipeline.merge_wait_admission import (
+    VerifiedRepositoryDefaultBranch,
+)
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
     ConditionalMergeResult,
@@ -804,6 +807,15 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror ci_driver.CIDriver._gh_pr_state (canned answer)."""
         del pr_number  # single canned answer; not per-PR keyed
         return self._pr_state
+
+    def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
+        """Return the default complete repository record for stage tests."""
+        return VerifiedRepositoryDefaultBranch(
+            "HomericIntelligence",
+            "Hephaestus",
+            "HomericIntelligence/Hephaestus",
+            "main",
+        )
 
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror the post-405 operational readiness lookup."""

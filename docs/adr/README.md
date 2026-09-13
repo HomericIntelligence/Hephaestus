@@ -28,7 +28,7 @@ numbered, and listed here.
 | [0013](0013-backup-and-disaster-recovery-policy.md) | Tiered backup and disaster-recovery policy | Accepted |
 | [0014](0014-conditional-normal-merge.md) | Conditional normal merge after loop-owned review | Accepted (historical; superseded by 0015) |
 | [0015](0015-bounded-conditional-merge-retries.md) | Bounded conditional merge retries | Accepted (historical; superseded by 0016) |
-| [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted (merge-authorization boundary superseded by 0024) |
+| [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted (merge-authorization boundary superseded by 0024; branch-identity clause superseded by 0052) |
 | [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Superseded by 0050 (historical) |
 | [0018](0018-reviewer-owned-thread-reconciliation.md) | Reviewer-owned PR review-thread reconciliation | Accepted |
 | [0019](0019-pi-provider-parity-contract.md) | Provider-neutral Pi parity contract | Accepted |
@@ -64,3 +64,4 @@ numbered, and listed here.
 | [0049](0049-fast-pr-nightly-tests.md) | Fast PR tests and nightly full validation | Partly superseded by 0051 for manual final-rebase verification |
 | [0050](0050-queue-owned-automation-cutover.md) | Queue-owned automation cutover | Accepted |
 | [0051](0051-manual-final-rebase-verification.md) | Manual final-rebase verification | Accepted |
+| [0052](0052-verified-default-branch-merge-admission.md) | Verified default branch for merge admission | Accepted |

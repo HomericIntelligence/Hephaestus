@@ -72,6 +72,7 @@ from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillR
 from ..events import StageEvent
 from ..github_jobs import GitHubJob, ImplementationReplyProgress
 from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
+from ..merge_wait_admission import VerifiedRepositoryDefaultBranch
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..stage_results import Continue, JobRequest
 from ..work_item import ItemKind, WorkItem
@@ -569,6 +570,10 @@ class StageGitHub(Protocol):
 
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
         """Read operational normal-merge readiness without granting authorization."""
+        pass
+
+    def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
+        """Read validated repository identity and its exact default branch."""
         pass
 
     def effective_merge_policy(
