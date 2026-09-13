@@ -10,6 +10,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 
+from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 from hephaestus.automation.source_worktree import _PreparationDeadline
 
 from .athena_skill_jobs import (
@@ -106,6 +107,7 @@ class AuxiliaryWorkerPool:
             isinstance(job, AthenaSkillJob)
             and isinstance(result.value, AthenaSkillResult)
             and result.value.ok
+            and valid_delivery_receipt(result.value.delivery_receipt)
         ):
             if isinstance(job, AthenaSkillJob) and not host_started:
                 result = replace(
