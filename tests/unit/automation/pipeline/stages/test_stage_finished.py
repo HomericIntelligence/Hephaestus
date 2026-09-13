@@ -920,6 +920,7 @@ def test_terminal_wave_and_ledger_use_same_validated_result(
     from hephaestus.automation.source_worktree import (
         SourceWorkspaceError,
         SourceWorkspaceTerminalView,
+        normalize_source_workspace_creation_failure,
     )
 
     store = IssueWaveStore(tmp_path, "acme", "hephaestus")
@@ -957,6 +958,7 @@ def test_terminal_wave_and_ledger_use_same_validated_result(
         path=tmp_path / "absent-writer",
         requested_branch="42-auto",
         requested_base_sha="a" * 40,
+        creation_failure=normalize_source_workspace_creation_failure(category),
     )
     private = "https://user:credential-probe@example.invalid ENV_PROBE=secret /private/probe"
     with patch.object(finished_module, "SourceWorkspaceManager") as manager:
@@ -984,3 +986,39 @@ def test_terminal_wave_and_ledger_use_same_validated_result(
     for sentinel in ("credential-probe", "ENV_PROBE", "/private/probe"):
         assert sentinel not in outcome.reason
     assert f"creation_failure={safe}" in outcome.reason
+
+
+def test_terminal_evidence_restores_creation_failure_without_item_payload(
+    tmp_path: Path,
+    stage: FinishedStage,
+    ledger: list[ItemResult],
+    make_ctx: Any,
+) -> None:
+    """Validated terminal evidence supplies a missing worker failure category."""
+    from hephaestus.automation.source_worktree import (
+        SourceWorkspaceCreationFailure,
+        SourceWorkspaceTerminalView,
+    )
+
+    item = _item(state="RECORD")
+    item.payload["source_workspace_preserve"] = True
+    item.payload["source_workspace_terminal"] = {
+        "identity": "42-impl-terminal.json",
+        "content_sha256": "b" * 64,
+    }
+    view = SourceWorkspaceTerminalView(
+        phase="successor_created",
+        outcome="incomplete",
+        cause="source_workspace_transition_incomplete",
+        action="Retry the same request.",
+        path=tmp_path / "absent-writer",
+        requested_branch="42-auto",
+        requested_base_sha="a" * 40,
+        creation_failure=SourceWorkspaceCreationFailure.WRITER_RECEIPT,
+    )
+    ctx = make_ctx(paths=SimpleNamespace(repo_root=tmp_path))
+    with patch.object(finished_module, "SourceWorkspaceManager") as manager:
+        manager.return_value.read_terminal_failure.return_value = view
+        stage.step(item, ctx)
+
+    assert ledger[0].reason.endswith("creation_failure=writer_receipt")

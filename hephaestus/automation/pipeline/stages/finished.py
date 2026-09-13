@@ -223,6 +223,9 @@ class FinishedStage(Stage):
     @staticmethod
     def _resolve_source_terminal(item: WorkItem, ctx: StageContext) -> None:
         """Validate terminal evidence before either outcome store is changed."""
+        category = normalize_source_workspace_creation_failure(
+            item.payload.get("source_workspace_creation_failure")
+        )
         reason = (
             "source_workspace_recovery_receipt_invalid: "
             "Preserve all state. Obtain valid ownership evidence before retry "
@@ -240,12 +243,10 @@ class FinishedStage(Stage):
             )
             terminal = manager.read_terminal_failure(item.issue, reference)
             reason = f"{terminal.cause}: {terminal.action}"
+            category = terminal.creation_failure
             item.worktree = str(terminal.path)
         except (RuntimeError, OSError, ValueError):
             pass
-        category = normalize_source_workspace_creation_failure(
-            item.payload.get("source_workspace_creation_failure")
-        )
         reason = f"{reason} creation_failure={category.value}"
         item.result = ItemResult(passed=False, reason=reason, final_stage=item.stage)
 

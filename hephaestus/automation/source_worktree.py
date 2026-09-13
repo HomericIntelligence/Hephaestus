@@ -125,6 +125,18 @@ class SourceWorkspaceTerminalReference:
         return cls(value["identity"], value["content_sha256"])
 
 
+class SourceWorkspaceCreationFailure(StrEnum):
+    """Identify a creation-failure boundary without private exception text."""
+
+    UNKNOWN = "unknown"
+    REMOTE_REFRESH = "remote_refresh"
+    WRITER_TRANSITION = "writer_transition"
+    WORKTREE_CREATE = "worktree_create"
+    WRITER_OWNERSHIP = "writer_ownership"
+    WRITER_RECEIPT = "writer_receipt"
+    POST_CREATE_PREPARATION = "post_create_preparation"
+
+
 @dataclass(frozen=True, slots=True)
 class SourceWorkspaceTerminalView:
     """Return the verified terminal result and preservation action."""
@@ -137,18 +149,7 @@ class SourceWorkspaceTerminalView:
     requested_branch: str | None
     requested_base_sha: str | None
     reservation_disposition: str = "preserve"
-
-
-class SourceWorkspaceCreationFailure(StrEnum):
-    """Identify a creation-failure boundary without private exception text."""
-
-    UNKNOWN = "unknown"
-    REMOTE_REFRESH = "remote_refresh"
-    WRITER_TRANSITION = "writer_transition"
-    WORKTREE_CREATE = "worktree_create"
-    WRITER_OWNERSHIP = "writer_ownership"
-    WRITER_RECEIPT = "writer_receipt"
-    POST_CREATE_PREPARATION = "post_create_preparation"
+    creation_failure: SourceWorkspaceCreationFailure = SourceWorkspaceCreationFailure.UNKNOWN
 
 
 def normalize_source_workspace_creation_failure(value: object) -> SourceWorkspaceCreationFailure:
@@ -2108,7 +2109,7 @@ class SourceWorkspaceManager:
         if not pair_valid:
             branch, base = None, None
         payload: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "repository": self.repository,
             "repository_identity": self.repository_identity,
             "ownership_key": self.ownership_key(item_number, lane),
@@ -2123,6 +2124,7 @@ class SourceWorkspaceManager:
             "requested_branch": branch,
             "requested_base_sha": base,
             "reservation_disposition": "preserve",
+            "creation_failure": failure.creation_failure.value,
             "outcome": "manual_recovery_required",
             "cause": "source_workspace_recovery_receipt_invalid",
             "action": f"Preserve {path} and its records. Obtain valid ownership evidence.",
@@ -2255,7 +2257,7 @@ class SourceWorkspaceManager:
         if reference.identity != self._terminal_path(item_number).name:
             raise SourceWorkspaceError("source workspace terminal identity changed")
         payload = _terminal_json_object(_terminal_read_bytes(self._terminal_path(item_number)))
-        fields = {
+        common_fields = {
             "schema_version",
             "repository",
             "repository_identity",
@@ -2276,6 +2278,10 @@ class SourceWorkspaceManager:
             "action",
             "terminal_content_sha256",
         }
+        schema_version = payload.get("schema_version")
+        if type(schema_version) is not int or schema_version not in {1, 2}:
+            raise SourceWorkspaceError("source workspace terminal schema is invalid")
+        fields = common_fields | ({"creation_failure"} if schema_version == 2 else set())
         if set(payload) != fields:
             raise SourceWorkspaceError("source workspace terminal schema is invalid")
         digest = payload.pop("terminal_content_sha256")
@@ -2287,8 +2293,7 @@ class SourceWorkspaceManager:
             raise SourceWorkspaceError("source workspace terminal content changed")
         lane = SourceLane.IMPLEMENTATION
         if (
-            type(payload["schema_version"]) is not int
-            or payload["schema_version"] != 1
+            payload["schema_version"] != schema_version
             or type(payload["item_number"]) is not int
             or payload["item_number"] != item_number
             or payload["repository"] != self.repository
@@ -2305,6 +2310,15 @@ class SourceWorkspaceManager:
             branch, base
         ):
             raise SourceWorkspaceError("source workspace terminal request is invalid")
+        creation_failure = SourceWorkspaceCreationFailure.UNKNOWN
+        if schema_version == 2:
+            raw_creation_failure = payload["creation_failure"]
+            creation_failure = normalize_source_workspace_creation_failure(raw_creation_failure)
+            if (
+                type(raw_creation_failure) is not str
+                or raw_creation_failure != creation_failure.value
+            ):
+                raise SourceWorkspaceError("source workspace terminal creation failure is invalid")
         phase, cause, outcome, action = (
             payload[key] for key in ("phase", "cause", "outcome", "action")
         )
@@ -2364,7 +2378,14 @@ class SourceWorkspaceManager:
         ):
             raise SourceWorkspaceError("source workspace terminal source receipt changed")
         return SourceWorkspaceTerminalView(
-            phase, outcome, cause, action, Path(payload["path"]), branch, base
+            phase=phase,
+            outcome=outcome,
+            cause=cause,
+            action=action,
+            path=Path(payload["path"]),
+            requested_branch=branch,
+            requested_base_sha=base,
+            creation_failure=creation_failure,
         )
 
     def _transition_path(self, item_number: int) -> Path:
