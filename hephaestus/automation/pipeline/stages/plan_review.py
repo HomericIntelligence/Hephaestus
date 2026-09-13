@@ -178,6 +178,7 @@ AMEND_WAIT = "AMEND_WAIT"
 REVIEW_ERROR_RETRY_CAP = 2
 
 _PLAN_SCOPE_INVALID = "plan_scope_invalid"
+_EXTERNAL_PLAN_BLOCK_REASON = "plan was blocked externally while review was in flight"
 
 
 def _plan_scope_admission_failure(plan_text: str, ctx: StageContext) -> str | None:
@@ -1048,7 +1049,7 @@ class PlanReviewStage(Stage):
         if STATE_PLAN_BLOCKED in live_labels and verdict.verdict != "BLOCKED":
             return StageOutcome(
                 Disposition.BLOCKED,
-                "plan was blocked externally while review was in flight",
+                _EXTERNAL_PLAN_BLOCK_REASON,
             )
 
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
@@ -1222,7 +1223,9 @@ class PlanReviewStage(Stage):
             _plan_scope_blocked_verdict(),
             expected_review=review,
         )
-        if outcome.disposition is Disposition.BLOCKED:
+        if outcome.disposition is Disposition.BLOCKED and outcome != StageOutcome(
+            Disposition.BLOCKED, _EXTERNAL_PLAN_BLOCK_REASON
+        ):
             return StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
         return outcome
 
@@ -1268,6 +1271,10 @@ class PlanReviewStage(Stage):
         review_revision = revision or int(item.payload.get("plan_revision") or current_revision)
         comment_body = _normalize_review_comment(verdict.raw, revision=review_revision)
         validate_planning_body_for_write(PLAN_REVIEW_CANONICAL_MARKER, comment_body)
+        # An operator can block this plan after the comment snapshot was read.
+        # Preserve the operator's label and explanation before any stage write.
+        if STATE_PLAN_BLOCKED in _require_issue_labels(item, ctx):
+            return StageOutcome(Disposition.BLOCKED, _EXTERNAL_PLAN_BLOCK_REASON)
         outcome = self._complete_blocked(item, ctx)
         if outcome.disposition == Disposition.RETRY:
             return outcome
