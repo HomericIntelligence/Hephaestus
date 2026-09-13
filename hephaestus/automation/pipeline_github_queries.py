@@ -494,56 +494,6 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             return None
         return int(match.group(1))
 
-    def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
-        """Read immutable PR metadata that precedes a checkout-bound review.
-
-        A direct ``--prs`` seed must not grant the only review GO/NOGO based
-        solely on a PR number.  The diff intentionally does *not* come from
-        ``gh pr diff``: an ABA race could otherwise pair another commit's
-        mutable remote diff with this base/head pair.  The checkout barrier
-        derives the diff locally after it proves both exact commits.
-        """
-        try:
-            body_result = self._gh(
-                [
-                    "pr",
-                    "view",
-                    str(pr_number),
-                    "--json",
-                    "id,title,body,headRefOid,baseRefOid,baseRefName",
-                ]
-            )
-            body_data = json.loads(body_result.stdout or "{}")
-            if not isinstance(body_data, dict):
-                return None
-        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
-            logger.warning("PR #%s: review context read failed: %s", pr_number, exc)
-            return None
-        title = body_data.get("title")
-        body = body_data.get("body")
-        head = body_data.get("headRefOid")
-        base = body_data.get("baseRefOid")
-        base_branch = body_data.get("baseRefName")
-        if (
-            not isinstance(title, str)
-            or not isinstance(body, str)
-            or not isinstance(head, str)
-            or not head
-            or not isinstance(base, str)
-            or not base
-            or not isinstance(base_branch, str)
-            or not base_branch
-        ):
-            return None
-        return {
-            **({"pr_node_id": body_data["id"]} if isinstance(body_data.get("id"), str) else {}),
-            "pr_title": github_api.strip_null_bytes(title),
-            "pr_description": github_api.strip_null_bytes(body),
-            "pr_head_sha": head,
-            "pr_base_sha": base,
-            "pr_base_branch": base_branch,
-        }
-
     def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
         """Discover the actor-owned canonical plan without inventing absence."""
         try:

@@ -20,8 +20,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 
-from hephaestus.automation.github_api.diff import normalize_review_finding_compacted_outcomes
 from hephaestus.automation.pipeline.work_item import ItemKind, PreservedWorktree, WorkItem
+from hephaestus.automation.review_finding_history import normalize_review_finding_compacted_outcomes
 from hephaestus.cli.localization import Localizer, get_localizer
 from hephaestus.cli.utils import emit_json_status
 from hephaestus.logging.formatters import _LOCALIZED_RENDERER_FIELD

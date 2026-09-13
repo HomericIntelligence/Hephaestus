@@ -2,15 +2,65 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 from collections.abc import Mapping
 
-from hephaestus.automation.github_api import pull_request_reviews_page_query
+from hephaestus.automation.github_api import pull_request_reviews_page_query, strip_null_bytes
 
 from .pipeline_github_contract import _PipelineGitHubHost
+from .pipeline_github_transport import logger
 
 
 class PipelineGitHubReviewQueries(_PipelineGitHubHost):
     """Provide complete and stable pull-request review snapshots."""
+
+    def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
+        """Read PR metadata before the checkout proves its exact base and head.
+
+        The checkout derives the diff from these commits. A mutable remote
+        diff could belong to a different revision and cannot supply this proof.
+        """
+        try:
+            body_result = self._gh(
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--json",
+                    "id,title,body,headRefOid,baseRefOid,baseRefName",
+                ]
+            )
+            body_data = json.loads(body_result.stdout or "{}")
+            if not isinstance(body_data, dict):
+                return None
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+            logger.warning("PR #%s: review context read failed: %s", pr_number, exc)
+            return None
+        title = body_data.get("title")
+        body = body_data.get("body")
+        head = body_data.get("headRefOid")
+        base = body_data.get("baseRefOid")
+        base_branch = body_data.get("baseRefName")
+        if (
+            not isinstance(title, str)
+            or not isinstance(body, str)
+            or not isinstance(head, str)
+            or not head
+            or not isinstance(base, str)
+            or not base
+            or not isinstance(base_branch, str)
+            or not base_branch
+        ):
+            return None
+        return {
+            **({"pr_node_id": body_data["id"]} if isinstance(body_data.get("id"), str) else {}),
+            "pr_title": strip_null_bytes(title),
+            "pr_description": strip_null_bytes(body),
+            "pr_head_sha": head,
+            "pr_base_sha": base,
+            "pr_base_branch": base_branch,
+        }
 
     def _complete_pull_request_review_snapshot(  # noqa: C901
         self, pr_number: int

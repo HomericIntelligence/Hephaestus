@@ -2,13 +2,13 @@
 
 # This mixin consumes the shared PR-review stage namespace by design.
 # ruff: noqa: F403, F405
-from hephaestus.automation.github_api.diff import (
+from hephaestus.automation.review_audit import is_clean_go_review
+from hephaestus.automation.review_finding_history import (
     ReviewFindingCompactedOutcomes,
     empty_review_finding_compacted_outcomes,
     normalize_review_finding_collection,
     review_finding_collection_payload,
 )
-from hephaestus.automation.review_audit import is_clean_go_review
 
 from .pr_review_threads import *
 

@@ -7,10 +7,17 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from hephaestus.automation.review_finding_history import (
+    compact_terminal_review_finding_collection,
+    empty_review_finding_compacted_outcomes,
+    normalize_review_finding_collection,
+    normalize_review_finding_compacted_outcomes,
+)
 from hephaestus.observability.alerts import evaluate_alerts
 
 from .coordinator_types import _json_safe
 from .routing import AUXILIARY_PIPELINE_ORDER, MAIN_PIPELINE_ORDER
+from .work_item import WorkItem
 
 
 def record_event(
@@ -102,3 +109,71 @@ def health_snapshot(
         status = "ok"
     snapshot["status"] = status
     return snapshot
+
+
+def record_review_finding_events(
+    coordinator: Any, item: WorkItem, *, logger: logging.Logger
+) -> None:
+    """Stream bounded finding identities without review text."""
+    raw_records = item.payload.get("review_finding_records", [])
+    raw_compacted = item.payload.get(
+        "review_finding_compacted_outcomes",
+        empty_review_finding_compacted_outcomes(),
+    )
+    try:
+        validated_compacted = normalize_review_finding_compacted_outcomes(raw_compacted)
+        has_compacted_history = bool(validated_compacted["identities"])
+        legacy_records, legacy_compacted = normalize_review_finding_collection(
+            raw_records,
+            compacted_outcomes=validated_compacted if has_compacted_history else None,
+        )
+        if not has_compacted_history and any(
+            record["status"] == "pending" for record in legacy_records
+        ):
+            records, compacted = legacy_records, legacy_compacted
+        else:
+            records, compacted = compact_terminal_review_finding_collection(
+                legacy_records,
+                validated_compacted,
+            )
+    except ValueError:
+        logger.warning(
+            "terminal:%s: invalid review finding records; "
+            "the coordinator did not write finding events",
+            coordinator._item_key(item),
+        )
+        return
+    for record in records:
+        coordinator._record_event(
+            "review_finding_outcome",
+            {
+                "repo": item.repo,
+                "issue": item.issue,
+                "pr": item.pr,
+                "finding_id": record["finding_id"],
+                "source_head": record["source_head"],
+                "severity": record["severity"],
+                "status": record["status"],
+                "surface": record["surface"],
+                "original_anchor": record["original_anchor"],
+                "final_anchor": record["final_anchor"],
+                "reason": record["reason"],
+            },
+        )
+    for identity in compacted["identities"]:
+        coordinator._record_event(
+            "review_finding_compacted_outcome",
+            {
+                "repo": item.repo,
+                "issue": item.issue,
+                "pr": item.pr,
+                "finding_id": identity[0],
+                "source_head": identity[1],
+                "outcome": {
+                    "c": "corrected",
+                    "n": "not_publishable",
+                    "p": "published",
+                }[identity[2]],
+                "blocking": identity[3] == "b",
+            },
+        )

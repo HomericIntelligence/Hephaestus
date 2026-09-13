@@ -7,7 +7,7 @@ import json
 from unittest import mock
 
 from hephaestus.automation import github_api as gha
-from hephaestus.automation.github_api import graphql
+from hephaestus.automation.github_api import diff, graphql
 
 
 def test_public_reexports_match_canonical_submodules() -> None:
@@ -38,6 +38,37 @@ def test_public_reexports_match_canonical_submodules() -> None:
         module = importlib.import_module(f"hephaestus.automation.github_api.{module_name}")
         for name in names:
             assert getattr(gha, name) is getattr(module, name)
+
+
+def test_diff_star_import_preserves_review_compatibility_exports() -> None:
+    """The diff shim keeps its public review API available to star imports."""
+    expected = {
+        "MAX_COMPACTED_REVIEW_FINDINGS",
+        "MAX_REVIEW_FINDING_AGGREGATE_BYTES",
+        "MAX_REVIEW_FINDING_BATCH_BYTES",
+        "MAX_REVIEW_FINDING_BATCH_PUBLIC_SECTION_CHARS",
+        "MAX_REVIEW_FINDING_BODY_CHARS",
+        "MAX_REVIEW_FINDING_COLLECTION_BYTES",
+        "MAX_REVIEW_FINDING_EVIDENCE_CHARS",
+        "MAX_REVIEW_FINDING_PATH_CHARS",
+        "MAX_REVIEW_FINDING_PUBLIC_SECTION_CHARS",
+        "MAX_REVIEW_FINDINGS",
+        "ReviewAnchorCorrection",
+        "ReviewAnchorCorrectionReason",
+        "ReviewCommentValidation",
+        "ReviewFindingCompactedOutcomes",
+        "compact_terminal_review_finding_collection",
+        "empty_review_finding_compacted_outcomes",
+        "normalize_review_finding_batch_records",
+        "normalize_review_finding_collection",
+        "normalize_review_finding_compacted_outcomes",
+        "normalize_review_finding_records",
+        "review_finding_collection_payload",
+        "review_finding_compacted_outcomes_leave_batch_capacity",
+        "validate_comments_to_diff",
+    }
+    assert expected <= set(diff.__all__)
+    assert all(hasattr(diff, name) for name in expected)
 
 
 def test_graphql_contract_is_reexported_from_package_facade() -> None:

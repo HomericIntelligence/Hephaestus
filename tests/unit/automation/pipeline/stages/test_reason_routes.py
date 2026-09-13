@@ -24,6 +24,7 @@ from hephaestus.automation.pipeline.stages import (
     plan_review,
     planning,
     pr_review,
+    pr_review_findings,
     pr_review_jobs,
 )
 
@@ -35,12 +36,12 @@ _STAGE_MODULES: dict[StageName, ModuleType] = {
     StageName.MERGE_WAIT: merge_wait,
 }
 
-# A stage can emit a routed outcome from an inherited mixin.  Scan those
-# runtime owners too, so the vocabulary lock follows method resolution rather
-# than only the façade's source file.
+# A stage can emit a routed outcome from an inherited mixin or a helper.
+# Scan those runtime owners too, so the vocabulary lock covers actual emitters
+# rather than only the façade's source file.
 _STAGE_REASON_MODULES: dict[StageName, tuple[ModuleType, ...]] = {
     **{stage_name: (module,) for stage_name, module in _STAGE_MODULES.items()},
-    StageName.PR_REVIEW: (pr_review, pr_review_jobs),
+    StageName.PR_REVIEW: (pr_review, pr_review_jobs, pr_review_findings),
 }
 
 #: Reasons each stage is EXPECTED to emit (lock: additions must edit this).
