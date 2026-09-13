@@ -108,7 +108,10 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             if isinstance(result.job, GitJob) and result.job.op == "verify_pr_review_checkout":
                 stage.on_job_done(
                     item,
-                    JobResult(ok=True, value={"ready": True, "diff": "checkout diff"}),
+                    JobResult(
+                        ok=True,
+                        value={"ready": True, "diff": "checkout diff", "changed_paths": []},
+                    ),
                     ctx,
                 )
                 item.state = result.on_done_state

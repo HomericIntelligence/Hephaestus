@@ -62,6 +62,10 @@ from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
 from hephaestus.automation.pipeline.stages.pr_review_receipts import (
     _host_verification_receipt_matches,
 )
+from hephaestus.automation.pipeline.stages.pr_review_repository import (
+    _HOST_VERIFICATION_EXISTING_PATHS,
+    _prepare_host_checks,
+)
 from hephaestus.automation.pipeline.stages.pr_review_scope_expansion import (
     POST_REMEDIATION_HEAD_VISIBILITY_RETRY_CAP,
 )
@@ -249,7 +253,10 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             if isinstance(result.job, GitJob) and result.job.op == "verify_pr_review_checkout":
                 stage.on_job_done(
                     item,
-                    JobResult(ok=True, value={"ready": True, "diff": "checkout diff"}),
+                    JobResult(
+                        ok=True,
+                        value={"ready": True, "diff": "checkout diff", "changed_paths": []},
+                    ),
                     ctx,
                 )
                 item.state = result.on_done_state
@@ -370,6 +377,10 @@ def _dispatch_review(stage: Any, item: Any, ctx: Any) -> JobRequest:
                     "+++ b/hephaestus/automation/pipeline/stages/pr_review.py\n"
                     "@@ -0,0 +1,500 @@\n" + "+fixture\n" * 500
                 ),
+                "changed_paths": [
+                    "a.py",
+                    "hephaestus/automation/pipeline/stages/pr_review.py",
+                ],
             },
         ),
         ctx,
@@ -859,6 +870,7 @@ class TestPrReviewStageOnEnter:
         item.state = REVIEW_CHECKOUT_WAIT
         item.payload["pr_node_id"] = "PR_exact"
         item.payload["review_checkout_ready"] = True
+        item.payload["review_changed_paths"] = []
         item.payload["review_checkout_expected_head"] = "a" * 40
         result = _complete_github_job(stage, item, ctx)
 
@@ -900,6 +912,7 @@ class TestPrReviewStageOnEnter:
                 "review_checkout_expected_head": "a" * 40,
                 "review_worktree_expected_head": "a" * 40,
                 "pr_diff": "",
+                "review_changed_paths": [],
             }
         )
 
@@ -968,10 +981,11 @@ class TestPrReviewStageOnEnter:
             {
                 "reviewed_pr_head_sha": "a" * 40,
                 "host_verification_repository_profile": "hephaestus",
+                "review_changed_paths": ["example.py"],
                 "pr_diff": "diff --git a/example.py b/example.py\n+new line\n",
             }
         )
-        specs = _host_verification_specs(item.payload["pr_diff"])
+        specs = _host_verification_specs(item.payload["review_changed_paths"])
         item.payload["host_verification_receipts"] = [
             {
                 "head_sha": "a" * 40,
@@ -1532,6 +1546,85 @@ class TestPrReviewStageStep:
         assert isinstance(review.job, AgentJob)
         assert review.job.prompt_kwargs["pr_diff"] == "checkout diff for A"
         assert item.payload["review_changed_paths"] == ["old.py", "new.py"]
+
+    def test_review_checkout_rejects_a_missing_path_manifest(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A checkout result without bound paths must not start host checks."""
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload["review_checkout_pending"] = True
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"ready": True, "diff": "bound diff"}),
+            make_ctx(),
+        )
+
+        assert item.payload["review_checkout_ready"] is False
+        assert item.payload["review_checkout_error"] == (
+            "checkout job returned no bound path manifest"
+        )
+
+    @pytest.mark.parametrize(
+        "changed_paths",
+        [
+            pytest.param(["../outside.py"], id="parent-component"),
+            pytest.param(
+                [f"file-{index}.py" for index in range(513)],
+                id="too-many-paths",
+            ),
+        ],
+    )
+    def test_review_checkout_rejects_an_unsafe_path_manifest(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        changed_paths: list[str],
+    ) -> None:
+        """An unsafe path manifest must not start host checks."""
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload["review_checkout_pending"] = True
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={"ready": True, "diff": "bound diff", "changed_paths": changed_paths},
+            ),
+            make_ctx(),
+        )
+
+        assert item.payload["review_checkout_ready"] is False
+        assert item.payload["review_checkout_error"] == (
+            "checkout job returned an invalid path manifest"
+        )
+
+    def test_review_checkout_wait_revalidates_the_path_manifest(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A restored checkout state must revalidate its path manifest."""
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "review_changed_paths": ["../outside.py"],
+                "pr_diff": "diff --git a/example.py b/example.py\n",
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx())
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "review_checkout_path_manifest_invalid",
+        )
 
     def test_no_issue_number_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """Step without an issue number finishes failed."""
@@ -2300,10 +2393,21 @@ class TestPrReviewStageStep:
         ctx = make_ctx()
         item = make_work_item(issue=issue_number, pr=1001, state=REVIEW_CHECKOUT_WAIT)
         item.worktree = _make_hephaestus_checkout(tmp_path)
+        changed_test = Path(item.worktree) / (
+            "tests/unit/automation/pipeline/stages/test_stage_pr_review.py"
+        )
+        changed_test.parent.mkdir(parents=True)
+        changed_test.write_text("def test_fixture() -> None:\n    pass\n", encoding="utf-8")
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": [
+                    "tests/unit/automation/pipeline/stages/test_stage_pr_review.py",
+                    "tests/unit/automation/pipeline/test_worker_pool.py",
+                    "tests/performance/test_worker_pool_load.py",
+                    "coverage.toml",
+                ],
                 "pr_diff": (
                     "diff --git a/tests/unit/automation/pipeline/stages/test_stage_pr_review.py "
                     "b/tests/unit/automation/pipeline/stages/test_stage_pr_review.py\n"
@@ -2443,6 +2547,7 @@ class TestPrReviewStageStep:
             assert isinstance(request.job, BuildTestJob)
             assert request.job.descr == description
             assert request.job.argv == argv
+            assert request.job.timeout_s == 300
             assert request.on_done_state == "HOST_VERIFICATION_WAIT"
             assert request.job.expected_head_sha == "a" * 40
             assert request.job.immutable_source is True
@@ -2515,6 +2620,9 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "reviewer_comment_validation_only": True,
+                "review_changed_paths": [
+                    "tests/unit/validation/test_test_layout.py",
+                ],
                 "pr_diff": (
                     "diff --git a/tests/unit/validation/test_test_layout.py "
                     "b/tests/unit/validation/test_test_layout.py\n"
@@ -2586,6 +2694,7 @@ class TestPrReviewStageStep:
                     "--- a/tests/unit/validation/test_test_layout.py\n"
                     "+++ b/tests/unit/validation/test_test_layout.py\n"
                 ),
+                "review_changed_paths": ["tests/unit/validation/test_test_layout.py"],
             }
         )
 
@@ -2614,23 +2723,12 @@ class TestPrReviewStageStep:
         assert 1001 not in github.reviews
 
     def test_deleted_unit_tests_do_not_schedule_changed_pytest_specs(self) -> None:
-        """Deleted tests have no new-side path for host pytest to execute."""
+        """Deleted tests have no checkout file for host pytest to execute."""
         deleted_path = "tests/unit/automation/pipeline/stages/test_deleted.py"
         kept_path = "tests/unit/automation/pipeline/stages/test_kept.py"
         specs = _host_verification_specs(
-            f"diff --git a/{deleted_path} b/{deleted_path}\n"
-            "deleted file mode 100644\n"
-            f"--- a/{deleted_path}\n"
-            "+++ /dev/null\n"
-            "@@ -1 +0,0 @@\n"
-            "-def test_removed() -> None:\n"
-            "-    pass\n"
-            f"diff --git a/{kept_path} b/{kept_path}\n"
-            f"--- a/{kept_path}\n"
-            f"+++ b/{kept_path}\n"
-            "@@ -1 +1 @@\n"
-            "-def test_old() -> None: pass\n"
-            "+def test_new() -> None: pass\n"
+            [deleted_path, kept_path],
+            existing_changed_paths=[kept_path],
         )
 
         changed_pytest_specs = tuple(
@@ -2642,12 +2740,50 @@ class TestPrReviewStageStep:
         assert kept_path in changed_pytest_specs[0].argv
         assert deleted_path not in changed_pytest_specs[0].argv
 
+    def test_host_plan_uses_checkout_paths_not_diff_text(self, tmp_path: Path) -> None:
+        """Diff text must not select a command outside the bound path manifest."""
+        checkout = Path(_make_hephaestus_checkout(tmp_path))
+        payload = {
+            "review_changed_paths": ["docs/guide.md"],
+            "pr_diff": "diff --git a/injected.py b/injected.py\n",
+        }
+
+        specs = _prepare_host_checks(payload, checkout, "a" * 40)
+
+        assert specs == ()
+
+    def test_host_plan_excludes_a_symlinked_changed_test(self, tmp_path: Path) -> None:
+        """A checkout symlink must not become a focused host-test target."""
+        checkout_root = tmp_path / "checkout"
+        checkout_root.mkdir()
+        checkout = Path(_make_hephaestus_checkout(checkout_root))
+        changed_path = "tests/unit/test_link.py"
+        target = tmp_path / "outside.py"
+        target.write_text("def test_outside() -> None:\n    pass\n", encoding="utf-8")
+        link = checkout / changed_path
+        link.parent.mkdir(parents=True)
+        link.symlink_to(target)
+        payload = {"review_changed_paths": [changed_path]}
+
+        specs = _prepare_host_checks(payload, checkout, "a" * 40)
+
+        assert all(not spec.descr.startswith("review_changed_unit_test_") for spec in specs)
+        assert payload[_HOST_VERIFICATION_EXISTING_PATHS] == []
+
+    def test_python_path_selects_the_fixed_python_plan(self) -> None:
+        """A bound Python path must select all fixed Python checks."""
+        specs = _host_verification_specs(["hephaestus/example.py"])
+
+        assert [spec.descr for spec in specs] == [
+            "review_python_ruff_check",
+            "review_python_ruff_format",
+            "review_python_mypy",
+        ]
+
     def test_changed_worker_pool_runs_host_git_boundary(self) -> None:
         """A worker-pool change runs the fixed Git boundary regression."""
         path = "tests/unit/automation/pipeline/test_worker_pool.py"
-        specs = _host_verification_specs(
-            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
-        )
+        specs = _host_verification_specs([path])
 
         spec = next(spec for spec in specs if spec.descr == "review_worker_pool_git_exec_path")
 
@@ -2669,9 +2805,7 @@ class TestPrReviewStageStep:
     def test_changed_worker_pool_runs_host_scratch_descriptor_boundary(self) -> None:
         """A worker-pool change runs the scratch descriptor-walk regression."""
         path = "tests/unit/automation/pipeline/test_worker_pool.py"
-        specs = _host_verification_specs(
-            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
-        )
+        specs = _host_verification_specs([path])
 
         spec = next(
             spec for spec in specs if spec.descr == "review_worker_pool_scratch_descriptor_walk"
@@ -2695,9 +2829,7 @@ class TestPrReviewStageStep:
     def test_changed_worker_pool_runs_host_profile_boundary(self) -> None:
         """A worker-pool change runs the fixed host-profile regression."""
         path = "tests/unit/automation/pipeline/test_worker_pool.py"
-        specs = _host_verification_specs(
-            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
-        )
+        specs = _host_verification_specs([path])
 
         spec = next(spec for spec in specs if spec.descr == "review_worker_pool_host_profile")
 
@@ -2717,20 +2849,11 @@ class TestPrReviewStageStep:
         )
 
     def test_changed_conftest_verifies_containing_directory_once(self) -> None:
-        """A support-only conftest change must not be a no-tests pytest target."""
+        """A support-only conftest change must select its test directory."""
         directory = "tests/unit/automation/pipeline/stages"
         conftest_path = f"{directory}/conftest.py"
         test_path = f"{directory}/test_stage_pr_review.py"
-        specs = _host_verification_specs(
-            f"diff --git a/{conftest_path} b/{conftest_path}\n"
-            f"--- a/{conftest_path}\n"
-            f"+++ b/{conftest_path}\n"
-            "@@ -1 +1 @@\n-old = True\n+new = True\n"
-            f"diff --git a/{test_path} b/{test_path}\n"
-            f"--- a/{test_path}\n"
-            f"+++ b/{test_path}\n"
-            "@@ -1 +1 @@\n-old = True\n+new = True\n"
-        )
+        specs = _host_verification_specs([conftest_path, test_path])
 
         changed_pytest_specs = tuple(
             spec for spec in specs if spec.descr.startswith("review_changed_unit_test_")
@@ -2750,21 +2873,12 @@ class TestPrReviewStageStep:
         )
 
     def test_nested_changed_conftests_keep_shallowest_directory_once(self) -> None:
-        """A parent conftest directory target already covers nested conftest changes."""
+        """A parent conftest target already covers nested conftest changes."""
         parent_directory = "tests/unit/automation"
         child_directory = f"{parent_directory}/pipeline"
         parent_conftest_path = f"{parent_directory}/conftest.py"
         child_conftest_path = f"{child_directory}/conftest.py"
-        specs = _host_verification_specs(
-            f"diff --git a/{parent_conftest_path} b/{parent_conftest_path}\n"
-            f"--- a/{parent_conftest_path}\n"
-            f"+++ b/{parent_conftest_path}\n"
-            "@@ -1 +1 @@\n-old = True\n+new = True\n"
-            f"diff --git a/{child_conftest_path} b/{child_conftest_path}\n"
-            f"--- a/{child_conftest_path}\n"
-            f"+++ b/{child_conftest_path}\n"
-            "@@ -1 +1 @@\n-old = True\n+new = True\n"
-        )
+        specs = _host_verification_specs([parent_conftest_path, child_conftest_path])
 
         changed_pytest_specs = tuple(
             spec for spec in specs if spec.descr.startswith("review_changed_unit_test_")
@@ -2791,16 +2905,7 @@ class TestPrReviewStageStep:
         directory = "tests/unit/automation"
         conftest_path = f"{directory}/conftest.py"
         ordinary_path = "tests/unit/automation/stages/test_plan_review.py"
-        specs = _host_verification_specs(
-            f"diff --git a/{conftest_path} b/{conftest_path}\n"
-            f"--- a/{conftest_path}\n"
-            f"+++ b/{conftest_path}\n"
-            "@@ -1 +1 @@\n-old = True\n+new = True\n"
-            f"diff --git a/{ordinary_path} b/{ordinary_path}\n"
-            f"--- a/{ordinary_path}\n"
-            f"+++ b/{ordinary_path}\n"
-            "@@ -1 +1 @@\n-old = True\n+new = True\n"
-        )
+        specs = _host_verification_specs([conftest_path, ordinary_path])
 
         changed_pytest_specs = tuple(
             spec for spec in specs if spec.descr.startswith("review_changed_unit_test_")
@@ -2823,15 +2928,10 @@ class TestPrReviewStageStep:
     def test_changed_conftest_directory_host_verification_receipt_is_head_bound(
         self, tmp_path: Path
     ) -> None:
-        """The emitted conftest directory target runs through the immutable receipt path."""
+        """The conftest directory target must use the immutable receipt path."""
         directory = "tests/unit/host_conftest_receipt"
         conftest_path = f"{directory}/conftest.py"
-        specs = _host_verification_specs(
-            f"diff --git a/{conftest_path} b/{conftest_path}\n"
-            f"--- a/{conftest_path}\n"
-            f"+++ b/{conftest_path}\n"
-            "@@ -1 +1 @@\n-old = True\n+new = True\n"
-        )
+        specs = _host_verification_specs([conftest_path])
         spec = next(spec for spec in specs if spec.descr.startswith("review_changed_unit_test_"))
         assert spec.argv == (
             "uv",
@@ -3045,6 +3145,9 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": [
+                    "hephaestus/automation/pipeline/worker_pool.py",
+                ],
                 "pr_diff": (
                     "diff --git a/hephaestus/automation/pipeline/worker_pool.py "
                     "b/hephaestus/automation/pipeline/worker_pool.py\n"
@@ -3098,6 +3201,9 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": head,
                 "review_checkout_ready": True,
+                "review_changed_paths": [
+                    "hephaestus/automation/pipeline/worker_pool.py",
+                ],
                 "pr_diff": (
                     "diff --git a/hephaestus/automation/pipeline/worker_pool.py "
                     "b/hephaestus/automation/pipeline/worker_pool.py\n"
@@ -3126,6 +3232,7 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "pr_diff": "diff --git a/hephaestus/a.py b/hephaestus/a.py\n",
+                "review_changed_paths": ["hephaestus/a.py"],
             }
         )
         stage = PrReviewStage()
@@ -3143,10 +3250,7 @@ class TestPrReviewStageStep:
         assert result == StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
 
     def test_non_hephaestus_repository_has_no_hephaestus_host_plan(self) -> None:
-        specs = _host_verification_specs(
-            "diff --git a/scripts/validate.py b/scripts/validate.py\n",
-            profile=None,
-        )
+        specs = _host_verification_specs(["scripts/validate.py"], profile=None)
 
         assert specs == ()
 
@@ -3160,6 +3264,7 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["scripts/validate.py"],
                 "pr_diff": "diff --git a/scripts/validate.py b/scripts/validate.py\n",
             }
         )
@@ -3190,6 +3295,7 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["uv.lock"],
                 "pr_diff": "diff --git a/uv.lock b/uv.lock\n",
             }
         )
@@ -3212,6 +3318,7 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["docs/MIGRATION.md"],
                 "pr_diff": (
                     "diff --git a/docs/MIGRATION.md b/docs/MIGRATION.md\n"
                     "--- a/docs/MIGRATION.md\n"
@@ -3279,6 +3386,7 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["tests/integration/test_flow.py"],
                 "pr_diff": (
                     "diff --git a/tests/integration/test_flow.py b/tests/integration/test_flow.py\n"
                 ),
@@ -3320,6 +3428,7 @@ class TestPrReviewStageStep:
                 "existing_pr": True,
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["hephaestus/example.py"],
                 "pr_diff": "diff --git a/hephaestus/example.py b/hephaestus/example.py\n",
             }
         )
@@ -3362,6 +3471,7 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["tests/performance/test_worker_pool_load.py"],
                 "pr_diff": (
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
@@ -3455,6 +3565,7 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["tests/performance/test_worker_pool_load.py"],
                 "pr_diff": (
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
@@ -3515,6 +3626,7 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["tests/performance/test_worker_pool_load.py"],
                 "pr_diff": (
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
@@ -3564,6 +3676,7 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["tests/performance/test_worker_pool_load.py"],
                 "pr_diff": (
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
@@ -3613,6 +3726,7 @@ class TestPrReviewStageStep:
             {
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
+                "review_changed_paths": ["hephaestus/example.py"],
                 "pr_diff": "diff --git a/hephaestus/example.py b/hephaestus/example.py\n",
             }
         )
@@ -3651,6 +3765,7 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "pr_diff": "+++ b/tests/performance/test_worker_pool_load.py\n",
+                "review_changed_paths": [],
             }
         )
 
@@ -8498,6 +8613,7 @@ class TestAuditPublication:
                 "review_worktree": item.worktree,
                 "review_worktree_expected_head": "a" * 40,
                 "pr_diff": "diff --git a/a.py b/a.py",
+                "review_changed_paths": ["a.py"],
                 "carried_review_finding_compacted_outcomes": compacted,
             }
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,14 @@ from .base import (
     WorkItem,
     _is_confirmed_open_unarmed,
 )
-from .pr_review_verification import _host_verification_specs, _HostVerificationSpec
+from .pr_review_verification import (
+    _host_verification_specs,
+    _HostVerificationSpec,
+    _review_changed_paths,
+)
 
 _HOST_VERIFICATION_PROFILE = "host_verification_repository_profile"
+_HOST_VERIFICATION_EXISTING_PATHS = "host_verification_existing_changed_paths"
 
 
 def _repository_host_verification_profile(repository_root: Path) -> str | None:
@@ -43,8 +49,27 @@ def _prepare_host_checks(
     """Bind a repository plan or explicit unsupported evidence to the review payload."""
     profile = _repository_host_verification_profile(repository_root)
     payload[_HOST_VERIFICATION_PROFILE] = profile
-    verifications = _host_verification_specs(payload.get("pr_diff"), profile=profile)
-    requested = _host_verification_specs(payload.get("pr_diff"), profile="hephaestus")
+    changed_paths = _review_changed_paths(payload.get("review_changed_paths"))
+    existing_paths: list[str] = []
+    if changed_paths is not None:
+        for path in changed_paths:
+            try:
+                mode = (repository_root / path).lstat().st_mode
+            except OSError:
+                continue
+            if stat.S_ISREG(mode):
+                existing_paths.append(path)
+    payload[_HOST_VERIFICATION_EXISTING_PATHS] = existing_paths
+    verifications = _host_verification_specs(
+        changed_paths,
+        existing_changed_paths=existing_paths,
+        profile=profile,
+    )
+    requested = _host_verification_specs(
+        changed_paths,
+        existing_changed_paths=existing_paths,
+        profile="hephaestus",
+    )
     if profile is None and requested:
         payload["host_verification_receipts"] = [
             {
@@ -60,7 +85,9 @@ def _prepare_host_checks(
 def _payload_host_verification_specs(payload: dict[str, Any]) -> tuple[_HostVerificationSpec, ...]:
     """Rebuild the bound host plan for a later stage transition."""
     return _host_verification_specs(
-        payload.get("pr_diff"), profile=payload.get(_HOST_VERIFICATION_PROFILE)
+        payload.get("review_changed_paths"),
+        existing_changed_paths=payload.get(_HOST_VERIFICATION_EXISTING_PATHS, ()),
+        profile=payload.get(_HOST_VERIFICATION_PROFILE),
     )
 
 
@@ -87,6 +114,7 @@ def _require_reviewed_unarmed_state(
 
 
 __all__ = [
+    "_HOST_VERIFICATION_EXISTING_PATHS",
     "_HOST_VERIFICATION_PROFILE",
     "_payload_host_verification_specs",
     "_prepare_host_checks",
