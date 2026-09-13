@@ -196,6 +196,79 @@ def test_amend_history_excludes_superseded_review_artifacts() -> None:
 class TestPlanReviewStageOnEnter:
     """on_enter cycle-relative counter reset (attempts are per-lifetime)."""
 
+    def test_on_enter_blocks_codex_go_with_unsupported_scope_heading(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A Codex restart cannot advance a plan the scope parser rejects."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        _seed_canonical_plan(
+            github,
+            1,
+            "## Exact file scope and ownership\n"
+            "- `tests/unit/one.py`\n"
+            "- `tests/unit/two.py`\n"
+            "- `tests/unit/three.py`",
+        )
+        ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+        item = make_work_item(issue=1, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+        assert [entry[0] for entry in github.mutation_log] == [
+            "edit_labels",
+            "gh_issue_upsert_comment",
+        ]
+        assert github.comments[1][-1].endswith(STATE_PLAN_BLOCKED)
+        assert "plan_scope_invalid" in github.comments[1][-1]
+
+    def test_on_enter_advances_codex_go_with_accepted_scope_heading(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A Codex restart keeps a valid exact file scope unchanged."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        _seed_canonical_plan(
+            github,
+            1,
+            "## Files to Modify\n"
+            "- `tests/unit/one.py`\n"
+            "- `tests/unit/two.py`\n"
+            "- `tests/unit/three.py`\n\n"
+            "## Verification\n"
+            "- Refer to `tests/unit/not-in-scope.py`.",
+        )
+        ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+        item = make_work_item(issue=1, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome == StageOutcome(Disposition.ADVANCE, "plan already approved")
+        assert github.mutation_log == []
+
+    def test_on_enter_keeps_non_codex_go_with_unsupported_scope_heading(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Providers without Codex claims keep the existing restart route."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        _seed_canonical_plan(
+            github,
+            1,
+            "## Exact file scope and ownership\n- `tests/unit/one.py`",
+        )
+        item = make_work_item(issue=1, state="ENTER")
+
+        outcome = stage.on_enter(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "claude"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.ADVANCE, "plan already approved")
+        assert github.mutation_log == []
+
     def test_on_enter_plan_go_fast_forwards_advance(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1692,6 +1765,57 @@ class TestPlanReviewStageOnJobDone:
             stage.on_job_done(item, JobResult(ok=False, error=error), ctx)
 
         assert caplog.messages == [f"plan_review:3: job failed: {expected_reason}"]
+
+
+class TestPlanScopeAdmission:
+    """Codex plan GO requires the implementation scope grammar."""
+
+    def test_fresh_codex_go_blocks_an_unsupported_scope_heading(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A new GO cannot publish when the parser rejects the plan scope."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+        _seed_canonical_plan(github, 1, plan)
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        outcome = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+        assert [entry[0] for entry in github.mutation_log] == [
+            "edit_labels",
+            "gh_issue_upsert_comment",
+        ]
+
+    def test_fresh_codex_go_blocks_when_the_canonical_plan_changes(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A review cannot authorize a later canonical plan revision."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(github, 1, "## Files to Modify\n- `tests/unit/one.py`")
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+        github.comments[1] = [
+            render_current_plan("## Files to Modify\n- `tests/unit/two.py`", revision=2),
+            render_pending_review(revision=2),
+        ]
+
+        outcome = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+        assert github.comments[1][-1].endswith(STATE_PLAN_BLOCKED)
+        assert "plan_scope_changed" in github.comments[1][-1]
 
 
 class TestDurableWriteOrdering:
