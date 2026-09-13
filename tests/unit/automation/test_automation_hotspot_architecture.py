@@ -31,6 +31,7 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline_github_transport.py": 425,
     "hephaestus/automation/pipeline_github_review_queries.py": 150,
     "hephaestus/automation/pipeline_github_queries.py": 650,
+    "hephaestus/automation/pipeline_github_repository.py": 100,
     # Effective classic and ruleset policy reads form one stable snapshot. The
     # bound includes the authenticated absent-classic-protection parser.
     "hephaestus/automation/pipeline_github_check_policy.py": 450,
@@ -85,6 +86,7 @@ _COLLABORATOR_MODULES = frozenset(
         "pipeline_github_ref_patterns",
         "pipeline_github_ruleset_conditions",
         "pipeline_github_queries",
+        "pipeline_github_repository",
         "pipeline_github_required_checks",
         "pipeline_github_reviews",
         "pipeline_github_mutations",

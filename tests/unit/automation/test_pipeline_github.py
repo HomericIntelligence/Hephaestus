@@ -39,6 +39,9 @@ from hephaestus.automation.implementation_go_audit_receipt import (
     render_review_finding_journal,
 )
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.merge_wait_admission import (
+    VerifiedRepositoryDefaultBranch,
+)
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
     implementation_remediation_reply_handoff_journal_entry,
@@ -154,6 +157,16 @@ def _direct_merge_policy() -> EffectiveMergePolicy:
     )
 
 
+def _verified_default_branch(name: str = "main") -> VerifiedRepositoryDefaultBranch:
+    """Return complete repository metadata for merge-cycle test doubles."""
+    return VerifiedRepositoryDefaultBranch(
+        "HomericIntelligence",
+        "Hephaestus",
+        "HomericIntelligence/Hephaestus",
+        name,
+    )
+
+
 def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
     """The final admission directly follows all mutable policy reads."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
@@ -181,6 +194,10 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
         def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
             events.append("label")
             return True, False
+
+        def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
+            events.append("repository")
+            return _verified_default_branch()
 
         def list_unresolved_review_threads(self, _pr: int) -> list[object]:
             events.append("threads")
@@ -249,6 +266,7 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
     assert events == [
         "state:1",
         "label",
+        "repository",
         "policy",
         "threads",
         "readiness",
@@ -257,6 +275,7 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
         "threads",
         "state:2",
         "label",
+        "repository",
         f"merge:{head}",
         "state:3",
     ]
@@ -296,6 +315,11 @@ class _RulesetBypassGitHub:
     def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
         self.events.append("label")
         return True, False
+
+    def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
+        """Return complete repository metadata for this policy test double."""
+        self.events.append("repository")
+        return _verified_default_branch()
 
     def effective_merge_policy(self, *_args: object, **_kwargs: object) -> EffectiveMergePolicy:
         self.events.append("policy")
@@ -371,7 +395,7 @@ def _assert_ruleset_bypass_stops_before_mutable_merge_reads(
 
     assert receipt.outcome == "merge_policy_bypassable"
     assert receipt.attempted is False
-    assert github.events == ["state", "label", "policy"]
+    assert github.events == ["state", "label", "repository", "policy"]
 
 
 def test_merge_wait_rejects_bypassable_effective_policy_before_readiness() -> None:
@@ -403,6 +427,7 @@ def test_required_merge_queue_uses_exact_head_queue_admission(
     assert github.events == [
         "state",
         "label",
+        "repository",
         "policy",
         "threads",
         "readiness",
@@ -411,6 +436,7 @@ def test_required_merge_queue_uses_exact_head_queue_admission(
         "threads",
         "state",
         "label",
+        "repository",
         "merge",
     ]
 
@@ -427,7 +453,7 @@ def test_non_strict_direct_mode_stops_before_merge_request() -> None:
 
     assert receipt.outcome == "merge_policy_not_strict"
     assert receipt.attempted is False
-    assert github.events == ["state", "label", "policy"]
+    assert github.events == ["state", "label", "repository", "policy"]
 
 
 def test_base_advance_before_request_remains_safe_with_required_queue() -> None:
@@ -501,6 +527,7 @@ def test_non_bypassable_effective_policy_preserves_successful_merge_path() -> No
     assert github.events == [
         "state",
         "label",
+        "repository",
         "policy",
         "threads",
         "readiness",
@@ -509,6 +536,7 @@ def test_non_bypassable_effective_policy_preserves_successful_merge_path() -> No
         "threads",
         "state",
         "label",
+        "repository",
         "merge",
         "state",
     ]
@@ -551,6 +579,7 @@ def test_policy_drift_after_status_evidence_blocks_merge(drift: str) -> None:
     assert github.events == [
         "state",
         "label",
+        "repository",
         "policy",
         "threads",
         "readiness",
@@ -586,6 +615,10 @@ def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
         def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
             events.append("label")
             return True, False
+
+        def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
+            events.append("repository")
+            return _verified_default_branch()
 
         def list_unresolved_review_threads(self, _pr: int) -> list[object]:
             events.append("threads")
@@ -701,6 +734,9 @@ def test_merge_cycle_rechecks_final_admission_after_check_traversal(
                 not (self.revoked and revocation == "go-removed"),
                 self.revoked and revocation == "no-go-added",
             )
+
+        def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
+            return _verified_default_branch()
 
         def effective_merge_policy(self, *_args: object, **_kwargs: object) -> EffectiveMergePolicy:
             return EffectiveMergePolicy(
@@ -3959,6 +3995,7 @@ class TestExactHeadChecks:
             "pr_has_implementation_state_label",
             lambda _pr: (True, False),
         )
+        monkeypatch.setattr(adapter, "verified_repository_default_branch", _verified_default_branch)
         monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
         monkeypatch.setattr(
             adapter,
@@ -4076,6 +4113,7 @@ class TestExactHeadChecks:
             },
         )
         monkeypatch.setattr(adapter, "pr_has_implementation_state_label", lambda _pr: (True, False))
+        monkeypatch.setattr(adapter, "verified_repository_default_branch", _verified_default_branch)
         monkeypatch.setattr(adapter, "list_unresolved_review_threads", lambda _pr: [])
         monkeypatch.setattr(
             adapter,

@@ -46,6 +46,10 @@ from hephaestus.automation.pipeline.github_jobs import (
     ScopeExpansionChildrenEnsured,
     ScopeExpansionDependenciesReconciled,
 )
+from hephaestus.automation.pipeline.merge_wait_admission import (
+    MergeWaitAdmissionSnapshot,
+    validate_merge_wait_admission,
+)
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
     journaled_implementation_remediation_reply_handoff,
@@ -1524,7 +1528,9 @@ class PipelineGitHubJobRunner:
                 return "rebase_review_record_changed"
             return None if live_record == request.rebase_record else "rebase_review_record_changed"
 
-        def admit() -> tuple[dict[str, object], str] | str:
+        def admit(
+            initial: MergeWaitAdmissionSnapshot | None = None,
+        ) -> tuple[dict[str, object], MergeWaitAdmissionSnapshot] | str:
             nonlocal terminal_merge_sha
             try:
                 state = github.gh_pr_state(request.pr_number)
@@ -1542,20 +1548,25 @@ class PipelineGitHubJobRunner:
                 return "auto_merge_already_armed"
             if state.get("state") != "OPEN" or "autoMergeRequest" not in state:
                 return "pr_state_unverified"
-            if state.get("baseRefName") != "main":
-                return "non_main_base"
             try:
                 has_go, has_no_go = github.pr_has_implementation_state_label(request.pr_number)
             except Exception:
                 return "implementation_state_unavailable"
             if not has_go or has_no_go:
                 return "not_implementation_go"
-            head = str(state.get("headRefOid") or "")
-            if not head:
-                return "missing_pr_head"
-            if head != request.merge_head_sha:
-                return "reviewed_head_drift"
-            return state, head
+            try:
+                repository = github.verified_repository_default_branch()
+            except Exception:
+                return "default_branch_unavailable"
+            snapshot = validate_merge_wait_admission(
+                state,
+                repository,
+                request.merge_head_sha,
+                initial=initial,
+            )
+            if isinstance(snapshot, str):
+                return snapshot
+            return state, snapshot
 
         def conversation_safety(policy: object) -> str | None:
             try:
@@ -1567,9 +1578,17 @@ class PipelineGitHubJobRunner:
             protected = getattr(policy, "conversation_resolution_enforced", None)
             return None if protected is True else "conversation_resolution_required"
 
-        def policy_safety(policy: object) -> str | None:
+        def policy_safety(
+            policy: object,
+            snapshot: MergeWaitAdmissionSnapshot,
+        ) -> str | None:
             """Require one server-enforced merge route before mutable reads."""
             if not isinstance(policy, EffectiveMergePolicy):
+                return "merge_policy_unavailable"
+            if (
+                policy.base_branch != snapshot.base_branch
+                or policy.default_branch != snapshot.repository.default_branch
+            ):
                 return "merge_policy_unavailable"
             if any(
                 isinstance(ruleset_id, bool) or not isinstance(ruleset_id, int) or ruleset_id <= 0
@@ -1631,12 +1650,10 @@ class PipelineGitHubJobRunner:
         record_status = rebase_record_outcome()
         if record_status is not None:
             return complete(record_status)
-        state, _ = admitted
+        _, initial_snapshot = admitted
         if request.queue_admitted:
             return complete("merge_queue_wait")
-        base_branch = state.get("baseRefName")
-        if not isinstance(base_branch, str) or not base_branch:
-            return complete("pr_state_unverified")
+        base_branch = initial_snapshot.base_branch
         try:
             policy = github.effective_merge_policy(
                 request.pr_number,
@@ -1648,7 +1665,7 @@ class PipelineGitHubJobRunner:
             policy = None
         if policy is None:
             return complete("merge_policy_unavailable")
-        unsafe = policy_safety(policy)
+        unsafe = policy_safety(policy, initial_snapshot)
         if unsafe is not None:
             return complete(unsafe)
 
@@ -1689,7 +1706,7 @@ class PipelineGitHubJobRunner:
             current_policy = None
         if not isinstance(current_policy, EffectiveMergePolicy) or current_policy != policy:
             return complete("merge_policy_unavailable")
-        unsafe = policy_safety(current_policy)
+        unsafe = policy_safety(current_policy, initial_snapshot)
         if unsafe is not None:
             return complete(unsafe)
 
@@ -1700,7 +1717,7 @@ class PipelineGitHubJobRunner:
         boundary = operation_boundary()
         if boundary is not None:
             return complete(boundary)
-        admitted = admit()
+        admitted = admit(initial_snapshot)
         if isinstance(admitted, str):
             return complete(admitted, merge_sha=terminal_merge_sha)
         final_state, _ = admitted
@@ -1721,7 +1738,7 @@ class PipelineGitHubJobRunner:
         if result.malformed:
             return complete("merge_result_malformed", attempted=True)
         if result.transport_error or result.status is None:
-            admitted = admit()
+            admitted = admit(initial_snapshot)
             if isinstance(admitted, str):
                 return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
             return complete("merge_not_ready", attempted=True, can_retry=True)
@@ -1750,7 +1767,7 @@ class PipelineGitHubJobRunner:
                 merge_sha=merge_sha,
             )
         if result.status == 409:
-            admitted = admit()
+            admitted = admit(initial_snapshot)
             if isinstance(admitted, str):
                 return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
             return complete("merge_409_without_head_drift", attempted=True)
@@ -1766,7 +1783,7 @@ class PipelineGitHubJobRunner:
                 return complete("merge_readiness_unavailable", attempted=True)
             if readiness.get("autoMergeRequest") is not None:
                 return complete("auto_merge_already_armed", attempted=True)
-            admitted = admit()
+            admitted = admit(initial_snapshot)
             if isinstance(admitted, str):
                 return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
             readiness_status, fingerprint = readiness_outcome(readiness, park_if_ready=True)

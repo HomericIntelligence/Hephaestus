@@ -94,7 +94,12 @@ Repository and direct intake use the same row boundary. Intake does not write
  spending a merge attempt. The `--poll-max-wait` option controls this wait. Its
  default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof.
  Readiness is not authorization, and each request
- still has fresh open/`main`/unarmed/exclusive-GO admission.
+ still has fresh open/unarmed/exclusive-GO admission against the verified
+ repository default branch. The initial repository/default-branch/base/head
+ snapshot must equal the final snapshot immediately before the request. If the
+ metadata accessor fails, stop queue-driven merge requests and use the normal
+ protected manual process until repair. Do not guess `main` or use labels as
+ branch authority.
  The adapter makes one request per call and never retries. A required merge
  queue uses exact-head GraphQL admission. Otherwise, direct REST merge requires
  strict-update protection from a source that the current actor cannot bypass.
@@ -689,9 +694,10 @@ exact-head status evidence ─────► current CI merge gate
 ```
 
 `merge_wait` requires the implementation-GO label, a matching in-memory
-reviewed-head proof on an open `main`, confirmed-unarmed live PR with an
-exclusive GO label, no unresolved review threads, and complete passing required
-status evidence for that head. A missing or drifted proof,
+reviewed-head proof on an open PR whose base equals the verified repository
+default branch, a confirmed-unarmed live PR with an exclusive GO label, no
+unresolved review threads, and complete passing required status evidence for
+that head. A missing or drifted proof,
 failed or missing required status evidence, or untrusted merge state blocks
 without a label mutation. A matching set
 permits a bounded sequence (default: five) of policy-selected server requests.
@@ -1586,8 +1592,8 @@ Architectural contract:
 Merge wait verifies a still-valid implementation review against its
 in-memory reviewed-head proof before each request. It may issue a bounded
 sequence (default: five) of policy-selected server merge requests. Admission
-for every request requires an open
-`main` PR, an explicitly unarmed record, an exclusive implementation-GO
+for every request requires an open PR whose base equals the verified repository
+default branch, an explicitly unarmed record, an exclusive implementation-GO
 label, the current-process reviewed-head proof or a verified retained rebase
 proof, no unresolved review threads, and complete passing required status
 evidence for the merge head. The merge head is the original reviewed commit
@@ -1633,7 +1639,7 @@ stateDiagram-v2
     Inspect --> OperatorOwned: externally armed
     Inspect --> PRReview: implementation proof missing
     Inspect --> Verify: implementation proof present
-    Verify --> Merge: matching reviewed head, main, unarmed exclusive GO
+    Verify --> Merge: matching head and verified default branch, unarmed exclusive GO
     Verify --> PRReview: missing or drifted proof
     Verify --> OperatorOwned: externally armed or ownership ambiguous
     Verify --> Failed: required status evidence missing or failed
@@ -2546,9 +2552,11 @@ Exit-code priority is:
   matching the live `headRefOid` of the PR. `pr_review` creates its
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
-  compares the proof with the confirmed-unarmed live PR, reads complete passing
-  required status evidence for that SHA, and issues the server route that the
-  effective policy requires. It does not arm or poll native auto-merge.
+  compares the proof with the confirmed-unarmed live PR, verifies that its base
+  equals the repository default branch from validated repository metadata,
+  reads complete passing required status evidence for that SHA, and issues the
+  server route that the effective policy requires. It does not arm or poll
+  native auto-merge.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Host advice and learning** — typed `AthenaSkillJob` operations executed
   by the Mnemosyne host boundary. Advice and learning do not invoke an agent

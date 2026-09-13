@@ -20,6 +20,9 @@ from dataclasses import dataclass
 from typing import Any, TypeVar, cast, overload
 
 from hephaestus.automation.dependency_parser import MAX_DEPENDENCY_FACTS
+from hephaestus.automation.pipeline.merge_wait_admission import (
+    VerifiedRepositoryDefaultBranch,
+)
 from hephaestus.github.client import (
     ClaudeUsageCapError,
     GitHubRateLimitError,
@@ -628,6 +631,35 @@ def reviewed_pr_state_query(pull_request_id: str) -> GraphQLQuerySpec[dict[str, 
         "query($id:ID!){node(id:$id){... on PullRequest{id state headRefOid mergedAt}}}",
         validate,
     )
+
+
+def repository_default_branch_query(
+    owner: str, name: str
+) -> GraphQLQuerySpec[VerifiedRepositoryDefaultBranch]:
+    """Build a validated repository identity and default-branch query."""
+    document = (
+        "query RepositoryDefaultBranch($owner:String!,$name:String!){"
+        "repository(owner:$owner,name:$name){owner{login} name nameWithOwner "
+        "defaultBranchRef{name}}}"
+    )
+
+    def validate(data: dict[str, Any]) -> VerifiedRepositoryDefaultBranch:
+        repository = _repo_identity(data, owner, name)
+        name_with_owner = repository.get("nameWithOwner")
+        default_branch_ref = repository.get("defaultBranchRef")
+        default_branch = (
+            default_branch_ref.get("name") if isinstance(default_branch_ref, dict) else None
+        )
+        if not isinstance(name_with_owner, str) or not isinstance(default_branch, str):
+            raise ValueError("repository default-branch fields were malformed")
+        return VerifiedRepositoryDefaultBranch(
+            owner=owner,
+            name=name,
+            name_with_owner=name_with_owner,
+            default_branch=default_branch,
+        )
+
+    return _query("RepositoryDefaultBranch", document, validate)
 
 
 def issue_comment_ids_query(
@@ -1684,6 +1716,7 @@ __all__ = [
     "pipeline_thread_snapshot_page_query",
     "pipeline_unresolved_threads_page_query",
     "pull_request_queue_entry_query",
+    "repository_default_branch_query",
     "resolve_thread_mutation",
     "review_receipts_page_query",
     "review_thread_snapshot_page_query",

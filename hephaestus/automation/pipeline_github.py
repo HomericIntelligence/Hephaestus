@@ -4,6 +4,7 @@ from .pipeline_github_audit import PipelineGitHubAuditReceipts
 from .pipeline_github_check_policy import PipelineGitHubCheckPolicy
 from .pipeline_github_mutations import PipelineGitHubMutations
 from .pipeline_github_queries import PipelineGitHubQueries
+from .pipeline_github_repository import PipelineGitHubRepositoryMetadata
 from .pipeline_github_required_checks import PipelineGitHubRequiredChecks
 from .pipeline_github_review_queries import PipelineGitHubReviewQueries
 from .pipeline_github_reviews import PipelineGitHubReviews
@@ -15,6 +16,7 @@ from .state_labels import STATE_IMPLEMENTATION_GO, STATE_IMPLEMENTATION_NO_GO
 class PipelineGitHub(
     PipelineGitHubTransport,
     PipelineGitHubQueries,
+    PipelineGitHubRepositoryMetadata,
     PipelineGitHubCheckPolicy,
     PipelineGitHubRequiredChecks,
     PipelineGitHubReviewQueries,

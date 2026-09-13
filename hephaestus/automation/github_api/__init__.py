@@ -96,6 +96,7 @@ from .graphql import (  # noqa: E402
     pipeline_unresolved_threads_page_query as pipeline_unresolved_threads_page_query,
     pull_request_queue_entry_query as pull_request_queue_entry_query,
     pull_request_reviews_page_query as pull_request_reviews_page_query,
+    repository_default_branch_query as repository_default_branch_query,
     resolve_thread_mutation as resolve_thread_mutation,
     review_receipts_page_query as review_receipts_page_query,
     review_thread_snapshot_page_query as review_thread_snapshot_page_query,
