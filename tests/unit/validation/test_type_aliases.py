@@ -13,11 +13,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.validation.type_aliases import (
     _update_string_state,
     check_files,
     detect_shadowing,
     format_error,
+    format_human_error,
     is_shadowing_pattern,
     main,
 )
@@ -124,6 +126,27 @@ class TestFormatError:
         assert "Result = DomainResult" in msg
         assert "DomainResult" in msg
         assert "type: ignore[shadowing]" in msg
+
+    def test_human_error_uses_stable_localized_templates(self) -> None:
+        """Translate human labels and keep finding values unchanged."""
+        raw = format_error(
+            Path("foo.py"),
+            10,
+            "Result = DomainResult",
+            "Result",
+            "DomainResult",
+        )
+        catalog = {
+            "%(path)s:%(line)d: Type alias shadows domain-specific name": (
+                "%(path)s:%(line)d : alias de type non valide"
+            )
+        }
+
+        with using_localizer(catalog):
+            rendered = format_human_error(raw)
+
+        assert "foo.py:10 : alias de type non valide" in rendered
+        assert "Result = DomainResult" in rendered
 
 
 class TestCheckFiles:

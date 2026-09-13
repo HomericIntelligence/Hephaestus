@@ -6,6 +6,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.config.child_environments import build_nested_host_verification_env
 from hephaestus.utils.helpers import run_subprocess
 
@@ -39,7 +40,7 @@ def _run(args: Sequence[str]) -> int:
     try:
         environment = build_nested_host_verification_env(Path.cwd())
     except ValueError:
-        print("Invalid host verification environment.", file=sys.stderr)
+        print(text("Invalid host verification environment."), file=sys.stderr)
         return 2
     result = run_subprocess([sys.executable, *args], env=environment, check=False)
     if result.returncode != 0:
@@ -51,7 +52,7 @@ def _run(args: Sequence[str]) -> int:
         if result.stderr:
             print(result.stderr[-_FAILURE_OUTPUT_TAIL_CHARS:], end="", file=sys.stderr)
         if summary:
-            print("\nHost coverage failure index:", file=sys.stderr)
+            print(text("\nHost coverage failure index:"), file=sys.stderr)
             print("\n".join(summary), file=sys.stderr)
     return result.returncode
 

@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status
 from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
@@ -75,6 +76,8 @@ def run_mypy_per_file(
     files: list[str],
     flags: list[str] | None = None,
     python_executable: str | None = None,
+    *,
+    redirect_stdout_to_stderr: bool = False,
 ) -> int:
     """Run mypy once per file and aggregate exit codes.
 
@@ -82,13 +85,14 @@ def run_mypy_per_file(
         files: File paths to type-check.
         flags: Extra mypy flags to pass to every invocation.
         python_executable: Python interpreter to invoke mypy with (default: ``sys.executable``).
+        redirect_stdout_to_stderr: Keep mypy diagnostics outside machine stdout.
 
     Returns:
         0 if all runs passed, otherwise the last non-zero return code.
 
     """
     if not files:
-        print("mypy-each-file: no files to check", file=sys.stderr)
+        print(text("mypy-each-file: no files to check"), file=sys.stderr)
         return 0
 
     executable = python_executable or sys.executable
@@ -111,6 +115,7 @@ def run_mypy_per_file(
                 result = subprocess.run(
                     cmd,
                     capture_output=False,
+                    stdout=sys.stderr if redirect_stdout_to_stderr else None,
                     timeout=NETWORK_TIMEOUT,
                     env=build_python_phase_env(Path.cwd()),
                 )
@@ -119,7 +124,11 @@ def run_mypy_per_file(
                 # A hung mypy run must not stall the whole check; treat it as a
                 # failure for this file so the aggregate rc is non-zero (#684).
                 print(
-                    f"mypy-each-file: {filepath} timed out after {exc.timeout}s",
+                    text(
+                        "mypy-each-file: %(value0)s timed out after %(value1)ss",
+                        value0=filepath,
+                        value1=exc.timeout,
+                    ),
                     file=sys.stderr,
                 )
                 rc = 124
@@ -171,7 +180,11 @@ def main() -> int:
     raw_args = [a for a in raw_args if a not in ("-h", "--help", "--json")]
 
     flags, files = split_flags_and_files(raw_args)
-    exit_code = run_mypy_per_file(files, flags=flags)
+    exit_code = run_mypy_per_file(
+        files,
+        flags=flags,
+        redirect_stdout_to_stderr=json_mode,
+    )
     if json_mode:
         emit_json_status(exit_code, files_checked=len(files))
     return exit_code

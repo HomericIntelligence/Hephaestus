@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -10,6 +11,7 @@ import pytest
 
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 from hephaestus.validation.doc_config import (
+    _format_consistency_error,
     check_addopts_cov_fail_under,
     check_agents_md_threshold,
     check_claude_md_threshold,
@@ -23,6 +25,37 @@ from hephaestus.validation.doc_config import (
     load_coverage_threshold,
     main,
 )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "AGENTS.md: No coverage threshold mention found (expected pattern: '<N>%+ test coverage')",
+        (
+            "DEFINITION_OF_DONE.md: No coverage threshold mention found "
+            "(expected '--cov-fail-under=<N>' or 'drops total under <N>%')"
+        ),
+    ],
+)
+def test_human_fallback_keeps_single_percent_sign(message: str) -> None:
+    """Keep literal percent signs unchanged in English fallback text."""
+    assert _format_consistency_error(message) == message
+
+
+def test_main_json_reports_missing_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Machine mode emits one JSON error when project metadata is absent."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["check-doc-config", "--repo-root", str(tmp_path), "--json", "--skip-test-count"],
+    )
+
+    assert main() == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["passed"] is False
+    assert payload["error"] == "configuration_error"
 
 
 def _write_pyproject(tmp_path: Path, content: str) -> Path:

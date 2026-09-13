@@ -12,6 +12,7 @@ from hephaestus.ci.bandit_baseline_check import (
     diff_against_baseline,
     main,
 )
+from hephaestus.cli.localization import using_localizer
 
 
 def test_count_by_test_id_tallies_duplicate_low_results() -> None:
@@ -124,6 +125,37 @@ def test_main_prints_regression_and_stale_sections(
     assert "REGRESSION: B999" in output
     assert "STALE BASELINE: B607" in output
     assert "STALE BASELINE: B311" in output
+
+
+def test_main_localizes_classified_problem_templates(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Translate classification prose and keep finding identifiers and counts."""
+    report_path = tmp_path / "report.json"
+    baseline_path = tmp_path / "baseline.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "errors": [],
+                "results": [{"test_id": "B999", "issue_severity": "LOW"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline_path.write_text(
+        json.dumps({"generated_by": "issue #1", "severity": "LOW", "counts": {}}),
+        encoding="utf-8",
+    )
+    source = "REGRESSION: %(test_id)s is new (%(baseline)d -> %(current)d)"
+
+    with using_localizer(
+        {source: "RÉGRESSION : %(test_id)s est nouveau (%(baseline)d -> %(current)d)"}
+    ):
+        assert main([str(report_path), str(baseline_path)]) == 1
+
+    output = capsys.readouterr().out
+    assert "RÉGRESSION : B999 est nouveau (0 -> 1)" in output
 
 
 @pytest.mark.parametrize(

@@ -608,6 +608,27 @@ class TestScriptsCoverageWiredIntoEntryPoint:
 
         assert check_test_structure(tmp_path, src_package="mypkg") is True
 
+    def test_scripts_coverage_details_use_stable_templates(self, tmp_path: Path, capsys) -> None:
+        """Translate authored detail lines and keep their file names."""
+        from hephaestus.cli.localization import using_localizer
+
+        src = tmp_path / "mypkg"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        _make_test_dir(tmp_path / "tests" / "unit", "utils")
+        scripts_root = tmp_path / "scripts"
+        scripts_root.mkdir()
+        (scripts_root / "foo.py").write_text("# script\n", encoding="utf-8")
+        source = (
+            "  The scripts/ smoke harness is required so every scripts/*.py is "
+            "auto-tested via --help."
+        )
+
+        with using_localizer({source: "  Le banc d'essai scripts/ est requis."}):
+            assert check_test_structure(tmp_path, src_package="mypkg") is False
+
+        assert "Le banc d'essai scripts/ est requis." in capsys.readouterr().err
+
 
 class TestCheckScriptsCoverage:
     """Tests for check_scripts_coverage()."""

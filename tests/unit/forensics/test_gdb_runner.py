@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.forensics import gdb_runner
 from hephaestus.forensics.gdb_runner import (
     _parse_execution_timeout,
@@ -97,6 +98,17 @@ class TestBuildGdbScript:
         script = build_gdb_script("a", "b", "c")
         assert "gdb.events.stop.connect" in script
         assert "gdb.events.exited.connect" in script
+
+    def test_localizes_crash_message_as_a_stable_template(self) -> None:
+        """Embed a translated crash template that the generated script defines."""
+        source = "[run-under-gdb] caught %(signal)s; dumping %(core)s"
+        translated = "[gdb] signal %(signal)s; fichier %(core)s"
+
+        with using_localizer({source: translated}):
+            script = build_gdb_script("a", "b", "c")
+
+        assert f"CRASH_MESSAGE = {translated!r}" in script
+        assert 'print(CRASH_MESSAGE % {"signal": signo, "core": CORE_FILE})' in script
 
 
 class TestRunUnderGdb:
@@ -216,6 +228,26 @@ class TestMain:
         monkeypatch.setenv("RUN_UNDER_GDB", "1")
         rc = main(["--direct", "/tmp/unused-core-dir", "sh", "-c", "exit 3"])
         assert rc == 3
+
+    def test_direct_json_routes_child_output_to_stderr(self, capfd, tmp_path: Path) -> None:
+        """Machine mode keeps inherited child output outside the JSON stream."""
+        import json
+
+        rc = main(
+            [
+                "--json",
+                "--direct",
+                str(tmp_path),
+                "sh",
+                "-c",
+                "printf child-output",
+            ]
+        )
+
+        captured = capfd.readouterr()
+        assert rc == 0
+        assert json.loads(captured.out)["status"] == "ok"
+        assert "child-output" in captured.err
 
     def test_direct_option_json_envelope(self, monkeypatch, capsys) -> None:
         """--direct with --json emits a status envelope."""
@@ -590,3 +622,11 @@ def test_main_translates_execution_timeout(
     assert "command timed out" in captured.err
     if as_json:
         assert '"exit_code": 124' in captured.out
+
+
+def test_timeout_range_error_uses_stable_human_template() -> None:
+    """Translate the range diagnostic and keep the configured bound."""
+    source = "timeout must be between 1 and %(maximum)d seconds"
+    with using_localizer({source: "le délai doit être entre 1 et %(maximum)d secondes"}):
+        with pytest.raises(argparse.ArgumentTypeError, match="entre 1 et 86400"):
+            gdb_runner._parse_execution_timeout("0")

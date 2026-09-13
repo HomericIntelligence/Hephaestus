@@ -14,6 +14,7 @@ from typing import Any
 
 from hephaestus.automation.fleet_request_evidence import read_request_evidence
 from hephaestus.automation.fleet_worker import FleetWorker
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg
 
 _MAX_MESSAGE = 1024 * 1024
@@ -110,7 +111,7 @@ def serve(worker: FleetWorker) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """Run a private worker or attach through an existing authenticated transport."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=text(__doc__ or ""))
     add_json_arg(parser)
     add_version_arg(parser)
     subcommands = parser.add_subparsers(dest="operation", required=True)

@@ -320,6 +320,39 @@ class TestMain:
         payload = json.loads(capsys.readouterr().out)
         assert payload["passed"] is False
 
+    def test_json_reports_module_floor_failure(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """A configured missing module emits one structured failure result."""
+        pytest.importorskip("defusedxml")
+        coverage_xml = tmp_path / "coverage.xml"
+        coverage_xml.write_text(
+            '<?xml version="1.0" ?>\n'
+            '<coverage line-rate="0.95"><packages><package name="pkg" line-rate="0.95">'
+            '<classes><class filename="pkg/present.py" line-rate="0.95"/></classes>'
+            "</package></packages></coverage>\n",
+            encoding="utf-8",
+        )
+        config = tmp_path / "coverage.toml"
+        config.write_text(
+            '[coverage]\nminimum = 80\n[coverage.modules."pkg/missing.py"]\nminimum = 90\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--coverage-file",
+                str(coverage_xml),
+                "--config",
+                str(config),
+                "--json",
+            ],
+        )
+
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["error"] == "module_floor_failed"
+
     def test_json_unparseable_coverage(
         self, tmp_path: Path, monkeypatch, capsys, empty_config: Path
     ) -> None:

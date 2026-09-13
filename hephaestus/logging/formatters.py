@@ -16,11 +16,17 @@ Usage:
     logger.info("hello", extra={"request_id": "abc-123"})
 """
 
+from __future__ import annotations
+
+import copy
 import json
 import logging
 import traceback
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from hephaestus._localization import Localizer
 
 # Fields that are reserved for the formatter and cannot be overridden by
 # context or extra data.  If a context key collides with one of these, it
@@ -28,6 +34,38 @@ from typing import Any
 RESERVED_FIELDS: frozenset[str] = frozenset(
     {"timestamp", "level", "logger", "message", "exception", "stack_info"}
 )
+_LOCALIZED_RENDERER_FIELD = "_hephaestus_localized_renderer"
+
+
+class _LocalizedFormatter(logging.Formatter):
+    """Translate a copy of a plain-text log message template."""
+
+    def __init__(
+        self,
+        fmt: str | None = None,
+        datefmt: str | None = None,
+        *,
+        localizer: Localizer | None = None,
+    ) -> None:
+        """Capture the active localizer unless the caller supplies one."""
+        self._formatter = logging.Formatter(fmt, datefmt=datefmt)
+        super().__init__(fmt, datefmt=datefmt)
+        if localizer is None:
+            from hephaestus._localization import get_localizer
+
+            localizer = get_localizer()
+        self._localizer = localizer
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format a translated copy and keep the source record unchanged."""
+        copied = copy.copy(record)
+        localized_renderer = getattr(copied, _LOCALIZED_RENDERER_FIELD, None)
+        if callable(localized_renderer):
+            copied.msg = localized_renderer(self._localizer)
+            copied.args = ()
+        elif isinstance(copied.msg, str):
+            copied.msg = self._localizer.template(copied.msg)
+        return self._formatter.format(copied)
 
 
 class JsonFormatter(logging.Formatter):
@@ -69,7 +107,11 @@ class JsonFormatter(logging.Formatter):
         # ``LoggerAdapter`` (used by ``ContextLogger``) flattens its ``extra``
         # dict onto the record as individual attributes; we recover them by
         # set-differencing against the default ``LogRecord`` attribute names.
-        extras = {k: v for k, v in record.__dict__.items() if k not in _DEFAULT_RECORD_ATTRS}
+        extras = {
+            k: v
+            for k, v in record.__dict__.items()
+            if k not in _DEFAULT_RECORD_ATTRS and k != _LOCALIZED_RENDERER_FIELD
+        }
 
         for key, value in extras.items():
             if key in RESERVED_FIELDS:

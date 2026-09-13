@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
 from hephaestus.logging.utils import get_logger
@@ -240,21 +241,21 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Check or fix absolute-path links in markdown files",
-        epilog="Example: %(prog)s --check docs/ -v",
+        description=text("Check or fix absolute-path links in markdown files"),
+        epilog=text("Example: %(prog)s --check docs/ -v"),
     )
-    parser.add_argument("path", type=Path, help="Markdown file or directory to process")
+    parser.add_argument("path", type=Path, help=text("Markdown file or directory to process"))
     parser.add_argument(
         "--check",
         "-n",
         action="store_true",
-        help="Validate only — report issues and exit 1 if any found (no writes)",
+        help=text("Validate only — report issues and exit 1 if any found (no writes)"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print per-file details",
+        help=text("Print per-file details"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -275,15 +276,21 @@ def main() -> int:
                 )
             else:
                 print(
-                    f"Found {files_with_issues} file(s) with {total} invalid link(s) "
-                    f"({system_issues} system-path, {abs_issues} absolute-path).",
+                    text(
+                        "Found %(files)d file(s) with %(total)d invalid link(s) "
+                        "(%(system)d system-path, %(absolute)d absolute-path).",
+                        files=files_with_issues,
+                        total=total,
+                        system=system_issues,
+                        absolute=abs_issues,
+                    ),
                     file=sys.stderr,
                 )
             return 1
         if args.json:
             emit_json_status(0, message="no invalid links found")
         elif args.verbose:
-            print("No invalid absolute-path links found.")
+            print(text("No invalid absolute-path links found."))
         return 0
 
     # Fix mode
@@ -301,7 +308,13 @@ def main() -> int:
             absolute_path_fixes=abs_fixes,
         )
     else:
-        print(f"\nSummary: {files_modified} file(s) modified, {total} link(s) fixed.")
+        print(
+            text(
+                "\nSummary: %(value0)s file(s) modified, %(value1)s link(s) fixed.",
+                value0=files_modified,
+                value1=total,
+            )
+        )
     return 0
 
 

@@ -15,6 +15,7 @@ from hephaestus.ci.precommit import (
     load_precommit_config,
     write_step_summary,
 )
+from hephaestus.cli.localization import using_localizer
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -23,6 +24,27 @@ def test_summary_table_includes_reported_values() -> None:
     """The benchmark report preserves its measured status and counts."""
     table = format_summary_table(45, 300, "passed")
     assert "passed" in table
+    assert "45s" in table
+    assert "300" in table
+
+
+def test_summary_table_uses_a_stable_catalog_template() -> None:
+    """Translate the report template before metric insertion."""
+    source = (
+        "## Pre-commit Hook Benchmark\n\n"
+        "| Metric | Value |\n"
+        "|--------|-------|\n"
+        "| Hook status | %(status_icon)s %(hook_status)s |\n"
+        "| Elapsed time | %(elapsed_s)ds |\n"
+        "| Files processed | %(file_count)d |\n"
+    )
+    translated = source.replace("Metric", "Mesure").replace("Files processed", "Fichiers")
+
+    with using_localizer({source: translated}):
+        table = format_summary_table(45, 300, "passed")
+
+    assert "Mesure" in table
+    assert "Fichiers" in table
     assert "45s" in table
     assert "300" in table
 

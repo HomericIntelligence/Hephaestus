@@ -160,10 +160,14 @@ def test_main_rejects_missing_github_repository() -> None:
         sl.main(["--issue-number", "42", "--body-file", "-"])
 
 
-def test_main_rejects_malformed_github_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_rejects_malformed_github_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """A GITHUB_REPOSITORY value without '/' exits 1 with a descriptive error."""
     monkeypatch.setattr("sys.stdin", io.StringIO(RENDERED_BODY))
     assert sl.main(["--repo", "no-slash-here", "--issue-number", "42", "--body-file", "-"]) == 1
+    assert "Unexpected --repo 'no-slash-here'" in capsys.readouterr().err
 
 
 def test_main_reconciles_on_valid_input(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -194,3 +195,19 @@ class TestMain:
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code == 0
+
+    def test_json_keeps_mypy_diagnostics_out_of_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd
+    ) -> None:
+        """A failing mypy run leaves one parseable JSON document on stdout."""
+        source = tmp_path / "bad.py"
+        source.write_text('value: int = "wrong"\n', encoding="utf-8")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-mypy-each-file", "--json", str(source)],
+        )
+
+        assert main() != 0
+        captured = capfd.readouterr()
+        assert json.loads(captured.out)["status"] == "error"
+        assert "incompatible types" in captured.err.lower()

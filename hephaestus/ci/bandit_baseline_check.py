@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.io import safe_write
 
 
@@ -118,6 +120,38 @@ def diff_against_baseline(current: dict[str, int], baseline: dict[str, int]) -> 
     return problems
 
 
+def _format_problem(problem: str) -> str:
+    """Translate one classified problem while retaining its result data."""
+    patterns = (
+        (
+            r"REGRESSION: (?P<test_id>\S+) is new \((?P<baseline>\d+) -> (?P<current>\d+)\)",
+            "REGRESSION: %(test_id)s is new (%(baseline)d -> %(current)d)",
+        ),
+        (
+            r"REGRESSION: (?P<test_id>\S+) count increased "
+            r"\((?P<baseline>\d+) -> (?P<current>\d+)\)",
+            "REGRESSION: %(test_id)s count increased (%(baseline)d -> %(current)d)",
+        ),
+        (
+            r"STALE BASELINE: (?P<test_id>\S+) is no longer observed "
+            r"\((?P<baseline>\d+) -> (?P<current>\d+)\)",
+            "STALE BASELINE: %(test_id)s is no longer observed (%(baseline)d -> %(current)d)",
+        ),
+        (
+            r"STALE BASELINE: (?P<test_id>\S+) count decreased "
+            r"\((?P<baseline>\d+) -> (?P<current>\d+)\)",
+            "STALE BASELINE: %(test_id)s count decreased (%(baseline)d -> %(current)d)",
+        ),
+    )
+    for pattern, source in patterns:
+        if match := re.fullmatch(pattern, problem):
+            values: dict[str, object] = match.groupdict()
+            values["baseline"] = int(match["baseline"])
+            values["current"] = int(match["current"])
+            return text(source, **values)
+    return problem
+
+
 def _write_baseline(
     baseline_path: Path,
     counts: dict[str, int],
@@ -138,14 +172,14 @@ def _write_baseline(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Compare a Bandit LOW-severity report with its reviewed baseline."
+        description=text("Compare a Bandit LOW-severity report with its reviewed baseline.")
     )
     parser.add_argument("report_path", type=Path)
     parser.add_argument("baseline_path", type=Path)
     parser.add_argument("--update-baseline", action="store_true")
     parser.add_argument(
         "--review-reference",
-        help="Issue or PR recording the security review; required when updating.",
+        help=text("Issue or PR recording the security review; required when updating."),
     )
     return parser
 
@@ -157,31 +191,33 @@ def main(argv: list[str] | None = None) -> int:
     if args.update_baseline and (
         args.review_reference is None or not args.review_reference.strip()
     ):
-        parser.error("--update-baseline requires --review-reference")
+        parser.error(text("--update-baseline requires --review-reference"))
     if args.review_reference is not None and not args.update_baseline:
-        parser.error("--review-reference requires --update-baseline")
+        parser.error(text("--review-reference requires --update-baseline"))
 
     try:
         current = count_by_test_id(_load_json_object(args.report_path))
         if args.update_baseline:
             _write_baseline(args.baseline_path, current, args.review_reference)
-            print(f"Updated Bandit LOW baseline: {args.baseline_path}")
+            print(text("Updated Bandit LOW baseline: %(value0)s", value0=args.baseline_path))
             return 0
         baseline = _baseline_counts(_load_json_object(args.baseline_path))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        print(f"ERROR: invalid Bandit baseline input: {exc}", file=sys.stderr)
+        print(text("ERROR: invalid Bandit baseline input: %(value0)s", value0=exc), file=sys.stderr)
         return 2
 
     problems = diff_against_baseline(current, baseline)
     if not problems:
         return 0
 
-    print("ERROR: Bandit LOW-severity report does not match the reviewed baseline:")
+    print(text("ERROR: Bandit LOW-severity report does not match the reviewed baseline:"))
     for problem in problems:
-        print(f"  {problem}")
+        print(text("  %(problem)s", problem=_format_problem(problem)))
     print(
-        "\nReview every changed finding. After approval, use "
-        "--update-baseline with --review-reference; see SECURITY.md."
+        text(
+            "\nReview every changed finding. After approval, use "
+            "--update-baseline with --review-reference; see SECURITY.md."
+        )
     )
     return 1
 

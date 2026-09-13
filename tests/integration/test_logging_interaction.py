@@ -10,6 +10,8 @@ import sys
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
+
 pytestmark = pytest.mark.integration
 
 
@@ -121,6 +123,17 @@ class TestFileLogging:
         content = log_file.read_text()
         assert "named-logger-file-test" in content
 
+    def test_plain_file_uses_emission_catalog(self, tmp_path) -> None:
+        """Translate a plain file record with the active emission catalog."""
+        from hephaestus.logging.utils import get_logger
+
+        log_file = tmp_path / "localized.log"
+        with using_localizer({"Processed %(count)d files": "Traitement de %(count)d fichiers"}):
+            logger = get_logger("test.file.localized", log_file=str(log_file))
+        logger.info("Processed %(count)d files", {"count": 2})
+
+        assert "Traitement de 2 fichiers" in log_file.read_text()
+
 
 class TestJsonFormat:
     """Integration: JSON formatting through an explicit logging parameter."""
@@ -141,6 +154,20 @@ class TestJsonFormat:
                 assert "message" in parsed
                 assert "level" in parsed
                 assert "timestamp" in parsed
+
+    def test_json_fields_and_message_are_stable_with_active_catalog(self, capsys) -> None:
+        """Keep JSON keys and message content unchanged under a catalog."""
+        import json
+
+        from hephaestus.logging.utils import get_logger
+
+        logger = get_logger("test.json.localized", json_format=True, level=logging.INFO)
+        with using_localizer({"Processed %(count)d files": "Traitement de %(count)d fichiers"}):
+            logger.info("Processed %(count)d files", {"count": 2})
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["message"] == "Processed 2 files"
+        assert {"timestamp", "level", "logger", "message"} <= payload.keys()
 
 
 class TestContextLogger:

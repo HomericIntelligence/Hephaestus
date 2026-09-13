@@ -109,6 +109,7 @@ from hephaestus.automation.pipeline.work_item import (
     ItemResult as ItemResult,
     WorkItem as WorkItem,
 )
+from hephaestus.cli.localization import text
 from hephaestus.prompts import PromptCatalog as PromptCatalog
 
 if TYPE_CHECKING:
@@ -161,6 +162,22 @@ _FAIL_BACK_CAP = sum(sum(route.budgets.values()) for route in ROUTES.values())
 _PROMPT_PREFLIGHT_TEMPLATE = "shared/untrusted_notice.j2"
 _PROMPT_PREFLIGHT_ERROR = "ERROR: Prompt templates missing or unreadable — reinstall: `uv sync`."
 
+
+class PromptCatalogPreflightError(SystemExit):
+    """Carry separate human and machine forms of a prompt preflight failure."""
+
+    def __init__(self, error: Exception) -> None:
+        """Preserve the loader cause and keep JSON text untranslated."""
+        self.json_message = f"{_PROMPT_PREFLIGHT_ERROR}\nCause: {error}"
+        super().__init__(
+            text(
+                "%(message)s\nCause: %(error)s",
+                message=text(_PROMPT_PREFLIGHT_ERROR),
+                error=error,
+            )
+        )
+
+
 # JSONL is diagnostic only. GitHub facts, learning journals, arming state, and issue-wave
 # checkpoints are the restart authorities for their owned state.
 _DEFAULT_EVENT_LOG_CAPACITY = 1_024
@@ -202,7 +219,7 @@ def _preflight_prompt_catalog() -> None:
     try:
         PromptCatalog.current().render(_PROMPT_PREFLIGHT_TEMPLATE)
     except (OSError, TemplateNotFound, ValueError) as exc:
-        raise SystemExit(f"{_PROMPT_PREFLIGHT_ERROR}\nCause: {exc}") from exc
+        raise PromptCatalogPreflightError(exc) from exc
 
 
 def _json_safe(value: Any) -> Any:

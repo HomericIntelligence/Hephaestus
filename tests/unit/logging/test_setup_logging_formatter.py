@@ -29,7 +29,7 @@ def test_log_format_environment_is_ignored() -> None:
         text=True,
     )
 
-    assert result.stdout.strip() == "Formatter"
+    assert result.stdout.strip() == "_LocalizedFormatter"
 
 
 def test_custom_datefmt_is_forwarded_to_formatter() -> None:

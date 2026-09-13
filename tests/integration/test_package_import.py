@@ -56,7 +56,10 @@ SUBPACKAGE_SYMBOLS = [
     ("hephaestus.datasets", ["DatasetDownloader"]),
     ("hephaestus.github", ["gh_call", "collect_stats"]),
     ("hephaestus.config", ["load_config", "get_setting", "merge_configs"]),
-    ("hephaestus.cli", ["Colors"]),
+    (
+        "hephaestus.cli",
+        ["Colors", "Localizer", "get_localizer", "text", "using_localizer"],
+    ),
     ("hephaestus.utils", ["slugify", "retry_with_backoff", "flatten_dict", "get_repo_root"]),
     ("hephaestus.markdown", ["MarkdownFixer", "LinkFixer"]),
     ("hephaestus.benchmarks", ["detect_regressions", "load_benchmark_results"]),

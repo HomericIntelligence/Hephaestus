@@ -98,6 +98,23 @@ def test_prepare_worktree_rejects_a_symlinked_path_component(
     assert "symlink" in capsys.readouterr().err
 
 
+def test_prepare_worktree_localizes_invalid_branch_name(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Translate the authored error template and keep the invalid branch name."""
+    from hephaestus.cli.localization import using_localizer
+
+    repository = tmp_path / "repo"
+    _initialize_repository(repository)
+    monkeypatch.chdir(repository)
+    source = "invalid branch name: %(branch)s"
+
+    with using_localizer({source: "nom de branche non valide : %(branch)s"}):
+        assert prepare_worktree_main(["bad branch", "--start-point", "HEAD"]) == 1
+
+    assert "nom de branche non valide : bad branch" in capsys.readouterr().err
+
+
 def test_prepare_worktree_rejects_path_traversal_outside_path_root(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

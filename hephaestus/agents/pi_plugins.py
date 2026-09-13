@@ -29,6 +29,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_version_arg
 from hephaestus.config.child_environments import build_pi_child_env
 
@@ -1448,7 +1449,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the ``hephaestus-install-pi-plugins`` argument parser."""
     parser = argparse.ArgumentParser(
         prog="hephaestus-install-pi-plugins",
-        description="Install and preflight the catalog-pinned Pi package set.",
+        description=text("Install and preflight the catalog-pinned Pi package set."),
     )
     add_version_arg(parser)
     scope = parser.add_mutually_exclusive_group()
@@ -1468,14 +1469,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         metavar="PATH",
-        help="explicit Pi executable path",
+        help=text("explicit Pi executable path"),
     )
     parser.add_argument(
         "--pi-dir",
         type=Path,
         default=None,
         metavar="PATH",
-        help="explicit Pi coding-agent configuration directory",
+        help=text("explicit Pi coding-agent configuration directory"),
     )
     return parser
 
@@ -1499,12 +1500,60 @@ def _report_document(report: InstallReport) -> dict[str, Any]:
     }
 
 
+def _format_install_detail(report: InstallReport) -> str:
+    """Translate authored installer detail and retain external diagnostics."""
+    if report.status == "confirmation_required":
+        return text("rerun with --yes")
+    if report.status == "installed_unapproved":
+        return text(
+            "packages were retained; rerun with --project-local --yes --approve to verify once"
+        )
+    if report.status == "install_timeout":
+        return text("Package installation timed out: %(package)s", package=report.detail)
+    if report.status == "install_failed":
+        return text("Package installation failed: %(detail)s", detail=report.detail)
+    if match := re.fullmatch(
+        r"Pi package preflight failed: (?P<status>[^ (]+)(?P<detail> \(.+\))?\. "
+        r"(?P<remediation>.+)",
+        report.detail,
+    ):
+        detail = match["detail"] or ""
+        return _format_preflight_parts(
+            match["status"],
+            detail[2:-1] if detail else "",
+            match["remediation"],
+        )
+    return report.detail
+
+
+def _format_preflight_parts(status: str, detail: str, remediation: str) -> str:
+    """Translate one human preflight failure from its structured fields."""
+    rendered_detail = text(" (%(detail)s)", detail=detail) if detail else ""
+    if remediation == "Run hephaestus-install-pi-plugins --global --yes --no-approve":
+        rendered_remediation = text(remediation)
+    elif remediation.startswith("npm install -g --ignore-scripts "):
+        rendered_remediation = text("Run %(command)s", command=remediation)
+    else:
+        rendered_remediation = remediation
+    return text(
+        "Pi package preflight failed: %(status)s%(detail)s. %(remediation)s",
+        status=status,
+        detail=rendered_detail,
+        remediation=rendered_remediation,
+    )
+
+
+def format_preflight_human_error(result: PiPreflightResult) -> str:
+    """Render a localized human error without changing result data."""
+    return _format_preflight_parts(result.status, result.detail, result.remediation)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the package bootstrap CLI and return its stable process status."""
     args = build_parser().parse_args(argv)
     yes = args.yes
     if not args.dry_run and not yes and sys.stdin.isatty() and not args.json_output:
-        answer = input("Install the catalog-pinned Pi packages? [y/N] ").strip().lower()
+        answer = input(text("Install the catalog-pinned Pi packages? [y/N] ")).strip().lower()
         yes = answer in {"y", "yes"}
     options = InstallOptions(
         dry_run=args.dry_run,
@@ -1520,12 +1569,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_output:
         print(json.dumps(_report_document(report), sort_keys=True))
     else:
-        print(f"Pi package bootstrap: {report.status}")
+        print(text("Pi package bootstrap: %(status)s", status=report.status))
         if report.detail:
-            print(report.detail, file=sys.stderr)
+            print(_format_install_detail(report), file=sys.stderr)
         if report.status == "dry_run":
             for command in report.commands:
-                print("  " + " ".join(command))
+                print(text("  %(command)s", command=" ".join(command)))
     if report.ready or report.status == "dry_run":
         return 0
     if report.status in {

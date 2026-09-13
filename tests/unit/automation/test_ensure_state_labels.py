@@ -10,6 +10,7 @@ enumeration filters archived/fork repos only — no name-based exclusion,
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -35,6 +36,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
 )
+from hephaestus.cli.localization import using_localizer
 
 
 @pytest.fixture
@@ -231,6 +233,152 @@ class TestMain:
         mock_gh_call.side_effect = subprocess.CalledProcessError(1, ["gh"], stderr="not in a repo")
         with pytest.raises(SystemExit):
             main([])
+
+    def test_json_reports_repository_discovery_failure(
+        self,
+        mock_gh_call: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Emit one JSON error when repository discovery fails."""
+        mock_gh_call.side_effect = subprocess.CalledProcessError(
+            1,
+            ["gh"],
+            stderr="not in a repo",
+        )
+
+        source = (
+            "Could not detect current repo via 'gh repo view'. Pass --repo OWNER/NAME or "
+            "--org NAME explicitly."
+        )
+        with using_localizer({source: "Dépôt introuvable."}):
+            assert main(["--json"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["exit_code"] == 1
+        assert payload["message"].startswith("Could not detect current repo")
+
+    def test_discovery_error_log_record_stays_untranslated(
+        self,
+        mock_gh_call: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Keep the shared error record stable for a JSON formatter."""
+        mock_gh_call.side_effect = subprocess.CalledProcessError(
+            1,
+            ["gh"],
+            stderr="not in a repo",
+        )
+        source = (
+            "Could not detect current repo via 'gh repo view'. Pass --repo OWNER/NAME or "
+            "--org NAME explicitly."
+        )
+
+        with (
+            patch("hephaestus.automation.ensure_state_labels.configure_cli_logging"),
+            using_localizer({source: "Dépôt introuvable."}),
+            caplog.at_level(logging.ERROR, logger="hephaestus.automation.ensure_state_labels"),
+        ):
+            assert main(["--json", "--log-format", "json"]) == 1
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert source in messages
+        assert "Dépôt introuvable." not in messages
+
+    def test_json_reports_logging_setup_failure(
+        self,
+        mock_gh_call: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Emit one JSON error when command logging cannot start."""
+        with patch(
+            "hephaestus.automation.ensure_state_labels.configure_cli_logging",
+            side_effect=OSError("read-only directory"),
+        ):
+            assert main(["--json", "--log-file", "/unavailable/labels.log"]) == 1
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["exit_code"] == 1
+        assert payload["message"].startswith("Cannot open log file")
+        mock_gh_call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            subprocess.TimeoutExpired(["gh"], 60),
+            OSError("cannot execute gh"),
+            RuntimeError("GitHub breaker is open"),
+        ],
+    )
+    def test_json_reports_org_discovery_operational_failure(
+        self,
+        mock_gh_call: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+        error: Exception,
+    ) -> None:
+        """Emit one JSON error for each GitHub discovery transport failure."""
+        mock_gh_call.side_effect = error
+
+        assert main(["--json", "--org", "AnOrg"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["exit_code"] == 1
+        assert payload["message"].startswith("gh repo list AnOrg failed")
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            subprocess.TimeoutExpired(["gh"], 60),
+            OSError("cannot execute gh"),
+            RuntimeError("GitHub breaker is open"),
+        ],
+    )
+    def test_json_reports_current_repo_discovery_operational_failure(
+        self,
+        mock_gh_call: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+        error: Exception,
+    ) -> None:
+        """Emit one JSON error when current-repository discovery fails."""
+        mock_gh_call.side_effect = error
+
+        assert main(["--json"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["exit_code"] == 1
+        assert payload["message"].startswith("Could not detect current repo")
+
+    def test_json_reports_invalid_org_discovery_json(
+        self,
+        mock_gh_call: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Emit one JSON error when GitHub returns invalid JSON."""
+        mock_gh_call.return_value = _ok_proc(stdout="not-json{")
+
+        assert main(["--json", "--org", "AnOrg"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["exit_code"] == 1
+        assert payload["message"].startswith("gh repo list returned invalid JSON")
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            [1],
+            [{"name": 7, "isArchived": False, "isFork": False}],
+            [{"name": "RepoA", "isArchived": "no", "isFork": False}],
+        ],
+    )
+    def test_json_reports_malformed_org_discovery_data(
+        self,
+        mock_gh_call: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+        payload: object,
+    ) -> None:
+        """Reject malformed decoded repository data with one JSON error."""
+        mock_gh_call.return_value = _ok_proc(stdout=json.dumps(payload))
+
+        assert main(["--json", "--org", "AnOrg"]) == 1
+        result = json.loads(capsys.readouterr().out)
+        assert result["exit_code"] == 1
+        assert result["message"] == "gh repo list returned invalid repository data"
 
     def test_main_configures_cli_logging(self, mock_gh_call: MagicMock) -> None:
         """main() routes log setup through the shared configure_cli_logging helper."""

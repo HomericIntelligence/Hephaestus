@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.logging.formatters import JsonFormatter
 from hephaestus.logging.utils import (
     ContextLogger,
@@ -234,6 +235,41 @@ class TestGetLogger:
             assert parsed["level"] == "INFO"
         finally:
             logger.logger.removeHandler(handler)
+
+    def test_plain_output_uses_construction_context_localizer(self) -> None:
+        """Translate plain log templates with the construction catalog."""
+        with using_localizer({"Hello %(name)s": "Bonjour %(name)s"}):
+            logger = get_logger("test.localized_plain_output")
+        stream = StringIO()
+        handler = logger.logger.handlers[0]
+        handler.stream = stream
+        logger.info("Hello %(name)s", {"name": "Ada"})
+
+        assert "Bonjour Ada" in stream.getvalue()
+
+    def test_plain_output_keeps_construction_catalog_in_background_thread(self) -> None:
+        """Use the formatter catalog when a fresh thread emits the record."""
+        stream = StringIO()
+        with using_localizer({"Ready": "Prêt"}):
+            logger = get_logger("test.localized_background_output")
+            logger.logger.handlers[0].stream = stream
+
+        thread = threading.Thread(target=logger.info, args=("Ready",))
+        thread.start()
+        thread.join()
+
+        assert "Prêt" in stream.getvalue()
+
+    def test_json_output_does_not_use_localization_catalog(self) -> None:
+        """Keep the machine-readable JSON message stable."""
+        with using_localizer({"Hello %(name)s": "Bonjour %(name)s"}):
+            logger = get_logger("test.localized_json_output", json_format=True)
+        stream = StringIO()
+        handler = logger.logger.handlers[0]
+        handler.stream = stream
+        logger.info("Hello %(name)s", {"name": "Ada"})
+
+        assert json.loads(stream.getvalue())["message"] == "Hello Ada"
 
     def test_json_format_with_context(self) -> None:
         """Bound context fields appear in JSON output."""
@@ -600,6 +636,26 @@ class TestSetupLogging:
             assert len(file_handlers) == 1
         finally:
             root.handlers.clear()
+            root.handlers.extend(saved)
+
+    def test_existing_file_handler_keeps_its_formatter(self, tmp_path: Path) -> None:
+        """Do not replace a formatter on an existing file handler."""
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        log_file = tmp_path / "existing.log"
+        handler = logging.FileHandler(log_file)
+        formatter = logging.Formatter("CUSTOM %(message)s")
+        handler.setFormatter(formatter)
+        root.addHandler(handler)
+        try:
+            with using_localizer({"Ready": "Prêt"}):
+                setup_logging(log_file=str(log_file))
+
+            assert handler.formatter is formatter
+        finally:
+            root.handlers.clear()
+            handler.close()
             root.handlers.extend(saved)
 
     def test_no_duplicate_stdout_handler(self) -> None:

@@ -20,6 +20,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 PACKAGE_NAME = "hephaestus"
@@ -132,9 +133,12 @@ def find_violations(
 def format_report(findings: list[ApiReferenceFinding]) -> str:
     """Render *findings* as a human-readable report."""
     if not findings:
-        return "OK: generated API reference contains hephaestus subpackage pages."
-    lines = [f"FAIL: {len(findings)} API-reference violation(s):"]
-    lines.extend(f"  [{finding.kind}] {finding.detail}" for finding in findings)
+        return text("OK: generated API reference contains hephaestus subpackage pages.")
+    lines = [text("FAIL: %(count)d API-reference violation(s):", count=len(findings))]
+    lines.extend(
+        text("  [%(kind)s] %(detail)s", kind=finding.kind, detail=finding.detail)
+        for finding in findings
+    )
     return "\n".join(lines)
 
 
@@ -150,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         "--docs-dir",
         type=Path,
         default=None,
-        help="Generated API reference directory (default: <repo-root>/docs/api)",
+        help=text("Generated API reference directory (default: <repo-root>/docs/api)"),
     )
     args = parser.parse_args(argv)
     repo_root = resolve_repo_root(args)

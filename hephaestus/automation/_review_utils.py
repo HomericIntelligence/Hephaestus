@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_github_throttle_args,
@@ -81,7 +82,7 @@ def add_max_workers_arg(
         default=default,
         choices=range(1, 33),
         metavar="N",
-        help=help_text,
+        help=text(help_text),
     )
 
 
@@ -89,13 +90,13 @@ def _parse_gh_extra_path_root(value: str) -> Path:
     """Validate an explicit root whose only admitted executable is ``bin/gh``."""
     root = Path(value).expanduser()
     if not root.is_absolute():
-        raise argparse.ArgumentTypeError("--gh-extra-path-root must be an absolute path")
+        raise argparse.ArgumentTypeError(text("--gh-extra-path-root must be an absolute path"))
     try:
         resolved_root = root.resolve(strict=True)
         executable = (resolved_root / "bin" / "gh").resolve(strict=True)
     except OSError as exc:
         raise argparse.ArgumentTypeError(
-            "--gh-extra-path-root must contain an executable bin/gh"
+            text("--gh-extra-path-root must contain an executable bin/gh")
         ) from exc
     if (
         not resolved_root.is_dir()
@@ -104,7 +105,7 @@ def _parse_gh_extra_path_root(value: str) -> Path:
         or not executable.is_relative_to(resolved_root)
     ):
         raise argparse.ArgumentTypeError(
-            "--gh-extra-path-root must contain an executable bin/gh without symlink escapes"
+            text("--gh-extra-path-root must contain an executable bin/gh without symlink escapes")
         )
     return resolved_root
 
@@ -116,7 +117,7 @@ def add_gh_extra_path_root_arg(parser: argparse.ArgumentParser) -> None:
         type=_parse_gh_extra_path_root,
         default=None,
         metavar="ROOT",
-        help=(
+        help=text(
             "Explicitly allow only ROOT/bin/gh in addition to system gh locations. "
             "ROOT must be absolute and contain an executable bin/gh that does not escape ROOT."
         ),
@@ -130,13 +131,13 @@ def _automation_parser_kwargs(
     formatter_class: type[argparse.HelpFormatter] | None,
 ) -> dict[str, Any]:
     """Build ArgumentParser kwargs while omitting unset optional parameters."""
-    kwargs: dict[str, Any] = {"description": description}
+    kwargs: dict[str, Any] = {"description": text(description)}
     if prog is not None:
         kwargs["prog"] = prog
     if formatter_class is not None:
         kwargs["formatter_class"] = formatter_class
     if epilog is not None:
-        kwargs["epilog"] = epilog
+        kwargs["epilog"] = text(epilog)
     return kwargs
 
 
@@ -200,7 +201,7 @@ def build_automation_parser(
         add_gh_extra_path_root_arg(parser)
     if add_dry_run:
         if dry_run_help is not None:
-            parser.add_argument("--dry-run", action="store_true", help=dry_run_help)
+            parser.add_argument("--dry-run", action="store_true", help=text(dry_run_help))
         else:
             add_dry_run_arg(parser, prefix=dry_run_prefix)
     if add_verbose:

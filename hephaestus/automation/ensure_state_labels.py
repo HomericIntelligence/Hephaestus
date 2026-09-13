@@ -36,17 +36,34 @@ import sys
 import threading
 
 from hephaestus.automation.github_api import gh_call
+from hephaestus.cli.localization import Localizer, text
 from hephaestus.cli.utils import (
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.logging.formatters import _LOCALIZED_RENDERER_FIELD
 from hephaestus.utils.terminal import terminal_guard
 
 from ._review_utils import build_automation_parser
 from .label_taxonomy import REQUIRED_REPOSITORY_LABEL_SPECS
 
 logger = logging.getLogger(__name__)
+
+
+class _StateLabelCliError(SystemExit):
+    """Carry separate human and machine forms of one discovery failure."""
+
+    def __init__(self, source: str, /, **values: object) -> None:
+        """Build localized display text and stable JSON text."""
+        self._source = source
+        self._values = values
+        self.json_message = source % values
+        super().__init__(text(source, **values))
+
+    def render(self, localizer: Localizer) -> str:
+        """Render this failure for one plain formatter."""
+        return localizer.text(self._source, **self._values)
 
 
 def _gh_list_org_repos(org: str, *, timeout: int = 60) -> list[str]:
@@ -73,13 +90,33 @@ def _gh_list_org_repos(org: str, *, timeout: int = 60) -> list[str]:
             timeout=timeout,
         )
     except subprocess.CalledProcessError as exc:
-        raise SystemExit(
-            f"gh repo list {org} failed (rc={exc.returncode}): {(exc.stderr or '').strip()}"
+        raise _StateLabelCliError(
+            "gh repo list %(org)s failed (rc=%(returncode)s): %(detail)s",
+            org=org,
+            returncode=exc.returncode,
+            detail=(exc.stderr or "").strip(),
+        ) from exc
+    except (subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
+        raise _StateLabelCliError(
+            "gh repo list %(org)s failed: %(detail)s",
+            org=org,
+            detail=exc,
         ) from exc
     try:
         entries = json.loads(out.stdout or "[]")
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"gh repo list returned invalid JSON: {exc}") from exc
+        raise _StateLabelCliError(
+            "gh repo list returned invalid JSON: %(error)s",
+            error=exc,
+        ) from exc
+    if not isinstance(entries, list) or any(
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("name"), str)
+        or not isinstance(entry.get("isArchived"), bool)
+        or not isinstance(entry.get("isFork"), bool)
+        for entry in entries
+    ):
+        raise _StateLabelCliError("gh repo list returned invalid repository data")
     return sorted(
         e["name"] for e in entries if not e.get("isArchived", False) and not e.get("isFork", False)
     )
@@ -140,14 +177,19 @@ def _detect_current_repo_slug() -> str:
     try:
         proc = gh_call(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
     except subprocess.CalledProcessError as exc:
-        raise SystemExit(
-            "Could not detect current repo via 'gh repo view'. "
-            "Pass --repo OWNER/NAME or --org NAME explicitly."
+        raise _StateLabelCliError(
+            "Could not detect current repo via 'gh repo view'. Pass --repo OWNER/NAME or "
+            "--org NAME explicitly."
+        ) from exc
+    except (subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
+        raise _StateLabelCliError(
+            "Could not detect current repo via 'gh repo view': %(detail)s",
+            detail=exc,
         ) from exc
     if not proc.stdout.strip():
-        raise SystemExit(
-            "Could not detect current repo via 'gh repo view'. "
-            "Pass --repo OWNER/NAME or --org NAME explicitly."
+        raise _StateLabelCliError(
+            "Could not detect current repo via 'gh repo view'. Pass --repo OWNER/NAME or "
+            "--org NAME explicitly."
         )
     return proc.stdout.strip()
 
@@ -169,27 +211,40 @@ def _build_parser() -> argparse.ArgumentParser:
     target.add_argument(
         "--repo",
         metavar="OWNER/NAME",
-        help="Single target repo (default: the current git checkout's origin).",
+        help=text("Single target repo (default: the current git checkout's origin)."),
     )
     target.add_argument(
         "--org",
         metavar="ORG",
-        help="Apply to every non-archived, non-fork repo in the org.",
+        help=text("Apply to every non-archived, non-fork repo in the org."),
     )
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point for ``hephaestus-ensure-state-labels``.
+def _setup_logging(args: argparse.Namespace) -> None:
+    """Configure logging or raise one stable command error."""
+    try:
+        if args.log_file is None:
+            configure_cli_logging(
+                verbose=args.verbose,
+                log_format=getattr(args, "log_format", "text"),
+            )
+        else:
+            configure_cli_logging(
+                verbose=args.verbose,
+                log_format=getattr(args, "log_format", "text"),
+                log_file=args.log_file,
+            )
+    except OSError as exc:
+        raise _StateLabelCliError(
+            "Cannot open log file %(path)r: %(error)s. Check the parent directory and permissions.",
+            path=getattr(args, "log_file", None),
+            error=exc,
+        ) from exc
 
-    Returns 0 on success, non-zero on hard failure (e.g. ``gh`` not on PATH or
-    an unrecoverable ``gh repo list`` failure). Per-label-create warnings
-    do not fail the overall run — operators can re-run to retry.
-    """
-    args = _build_parser().parse_args(argv)
-    configure_github_throttle_from_args(args)
-    configure_cli_logging(verbose=args.verbose, log_format=getattr(args, "log_format", "text"))
 
+def _run(args: argparse.Namespace) -> int:
+    """Run the label command after argument parsing and logging setup."""
     shutdown = threading.Event()
     with terminal_guard(shutdown.set):
         try:
@@ -241,6 +296,25 @@ def main(argv: list[str] | None = None) -> int:
             if args.json:
                 emit_json_status(130, message="interrupted")
             return 130
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Provision state labels and return a process exit code."""
+    args = _build_parser().parse_args(argv)
+    configure_github_throttle_from_args(args)
+    try:
+        _setup_logging(args)
+        return _run(args)
+    except _StateLabelCliError as exc:
+        if not args.json:
+            raise
+        logger.error(
+            "%s",
+            exc.json_message,
+            extra={_LOCALIZED_RENDERER_FIELD: exc.render},
+        )
+        emit_json_status(1, message=exc.json_message)
+        return 1
 
 
 if __name__ == "__main__":

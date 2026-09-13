@@ -11,8 +11,12 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.cli.utils import (
+    DRY_RUN_HELP_CAVEAT,
     CommandRegistry,
+    add_agent_timeout_arg,
+    add_dry_run_arg,
     add_github_throttle_args,
     add_json_arg,
     add_logging_args,
@@ -27,6 +31,47 @@ from hephaestus.cli.utils import (
     format_table,
     resolve_repo_root,
 )
+
+
+def test_dynamic_shared_help_uses_stable_catalog_templates() -> None:
+    """Translate shared help templates before dynamic values are inserted."""
+    parser = argparse.ArgumentParser()
+    timeout_source = "Agent subprocess timeout in seconds (default: %(default)d)."
+    catalog = {
+        "Preview changes.": "Prévisualiser les modifications.",
+        DRY_RUN_HELP_CAVEAT: "REMARQUE : cette opération utilise encore des jetons.",
+        timeout_source: "Délai du sous-processus agent (valeur par défaut : %(default)d).",
+        "Extra timeout detail": "Détail du délai",
+    }
+
+    with using_localizer(catalog):
+        add_dry_run_arg(parser, prefix="Preview changes")
+        add_agent_timeout_arg(parser, default=12, help_extra="Extra timeout detail")
+
+    help_text = parser.format_help()
+    normalized_help = " ".join(help_text.split())
+    assert "Prévisualiser les modifications." in normalized_help
+    assert "REMARQUE : cette opération utilise encore des jetons." in normalized_help
+    assert "Délai du sous-processus agent (valeur par défaut : 12)." in normalized_help
+    assert "Détail du délai" in normalized_help
+
+
+def test_shared_help_does_not_translate_a_catalog_value_twice() -> None:
+    """Do not use a translated aggregate as a second catalog key."""
+    combined = "Prévisualiser. REMARQUE : cette opération utilise encore des jetons."
+    catalog = {
+        "Preview.": "Prévisualiser.",
+        DRY_RUN_HELP_CAVEAT: "REMARQUE : cette opération utilise encore des jetons.",
+        combined: "TRADUCTION INCORRECTE",
+    }
+    parser = argparse.ArgumentParser()
+
+    with using_localizer(catalog):
+        add_dry_run_arg(parser, prefix="Preview")
+
+    help_text = " ".join(parser.format_help().split())
+    assert combined in help_text
+    assert "TRADUCTION INCORRECTE" not in help_text
 
 
 class TestConfirmAction:

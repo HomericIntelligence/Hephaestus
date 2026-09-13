@@ -58,6 +58,7 @@ from hephaestus.agents.model_selection import (
 )
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
+    format_preflight_human_error,
     package_tree_digest,
     preflight_pi_environment,
     prove_athena_skill_command,
@@ -68,6 +69,7 @@ from hephaestus.agents.pi_session import (
     create_pi_binding,
     validate_pi_binding,
 )
+from hephaestus.cli.localization import text
 from hephaestus.config.child_environments import (
     build_claude_child_env,
     build_codex_child_env,
@@ -533,7 +535,7 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
         "--agent",
         choices=AGENT_CHOICES,
         default=None,
-        help=(
+        help=text(
             "Agent backend to invoke for model-driven steps "
             "(default: auto-detect authenticated backend, preferring claude when authenticated)"
         ),
@@ -541,48 +543,48 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--disable-pi-automation",
         action="store_true",
-        help="Reject Pi automation before preflight or provider execution",
+        help=text("Reject Pi automation before preflight or provider execution"),
     )
     parser.add_argument(
         "--auth-status-timeout",
         type=_positive_timeout,
         default=agent_auth_status_timeout(),
         metavar="SECONDS",
-        help="Positive timeout for provider authentication probes (default: 10)",
+        help=text("Positive timeout for provider authentication probes (default: 10)"),
     )
     parser.add_argument(
         "--pi-isolation-adapter",
         default=None,
         metavar="ENTRY_POINT",
-        help="Explicit registered Pi OS-isolation adapter entry point",
+        help=text("Explicit registered Pi OS-isolation adapter entry point"),
     )
     parser.add_argument(
         "--pi-dir",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Explicit Pi coding-agent configuration directory",
+        help=text("Explicit Pi coding-agent configuration directory"),
     )
     parser.add_argument(
         "--codex-isolation-adapter",
         type=_codex_adapter_name,
         default=None,
         metavar="NAME",
-        help="Exact external Codex implementation-isolation entry point",
+        help=text("Exact external Codex implementation-isolation entry point"),
     )
     parser.add_argument(
         "--codex-isolation-deployment-lock",
         type=_absolute_cli_path,
         default=None,
         metavar="PATH",
-        help="Absolute detached Codex adapter deployment-lock path",
+        help=text("Absolute detached Codex adapter deployment-lock path"),
     )
     parser.add_argument(
         "--codex-isolation-deployment-lock-sha256",
         type=_lowercase_sha256,
         default=None,
         metavar="SHA256",
-        help="Expected SHA-256 digest for the detached deployment lock",
+        help=text("Expected SHA-256 digest for the detached deployment lock"),
     )
 
 
@@ -593,7 +595,7 @@ def _codex_adapter_name(value: str) -> str:
         or any(character.isspace() for character in value)
         or any(token in value for token in ("/", "\\", ":", ";"))
     ):
-        raise argparse.ArgumentTypeError("Codex isolation adapter name is invalid")
+        raise argparse.ArgumentTypeError(text("Codex isolation adapter name is invalid"))
     return value
 
 
@@ -601,14 +603,16 @@ def _absolute_cli_path(value: str) -> Path:
     """Parse one lexical absolute path without file-system access."""
     path = Path(value)
     if not path.is_absolute() or "\x00" in value:
-        raise argparse.ArgumentTypeError("Codex deployment-lock path must be absolute")
+        raise argparse.ArgumentTypeError(text("Codex deployment-lock path must be absolute"))
     return path
 
 
 def _lowercase_sha256(value: str) -> str:
     """Parse one lowercase SHA-256 value."""
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
-        raise argparse.ArgumentTypeError("Codex deployment-lock digest must be lowercase SHA-256")
+        raise argparse.ArgumentTypeError(
+            text("Codex deployment-lock digest must be lowercase SHA-256")
+        )
     return value
 
 
@@ -617,9 +621,9 @@ def _positive_timeout(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("timeout must be a positive integer") from exc
+        raise argparse.ArgumentTypeError(text("timeout must be a positive integer")) from exc
     if parsed <= 0:
-        raise argparse.ArgumentTypeError("timeout must be a positive integer")
+        raise argparse.ArgumentTypeError(text("timeout must be a positive integer"))
     return parsed
 
 
@@ -734,13 +738,17 @@ def _read_pi_settings_payload(config_path: Path, *, required: bool) -> Any | Non
     except FileNotFoundError:
         if not required:
             return None
-        failure = AgentExecutionError("Pi default model configuration is unavailable or invalid")
+        failure = AgentExecutionError(
+            text("Pi default model configuration is unavailable or invalid")
+        )
     except (OSError, UnicodeError, json.JSONDecodeError):
-        failure = AgentExecutionError("Pi default model configuration is unavailable or invalid")
+        failure = AgentExecutionError(
+            text("Pi default model configuration is unavailable or invalid")
+        )
     if failure is not None:
         raise failure
     if not isinstance(payload, dict):
-        raise AgentExecutionError("Pi default model configuration must be a JSON object")
+        raise AgentExecutionError(text("Pi default model configuration must be a JSON object"))
     return payload
 
 
@@ -765,7 +773,7 @@ def _load_pi_default_model_selection(
     thinking = payload.get("defaultThinkingLevel", "")
     if not isinstance(thinking, str) or thinking not in PI_THINKING_LEVELS | {""}:
         raise AgentExecutionError(
-            "Pi default model configuration has an invalid defaultThinkingLevel"
+            text("Pi default model configuration has an invalid defaultThinkingLevel")
         )
     if explicit_model:
         return AgentModelSelection(explicit_model, thinking)
@@ -778,7 +786,7 @@ def _load_pi_default_model_selection(
         or model.strip() != model
     ):
         raise AgentExecutionError(
-            "Pi default model configuration requires defaultProvider and defaultModel"
+            text("Pi default model configuration requires defaultProvider and defaultModel")
         )
     return AgentModelSelection(f"{provider}/{model}", thinking)
 
@@ -824,7 +832,14 @@ def _require_pi_automation_admission(
         )
     result = preflight_pi_environment(cwd, pi_dir=pi_dir)
     if not result.ready:
-        raise AgentExecutionError(f"{PI_AUTOMATION_PREFLIGHT_ERROR} {result.remediation_message()}")
+        human_preflight = format_preflight_human_error(result)
+        raise AgentExecutionError(
+            text(
+                "%(message)s %(remediation)s",
+                message=text(PI_AUTOMATION_PREFLIGHT_ERROR),
+                remediation=human_preflight,
+            )
+        )
     return result
 
 
@@ -1022,7 +1037,9 @@ def reject_pi_unsupported_surface(agent: str, reason: str) -> None:
 
     """
     if is_pi(agent):
-        raise AgentExecutionError(f"Pi is not supported by this surface: {reason}")
+        raise AgentExecutionError(
+            text("Pi is not supported by this surface: %(reason)s", reason=reason)
+        )
 
 
 def agent_uses_configured_model_default(agent: str) -> bool:
@@ -4800,10 +4817,10 @@ def _opencode_failure_diagnostic(*texts: str | None) -> str | None:
     structured shape converts CLI crashes into actionable automation errors
     instead of opaque exit codes; the message is bounded like the Codex path.
     """
-    for text in texts:
-        if not text:
+    for output_text in texts:
+        if not output_text:
             continue
-        for line in text.splitlines():
+        for line in output_text.splitlines():
             if not line.strip():
                 continue
             try:
@@ -4946,8 +4963,11 @@ def _opencode_sandbox_args(sandbox: str) -> list[str]:
     if sandbox == "workspace-write":
         return []
     raise AgentExecutionError(
-        f"OpenCode cannot enforce sandbox mode {sandbox!r}; select claude, "
-        "codex, or pi for stages that require this isolation level"
+        text(
+            "OpenCode cannot enforce sandbox mode %(sandbox)r; select claude, codex, or pi "
+            "for stages that require this isolation level",
+            sandbox=sandbox,
+        )
     )
 
 
@@ -5063,7 +5083,7 @@ def _pi_automation_cmd(
     """Build a non-interactive Pi command with explicit private selection."""
     selection = parse_model_selection(model)
     if not selection.model:
-        raise AgentExecutionError("Pi automation requires an explicit model selection")
+        raise AgentExecutionError(text("Pi automation requires an explicit model selection"))
     cmd = _pi_base_cmd(executable, lifecycle=lifecycle, session_id=session_id)
     cmd.extend(
         [
@@ -5127,7 +5147,7 @@ def _pi_automation_profile(
     """Materialize the exact preflight-proven packages plus private model/auth data."""
     inventory = preflight.inventory
     if inventory is None or not inventory.ready:
-        raise AgentExecutionError("Pi automation lacks a verified package inventory")
+        raise AgentExecutionError(text("Pi automation lacks a verified package inventory"))
     source_dir = pi_dir.expanduser() if pi_dir is not None else Path.home() / ".pi" / "agent"
     with tempfile.TemporaryDirectory(prefix="pi-automation-") as temporary:
         profile_dir = Path(temporary)
@@ -5136,11 +5156,21 @@ def _pi_automation_profile(
         for key, source in sorted(inventory.roots.items()):
             expected = inventory.content_sha256.get(key)
             if not expected or package_tree_digest(source) != expected:
-                raise AgentExecutionError(f"Pi package {key!r} content changed after preflight")
+                raise AgentExecutionError(
+                    text(
+                        "Pi package %(package)r content changed after preflight",
+                        package=key,
+                    )
+                )
             destination = profile_dir / "packages" / key
             shutil.copytree(source, destination, ignore=shutil.ignore_patterns(".git"))
             if package_tree_digest(destination) != expected:
-                raise AgentExecutionError(f"Pi package {key!r} snapshot integrity failed")
+                raise AgentExecutionError(
+                    text(
+                        "Pi package %(package)r snapshot integrity failed",
+                        package=key,
+                    )
+                )
             snapshot_roots[key] = destination
         write_secure(
             profile_dir / "settings.json",
@@ -5386,7 +5416,10 @@ def validate_agent_execution_support(
         and agent not in {"claude", "pi"}
     ):
         raise AgentExecutionError(
-            f"{agent} has no enforceable no-tool execution mode for remediation reply"
+            text(
+                "%(agent)s has no enforceable no-tool execution mode for remediation reply",
+                agent=agent,
+            )
         )
 
 
@@ -5423,9 +5456,13 @@ def _pi_policy_args(
                 resolved = skill_path.resolve(strict=True)
                 package_root = package_roots["athena"].resolve(strict=True)
             except OSError as exc:
-                raise AgentExecutionError(f"Pi skill {command!r} is unavailable") from exc
+                raise AgentExecutionError(
+                    text("Pi skill %(command)r is unavailable", command=command)
+                ) from exc
             if not resolved.is_relative_to(package_root) or not (resolved / "SKILL.md").is_file():
-                raise AgentExecutionError(f"Pi skill {command!r} escaped its proven package")
+                raise AgentExecutionError(
+                    text("Pi skill %(command)r escaped its proven package", command=command)
+                )
             args.extend(["--skill", str(resolved)])
     return args
 
@@ -5458,17 +5495,17 @@ def _run_pi_with_policy(
             "no Pi provider process was started"
         )
     if preflight.executable is None:
-        raise AgentExecutionError("Pi automation lacks a preflight-proven executable")
+        raise AgentExecutionError(text("Pi automation lacks a preflight-proven executable"))
     try:
         executable = preflight.executable.resolve(strict=True)
         metadata = executable.stat()
     except OSError as exc:
-        raise AgentExecutionError("Pi preflight-proven executable is unavailable") from exc
+        raise AgentExecutionError(text("Pi preflight-proven executable is unavailable")) from exc
     if executable != preflight.executable:
-        raise AgentExecutionError("Pi preflight-proven executable identity drifted")
+        raise AgentExecutionError(text("Pi preflight-proven executable identity drifted"))
     fingerprint = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
     if fingerprint != preflight.executable_fingerprint:
-        raise AgentExecutionError("Pi preflight-proven executable identity drifted")
+        raise AgentExecutionError(text("Pi preflight-proven executable identity drifted"))
     selection = (
         model
         if isinstance(model, AgentModelSelection)
@@ -5533,7 +5570,9 @@ def _run_pi_with_policy(
     allowed_skills = set(policy.skills)
     observed = tuple(dict.fromkeys(result.observed_skill_invocations))
     if any(skill not in allowed_skills for skill in observed):
-        raise AgentExecutionError("Pi isolation adapter reported an ungranted skill invocation")
+        raise AgentExecutionError(
+            text("Pi isolation adapter reported an ungranted skill invocation")
+        )
     return AgentRunResult(
         stdout=redact_pi_private_values(result.stdout, tokens),
         stderr=redact_pi_private_values(result.stderr, tokens),
@@ -5551,7 +5590,9 @@ def _pi_adapter_invocation_failure(
     if isinstance(exc, InterruptedError):
         return exc
     detail = redact_pi_private_values(str(exc), tokens)
-    return AgentExecutionError(f"Pi isolation adapter invocation failed: {detail}")
+    return AgentExecutionError(
+        text("Pi isolation adapter invocation failed: %(detail)s", detail=detail)
+    )
 
 
 def _redact_pi_exception_output(

@@ -17,6 +17,8 @@ from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.summary import (
     RunStats,
     TerminalSummary,
+    _item_row,
+    _summary_header,
     format_direct_review_recovery_worktrees,
     format_preserved_worktrees,
     print_summary,
@@ -24,6 +26,8 @@ from hephaestus.automation.pipeline.summary import (
     record_summary_action,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+from hephaestus.cli.localization import using_localizer
+from hephaestus.logging.formatters import JsonFormatter, _LocalizedFormatter
 
 
 def _stats(**overrides: object) -> RunStats:
@@ -91,6 +95,23 @@ class TestFormatPreservedWorktrees:
             "  git worktree remove --force /wt/issue-202",
         ]
 
+    def test_guidance_uses_stable_localized_templates(self) -> None:
+        """Translate guidance labels and keep paths and issue numbers unchanged."""
+        catalog = {
+            "\nPreserved worktrees (retained for recovery or debugging):": (
+                "\nArbres de travail conservés :"
+            ),
+            "  #%(number)d: %(path)s": "  dossier %(number)d : %(path)s",
+            "To discard them instead:": "Pour les supprimer :",
+        }
+
+        with using_localizer(catalog):
+            lines = format_preserved_worktrees([("repo-a", 101, "/wt/issue-101")], "impl.py")
+
+        assert lines[0] == "\nArbres de travail conservés :"
+        assert lines[1] == "  dossier 101 : /wt/issue-101"
+        assert "Pour les supprimer :" in lines
+
     def test_rerun_hint_actually_parses_with_the_loop_cli(self) -> None:
         """The emitted rerun command must be valid input to the loop parser (#2281).
 
@@ -112,6 +133,39 @@ class TestFormatPreservedWorktrees:
 
 class TestPrintSummaryRows:
     """Per-item rows and aggregates."""
+
+    def test_table_header_and_disposition_use_active_catalog(self) -> None:
+        """Translate display labels and keep item values unchanged."""
+        item = _item(7, StageName.FINISHED, passed=True)
+        with using_localizer({"repo": "dépôt", "PASS": "RÉUSSI"}):
+            header = _summary_header()
+            row = _item_row(item)
+
+        assert "dépôt" in header
+        assert "RÉUSSI" in row
+        assert "repo-a" in row
+
+    def test_summary_records_stay_raw_for_json_handlers(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Localize plain rendering without changing the shared log record."""
+        item = _item(7, StageName.FINISHED, passed=True)
+        catalog = {"repo": "dépôt", "PASS": "RÉUSSI"}
+
+        with using_localizer(catalog):
+            formatter = _LocalizedFormatter("%(message)s")
+            with caplog.at_level(logging.INFO):
+                print_summary([item], _stats(), [], json_out=False)
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert all("dépôt" not in message and "RÉUSSI" not in message for message in messages)
+        assert any("dépôt" in formatter.format(record) for record in caplog.records)
+        assert any("RÉUSSI" in formatter.format(record) for record in caplog.records)
+        machine_records = [json.loads(JsonFormatter().format(record)) for record in caplog.records]
+        assert all(
+            "dépôt" not in json.dumps(record) and "RÉUSSI" not in json.dumps(record)
+            for record in machine_records
+        )
 
     def test_repository_busy_reason_remains_visible(self, caplog: pytest.LogCaptureFixture) -> None:
         """The summary preserves a terminal repository contention cause."""
