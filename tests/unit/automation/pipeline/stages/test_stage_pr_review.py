@@ -2403,6 +2403,23 @@ class TestPrReviewStageStep:
                 ),
             ),
             (
+                "review_worker_pool_host_profile",
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    (
+                        "tests/unit/automation/pipeline/test_worker_pool.py::"
+                        "TestWorkerPoolSubmitComplete::"
+                        "test_host_verification_profile_keeps_source_outside_writable_root"
+                    ),
+                    "-q",
+                    "--tb=short",
+                ),
+            ),
+            (
                 "review_stalled_consumer_verification",
                 (
                     "uv",
