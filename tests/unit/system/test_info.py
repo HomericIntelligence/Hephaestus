@@ -3,6 +3,7 @@
 
 import sys
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.system.info import (
     extract_version_word,
     format_system_info,
@@ -151,6 +152,26 @@ class TestFormatSystemInfo:
         text = format_system_info(info, format_type="json")
         parsed = json.loads(text)
         assert "os" in parsed
+
+    def test_text_localizes_labels_and_keeps_values(self) -> None:
+        """Translate text labels and keep collected system values unchanged."""
+        info = get_system_info(include_tools=False)
+
+        with using_localizer({"OS Information:": "Système :"}):
+            output = format_system_info(info, format_type="text")
+
+        assert "Système :" in output
+        assert info["os"]["name"] in output
+
+    def test_json_is_stable_with_an_active_catalog(self) -> None:
+        """Do not translate machine-readable system information."""
+        info = get_system_info(include_tools=False)
+        expected = format_system_info(info, format_type="json")
+
+        with using_localizer({"OS Information:": "Système :"}):
+            actual = format_system_info(info, format_type="json")
+
+        assert actual == expected
 
     def test_invalid_format_falls_back_to_text(self) -> None:
         """Unrecognized format_type renders as text, not an error."""

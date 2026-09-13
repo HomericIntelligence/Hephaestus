@@ -402,6 +402,29 @@ def test_resolve_pr_json_error_is_machine_readable(_mock_throttle: MagicMock, ca
 
 
 @patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
+def test_resolve_pr_human_error_uses_stable_template(_mock_throttle: MagicMock, capsys) -> None:
+    """Translate an authored resolution error and keep its runtime identifier."""
+    from hephaestus.cli.localization import using_localizer
+
+    source = "invalid pull-request identifier: %(identifier)r"
+    with using_localizer({source: "identifiant de demande non valide : %(identifier)r"}):
+        assert (
+            resolve_pr_main(
+                [
+                    "--target-host",
+                    "github.com",
+                    "--target-repository",
+                    "owner/repository",
+                    "invalid",
+                ]
+            )
+            == 1
+        )
+
+    assert "identifiant de demande non valide : 'invalid'" in capsys.readouterr().err
+
+
+@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
 @patch("hephaestus.github.skill_pr_review.gh_call")
 def test_resolve_pr_rejects_missing_immutable_refs_as_json(
     mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys

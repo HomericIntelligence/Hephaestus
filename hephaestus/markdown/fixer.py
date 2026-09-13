@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
 from hephaestus.logging.utils import get_logger
@@ -468,17 +469,17 @@ class MarkdownFixer:
 def main() -> int:
     """Serve as the main entry point for the markdown fixer."""
     parser = argparse.ArgumentParser(
-        description="Fix common markdown linting errors automatically",
+        description=text("Fix common markdown linting errors automatically"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        epilog=text(__doc__),
     )
-    parser.add_argument("path", type=Path, help="Path to markdown file or directory")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("path", type=Path, help=text("Path to markdown file or directory"))
+    parser.add_argument("-v", "--verbose", action="store_true", help=text("Enable verbose output"))
     parser.add_argument(
         "-n",
         "--dry-run",
         action="store_true",
-        help="Show what would be fixed without making changes",
+        help=text("Show what would be fixed without making changes"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -507,12 +508,12 @@ def main() -> int:
             dry_run=args.dry_run,
         )
     else:
-        print("\nSummary:")
-        print(f"  Files modified: {files_modified}")
-        print(f"  Total fixes: {total_fixes}")
+        print(text("\nSummary:"))
+        print(text("  Files modified: %(value0)s", value0=files_modified))
+        print(text("  Total fixes: %(value0)s", value0=total_fixes))
 
         if args.dry_run:
-            print("\n[DRY RUN] No files were actually modified")
+            print(text("\n[DRY RUN] No files were actually modified"))
 
     return exit_code
 

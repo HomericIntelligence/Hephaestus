@@ -79,9 +79,15 @@ def test_mypy_per_file_preserves_unknown_flag_passthrough(
     """mypy_per_file.main() parses --json without swallowing mypy flags."""
     observed: dict[str, Any] = {}
 
-    def fake_run(files: list[str], flags: list[str] | None = None) -> int:
+    def fake_run(
+        files: list[str],
+        flags: list[str] | None = None,
+        *,
+        redirect_stdout_to_stderr: bool = False,
+    ) -> int:
         observed["files"] = files
         observed["flags"] = flags
+        observed["redirect_stdout_to_stderr"] = redirect_stdout_to_stderr
         return 0
 
     monkeypatch.setattr(
@@ -102,6 +108,7 @@ def test_mypy_per_file_preserves_unknown_flag_passthrough(
     assert observed == {
         "files": ["module.py"],
         "flags": ["--strict", "--python-version", "3.13"],
+        "redirect_stdout_to_stderr": True,
     }
     assert json.loads(capsys.readouterr().out)["files_checked"] == 1
 

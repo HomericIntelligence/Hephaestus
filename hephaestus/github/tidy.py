@@ -32,6 +32,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -623,7 +624,12 @@ def _cleanup_stale_worktree_candidate(
         )
         return False
 
-    prompt = f"Remove stale worktree {current.path} (branch {current.branch}; {reason})? [y/N] "
+    prompt = text(
+        "Remove stale worktree %(path)s (branch %(branch)s; %(reason)s)? [y/N] ",
+        path=current.path,
+        branch=current.branch,
+        reason=reason,
+    )
     if input(prompt).lower() != "y":
         logger.info("Kept worktree %s", current.path)
         return False
@@ -914,7 +920,7 @@ def _run_direct_rebase_agent(
     try:
         reject_pi_unsupported_surface(
             agent,
-            "tidy rebase agents are Pi N/A until Git mutation is host-owned",
+            text("tidy rebase agents are Pi N/A until Git mutation is host-owned"),
         )
         result = run_agent_text(
             agent=agent,
@@ -924,9 +930,9 @@ def _run_direct_rebase_agent(
             model=model,
             sandbox="workspace-write",
         )
-        text = result.stdout or ""
-        logger.debug("[%s] agent: %s", branch, text[:300])
-        return _status_from_agent_text(text) or "failed"
+        output_text = result.stdout or ""
+        logger.debug("[%s] agent: %s", branch, output_text[:300])
+        return _status_from_agent_text(output_text) or "failed"
     except Exception as e:
         logger.error("[%s] agent exception: %s", branch, e)
         return "failed"
@@ -947,10 +953,10 @@ async def _run_claude_rebase_agent(
     status = "failed"
     try:
         async for message in query(prompt=prompt, options=options):
-            text = getattr(message, "text", None) or str(message)
-            status = _status_from_agent_text(text) or status
-            if text:
-                logger.debug("[%s] agent: %s", branch, text[:300])
+            output_text = getattr(message, "text", None) or str(message)
+            status = _status_from_agent_text(output_text) or status
+            if output_text:
+                logger.debug("[%s] agent: %s", branch, output_text[:300])
     except Exception as e:
         logger.error("[%s] agent exception: %s", branch, e)
     return status
@@ -967,39 +973,42 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print actions without executing",
+        help=text("Print actions without executing"),
     )
     parser.add_argument(
         "--cleanup-stale-worktrees",
         action="store_true",
         help=(
-            "Interactively remove clean worktrees for closed issues or merged branches "
-            f"(requires Git {_WORKTREE_LIST_Z_MIN_GIT} or later)"
+            text(
+                "Interactively remove clean worktrees for closed issues or merged branches "
+                "(requires Git %(version)s or later)",
+                version=_WORKTREE_LIST_Z_MIN_GIT,
+            )
         ),
     )
     parser.add_argument(
         "--trunk",
         metavar="BRANCH",
-        help="Trunk branch (default: auto-detected)",
+        help=text("Trunk branch (default: auto-detected)"),
     )
     parser.add_argument(
         "--no-swarm",
         action="store_true",
-        help="Skip swarm dispatch; only report failures",
+        help=text("Skip swarm dispatch; only report failures"),
     )
     parser.add_argument(
         "--max-concurrent",
         type=int,
         default=5,
         metavar="N",
-        help="Max parallel swarm agents (default: 5)",
+        help=text("Max parallel swarm agents (default: 5)"),
     )
     add_agent_argument(parser)
     parser.add_argument(
         "--model",
         default="",
         metavar="MODEL[:EFFORT]",
-        help="Model name and optional effort; omit to use the tool default",
+        help=text("Model name and optional effort; omit to use the tool default"),
     )
     add_prompt_dir_argument(parser)
     parser.add_argument(
@@ -1007,14 +1016,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=positive_timeout,
         default=DEFAULT_GH_TIMEOUT,
         metavar="SECONDS",
-        help=f"per-call GitHub CLI timeout (default: {DEFAULT_GH_TIMEOUT})",
+        help=text("Per-call GitHub CLI timeout (default: %(timeout)s)", timeout=DEFAULT_GH_TIMEOUT),
     )
     parser.add_argument(
         "--rebase-timeout",
         type=positive_timeout,
         default=2400,
         metavar="SECONDS",
-        help="direct rebase-agent timeout (default: 2400)",
+        help=text("Direct rebase-agent timeout (default: 2400)"),
     )
     add_logging_args(parser)
     add_github_throttle_args(parser)

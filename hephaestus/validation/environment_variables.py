@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 from hephaestus.config.environment_registry import RETIRED_ENV_NAMES
 
@@ -718,12 +719,24 @@ def main(argv: list[str] | None = None) -> int:
             findings=[asdict(finding) for finding in findings],
         )
     elif findings:
-        print(f"FAIL: {len(findings)} environment-variable policy finding(s):")
+        print(
+            text(
+                "FAIL: %(count)d environment-variable policy finding(s):",
+                count=len(findings),
+            )
+        )
         for finding in findings:
             location = finding.path + (f":{finding.line}" if finding.line else "")
-            print(f"  [{finding.code}] {location}: {finding.message}")
+            print(
+                text(
+                    "  [%(code)s] %(location)s: %(message)s",
+                    code=finding.code,
+                    location=location,
+                    message=finding.message,
+                )
+            )
     else:
-        print("OK: ambient environment-variable access exactly matches the registry.")
+        print(text("OK: ambient environment-variable access exactly matches the registry."))
     return exit_code
 
 

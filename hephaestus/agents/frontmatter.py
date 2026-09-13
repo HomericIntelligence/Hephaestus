@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 _yaml: Any | None = None
@@ -35,6 +36,52 @@ else:
 
 #: Compiled regex that matches a ``---`` frontmatter block at the start of a file.
 FRONTMATTER_PATTERN: re.Pattern[str] = re.compile(r"^---\s*\n(.*?\n)---\s*\n", re.DOTALL)
+
+_SIMPLE_VALIDATION_MESSAGES = frozenset(
+    {
+        "No YAML frontmatter found (should start with --- and end with ---)",
+        "Empty frontmatter",
+    }
+)
+_PREFIX_VALIDATION_MESSAGES = (
+    ("pyyaml is required: ", "pyyaml is required: %(value0)s"),
+    ("Failed to read file: ", "Failed to read file: %(value0)s"),
+    ("YAML syntax error: ", "YAML syntax error: %(value0)s"),
+    (
+        "Frontmatter should be a YAML mapping, got ",
+        "Frontmatter should be a YAML mapping, got %(value0)s",
+    ),
+)
+
+
+def _format_prefixed_validation_error(error: str) -> str | None:
+    """Render a recognized authored prefix while retaining the dynamic value."""
+    for prefix, template in _PREFIX_VALIDATION_MESSAGES:
+        if error.startswith(prefix):
+            return text(template, value0=error.removeprefix(prefix))
+    return None
+
+
+def _format_field_validation_error(error: str) -> str | None:
+    """Render field-validation errors without altering their API representation."""
+    if match := re.fullmatch(r"Missing required field: '(?P<field>.+)'", error):
+        return text("Missing required field: '%(field)s'", **match.groupdict())
+    if match := re.fullmatch(
+        r"Field '(?P<field>.+)' should be (?P<expected>.+), got (?P<actual>.+)", error
+    ):
+        return text("Field '%(field)s' should be %(expected)s, got %(actual)s", **match.groupdict())
+    return None
+
+
+def _format_validation_error(error: str) -> str:
+    """Render raw validation data through the text boundary for the CLI."""
+    if error in _SIMPLE_VALIDATION_MESSAGES:
+        return text(error)
+    if rendered := _format_prefixed_validation_error(error):
+        return rendered
+    if rendered := _format_field_validation_error(error):
+        return rendered
+    return error
 
 
 # ---------------------------------------------------------------------------
@@ -271,19 +318,19 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Validate frontmatter in agent markdown files",
-        epilog="Example: %(prog)s --agents-dir .claude/agents",
+        description=text("Validate frontmatter in agent markdown files"),
+        epilog=text("Example: %(prog)s --agents-dir .claude/agents"),
     )
     parser.add_argument(
         "--agents-dir",
         type=Path,
         default=None,
-        help="Path to agents directory (default: <repo-root>/.claude/agents)",
+        help=text("Path to agents directory (default: <repo-root>/.claude/agents)"),
     )
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Treat warnings as errors",
+        help=text("Treat warnings as errors"),
     )
     add_json_arg(parser)
     add_version_arg(parser)
@@ -305,7 +352,10 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
             }
             print(format_output(payload, "json"))
             return 1
-        print(f"ERROR: agents directory not found: {agents_dir}", file=sys.stderr)
+        print(
+            text("ERROR: agents directory not found: %(value0)s", value0=agents_dir),
+            file=sys.stderr,
+        )
         return 1
 
     md_files = sorted(agents_dir.glob("*.md"))
@@ -321,7 +371,7 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
             }
             print(format_output(payload, "json"))
             return 1
-        print(f"No agent files found in {agents_dir}", file=sys.stderr)
+        print(text("No agent files found in %(value0)s", value0=agents_dir), file=sys.stderr)
         return 1
 
     if args.json:
@@ -331,15 +381,15 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
     for file_path in md_files:
         is_valid, errors = check_agent_file(file_path)
         if is_valid:
-            print(f"  OK  {file_path.name}")
+            print(text("  OK  %(value0)s", value0=file_path.name))
         else:
             invalid_count += 1
-            print(f"FAIL  {file_path.name}")
+            print(text("FAIL  %(value0)s", value0=file_path.name))
             for err in errors:
-                print(f"      - {err}")
+                print(text("      - %(value0)s", value0=_format_validation_error(err)))
 
     total = len(md_files)
-    print(f"\n{total - invalid_count}/{total} agents valid")
+    print(text("\n%(value0)s/%(value1)s agents valid", value0=total - invalid_count, value1=total))
 
     return 0 if invalid_count == 0 else 1
 

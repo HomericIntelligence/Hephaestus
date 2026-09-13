@@ -454,6 +454,26 @@ class TestMain:
         assert exit_code == 0
         mock_instance.download_mnist.assert_called_once_with("datasets/mnist")
 
+    @patch("hephaestus.datasets.downloader.MNISTDownloader")
+    def test_main_json_keeps_progress_out_of_stdout(self, mock_cls, monkeypatch, capsys) -> None:
+        """Machine mode emits one JSON document when a downloader reports progress."""
+        import json
+
+        mock_instance = MagicMock()
+
+        def download(_output_dir: str) -> bool:
+            print("download progress")
+            return True
+
+        mock_instance.download_mnist.side_effect = download
+        mock_cls.return_value = mock_instance
+        monkeypatch.setattr("sys.argv", ["prog", "mnist", "--json"])
+
+        assert downloader.main() == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["status"] == "ok"
+        assert "download progress" in captured.err
+
 
 class TestFashionMNISTDownloader:
     """Tests for FashionMNISTDownloader."""

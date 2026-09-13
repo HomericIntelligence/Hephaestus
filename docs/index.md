@@ -67,6 +67,8 @@ See the [README](../README.md) for installation and development setup instructio
   rationale, and deny-by-default enforcement policy
 - [Model Configuration](ifm-models.md) — Tool selection, literal model names,
   `MODEL[:EFFORT]`, and OpenCode, Pi, and inference-server setup
+- [Localization Boundary](localization.md) — English fallback, scoped catalogs,
+  and the machine-readable output exclusion
 - [Privacy, Retention, and Deletion Policy](../PRIVACY.md) — data inventory, retention periods, deletion procedures, and GDPR contact (issue #2175)
 - [Third-Party Services](third-party-services.md) — Vendor inventory, responsibility split, and availability expectations for GitHub, PyPI, and agent providers (issue #2177)
 - [Documentation Maintenance](documentation-maintenance.md) — Living-doc scope,

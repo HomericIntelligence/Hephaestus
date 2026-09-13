@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus._version_lookup import get_version
+from hephaestus.cli.localization import text
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.logging.utils import setup_logging
 from hephaestus.utils.helpers import get_repo_root
@@ -140,9 +141,9 @@ def create_parser(
     """
     parser = argparse.ArgumentParser(
         prog=prog_name,
-        description=description,
-        epilog=epilog,
-        usage=usage,
+        description=text(description) if description is not None else None,
+        epilog=text(epilog) if epilog is not None else None,
+        usage=text(usage) if usage is not None else None,
         formatter_class=formatter_class,
         add_help=add_help,
     )
@@ -165,17 +166,19 @@ def add_logging_args(parser: argparse.ArgumentParser) -> None:
         parser: ArgumentParser instance
 
     """
-    logging_group = parser.add_argument_group("logging options")
-    logging_group.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    logging_group = parser.add_argument_group(text("logging options"))
     logging_group.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress informational messages"
+        "-v", "--verbose", action="store_true", help=text("Enable verbose output")
     )
-    logging_group.add_argument("--log-file", help="Log to file instead of stdout")
+    logging_group.add_argument(
+        "-q", "--quiet", action="store_true", help=text("Suppress informational messages")
+    )
+    logging_group.add_argument("--log-file", help=text("Log to file instead of stdout"))
     logging_group.add_argument(
         "--log-format",
         choices=("text", "json"),
         default="text",
-        help="Log record format (default: text; independent of --json output).",
+        help=text("Log record format (default: text; independent of --json output)."),
     )
 
 
@@ -204,7 +207,7 @@ def add_json_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit machine-readable JSON output instead of human-readable text",
+        help=text("Emit machine-readable JSON output instead of human-readable text"),
     )
 
 
@@ -243,7 +246,7 @@ def create_validation_parser(
             "--repo-root",
             type=Path,
             default=None,
-            help="Repository root (default: auto-detect)",
+            help=text("Repository root (default: auto-detect)"),
         )
     add_json_arg(parser)
     return parser
@@ -313,13 +316,17 @@ def add_dry_run_arg(parser: argparse.ArgumentParser, *, prefix: str | None = Non
         trimmed = prefix.rstrip()
         if trimmed and trimmed[-1] not in ".!?":
             trimmed = trimmed + "."
-        help_text = f"{trimmed} {DRY_RUN_HELP_CAVEAT}"
+        help_text = text(
+            "%(prefix)s %(caveat)s",
+            prefix=text(trimmed),
+            caveat=text(DRY_RUN_HELP_CAVEAT),
+        )
     else:
-        help_text = DRY_RUN_HELP_CAVEAT
+        help_text = text(DRY_RUN_HELP_CAVEAT)
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help=help_text,
+        help=text("%(help)s", help=help_text),
     )
 
 
@@ -328,9 +335,13 @@ def _finite_float(value: str) -> float:
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a finite number, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("expected a finite number, got %(value0)r", value0=value)
+        ) from exc
     if not math.isfinite(parsed):
-        raise argparse.ArgumentTypeError(f"expected a finite number, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a finite number, got %(value0)r", value0=value)
+        )
     return parsed
 
 
@@ -339,9 +350,13 @@ def positive_int(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(value0)r", value0=value)
+        ) from exc
     if parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(value0)r", value0=value)
+        )
     return parsed
 
 
@@ -352,7 +367,9 @@ def _non_negative_float(value: str) -> float:
     """Parse a finite non-negative float."""
     parsed = _finite_float(value)
     if parsed < 0:
-        raise argparse.ArgumentTypeError(f"expected a non-negative number, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a non-negative number, got %(value0)r", value0=value)
+        )
     return parsed
 
 
@@ -360,7 +377,9 @@ def _positive_float(value: str) -> float:
     """Parse a finite positive float."""
     parsed = _finite_float(value)
     if parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive number, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a positive number, got %(value0)r", value0=value)
+        )
     return parsed
 
 
@@ -368,19 +387,21 @@ def _at_least_one_float(value: str) -> float:
     """Parse a finite float greater than or equal to one."""
     parsed = _finite_float(value)
     if parsed < 1.0:
-        raise argparse.ArgumentTypeError(f"expected a number >= 1.0, got {value!r}")
+        raise argparse.ArgumentTypeError(
+            text("expected a number >= 1.0, got %(value0)r", value0=value)
+        )
     return parsed
 
 
 def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
     """Add GitHub global-throttle configuration flags to a CLI parser."""
-    group = parser.add_argument_group("GitHub throttle options")
+    group = parser.add_argument_group(text("GitHub throttle options"))
     group.add_argument(
         "--gh-global-rate",
         type=_non_negative_float,
         default=10.0,
         metavar="FLOAT",
-        help=(
+        help=text(
             "Global gh token-bucket refill rate in calls/sec (default: 10.0). "
             "Pass 0 to disable the global throttle."
         ),
@@ -390,7 +411,7 @@ def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
         type=_at_least_one_float,
         default=30.0,
         metavar="FLOAT",
-        help="Global gh token-bucket burst size (default: 30.0).",
+        help=text("Global gh token-bucket burst size (default: 30.0)."),
     )
 
 
@@ -431,9 +452,7 @@ def emit_json_status(exit_code: int, message: str | None = None, **extra: Any) -
     print(json.dumps(envelope))
 
 
-def confirm_action(
-    prompt: str = "Are you sure?", default: bool = False, max_attempts: int = 3
-) -> bool:
+def confirm_action(prompt: str | None = None, default: bool = False, max_attempts: int = 3) -> bool:
     """Prompt user for confirmation.
 
     Args:
@@ -445,12 +464,18 @@ def confirm_action(
         User's confirmation decision
 
     """
+    source_prompt = prompt if prompt is not None else "Are you sure?"
+    translated_prompt = text(source_prompt)
     choices = "Y/n" if default else "y/N"
     for _ in range(max_attempts):
         try:
-            choice = input(f"{prompt} [{choices}] ").strip().lower()
+            choice = (
+                input(text("%(prompt)s [%(choices)s] ", prompt=translated_prompt, choices=choices))
+                .strip()
+                .lower()
+            )
         except KeyboardInterrupt:
-            print("\nOperation cancelled.")
+            print(text("\nOperation cancelled."))
             sys.exit(1)
 
         if not choice:
@@ -460,7 +485,7 @@ def confirm_action(
         elif choice in ["n", "no"]:
             return False
         else:
-            print("Invalid choice. Please enter 'y' or 'n'.")
+            print(text("Invalid choice. Please enter '%(yes)s' or '%(no)s'.", yes="y", no="n"))
     return default
 
 
@@ -590,16 +615,22 @@ def add_agent_timeout_arg(
         help_extra: Optional extra help text appended after the default note
 
     """
-    extra = f" {help_extra}" if help_extra else ""
+    timeout_help = text(
+        "Agent subprocess timeout in seconds (default: %(default)d).",
+        default=default,
+    )
+    extra_help = text(" %(help)s", help=text(help_extra)) if help_extra else ""
     parser.add_argument(
         flag,
         dest=dest,
         type=_positive_int,
         default=default,
         metavar="SECONDS",
-        help=(
-            f"Agent subprocess timeout in seconds (default: {default})."
-            f"{extra}{_POSITIVE_TIMEOUT_HELP}"
+        help=text(
+            "%(timeout_help)s%(extra_help)s%(positive_help)s",
+            timeout_help=timeout_help,
+            extra_help=extra_help,
+            positive_help=text(_POSITIVE_TIMEOUT_HELP),
         ),
     )
 
@@ -617,8 +648,9 @@ def add_advise_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=7200,
         metavar="SECONDS",
-        help="Timeout for the advise sub-agent in seconds (default: 7200)."
-        + _POSITIVE_TIMEOUT_HELP,
+        help=text(
+            "Timeout for the advise sub-agent in seconds (default: 7200)." + _POSITIVE_TIMEOUT_HELP
+        ),
     )
 
 
@@ -635,8 +667,10 @@ def add_poll_max_wait_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=1200,
         metavar="SECONDS",
-        help="Max wall-clock seconds to poll CI before backing off (default: 1200)."
-        + _POSITIVE_TIMEOUT_HELP,
+        help=text(
+            "Max wall-clock seconds to poll CI before backing off (default: 1200)."
+            + _POSITIVE_TIMEOUT_HELP
+        ),
     )
 
 
@@ -653,8 +687,10 @@ def add_git_message_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=1200,
         metavar="SECONDS",
-        help="Timeout for the lightweight commit/PR message agent (default: 1200)."
-        + _POSITIVE_TIMEOUT_HELP,
+        help=text(
+            "Timeout for the lightweight commit/PR message agent (default: 1200)."
+            + _POSITIVE_TIMEOUT_HELP
+        ),
     )
 
 
@@ -671,7 +707,7 @@ def add_learn_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=1200,
         metavar="SECONDS",
-        help="Timeout for the /learn agent session (default: 1200)." + _POSITIVE_TIMEOUT_HELP,
+        help=text("Timeout for the /learn agent session (default: 1200)." + _POSITIVE_TIMEOUT_HELP),
     )
 
 
@@ -688,8 +724,10 @@ def add_follow_up_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=7200,
         metavar="SECONDS",
-        help="Timeout for the follow-up-issue agent session (default: 7200)."
-        + _POSITIVE_TIMEOUT_HELP,
+        help=text(
+            "Timeout for the follow-up-issue agent session (default: 7200)."
+            + _POSITIVE_TIMEOUT_HELP
+        ),
     )
 
 
@@ -702,7 +740,7 @@ def add_role_agent_args(parser: argparse.ArgumentParser) -> None:
             f"--{role}-agent",
             choices=AGENT_CHOICES,
             default=None,
-            help=f"Tool for the {role} role. Uses --agent when omitted.",
+            help=text("Tool for the %(role)s role. Uses --agent when omitted.", role=role),
         )
 
 
@@ -713,25 +751,25 @@ def add_host_verification_pyxis_image_arg(parser: argparse.ArgumentParser) -> No
         type=Path,
         default=None,
         metavar="PATH",
-        help=("Owner-only Enroot squashfs path shared with Slurm compute nodes."),
+        help=text("Owner-only Enroot squashfs path shared with Slurm compute nodes."),
     )
     parser.add_argument(
         "--host-verification-pyxis-sha256",
         default=None,
         metavar="SHA256",
-        help="Expected squashfs SHA-256 from a separate host-owned authority.",
+        help=text("Expected squashfs SHA-256 from a separate host-owned authority."),
     )
     parser.add_argument(
         "--host-verification-pyxis-authority",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Owner-only provenance authority for the expected squashfs.",
+        help=text("Owner-only provenance authority for the expected squashfs."),
     )
     parser.add_argument(
         "--host-verification-pyxis-quota-root",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Private maximum-1-GiB filesystem shared with Slurm compute nodes.",
+        help=text("Private maximum-1-GiB filesystem shared with Slurm compute nodes."),
     )

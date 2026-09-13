@@ -9,6 +9,7 @@ for creating, auditing, and removing worktrees.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,8 +17,48 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, create_parser, emit_json_status
 from hephaestus.utils.git import run_git
+
+
+def _format_human_error(error: Exception) -> str:
+    """Translate authored worktree errors and retain external diagnostics."""
+    message = str(error)
+    patterns = (
+        (r"invalid branch name: (?P<branch>.+)", "invalid branch name: %(branch)s"),
+        (
+            r"worktree path escapes trusted root (?P<root>.+)",
+            "worktree path escapes trusted root %(root)s",
+        ),
+        (
+            r"worktree path component is a symlink: (?P<path>.+)",
+            "worktree path component is a symlink: %(path)s",
+        ),
+        (
+            r"project-local worktree directory is a symlink: (?P<path>.+)",
+            "project-local worktree directory is a symlink: %(path)s",
+        ),
+        (
+            r"project-local worktree directory (?P<path>.+) is not ignored",
+            "project-local worktree directory %(path)s is not ignored",
+        ),
+        (r"worktree path already exists: (?P<path>.+)", "worktree path already exists: %(path)s"),
+        (r"not a registered worktree: (?P<path>.+)", "not a registered worktree: %(path)s"),
+        (r"worktree is not clean: (?P<path>.+)", "worktree is not clean: %(path)s"),
+        (
+            r"worktree HEAD changed: expected (?P<expected>\S+), found (?P<found>\S+)",
+            "worktree HEAD changed: expected %(expected)s, found %(found)s",
+        ),
+    )
+    for pattern, source in patterns:
+        if match := re.fullmatch(pattern, message):
+            return text(source, **match.groupdict())
+    authored = {
+        "--path and --path-root must be provided together",
+        "refusing to remove the current worktree",
+    }
+    return text(message) if message in authored else message
 
 
 def _git_output(cwd: Path, *arguments: str, accepted_codes: tuple[int, ...] = (0,)) -> str:
@@ -162,7 +203,7 @@ def prepare_worktree_main(argv: Sequence[str] | None = None) -> int:
         if arguments.json:
             emit_json_status(1, str(error))
         else:
-            print(error, file=sys.stderr)
+            print(_format_human_error(error), file=sys.stderr)
         return 1
     print(
         json.dumps(
@@ -224,7 +265,7 @@ def audit_worktrees_main(argv: Sequence[str] | None = None) -> int:
         if arguments.json:
             emit_json_status(1, str(error))
         else:
-            print(error, file=sys.stderr)
+            print(_format_human_error(error), file=sys.stderr)
         return 1
     print(json.dumps(records, indent=2, sort_keys=True))
     return 0
@@ -262,10 +303,10 @@ def remove_worktree_main(argv: Sequence[str] | None = None) -> int:
         if arguments.json:
             emit_json_status(1, str(error))
         else:
-            print(error, file=sys.stderr)
+            print(_format_human_error(error), file=sys.stderr)
         return 1
     if arguments.json:
         emit_json_status(0, f"removed {target} at {head}", path=str(target), head=head)
     else:
-        print(f"removed {target} at {head}")
+        print(text("removed %(target)s at %(head)s", target=target, head=head))
     return 0

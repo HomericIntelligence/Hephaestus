@@ -23,7 +23,15 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output
+
+_TYPE_ALIAS_ERROR = re.compile(
+    r"^(?P<path>.+):(?P<line>\d+): Type alias shadows domain-specific name\n"
+    r"  (?P<source>.*)\n"
+    r"  Suggestion: Use '(?P<target>.*)' directly instead of aliasing to '(?P<alias>.*)'\n"
+    r"  To suppress this check, add: # type: ignore\[shadowing\]$"
+)
 
 _HANDLED_PYTHON_FILE_TYPES = (
     stat.S_IFDIR,
@@ -102,7 +110,7 @@ def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
     """
     result = _scan_file(file_path)
     for error in result.read_errors:
-        print(f"Warning: {error}", file=sys.stderr)
+        print(text("Warning: %(error)s", error=error), file=sys.stderr)
     return result.violations
 
 
@@ -160,7 +168,31 @@ def format_error(file_path: Path, line_num: int, line: str, alias: str, target: 
         f"{file_path}:{line_num}: Type alias shadows domain-specific name\n"
         f"  {line}\n"
         f"  Suggestion: Use '{target}' directly instead of aliasing to '{alias}'\n"
-        f"  To suppress this check, add: # type: ignore[shadowing]"
+        "  To suppress this check, add: # type: ignore[shadowing]"
+    )
+
+
+def format_human_error(error: str) -> str:
+    """Translate a raw type-alias finding for the human-only CLI report."""
+    match = _TYPE_ALIAS_ERROR.fullmatch(error)
+    if match is None:
+        return error
+    values = match.groupdict()
+    return "\n".join(
+        [
+            text(
+                "%(path)s:%(line)d: Type alias shadows domain-specific name",
+                path=values["path"],
+                line=int(values["line"]),
+            ),
+            text("  %(value)s", value=values["source"]),
+            text(
+                "  Suggestion: Use '%(target)s' directly instead of aliasing to '%(alias)s'",
+                target=values["target"],
+                alias=values["alias"],
+            ),
+            text("  To suppress this check, add: # type: ignore[shadowing]"),
+        ]
     )
 
 
@@ -330,19 +362,24 @@ def main() -> int:
         "paths",
         nargs="+",
         type=Path,
-        help="Files or directories to check",
+        help=text("Files or directories to check"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print verbose output",
+        help=text("Print verbose output"),
     )
 
     args = parser.parse_args()
 
     if args.verbose and not args.json:
-        print(f"Checking {len(args.paths)} path(s) for type alias shadowing...")
+        print(
+            text(
+                "Checking %(count)d path(s) for type alias shadowing...",
+                count=len(args.paths),
+            )
+        )
 
     result = _check_files(args.paths)
     exit_code = result.exit_code
@@ -363,12 +400,21 @@ def main() -> int:
         return exit_code
 
     if errors:
-        print("\n".join(errors), file=sys.stderr)
-        print(f"\nFound {len(errors)} type alias shadowing violation(s)", file=sys.stderr)
+        print("\n".join(format_human_error(error) for error in errors), file=sys.stderr)
+        print(
+            text(
+                "\nFound %(count)d type alias shadowing violation(s)",
+                count=len(errors),
+            ),
+            file=sys.stderr,
+        )
 
     if result.read_errors:
         print("\n".join(result.read_errors), file=sys.stderr)
-        print(f"Scan incomplete: {len(result.read_errors)} read error(s)", file=sys.stderr)
+        print(
+            text("Scan incomplete: %(count)d read error(s)", count=len(result.read_errors)),
+            file=sys.stderr,
+        )
 
     return exit_code
 

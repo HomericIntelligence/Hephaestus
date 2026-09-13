@@ -6,6 +6,7 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.io.toml import import_tomllib
 
@@ -84,8 +85,8 @@ def extract_ci_matrix_python_versions(content: str) -> list[str]:
     return sorted(set(re.findall(r'["\']?(\d+\.\d+)["\']?', match.group(1))))
 
 
-def check_ci_matrix_coverage(repo_root: Path) -> bool:
-    """Verify CI tests every Python version advertised by project classifiers."""
+def check_ci_matrix_coverage(repo_root: Path, *, report: bool = True) -> bool:
+    """Verify that CI tests each advertised Python version."""
     pyproject_path = repo_root / "pyproject.toml"
     workflow_path = repo_root / ".github" / "workflows" / "_required.yml"
     if not pyproject_path.is_file() or not workflow_path.is_file():
@@ -94,7 +95,13 @@ def check_ci_matrix_coverage(repo_root: Path) -> bool:
     tested = extract_ci_matrix_python_versions(workflow_path.read_text(encoding="utf-8"))
     missing = sorted(set(advertised) - set(tested))
     if missing:
-        print(f"ERROR: CI matrix is missing classifier Python versions: {missing}")
+        if report:
+            print(
+                text(
+                    "ERROR: CI matrix is missing classifier Python versions: %(value0)s",
+                    value0=missing,
+                )
+            )
         return False
     return True
 
@@ -112,7 +119,7 @@ def check_python_version_consistency(
                 break
     if verbose:
         for key, value in sorted(versions.items()):
-            print(f"  {key}: {value}")
+            print(text("  %(value0)s: %(value1)s", value0=key, value1=value))
     checked = {
         value
         for key, value in versions.items()
@@ -134,7 +141,7 @@ def main() -> int:
     consistent, versions = check_python_version_consistency(
         repo_root, check_dockerfile=args.check_dockerfile, verbose=args.verbose and not args.json
     )
-    matrix_ok = check_ci_matrix_coverage(repo_root)
+    matrix_ok = check_ci_matrix_coverage(repo_root, report=not args.json)
     passed = (consistent or not versions) and matrix_ok
     if args.json:
         print(
@@ -143,9 +150,9 @@ def main() -> int:
             )
         )
     elif consistent:
-        print("OK: Python version specifications are consistent")
+        print(text("OK: Python version specifications are consistent"))
     else:
-        print("ERROR: Python version inconsistency detected", file=sys.stderr)
+        print(text("ERROR: Python version inconsistency detected"), file=sys.stderr)
     return 0 if passed else 1
 
 

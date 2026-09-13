@@ -8,7 +8,8 @@ from datetime import datetime
 
 import pytest
 
-from hephaestus.logging.formatters import RESERVED_FIELDS, JsonFormatter
+from hephaestus.cli.localization import Localizer, using_localizer
+from hephaestus.logging.formatters import RESERVED_FIELDS, JsonFormatter, _LocalizedFormatter
 
 
 @pytest.fixture()
@@ -67,6 +68,99 @@ class TestJsonFormatterOutput:
         assert parsed["level"] == "WARNING"
         assert parsed["logger"] == "my.logger"
         assert "timestamp" in parsed
+
+
+class TestLocalizedFormatterOutput:
+    """Tests for plain-log template localization."""
+
+    def test_translates_deferred_template_without_mutating_record(self) -> None:
+        """Translate a copied message and keep lazy interpolation and source state."""
+        record = logging.LogRecord(
+            "test",
+            logging.INFO,
+            "test.py",
+            1,
+            "Processed %(count)d files",
+            ({"count": 2},),
+            None,
+        )
+        formatter = _LocalizedFormatter(
+            "%(message)s",
+            localizer=Localizer({"Processed %(count)d files": "Traitement de %(count)d fichiers"}),
+        )
+
+        assert formatter.format(record) == "Traitement de 2 fichiers"
+        assert record.msg == "Processed %(count)d files"
+        assert record.args == {"count": 2}
+
+    def test_keeps_non_string_message_unchanged(self) -> None:
+        """Do not translate a non-string logging payload."""
+        payload = {"status": "ready"}
+        record = logging.LogRecord("test", logging.INFO, "test.py", 1, payload, None, None)
+
+        assert _LocalizedFormatter("%(message)s").format(record) == str(payload)
+        assert record.msg is payload
+
+    def test_captures_construction_context_as_fallback(self) -> None:
+        """Use the construction catalog when a record has no emission capture."""
+        with using_localizer({"Ready": "Prêt"}):
+            formatter = _LocalizedFormatter("%(message)s")
+        record = logging.LogRecord("test", logging.INFO, "test.py", 1, "Ready", None, None)
+
+        assert formatter.format(record) == "Prêt"
+
+    def test_json_formatter_keeps_source_message_with_active_catalog(self) -> None:
+        """Keep JSON message content outside the localization boundary."""
+        record = logging.LogRecord("test", logging.INFO, "test.py", 1, "Ready", None, None)
+        formatter = JsonFormatter()
+        expected = json.loads(formatter.format(record))
+
+        with using_localizer({"Ready": "Prêt"}):
+            actual = json.loads(formatter.format(record))
+
+        assert actual == expected
+
+    @pytest.mark.parametrize("localized_first", [True, False])
+    def test_exception_record_is_isolated_across_plain_and_json_handlers(
+        self, localized_first: bool
+    ) -> None:
+        """Keep one exception record stable in both formatter orders."""
+        try:
+            raise ValueError("bad value")
+        except ValueError as error:
+            record = logging.LogRecord(
+                "test",
+                logging.ERROR,
+                "test.py",
+                1,
+                "Failed %(item)s",
+                ({"item": "task"},),
+                (ValueError, error, error.__traceback__),
+            )
+        plain = _LocalizedFormatter(
+            "%(message)s",
+            localizer=Localizer({"Failed %(item)s": "Échec %(item)s"}),
+        )
+        machine = JsonFormatter()
+
+        if localized_first:
+            plain_output = plain.format(record)
+            json_output = machine.format(record)
+        else:
+            json_output = machine.format(record)
+            plain_output = plain.format(record)
+
+        assert plain_output.startswith("Échec task")
+        payload = json.loads(json_output)
+        assert payload["message"] == "Failed task"
+        assert "ValueError: bad value" in payload["exception"]
+        assert record.msg == "Failed %(item)s"
+        assert record.args == {"item": "task"}
+        assert record.exc_text is None
+
+
+class TestJsonFormatterDetails:
+    """Tests for JSON timestamp and message details."""
 
     def test_timestamp_is_iso8601(
         self, formatter: JsonFormatter, make_record: Callable[..., logging.LogRecord]

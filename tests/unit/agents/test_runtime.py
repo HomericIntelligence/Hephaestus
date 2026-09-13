@@ -5737,7 +5737,7 @@ def test_resume_pi_session_reaps_a_process_that_starts_at_operation_boundary(
         session_id="pi-session",
         cwd=tmp_path,
         role=request.role,
-        model="private/provider-model",
+        model="private/provider-model:high",
     )
     result: agent_runtime.AgentRunResult | None = None
     with (
@@ -5756,7 +5756,7 @@ def test_resume_pi_session_reaps_a_process_that_starts_at_operation_boundary(
             "/compact",
             cwd=tmp_path,
             timeout=30,
-            model="private/provider-model",
+            model="private/provider-model:high",
             execution_request=request,
             resume_binding=binding,
             process_tracker=track_process_group,

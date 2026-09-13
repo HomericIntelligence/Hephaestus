@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -23,7 +24,10 @@ from hephaestus.automation.event_log_retention import (
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.loop_repo_manager import _detect_cwd_repo, _iter_gh_repos
 from hephaestus.automation.models import DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
-from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+from hephaestus.automation.pipeline.coordinator_types import (
+    PipelineConfig,
+    PromptCatalogPreflightError,
+)
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
 )
@@ -34,6 +38,7 @@ from hephaestus.automation.podman_machine_supervisor import (
     validate_podman_machine_name,
 )
 from hephaestus.automation.role_selection import resolve_role_agents
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     MODEL_REFERENCE_HELP,
     add_host_verification_pyxis_image_arg,
@@ -60,6 +65,15 @@ _PROFILES = {
     ),
     "review": ("hephaestus-review-prs", (StageName.PR_REVIEW,)),
 }
+
+
+class _PipelineCliError(SystemExit):
+    """Carry separate human and machine forms of one startup failure."""
+
+    def __init__(self, source: str, /, **values: object) -> None:
+        """Build localized display text and stable JSON text."""
+        self.json_message = source % values
+        super().__init__(text(source, **values))
 
 
 def _source_revision(source_root: Path | None = None) -> str | None:
@@ -94,9 +108,13 @@ def _parse_positive_int(value: str) -> int:
     try:
         number = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(value)r", value=value)
+        ) from exc
     if number <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {number}")
+        raise argparse.ArgumentTypeError(
+            text("expected a positive integer, got %(number)d", number=number)
+        )
     return number
 
 
@@ -105,9 +123,13 @@ def _parse_non_negative_int(value: str) -> int:
     try:
         number = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("expected a non-negative integer, got %(value)r", value=value)
+        ) from exc
     if number < 0:
-        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {number}")
+        raise argparse.ArgumentTypeError(
+            text("expected a non-negative integer, got %(number)d", number=number)
+        )
     return number
 
 
@@ -116,7 +138,7 @@ def _parse_podman_machine_name(value: str) -> str:
     try:
         validate_podman_machine_name(value)
     except PodmanMachineError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from exc
+        raise argparse.ArgumentTypeError(text("Invalid Podman machine name.")) from exc
     return value
 
 
@@ -131,11 +153,19 @@ def _parse_positive_int_list(value: str, label: str) -> list[int]:
             number = int(item)
         except ValueError as exc:
             raise argparse.ArgumentTypeError(
-                f"expected comma-separated {label} numbers, got {item!r}"
+                text(
+                    "expected comma-separated %(label)s numbers, got %(item)r",
+                    label=label,
+                    item=item,
+                )
             ) from exc
         if number <= 0:
             raise argparse.ArgumentTypeError(
-                f"{label} numbers must be positive integers, got {number}"
+                text(
+                    "%(label)s numbers must be positive integers, got %(number)d",
+                    label=label,
+                    number=number,
+                )
             )
         numbers.append(number)
     return numbers
@@ -156,9 +186,11 @@ def _parse_metrics_port(value: str) -> int:
     try:
         port = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"metrics port must be an integer, got {value!r}") from exc
+        raise argparse.ArgumentTypeError(
+            text("metrics port must be an integer, got %(value)r", value=value)
+        ) from exc
     if not 0 <= port <= 65535:
-        raise argparse.ArgumentTypeError("metrics port must be in 0..65535")
+        raise argparse.ArgumentTypeError(text("metrics port must be in 0..65535"))
     return port
 
 
@@ -193,31 +225,43 @@ def _preflight_token_scopes(org: str, probe_repo: str, *, timeout: int = 120) ->
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise SystemExit(
-            f"ERROR: `gh` token preflight for {org}/{probe_repo} timed out after {exc.timeout}s."
+        raise _PipelineCliError(
+            "ERROR: `gh` token preflight for %(org)s/%(repo)s timed out after %(timeout)s s.",
+            org=org,
+            repo=probe_repo,
+            timeout=exc.timeout,
         ) from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or "").strip()
         if "HTTP 404" in detail:
-            raise SystemExit(
-                f"ERROR: GitHub returned HTTP 404 for {org}/{probe_repo}.\n"
+            raise _PipelineCliError(
+                "ERROR: GitHub returned HTTP 404 for %(org)s/%(repo)s.\n"
                 "  GitHub cannot confirm whether the repository exists.\n"
                 "  Confirm that the repository name is correct and that the current account "
                 "has access.\n"
-                f"  Repository check: gh repo view {org}/{probe_repo}\n"
+                "  Repository check: gh repo view %(org)s/%(repo)s\n"
                 "  Authentication check: gh auth status\n"
-                f"  GitHub response: {detail}"
+                "  GitHub response: %(detail)s",
+                org=org,
+                repo=probe_repo,
+                detail=detail,
             ) from exc
-        raise SystemExit(
-            f"ERROR: `gh` cannot read {org}/{probe_repo} with the current token.\n"
-            f"  {detail}\n"
-            "  Required scopes: repo (classic) OR "
-            "Issues+PRs+Contents Read & Write (fine-grained).\n"
-            "  Check with: gh auth status"
+        raise _PipelineCliError(
+            "ERROR: `gh` cannot read %(org)s/%(repo)s with the current token.\n"
+            "  %(detail)s\n"
+            "  Required scopes: repo (classic) OR Issues+PRs+Contents Read & Write "
+            "(fine-grained).\n"
+            "  Check with: gh auth status",
+            org=org,
+            repo=probe_repo,
+            detail=detail,
         ) from exc
     except (RuntimeError, OSError) as exc:
-        raise SystemExit(
-            f"ERROR: `gh` token preflight for {org}/{probe_repo} failed: {exc}"
+        raise _PipelineCliError(
+            "ERROR: `gh` token preflight for %(org)s/%(repo)s failed: %(error)s",
+            org=org,
+            repo=probe_repo,
+            error=exc,
         ) from exc
     if out.stdout.strip() in {"null", "{}"}:
         LOG.warning(
@@ -242,8 +286,10 @@ def _setup_logging(
             log_file=log_file,
         )
     except OSError as exc:
-        raise SystemExit(
-            f"Cannot open log file {log_file!r}: {exc}. Check the parent directory and permissions."
+        raise _PipelineCliError(
+            "Cannot open log file %(path)r: %(error)s. Check the parent directory and permissions.",
+            path=log_file,
+            error=exc,
         ) from exc
 
 
@@ -382,20 +428,31 @@ def _error_exit(args: argparse.Namespace, message: str, json_message: str | None
     return 1
 
 
+def _localize_cli_error(message: str | None) -> str:
+    """Translate an authored CLI error and preserve external error text."""
+    if message is None:
+        return ""
+    if match := re.fullmatch(r"Unsupported agent: (?P<agent>.+)", message):
+        return text("Unsupported agent: %(agent)s", **match.groupdict())
+    return text(message)
+
+
 def _parse_stages(value: str) -> tuple[StageName, ...]:
     """Require an ordered, contiguous set of main queue stages."""
     names = tuple(part.strip() for part in value.split(","))
     try:
         stages = tuple(StageName(name) for name in names)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("Use current main queue stage names") from exc
+        raise argparse.ArgumentTypeError(text("Use current main queue stage names")) from exc
     if not stages or len(set(stages)) != len(stages):
-        raise argparse.ArgumentTypeError("Stage names must be nonempty and unique")
+        raise argparse.ArgumentTypeError(text("Stage names must be nonempty and unique"))
     if any(stage not in MAIN_STAGES for stage in stages):
-        raise argparse.ArgumentTypeError("Learning and finished are implicit auxiliary stages")
+        raise argparse.ArgumentTypeError(
+            text("Learning and finished are implicit auxiliary stages")
+        )
     indexes = [MAIN_STAGES.index(stage) for stage in stages]
     if indexes != list(range(indexes[0], indexes[-1] + 1)):
-        raise argparse.ArgumentTypeError("Stage names must be contiguous and in queue order")
+        raise argparse.ArgumentTypeError(text("Stage names must be contiguous and in queue order"))
     return stages
 
 
@@ -407,7 +464,10 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
         prog=prog,
         description="Run the queue-owned automation pipeline.",
         max_workers_default=workers,
-        max_workers_help=f"Main worker capacity, 1-32 (default: {workers}).",
+        max_workers_help=text(
+            "Main worker capacity, 1-32 (default: %(workers)d).",
+            workers=workers,
+        ),
         add_github_throttle=True,
         add_gh_extra_path_root=True,
         dry_run_prefix="Preview queue work without agent calls, GitHub writes, or Git pushes.",
@@ -426,13 +486,16 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
         parser.add_argument(
             "--stages",
             type=_parse_stages,
-            help="Comma-separated main stage names in queue order: " + ",".join(MAIN_STAGES),
+            help=text(
+                "Comma-separated main stage names in queue order: %(stages)s",
+                stages=",".join(MAIN_STAGES),
+            ),
         )
         parser.add_argument(
             "--podman-machine",
             type=_parse_podman_machine_name,
             metavar="NAME",
-            help=(
+            help=text(
                 "Start and verify one AppleHV Podman machine in this host process before "
                 "pipeline dispatch. The loop never stops, removes, or recreates the machine."
             ),
@@ -442,59 +505,70 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
             type=_parse_positive_int,
             default=120,
             metavar="SECONDS",
-            help="Maximum Podman machine start time (default: 120).",
+            help=text("Maximum Podman machine start time (default: 120)."),
         )
         parser.add_argument(
             "--podman-health-timeout",
             type=_parse_positive_int,
             default=60,
             metavar="SECONDS",
-            help="Maximum named-connection health-check time (default: 60).",
+            help=text("Maximum named-connection health-check time (default: 60)."),
         )
     if profile in {"full", "planning"}:
-        parser.add_argument("--force", action="store_true", help="Plan the selected issues again.")
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help=text("Plan the selected issues again."),
+        )
     parser.add_argument(
         "--update-plan",
         action="store_true",
-        help="Update each selected issue plan from current origin/main, then continue the queue.",
+        help=text(
+            "Update each selected issue plan from current origin/main, then continue the queue."
+        ),
     )
     parser.add_argument(
         "--rebase",
         action="store_true",
-        help="Rebase each selected worktree against origin/main, then continue the queue.",
+        help=text("Rebase each selected worktree against origin/main, then continue the queue."),
     )
     parser.add_argument(
         "--reset-plan-review-session",
         action="store_true",
-        help="Reset the reviewer conversation for explicit issues.",
+        help=text("Reset the reviewer conversation for explicit issues."),
     )
     parser.add_argument(
         "--issues",
         type=_parse_issue_list,
         default=None,
-        help="Comma-separated issue numbers in one repository.",
+        help=text("Comma-separated issue numbers in one repository."),
     )
     parser.add_argument(
         "--prs",
         type=_parse_pr_list,
         default=None,
-        help="Comma-separated PR numbers in one repository.",
+        help=text("Comma-separated PR numbers in one repository."),
     )
     parser.add_argument(
-        "--repos", type=_parse_repo_list, default=None, help="Comma-separated repository names."
+        "--repos",
+        type=_parse_repo_list,
+        default=None,
+        help=text("Comma-separated repository names."),
     )
     parser.add_argument(
         "--org",
         nargs="?",
         const=_ORG_AUTODETECT,
         default=None,
-        help="Read repositories from this organization; omit NAME to detect the current owner.",
+        help=text(
+            "Read repositories from this organization; omit NAME to detect the current owner."
+        ),
     )
     parser.add_argument(
         "--projects-dir",
         type=str,
         default=None,
-        help="Directory that contains repository checkouts.",
+        help=text("Directory that contains repository checkouts."),
     )
     for name, default, help_text in (
         ("loops", 5 if profile == "full" else 1, "Repository discovery passes."),
@@ -507,7 +581,12 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
         ("poll-max-wait", 1200, "Maximum wait for a poll, in seconds."),
         ("rate-guard-threshold", 200, "Park jobs below this remaining GraphQL budget."),
     ):
-        parser.add_argument(f"--{name}", type=_parse_positive_int, default=default, help=help_text)
+        parser.add_argument(
+            f"--{name}",
+            type=_parse_positive_int,
+            default=default,
+            help=text(help_text),
+        )
     for name, help_text in (
         ("no-advise", "Skip host advice before planning or implementation."),
         ("no-learn", "Do not create or execute learning intents."),
@@ -519,30 +598,33 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
             "before initial PR creation.",
         ),
     ):
-        parser.add_argument(f"--{name}", action="store_true", help=help_text)
+        parser.add_argument(f"--{name}", action="store_true", help=text(help_text))
     parser.add_argument(
         "--no-serialize-file-overlap",
         action="store_false",
         dest="serialize_file_overlap",
         default=True,
-        help="Allow concurrent items whose planned files overlap.",
+        help=text("Allow concurrent items whose planned files overlap."),
     )
     parser.add_argument(
         "--rate-guard",
         action="store_true",
         dest="rate_guard_enabled",
         default=True,
-        help="Enable the GraphQL budget guard.",
+        help=text("Enable the GraphQL budget guard."),
     )
     parser.add_argument(
         "--no-rate-guard",
         action="store_false",
         dest="rate_guard_enabled",
-        help="Disable the GraphQL budget guard.",
+        help=text("Disable the GraphQL budget guard."),
     )
     for name in ("model", "planner-model", "reviewer-model", "implementer-model", "fallback-model"):
         parser.add_argument(
-            f"--{name}", default="", metavar="MODEL[:EFFORT]", help=MODEL_REFERENCE_HELP
+            f"--{name}",
+            default="",
+            metavar="MODEL[:EFFORT]",
+            help=text(MODEL_REFERENCE_HELP),
         )
     for name, default in (
         ("planner", 1200),
@@ -568,14 +650,15 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
         "--phase-timeout",
         type=float,
         default=7800.0,
-        help="Timeout for each agent job in seconds; "
-        "a nonpositive value disables this outer bound.",
+        help=text(
+            "Timeout for each agent job in seconds; a nonpositive value disables this outer bound."
+        ),
     )
     parser.add_argument(
         "--metrics-port",
         type=_parse_metrics_port,
         default=0,
-        help="Local metrics and health port; 0 disables the listener.",
+        help=text("Local metrics and health port; 0 disables the listener."),
     )
     for name, default in (
         ("days", DEFAULT_EVENT_LOG_RETENTION_DAYS),
@@ -585,19 +668,22 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
             f"--event-log-retention-{name}",
             type=_parse_non_negative_int,
             default=default,
-            help=f"Inactive event-log retention {name}; 0 disables this limit.",
+            help=text(
+                "Inactive event-log retention %(name)s; 0 disables this limit.",
+                name=name,
+            ),
         )
     parser.add_argument(
         "--plugin-skills-dir",
         type=Path,
         default=None,
-        help="Directory of installed automation skills.",
+        help=text("Directory of installed automation skills."),
     )
     parser.add_argument(
         "--evidence-receipt-dir",
         type=Path,
         default=None,
-        help="Directory for private queue-job evidence receipts.",
+        help=text("Directory for private queue-job evidence receipts."),
     )
     return parser
 
@@ -607,17 +693,17 @@ def parse_args(argv: list[str] | None = None, *, profile: str = "full") -> argpa
     parser = build_parser(profile=profile)
     args = parser.parse_args(argv)
     if args.issue_limit is not None and (args.issues is not None or args.prs is not None):
-        parser.error("--issue-limit cannot be combined with --issues or --prs")
+        parser.error(text("--issue-limit cannot be combined with --issues or --prs"))
     if args.update_plan and not args.issues:
-        parser.error("--update-plan requires explicit --issues")
+        parser.error(text("--update-plan requires explicit --issues"))
     if args.update_plan and StageName.PLANNING not in args.stages:
-        parser.error("--update-plan requires the planning stage")
+        parser.error(text("--update-plan requires the planning stage"))
     if args.rebase and not (args.issues or args.prs):
-        parser.error("--rebase requires explicit --issues or --prs")
+        parser.error(text("--rebase requires explicit --issues or --prs"))
     if args.rebase and StageName.IMPLEMENTATION not in args.stages:
-        parser.error("--rebase requires the implementation stage")
+        parser.error(text("--rebase requires the implementation stage"))
     if args.reset_plan_review_session and not args.issues:
-        parser.error("--reset-plan-review-session requires explicit --issues")
+        parser.error(text("--reset-plan-review-session requires explicit --issues"))
     return args
 
 
@@ -763,13 +849,13 @@ def _prepare_host_runtime(args: argparse.Namespace) -> int | None:
         try:
             require_virtual_environment(Path(sys.prefix))
         except RuntimeError as exc:
-            return _error_exit(args, str(exc))
+            message = str(exc)
+            return _error_exit(args, _localize_cli_error(message), message)
     return None
 
 
-def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
-    """Admit the selected roles and run the queue with one configuration."""
-    args = parse_args(argv, profile=profile)
+def _run(args: argparse.Namespace, *, profile: str) -> int:
+    """Run one queue command after argument parsing."""
     configure_github_throttle_from_args(args)
     _setup_logging(args.verbose, args.log_format, quiet=args.quiet, log_file=args.log_file)
     from hephaestus.automation.runtime_diagnostics import runtime_identity
@@ -792,12 +878,12 @@ def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
     try:
         args.agent, role_agents = resolve_role_agents(args, active_roles, resolver=resolve_agent)
     except ValueError as exc:
-        build_parser(profile=profile).error(str(exc))
+        build_parser(profile=profile).error(_localize_cli_error(str(exc)))
     for role, provider in role_agents.items():
         setattr(args, f"{role}_agent", provider)
     org, repos, error = _resolve_org_and_repos(args)
     if error:
-        return _error_exit(args, error)
+        return _error_exit(args, _localize_cli_error(error), error)
     streaming = args.org is not None and not args.repos and not (args.issues or args.prs)
     root_repos = repos
     if streaming:
@@ -818,7 +904,11 @@ def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
         else None,
     )
     if not repos and not streaming:
-        return _error_exit(args, "Repo list is empty; nothing to do.", "empty repo list")
+        return _error_exit(
+            args,
+            text("Repo list is empty; nothing to do."),
+            "empty repo list",
+        )
     if not args.dry_run and repos:
         _preflight_token_scopes(org, repos[0], timeout=args.gh_timeout)
     LOG.info("Queue stages: %s", ",".join(args.stages))
@@ -838,3 +928,14 @@ def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
         if args.json:
             emit_json_status(130, message="interrupted")
         return 130
+
+
+def main(argv: list[str] | None = None, *, profile: str = "full") -> int:
+    """Admit the selected roles and run the queue with one configuration."""
+    args = parse_args(argv, profile=profile)
+    try:
+        return _run(args, profile=profile)
+    except (_PipelineCliError, PromptCatalogPreflightError) as exc:
+        if not args.json:
+            raise
+        return _error_exit(args, str(exc), exc.json_message)

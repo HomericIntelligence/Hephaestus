@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.forensics.coredump_handler import (
     DEFAULT_MAX_BYTES,
+    _build_parser,
     main,
     resolve_target_dir,
     write_core,
@@ -57,6 +59,19 @@ class TestResolveTargetDir:
         """An all-empty candidate list raises ValueError."""
         with pytest.raises(ValueError, match="no candidate target directories"):
             resolve_target_dir(["", ""])
+
+
+def test_capture_argument_error_uses_stable_human_template(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Translate capture-argument prose and keep argument names unchanged."""
+    source = "missing required argument(s) for capture: %(arguments)s"
+    with using_localizer({source: "argument(s) requis manquant(s) : %(arguments)s"}):
+        assert main([]) == 1
+
+    assert "argument(s) requis manquant(s) : pid, exe, crash_time, signal" in (
+        capsys.readouterr().err
+    )
 
 
 class TestWriteCore:
@@ -120,6 +135,16 @@ class TestWriteCore:
 
 class TestMainTargetDir:
     """Tests for the --target-dir CLI option and its precedence in main()."""
+
+    def test_help_preserves_core_pattern_percent_tokens(self) -> None:
+        """Render deferred argparse percent tokens without an interpolation error."""
+        source = "PID of the crashing process (%%p)"
+        with using_localizer({source: "PID traduit (%%p)"}):
+            parser = _build_parser()
+        help_text = parser.format_help()
+
+        assert "PID traduit (%p)" in help_text
+        assert "(%P)" in help_text
 
     def test_target_dir_option_directs_the_core_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

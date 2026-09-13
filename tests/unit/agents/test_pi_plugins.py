@@ -1096,3 +1096,45 @@ def test_cli_main_emits_machine_readable_report_and_stable_exit(
     assert payload["status"] == "installed_unapproved"
     assert payload["packages"][0]["status"] == "installed"
     assert payload["approval_persisted"] is False
+
+
+def test_cli_main_localizes_authored_install_detail(monkeypatch: Any, capsys: Any) -> None:
+    """Translate an authored installer detail only in human output."""
+    from hephaestus.agents import pi_plugins
+    from hephaestus.cli.localization import using_localizer
+
+    report = pi_plugins.InstallReport(False, "confirmation_required", (), "rerun with --yes")
+    monkeypatch.setattr(pi_plugins, "install_pi_plugins", Mock(return_value=report))
+
+    with using_localizer({"rerun with --yes": "réexécuter avec --yes"}):
+        assert pi_plugins.main([]) == 2
+
+    assert "réexécuter avec --yes" in capsys.readouterr().err
+
+
+def test_cli_main_localizes_preflight_remediation(monkeypatch: Any, capsys: Any) -> None:
+    """Translate the authored preflight instruction and retain the status value."""
+    from hephaestus.agents import pi_plugins
+    from hephaestus.cli.localization import using_localizer
+
+    remediation = "Run hephaestus-install-pi-plugins --global --yes --no-approve"
+    report = pi_plugins.InstallReport(
+        False,
+        "preflight_failed",
+        (),
+        f"Pi package preflight failed: package_missing. {remediation}",
+    )
+    monkeypatch.setattr(pi_plugins, "install_pi_plugins", Mock(return_value=report))
+    catalog = {
+        "Pi package preflight failed: %(status)s%(detail)s. %(remediation)s": (
+            "Échec du contrôle Pi : %(status)s%(detail)s. %(remediation)s"
+        ),
+        remediation: "Exécutez hephaestus-install-pi-plugins --global --yes --no-approve",
+    }
+
+    with using_localizer(catalog):
+        assert pi_plugins.main([]) == 1
+
+    error = capsys.readouterr().err
+    assert "Échec du contrôle Pi : package_missing." in error
+    assert "Exécutez hephaestus-install-pi-plugins" in error

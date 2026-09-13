@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.cli.localization import using_localizer
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 ISSUE_1418_FILES = [
@@ -77,6 +78,28 @@ def test_create_validation_parser_preserves_parser_customization() -> None:
     assert parser.prog == "custom-check"
     assert "usage: custom-check [flags] path" in help_text
     assert "Example: custom-check path" in help_text
+
+
+def test_create_validation_parser_localizes_metadata_and_keeps_control_values(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Translate authored metadata and keep parser syntax and exit behavior."""
+    catalog = {
+        "Check files": "Vérifier les fichiers",
+        "Repository root (default: auto-detect)": "Racine du dépôt (détection automatique)",
+    }
+    with using_localizer(catalog):
+        parser = create_validation_parser("Check files", prog="validator")
+
+    help_text = parser.format_help()
+    assert "Vérifier les fichiers" in help_text
+    assert "Racine du dépôt" in help_text
+    assert "--repo-root REPO_ROOT" in help_text
+    assert parser.parse_args(["--repo-root", "/tmp/project"]).repo_root == Path("/tmp/project")
+    with pytest.raises(SystemExit) as version_exit:
+        parser.parse_args(["--version"])
+    assert version_exit.value.code == 0
+    assert "validator" in capsys.readouterr().out
 
 
 def test_resolve_repo_root_prefers_explicit_path() -> None:

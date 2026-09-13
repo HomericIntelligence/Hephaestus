@@ -21,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 
 SchemaMapping = list[tuple[re.Pattern[str], Path]]
@@ -244,7 +245,10 @@ def _check_files(
         if schema_path is None:
             if allow_unmapped:
                 print(
-                    f"WARNING: No schema mapping for {file_path} — skipping",
+                    text(
+                        "WARNING: No schema mapping for %(path)s — skipping",
+                        path=file_path,
+                    ),
                     file=sys.stderr,
                 )
                 skipped += 1
@@ -269,7 +273,7 @@ def _check_files(
         else:
             passed += 1
             if verbose:
-                print(f"PASS: {file_path}")
+                print(text("PASS: %(path)s", path=file_path))
 
     exit_code = 0 if dry_run or not diagnostics else 1
     return SchemaCheckResult(
@@ -298,29 +302,29 @@ def main() -> int:
         "files",
         nargs="*",
         type=Path,
-        help="Config files to validate",
+        help=text("Config files to validate"),
     )
     parser.add_argument(
         "--schema-map",
         type=Path,
         default=None,
-        help="JSON file defining pattern-to-schema mappings",
+        help=text("JSON file defining pattern-to-schema mappings"),
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print passing file names",
+        help=text("Print passing file names"),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print errors but exit 0",
+        help=text("Print errors but exit 0"),
     )
     parser.add_argument(
         "--allow-unmapped",
         action="store_true",
-        help="Explicitly skip requested files that have no matching schema",
+        help=text("Explicitly skip requested files that have no matching schema"),
     )
 
     args = parser.parse_args()
@@ -351,8 +355,10 @@ def main() -> int:
             )
         else:
             print(
-                "ERROR: --schema-map is required. Provide a JSON file mapping "
-                "file patterns to schema paths.",
+                text(
+                    "ERROR: --schema-map is required. Provide a JSON file mapping "
+                    "file patterns to schema paths."
+                ),
                 file=sys.stderr,
             )
         return 1
@@ -364,7 +370,7 @@ def main() -> int:
         if args.json:
             emit_json_status(1, message=message, errors=[message])
         else:
-            print(f"ERROR: {message}", file=sys.stderr)
+            print(text("ERROR: %(message)s", message=message), file=sys.stderr)
         return 1
 
     result = check_files(
@@ -391,15 +397,18 @@ def main() -> int:
         )
     elif result.diagnostics:
         for error in result.diagnostics:
-            print(f"ERROR: {error}", file=sys.stderr)
+            print(text("ERROR: %(error)s", error=error), file=sys.stderr)
     else:
         print(
-            "Summary: "
-            f"requested={result.requested}, "
-            f"validated={result.validated}, "
-            f"skipped={result.skipped}, "
-            f"passed={result.passed}, "
-            f"failed={result.failed}"
+            text(
+                "Summary: requested=%(requested)d, validated=%(validated)d, "
+                "skipped=%(skipped)d, passed=%(passed)d, failed=%(failed)d",
+                requested=result.requested,
+                validated=result.validated,
+                skipped=result.skipped,
+                passed=result.passed,
+                failed=result.failed,
+            )
         )
     return result.exit_code
 

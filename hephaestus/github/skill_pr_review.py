@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -167,24 +168,24 @@ def _target_from_arguments(
 ) -> RepositoryTarget:
     """Bind an explicit target, or derive it only from a direct canonical URL."""
     if (host is None) != (repository is None):
-        parser.error("--target-host and --target-repository must be supplied together")
+        parser.error(text("--target-host and --target-repository must be supplied together"))
     if host is not None and repository is not None:
         if host != "github.com":
-            parser.error("--target-host must be github.com")
+            parser.error(text("--target-host must be github.com"))
         try:
             target = RepositoryTarget(
                 host=host,
                 repository=_require_repository(repository, "--target-repository"),
             )
         except RuntimeError as error:
-            parser.error(str(error))
+            parser.error(_format_human_error(error))
         if identifier is not None and identifier.startswith("https://"):
             try:
                 supplied = repository_from_pr_url(identifier, _pull_request_number(identifier))
             except RuntimeError as error:
-                parser.error(str(error))
+                parser.error(_format_human_error(error))
             if supplied.casefold() != target.repository.casefold():
-                parser.error("pull-request URL does not match --target-repository")
+                parser.error(text("pull-request URL does not match --target-repository"))
         return target
     if identifier is not None and identifier.startswith("https://"):
         try:
@@ -193,9 +194,12 @@ def _target_from_arguments(
                 repository=repository_from_pr_url(identifier, _pull_request_number(identifier)),
             )
         except RuntimeError as error:
-            parser.error(str(error))
+            parser.error(_format_human_error(error))
     parser.error(
-        "numeric pull requests and branch discovery require --target-host and --target-repository"
+        text(
+            "numeric pull requests and branch discovery require "
+            "--target-host and --target-repository"
+        )
     )
     raise AssertionError("argument parser returned after a target error")
 
@@ -295,8 +299,53 @@ def _print_error(exit_code: int, error: Exception, json_output: bool) -> int:
     if json_output:
         emit_json_status(exit_code, str(error))
     else:
-        print(error, file=sys.stderr)
+        print(_format_human_error(error), file=sys.stderr)
     return exit_code
+
+
+def _format_human_error(error: Exception) -> str:
+    """Translate authored resolution errors and retain external diagnostics."""
+    message = str(error)
+    if match := re.fullmatch(r"invalid pull-request identifier: (?P<identifier>.+)", message):
+        identifier = match["identifier"]
+        if len(identifier) >= 2 and identifier[0] == identifier[-1] == "'":
+            identifier = identifier[1:-1]
+        return text(
+            "invalid pull-request identifier: %(identifier)r",
+            identifier=identifier,
+        )
+    if match := re.fullmatch(r"(?P<label>.+) must be a lowercase 40-hex Git commit OID", message):
+        return text(
+            "%(label)s must be a lowercase 40-hex Git commit OID",
+            **match.groupdict(),
+        )
+    if match := re.fullmatch(r"(?P<label>.+) must be a canonical GitHub owner/repository", message):
+        return text(
+            "%(label)s must be a canonical GitHub owner/repository",
+            **match.groupdict(),
+        )
+    if match := re.fullmatch(r"GitHub returned invalid pull-request URL: (?P<url>.+)", message):
+        return text("GitHub returned invalid pull-request URL: %(url)s", **match.groupdict())
+    if match := re.fullmatch(r"no open pull request found for branch (?P<branch>.+)", message):
+        return text("no open pull request found for branch %(branch)s", **match.groupdict())
+    if match := re.fullmatch(
+        r"multiple open pull requests found for (?P<branch>[^:]+):\n(?P<requests>.+)",
+        message,
+        re.DOTALL,
+    ):
+        return text(
+            "multiple open pull requests found for %(branch)s:\n%(requests)s",
+            **match.groupdict(),
+        )
+    authored = {
+        "repository history is shallow; immutable diff evidence is incomplete",
+        "immutable diff lenses require exactly one merge base",
+        "GitHub returned an invalid pull-request object",
+        "pull-request URL does not match the retained target",
+        "GitHub returned an invalid pull-request list",
+        "GitHub returned an invalid pull-request candidate",
+    }
+    return text(message) if message in authored else message
 
 
 def resolve_pr_main(argv: Sequence[str] | None = None) -> int:

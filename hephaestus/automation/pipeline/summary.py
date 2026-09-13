@@ -16,12 +16,15 @@ import logging
 import re
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 
 from hephaestus.automation.github_api.diff import normalize_review_finding_compacted_outcomes
 from hephaestus.automation.pipeline.work_item import ItemKind, PreservedWorktree, WorkItem
+from hephaestus.cli.localization import Localizer, get_localizer
 from hephaestus.cli.utils import emit_json_status
+from hephaestus.logging.formatters import _LOCALIZED_RENDERER_FIELD
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +142,12 @@ class RunStats:
         return self.exit_code == 130
 
 
-def format_preserved_worktrees(preserved: Sequence[PreservedWorktree], script: str) -> list[str]:
+def format_preserved_worktrees(
+    preserved: Sequence[PreservedWorktree],
+    script: str,
+    *,
+    localizer: Localizer | None = None,
+) -> list[str]:
     """Format the preserved-worktree footer (legacy line sequence, verbatim).
 
     Re-housed from the legacy implementer preserved-worktree footer so the
@@ -150,6 +158,7 @@ def format_preserved_worktrees(preserved: Sequence[PreservedWorktree], script: s
         preserved: ``(repo, issue_number, worktree_path)`` tuples retained for
             recovery or failed-item debugging.
         script: The script name (``sys.argv[0]``) for the rerun hint.
+        localizer: Optional renderer. The active localizer is the default.
 
     Returns:
         The formatted lines (empty when nothing is preserved).
@@ -157,23 +166,30 @@ def format_preserved_worktrees(preserved: Sequence[PreservedWorktree], script: s
     """
     if not preserved:
         return []
+    render = (localizer or get_localizer()).text
     issue_nums = [number for _, number, _ in preserved]
     # ``--issues`` takes ONE comma-separated string (loop_runner._parse_issue_list);
     # a space-joined list makes argparse read only the first number and reject the
     # rest, and ``--resume`` is not an option on this CLI at all (#2281). The loop
     # resumes a preserved worktree by re-seeding the same ``--issues``.
     issues_arg = ",".join(str(n) for n in issue_nums)
-    lines: list[str] = ["\nPreserved worktrees (retained for recovery or debugging):"]
-    lines.extend(f"  #{number}: {path}" for _, number, path in preserved)
-    lines.append("\nRerun these issues after inspecting/cleaning the worktrees:")
-    lines.append(f"  {script} --issues {issues_arg}")
-    lines.append("To discard them instead:")
-    lines.extend(f"  git worktree remove --force {path}" for _, _, path in preserved)
+    lines: list[str] = [render("\nPreserved worktrees (retained for recovery or debugging):")]
+    lines.extend(
+        render("  #%(number)d: %(path)s", number=number, path=path) for _, number, path in preserved
+    )
+    lines.append(render("\nRerun these issues after inspecting/cleaning the worktrees:"))
+    lines.append(render("  %(script)s --issues %(issues)s", script=script, issues=issues_arg))
+    lines.append(render("To discard them instead:"))
+    lines.extend(
+        render("  git worktree remove --force %(path)s", path=path) for _, _, path in preserved
+    )
     return lines
 
 
 def format_direct_review_recovery_worktrees(
     recovery: Sequence[PreservedWorktree],
+    *,
+    localizer: Localizer | None = None,
 ) -> list[str]:
     """Format inspection-only guidance for receipt-backed detached recoveries.
 
@@ -183,11 +199,16 @@ def format_direct_review_recovery_worktrees(
     """
     if not recovery:
         return []
-    lines = ["\nDetached-review recovery worktrees (inspection required):"]
-    lines.extend(f"  #{number}: {path}" for _, number, path in recovery)
+    render = (localizer or get_localizer()).text
+    lines = [render("\nDetached-review recovery worktrees (inspection required):")]
+    lines.extend(
+        render("  #%(number)d: %(path)s", number=number, path=path) for _, number, path in recovery
+    )
     lines.append(
-        "Do not remove or reuse these paths until you have confirmed that no "
-        "automation loop is active."
+        render(
+            "Do not remove or reuse these paths until you have confirmed that no "
+            "automation loop is active."
+        )
     )
     return lines
 
@@ -233,6 +254,23 @@ def _disposition_bucket(item: WorkItem) -> str:
     """Aggregate-count bucket for one item (pass/fail/skip/blocked/resumable)."""
     cell = _disposition(item)
     return cell.split(":")[0].split(" ")[0].lower()
+
+
+def _display_disposition(item: WorkItem, *, localizer: Localizer | None = None) -> str:
+    """Return a localized disposition for the human summary row."""
+    render = (localizer or get_localizer()).text
+    result = item.result
+    if result is None:
+        return render("PENDING")
+    if result.reason.startswith("resumable"):
+        return render("RESUMABLE at %(stage)s", stage=result.final_stage.value)
+    if result.passed:
+        return render("PASS")
+    if result.reason.startswith("skip"):
+        return render("SKIP")
+    if result.reason.startswith("blocked"):
+        return render("BLOCKED")
+    return render("FAIL:%(reason)s", reason=result.reason)
 
 
 @dataclass
@@ -307,7 +345,7 @@ def _json_message(exit_code: int) -> str:
     return "pipeline failed"
 
 
-def _item_row(item: WorkItem) -> str:
+def _item_row(item: WorkItem, *, localizer: Localizer | None = None) -> str:
     """Format one per-item summary row."""
     issue = f"#{item.issue}" if item.issue else "-"
     pr = f"!{item.pr}" if item.pr else "-"
@@ -316,8 +354,60 @@ def _item_row(item: WorkItem) -> str:
     elapsed_s = (item.updated_at - item.created_at).total_seconds()
     return (
         f"  {item.repo:<28} {issue:>7} {pr:>7} {entry:<15} "
-        f"{item.stage.value:<15} {_disposition(item):<28} {attempts:<24} {elapsed_s:7.1f}s"
+        f"{item.stage.value:<15} {_display_disposition(item, localizer=localizer):<28} "
+        f"{attempts:<24} {elapsed_s:7.1f}s"
     )
+
+
+def _summary_header(*, localizer: Localizer | None = None) -> str:
+    """Return the localized pipeline-summary table header."""
+    render = (localizer or get_localizer()).text
+    return (
+        f"  {render('repo'):<28} {render('issue'):>7} {render('pr'):>7} "
+        f"{render('entry'):<15} {render('final'):<15} {render('disposition'):<28} "
+        f"{render('attempts'):<24} {render('elapsed'):>8}"
+    )
+
+
+def _log_display_line(source: str, renderer: Callable[[Localizer], str]) -> None:
+    """Log one raw machine message with a plain-formatter renderer."""
+    logger.info("%s", source, extra={_LOCALIZED_RENDERER_FIELD: renderer})
+
+
+def _render_summary_header(localizer: Localizer) -> str:
+    """Render the summary header for one plain formatter."""
+    return _summary_header(localizer=localizer)
+
+
+def _render_summary_rule(localizer: Localizer) -> str:
+    """Render the summary rule for one plain formatter."""
+    return f"  {'-' * (len(_summary_header(localizer=localizer)) - 2)}"
+
+
+def _render_item_row(localizer: Localizer, *, item: WorkItem) -> str:
+    """Render one item row for one plain formatter."""
+    return _item_row(item, localizer=localizer)
+
+
+def _render_preserved_line(
+    localizer: Localizer,
+    *,
+    preserved: tuple[PreservedWorktree, ...],
+    script: str,
+    index: int,
+) -> str:
+    """Render one preserved-worktree line for one plain formatter."""
+    return format_preserved_worktrees(preserved, script, localizer=localizer)[index]
+
+
+def _render_recovery_line(
+    localizer: Localizer,
+    *,
+    recovery: tuple[PreservedWorktree, ...],
+    index: int,
+) -> str:
+    """Render one recovery-worktree line for one plain formatter."""
+    return format_direct_review_recovery_worktrees(recovery, localizer=localizer)[index]
 
 
 def _review_publication_targets(item: WorkItem) -> dict[str, list[str]]:
@@ -397,14 +487,15 @@ def print_summary(  # noqa: C901
 
     logger.info("")
     logger.info("=== Pipeline summary ===")
-    header = (
-        f"  {'repo':<28} {'issue':>7} {'pr':>7} {'entry':<15} "
-        f"{'final':<15} {'disposition':<28} {'attempts':<24} {'elapsed':>8}"
-    )
-    logger.info("%s", header)
-    logger.info("  %s", "-" * (len(header) - 2))
+    english = Localizer()
+    raw_header = _summary_header(localizer=english)
+    _log_display_line(raw_header, _render_summary_header)
+    _log_display_line(f"  {'-' * (len(raw_header) - 2)}", _render_summary_rule)
     for item in items:
-        logger.info("%s", _item_row(item))
+        _log_display_line(
+            _item_row(item, localizer=english),
+            partial(_render_item_row, item=item),
+        )
         review_run = _review_run(item)
         if review_run is not None:
             logger.info(
@@ -484,10 +575,26 @@ def print_summary(  # noqa: C901
 
     logger.info("  auxiliary jobs deferred: %d", stats.auxiliary_job_deferred_count)
 
-    for line in format_preserved_worktrees(preserved, sys.argv[0]):
-        logger.info("%s", line)
-    for line in format_direct_review_recovery_worktrees(recovery_preserved):
-        logger.info("%s", line)
+    preserved_items = tuple(preserved)
+    script = sys.argv[0]
+    raw_preserved = format_preserved_worktrees(preserved_items, script, localizer=english)
+    for index, raw_line in enumerate(raw_preserved):
+        _log_display_line(
+            raw_line,
+            partial(
+                _render_preserved_line,
+                preserved=preserved_items,
+                script=script,
+                index=index,
+            ),
+        )
+    recovery_items = tuple(recovery_preserved)
+    raw_recovery = format_direct_review_recovery_worktrees(recovery_items, localizer=english)
+    for index, raw_line in enumerate(raw_recovery):
+        _log_display_line(
+            raw_line,
+            partial(_render_recovery_line, recovery=recovery_items, index=index),
+        )
 
     if json_out:
         review_sessions = [

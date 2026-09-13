@@ -225,7 +225,7 @@ def test_main_combines_consistency_and_matrix_results(
         "check_python_version_consistency",
         lambda *args, **kwargs: (consistent, versions),
     )
-    monkeypatch.setattr(pv, "check_ci_matrix_coverage", lambda root: matrix_ok)
+    monkeypatch.setattr(pv, "check_ci_matrix_coverage", lambda root, **kwargs: matrix_ok)
 
     assert pv.main() == expected_rc
     captured = capsys.readouterr()
@@ -243,7 +243,7 @@ def test_main_emits_json_result(
         "check_python_version_consistency",
         lambda *args, **kwargs: (True, {"requires-python": "3.13"}),
     )
-    monkeypatch.setattr(pv, "check_ci_matrix_coverage", lambda root: True)
+    monkeypatch.setattr(pv, "check_ci_matrix_coverage", lambda root, **kwargs: True)
 
     assert pv.main() == 0
     assert json.loads(capsys.readouterr().out) == {
@@ -251,3 +251,31 @@ def test_main_emits_json_result(
         "passed": True,
         "versions": {"requires-python": "3.13"},
     }
+
+
+def test_main_json_is_stable_inside_localization_context(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A catalog cannot change or prefix the machine-readable result."""
+    from hephaestus.cli.localization import using_localizer
+
+    (tmp_path / "pyproject.toml").write_text(
+        PYPROJECT.replace(
+            'classifiers = ["Programming Language :: Python :: 3.13"]',
+            'classifiers = ["Programming Language :: Python :: 3.12"]',
+        ),
+        encoding="utf-8",
+    )
+    workflow = tmp_path / ".github" / "workflows"
+    workflow.mkdir(parents=True)
+    (workflow / "_required.yml").write_text('python-version: ["3.13"]', encoding="utf-8")
+    monkeypatch.setattr("hephaestus.validation.python_version.sys.argv", ["check", "--json"])
+    monkeypatch.setattr(pv, "resolve_repo_root", lambda args: tmp_path)
+
+    source = "ERROR: CI matrix is missing classifier Python versions: %(value0)s"
+    with using_localizer({source: "ERREUR : versions manquantes : %(value0)s"}):
+        assert pv.main() == 1
+
+    output = capsys.readouterr().out
+    assert "ERREUR" not in output
+    assert json.loads(output)["passed"] is False
