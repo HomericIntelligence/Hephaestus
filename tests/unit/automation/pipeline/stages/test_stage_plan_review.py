@@ -1875,6 +1875,56 @@ class TestPlanScopeAdmission:
         assert github.labels[1] == {STATE_NEEDS_PLAN}
         assert github.mutation_log == []
 
+    @pytest.mark.parametrize(
+        ("replacement_plan", "replacement_revision"),
+        [
+            ("## Exact file scope and ownership\n- `tests/unit/two.py`", 1),
+            ("## Exact file scope and ownership\n- `tests/unit/one.py`", 2),
+        ],
+    )
+    def test_scope_block_revalidates_plan_identity_before_mutation(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        replacement_plan: str,
+        replacement_revision: int,
+    ) -> None:
+        """A scope decision cannot block a plan that changes before its write."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+        _seed_canonical_plan(github, 1, plan)
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+        matching_comments = github.issue_comments(1)
+        replacement_comments = [
+            IssueComment(
+                body=body,
+                author_login="hephaestus[bot]",
+                viewer_did_author=True,
+            )
+            for body in (
+                render_current_plan(replacement_plan, revision=replacement_revision),
+                render_pending_review(revision=replacement_revision),
+            )
+        ]
+        reads = iter([matching_comments, matching_comments, replacement_comments])
+
+        def sequenced_comments(_issue_number: int) -> list[IssueComment]:
+            return next(reads, replacement_comments)
+
+        monkeypatch.setattr(github, "issue_comments", sequenced_comments)
+
+        outcome = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+        assert github.labels[1] == {STATE_NEEDS_PLAN}
+        assert github.mutation_log == []
+
 
 class TestDurableWriteOrdering:
     """The load-bearing invariant: durable writes precede advancing outcomes."""
