@@ -329,7 +329,6 @@ def _carry_review_finding_records(
                 break
         except ValueError:
             normalized_records = ()
-            normalized_compacted = empty_review_finding_compacted_outcomes()
         candidate_id = next(
             (
                 finding_id
