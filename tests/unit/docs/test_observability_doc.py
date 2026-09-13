@@ -41,7 +41,8 @@ def test_event_log_default_path_is_outside_registered_worktrees() -> None:
     text = DOC.read_text(encoding="utf-8")
 
     assert "~/.hephaestus-diagnostics/<projects-root-name>/pipeline-events-" in text
-    assert "<system-temporary-directory>/.hephaestus-diagnostics/<projects-root-name>" in text
+    assert "`hephaestus-<effective-user-id>` namespace" in text
+    assert "`.hephaestus-diagnostics/<projects-root-name>`" in text
 
 
 def test_every_emitted_metric_is_documented() -> None:

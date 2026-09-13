@@ -11,6 +11,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -18,6 +19,11 @@ from threading import Event
 from hephaestus._version_lookup import get_version
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation._review_utils import build_automation_parser
+from hephaestus.automation.event_log_io import (
+    EventLogCandidate,
+    event_log_io_supported,
+    open_event_log_handle,
+)
 from hephaestus.automation.event_log_retention import (
     DEFAULT_EVENT_LOG_RETENTION_COUNT,
     DEFAULT_EVENT_LOG_RETENTION_DAYS,
@@ -208,32 +214,75 @@ def _pipeline_event_log_path(
     directory is in a checkout, use the host temporary directory. Do not use
     a candidate below the projects root or a Git worktree.
     """
-    if not repos and not has_repo_source:
-        return None
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    diagnostics_dir = next(
-        (
-            root / _PIPELINE_DIAGNOSTICS_DIR / projects_dir.name
-            for root in _pipeline_diagnostics_roots()
-            if _is_safe_pipeline_diagnostics_dir(
-                root / _PIPELINE_DIAGNOSTICS_DIR / projects_dir.name,
-                projects_dir,
-            )
-        ),
-        None,
+    candidates = _pipeline_event_log_candidates(
+        projects_dir,
+        repos,
+        has_repo_source=has_repo_source,
     )
-    if diagnostics_dir is None:
+    return _select_pipeline_event_log_path(candidates)
+
+
+def _pipeline_event_log_candidates(
+    projects_dir: Path,
+    repos: list[str],
+    *,
+    has_repo_source: bool = False,
+) -> tuple[EventLogCandidate, ...]:
+    """Return safe event-log candidates in preferred order."""
+    if not repos and not has_repo_source:
+        return ()
+    if not event_log_io_supported():
+        LOG.warning("The host cannot provide secure event logging; event logging is disabled")
+        return ()
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    name = f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
+    candidates: list[EventLogCandidate] = []
+    for root, private_root in _pipeline_diagnostics_roots():
+        diagnostics_dir = root / _PIPELINE_DIAGNOSTICS_DIR / projects_dir.name
+        if _is_safe_pipeline_diagnostics_dir(diagnostics_dir, projects_dir):
+            candidates.append(
+                EventLogCandidate(
+                    path=diagnostics_dir / name,
+                    private_root=private_root,
+                )
+            )
+    if not candidates:
         LOG.warning("No safe event-log path is available; event logging is disabled")
-        return None
-    return diagnostics_dir / f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
+    return tuple(candidates)
 
 
-def _pipeline_diagnostics_roots() -> Iterator[Path]:
+def _select_pipeline_event_log_path(
+    candidates: tuple[EventLogCandidate, ...],
+) -> Path | None:
+    """Return the first candidate that supports a private probe write."""
+    for candidate in candidates:
+        try:
+            with open_event_log_handle(candidate) as handle:
+                handle.probe_write()
+        except (OSError, RuntimeError):
+            continue
+        return candidate.path
+    if candidates:
+        LOG.warning("No safe, usable event-log path is available; event logging is disabled")
+    return None
+
+
+def _pipeline_diagnostics_roots() -> Iterator[tuple[Path, Path]]:
     """Yield each available default root without coupling provider failures."""
+    get_effective_uid = getattr(os, "geteuid", None)
+    if not callable(get_effective_uid):
+        return
+    effective_uid = int(get_effective_uid())
     with suppress(OSError, RuntimeError):
-        yield Path.home()
+        # The OS can supply a home through a public symlinked prefix. Resolve
+        # this trusted boundary before the managed private subtree starts.
+        home = Path.home().resolve(strict=True)
+        yield home, home / _PIPELINE_DIAGNOSTICS_DIR
     with suppress(OSError, RuntimeError):
-        yield Path(tempfile.gettempdir())
+        temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        namespace = temporary_root / f"hephaestus-{effective_uid}"
+        yield namespace, namespace
 
 
 def _is_safe_pipeline_diagnostics_dir(path: Path, projects_dir: Path) -> bool:
@@ -842,6 +891,12 @@ def build_config(
         from hephaestus.resilience import all_circuit_breaker_snapshots
 
         breaker_snapshots = all_circuit_breaker_snapshots
+    event_log_candidates = _pipeline_event_log_candidates(
+        projects_dir,
+        repos,
+        has_repo_source=repo_source_factory is not None,
+    )
+    event_log_path = _select_pipeline_event_log_path(event_log_candidates)
     return PipelineConfig(
         org=org,
         repos=repos,
@@ -859,9 +914,8 @@ def build_config(
         enable_learn=not args.no_learn,
         budget_overrides=budgets,
         circuit_breaker_snapshot_provider=breaker_snapshots,
-        event_log_path=_pipeline_event_log_path(
-            projects_dir, repos, has_repo_source=repo_source_factory is not None
-        ),
+        event_log_path=event_log_path,
+        event_log_candidates=event_log_candidates,
         host_verification_pyxis_image=args.host_verification_pyxis_image
         or DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
         projects_dir=projects_dir,
@@ -977,8 +1031,14 @@ def _run(args: argparse.Namespace, *, profile: str) -> int:
             retention_days=args.event_log_retention_days,
             retention_count=args.event_log_retention_count,
             dry_run=args.dry_run,
-        ):
-            return run_pipeline(config)
+            candidates=config.event_log_candidates,
+        ) as event_log_handle:
+            runtime_config = replace(
+                config,
+                event_log_path=(event_log_handle.path if event_log_handle is not None else None),
+                event_log_handle=event_log_handle,
+            )
+            return run_pipeline(runtime_config)
     except KeyboardInterrupt:
         if args.json:
             emit_json_status(130, message="interrupted")

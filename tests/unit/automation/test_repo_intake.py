@@ -765,10 +765,14 @@ def test_nested_registered_writer_event_log_does_not_block_intake(
 ) -> None:
     """Pre-intake diagnostics stay outside a registered writer worktree."""
     caller, remote = _make_repository(tmp_path)
+    # A normal home is outside the inferred projects root. Keep the fixture
+    # independent of an ambient system temporary namespace.
+    user_home = tmp_path.with_name(f"{tmp_path.name}-user-home")
+    user_home.mkdir()
     monkeypatch.setattr(
         Path,
         "home",
-        classmethod(lambda cls: tmp_path / "user-home"),
+        classmethod(lambda cls: user_home),
     )
     writer = caller / writer_relative
     _run_git(caller, "worktree", "add", "--detach", str(writer), "HEAD")
@@ -850,7 +854,10 @@ def test_registered_home_event_log_does_not_dirty_or_block_intake(
         )
 
     assert config.event_log_path.parent == (
-        host_temp / ".hephaestus-diagnostics" / config.projects_dir.name
+        host_temp
+        / f"hephaestus-{os.geteuid()}"
+        / ".hephaestus-diagnostics"
+        / config.projects_dir.name
     )
     assert config.event_log_path.is_file()
     status = _run_git(

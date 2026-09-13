@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import queue
+import stat
 import subprocess
 import threading
 import uuid
@@ -3700,6 +3701,87 @@ class TestImplementationAdmission:
 
 class TestDurableEventLog:
     """Optional JSONL event log mirrors the coordinator's in-memory event log."""
+
+    def test_event_log_write_rejects_symlink(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An event-log symlink cannot redirect diagnostic records."""
+        target = tmp_path / "target"
+        target.write_text("existing data\n", encoding="utf-8")
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        event_log_path.symlink_to(target)
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            coordinator._record_event("probe")
+
+        assert target.read_text(encoding="utf-8") == "existing data\n"
+        assert coordinator._event_log_disabled is True
+        assert any(
+            "failed to write pipeline event log" in record.message for record in caplog.records
+        )
+
+    def test_event_log_write_creates_private_regular_file(self, tmp_path: Path) -> None:
+        """A new event log is a private regular file owned by the process user."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+
+        coordinator._record_event("probe")
+
+        status = event_log_path.lstat()
+        assert stat.S_ISREG(status.st_mode)
+        assert stat.S_IMODE(status.st_mode) == 0o600
+        assert status.st_uid == os.geteuid()
+
+    def test_event_log_write_creates_missing_private_parent(self, tmp_path: Path) -> None:
+        """An explicit nested event path creates a secure missing parent."""
+        event_log_path = tmp_path / "nested" / "missing" / "pipeline-events.jsonl"
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+
+        coordinator._record_event("probe")
+
+        assert json.loads(event_log_path.read_text(encoding="utf-8"))["event"] == "probe"
+        assert coordinator._event_log_disabled is False
+        for directory in (event_log_path.parent.parent, event_log_path.parent):
+            status = directory.lstat()
+            assert stat.S_ISDIR(status.st_mode)
+            assert stat.S_IMODE(status.st_mode) == 0o700
+            assert status.st_uid == os.geteuid()
 
     def test_run_start_records_bounded_executable_provenance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
