@@ -461,6 +461,45 @@ def test_effective_policy_records_an_applicable_required_merge_queue(
     assert policy is not None
     assert policy.merge_queue_required is True
     assert policy.merge_queue_method == "SQUASH"
+    assert policy.check_response_timeout_minutes == 180
+    assert policy.min_entries_to_merge_wait_minutes == 5
+    assert policy.merge_queue_residence_timeout_s == 11100.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("check_response_timeout_minutes", None),
+        ("check_response_timeout_minutes", 0),
+        ("check_response_timeout_minutes", True),
+        ("min_entries_to_merge_wait_minutes", None),
+        ("min_entries_to_merge_wait_minutes", -1),
+        ("min_entries_to_merge_wait_minutes", False),
+    ],
+)
+def test_effective_policy_rejects_invalid_merge_queue_timing(
+    command_runner: MagicMock, field: str, value: object
+) -> None:
+    """Incomplete server timing cannot authorize queue residence."""
+    ruleset = _ruleset(merge_queue=True)
+    rules = ruleset["rules"]
+    assert isinstance(rules, list)
+    queue_rule = rules[-1]
+    assert isinstance(queue_rule, dict)
+    parameters = queue_rule["parameters"]
+    assert isinstance(parameters, dict)
+    parameters[field] = value
+    command_runner.side_effect = _policy_transport(_classic_policy(), [ruleset])
+    adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+
+    policy = adapter.effective_merge_policy(
+        7,
+        "main",
+        deadline_s=time.monotonic() + 30.0,
+        cancellation=threading.Event(),
+    )
+
+    assert policy is None
 
 
 @pytest.mark.parametrize(

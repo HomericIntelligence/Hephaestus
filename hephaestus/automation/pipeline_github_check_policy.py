@@ -56,11 +56,27 @@ class EffectiveMergePolicy:
     bypassable_ruleset_ids: tuple[int, ...]
     strict_update_enforced: bool = False
     merge_queue_method: str | None = None
+    check_response_timeout_minutes: int | None = None
+    min_entries_to_merge_wait_minutes: int | None = None
 
     @property
     def merge_queue_required(self) -> bool:
         """Return whether server policy requires the merge queue."""
         return self.merge_queue_method is not None
+
+    @property
+    def merge_queue_residence_timeout_s(self) -> float | None:
+        """Return the complete server queue wait window in seconds."""
+        check_timeout = self.check_response_timeout_minutes
+        minimum_wait = self.min_entries_to_merge_wait_minutes
+        if (
+            type(check_timeout) is not int
+            or check_timeout <= 0
+            or type(minimum_wait) is not int
+            or minimum_wait < 0
+        ):
+            return None
+        return float((check_timeout + minimum_wait) * 60)
 
 
 def _request(
@@ -221,7 +237,7 @@ def _ruleset_policy(
     ruleset: object,
     base_branch: str,
     default_branch: str,
-) -> tuple[set[RequiredCheck], bool, bool, bool, str | None]:
+) -> tuple[set[RequiredCheck], bool, bool, bool, str | None, int | None, int | None]:
     """Parse one active ruleset into actor-bound policy facts."""
     if not isinstance(ruleset, dict):
         raise ValueError("ruleset detail is not an object")
@@ -231,17 +247,24 @@ def _ruleset_policy(
     if ruleset.get("target") != "branch" or ruleset.get("enforcement") != "active":
         raise ValueError("active branch ruleset identity is malformed")
     if not ruleset_applies(ruleset, base_branch, default_branch):
-        return set(), False, False, False, None
+        return set(), False, False, False, None, None, None
     bypassable = _validate_bypass(ruleset)
-    checks, requires_resolution, strict_update, merge_queue_method = ruleset_rule_facts(
-        ruleset.get("rules")
-    )
+    (
+        checks,
+        requires_resolution,
+        strict_update,
+        merge_queue_method,
+        check_response_timeout_minutes,
+        min_entries_to_merge_wait_minutes,
+    ) = ruleset_rule_facts(ruleset.get("rules"))
     return (
         checks,
         requires_resolution and not bypassable,
         bypassable,
         strict_update and not bypassable,
         merge_queue_method,
+        check_response_timeout_minutes,
+        min_entries_to_merge_wait_minutes,
     )
 
 
@@ -359,6 +382,8 @@ class PipelineGitHubCheckPolicy(_PipelineGitHubHost):
         bypassable: list[int] = []
         strict_update = classic_strict
         merge_queue_method: str | None = None
+        check_response_timeout_minutes: int | None = None
+        min_entries_to_merge_wait_minutes: int | None = None
         for detail in details:
             (
                 ruleset_checks,
@@ -366,6 +391,8 @@ class PipelineGitHubCheckPolicy(_PipelineGitHubHost):
                 can_bypass,
                 ruleset_strict,
                 ruleset_queue_method,
+                ruleset_check_timeout,
+                ruleset_minimum_wait,
             ) = _ruleset_policy(detail, base_branch, default_branch)
             checks.update(ruleset_checks)
             ruleset_resolution = ruleset_resolution or safe_resolution
@@ -373,9 +400,15 @@ class PipelineGitHubCheckPolicy(_PipelineGitHubHost):
                 bypassable.append(cast(int, detail["id"]))
             strict_update = strict_update or ruleset_strict
             if ruleset_queue_method is not None:
-                if merge_queue_method not in {None, ruleset_queue_method}:
-                    raise ValueError("applicable merge-queue methods disagree")
+                if merge_queue_method is not None and (
+                    merge_queue_method != ruleset_queue_method
+                    or check_response_timeout_minutes != ruleset_check_timeout
+                    or min_entries_to_merge_wait_minutes != ruleset_minimum_wait
+                ):
+                    raise ValueError("applicable merge-queue policies disagree")
                 merge_queue_method = ruleset_queue_method
+                check_response_timeout_minutes = ruleset_check_timeout
+                min_entries_to_merge_wait_minutes = ruleset_minimum_wait
         return EffectiveMergePolicy(
             base_branch=base_branch,
             default_branch=default_branch,
@@ -384,6 +417,8 @@ class PipelineGitHubCheckPolicy(_PipelineGitHubHost):
             bypassable_ruleset_ids=tuple(sorted(bypassable)),
             strict_update_enforced=strict_update,
             merge_queue_method=merge_queue_method,
+            check_response_timeout_minutes=check_response_timeout_minutes,
+            min_entries_to_merge_wait_minutes=min_entries_to_merge_wait_minutes,
         )
 
     def _active_rulesets(

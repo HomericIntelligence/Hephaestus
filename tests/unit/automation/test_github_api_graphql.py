@@ -22,6 +22,7 @@ from hephaestus.automation.github_api.graphql import (
     create_pending_review_mutation,
     enqueue_pull_request_mutation,
     pipeline_thread_snapshot_page_query,
+    pull_request_merge_queue_reconciliation_query,
     pull_request_queue_entry_query,
     repository_default_branch_query,
     resolve_thread_mutation,
@@ -464,6 +465,145 @@ def test_pull_request_queue_entry_query_binds_identity_and_head() -> None:
 
     assert result["headRefOid"] == "a" * 40
     assert result["mergeQueueEntry"] == {"id": "MQE_node", "state": "AWAITING_CHECKS"}
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ({"id": "MQE_node", "state": "AWAITING_CHECKS"}, True),
+        (None, False),
+    ],
+    ids=("present", "removed"),
+)
+def test_pull_request_merge_queue_reconciliation_query_accepts_exact_entry_states(
+    entry: object, expected: bool
+) -> None:
+    """Reconciliation accepts only a valid entry or GitHub's explicit removal."""
+    spec = pull_request_merge_queue_reconciliation_query("org", "repo", 7)
+    response = {
+        "data": {
+            "repository": {
+                "owner": {"login": "org"},
+                "name": "repo",
+                "pullRequest": {
+                    "id": "PR_node",
+                    "number": 7,
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "mergeQueueEntry": entry,
+                },
+            }
+        }
+    }
+    with patch(
+        "hephaestus.automation.github_api.graphql._raw_gh_call",
+        return_value=completed(stdout=json.dumps(response)),
+    ):
+        result = run_graphql(spec, {"owner": "org", "name": "repo", "number": 7})
+
+    assert (result["mergeQueueEntry"] is not None) is expected
+
+
+@pytest.mark.parametrize(
+    "pull_request",
+    [
+        None,
+        {
+            "id": "PR_node",
+            "number": 8,
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "mergeQueueEntry": None,
+        },
+        {
+            "id": "",
+            "number": 7,
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "mergeQueueEntry": None,
+        },
+        {
+            "id": "PR_node",
+            "number": 7,
+            "state": "CLOSED",
+            "headRefOid": "a" * 40,
+            "mergeQueueEntry": None,
+        },
+        {
+            "id": "PR_node",
+            "number": 7,
+            "state": "OPEN",
+            "headRefOid": None,
+            "mergeQueueEntry": None,
+        },
+        {
+            "id": "PR_node",
+            "number": 7,
+            "state": "OPEN",
+            "headRefOid": "short",
+            "mergeQueueEntry": None,
+        },
+    ],
+    ids=("missing", "number", "node", "state", "head", "malformed-head"),
+)
+def test_pull_request_merge_queue_reconciliation_query_rejects_invalid_identity(
+    pull_request: object,
+) -> None:
+    """A nullable queue entry does not weaken pull-request identity checks."""
+    spec = pull_request_merge_queue_reconciliation_query("org", "repo", 7)
+    response = {
+        "data": {
+            "repository": {
+                "owner": {"login": "org"},
+                "name": "repo",
+                "pullRequest": pull_request,
+            }
+        }
+    }
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(stdout=json.dumps(response)),
+        ),
+        pytest.raises(GraphQLDeterministicError),
+    ):
+        run_graphql(spec, {"owner": "org", "name": "repo", "number": 7})
+
+
+@pytest.mark.parametrize(
+    ("live_owner", "live_name"),
+    [("other", "repo"), ("org", "other")],
+    ids=("owner", "name"),
+)
+def test_pull_request_merge_queue_reconciliation_query_rejects_wrong_repository(
+    live_owner: str,
+    live_name: str,
+) -> None:
+    """Reconciliation accepts evidence only from the requested repository."""
+    spec = pull_request_merge_queue_reconciliation_query("org", "repo", 7)
+    response = {
+        "data": {
+            "repository": {
+                "owner": {"login": live_owner},
+                "name": live_name,
+                "pullRequest": {
+                    "id": "PR_node",
+                    "number": 7,
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "mergeQueueEntry": None,
+                },
+            }
+        }
+    }
+    with (
+        patch(
+            "hephaestus.automation.github_api.graphql._raw_gh_call",
+            return_value=completed(stdout=json.dumps(response)),
+        ),
+        pytest.raises(GraphQLDeterministicError),
+    ):
+        run_graphql(spec, {"owner": "org", "name": "repo", "number": 7})
 
 
 @pytest.mark.parametrize(

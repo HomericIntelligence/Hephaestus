@@ -1674,6 +1674,44 @@ def pull_request_queue_entry_query(
     return _query("pullRequestQueueEntry", document, validate)
 
 
+def pull_request_merge_queue_reconciliation_query(
+    owner: str, name: str, pr_number: int
+) -> GraphQLQuerySpec[dict[str, Any]]:
+    """Build a queue query that accepts a validated entry or explicit removal."""
+    document = (
+        "query PullRequestMergeQueueReconciliation($owner:String!,$name:String!,$number:Int!){"
+        "repository(owner:$owner,name:$name){owner{login} name pullRequest(number:$number){"
+        "id number state headRefOid mergeQueueEntry{id state}}}}"
+    )
+
+    def validate(data: dict[str, Any]) -> dict[str, Any]:
+        repository = _repo_identity(data, owner, name)
+        pull_request = repository.get("pullRequest")
+        pull_request_id = pull_request.get("id") if isinstance(pull_request, dict) else None
+        head_sha = pull_request.get("headRefOid") if isinstance(pull_request, dict) else None
+        if (
+            not isinstance(pull_request, dict)
+            or pull_request.get("number") != pr_number
+            or not isinstance(pull_request_id, str)
+            or not pull_request_id
+            or pull_request.get("state") != "OPEN"
+            or not isinstance(head_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", head_sha) is None
+        ):
+            raise ValueError("pull-request queue identity was malformed")
+        entry = pull_request.get("mergeQueueEntry")
+        if entry is not None and (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not entry["id"]
+            or entry.get("state") not in _MERGE_QUEUE_ENTRY_STATES
+        ):
+            raise ValueError("pull-request queue entry was malformed")
+        return pull_request
+
+    return _query("pullRequestMergeQueueReconciliation", document, validate)
+
+
 def github_schema_contract_query() -> GraphQLQuerySpec[dict[str, Any]]:
     """Build a read-only introspection query for the live schema contract lane."""
     document = (
@@ -1715,6 +1753,7 @@ __all__ = [
     "issue_comments_query",
     "pipeline_thread_snapshot_page_query",
     "pipeline_unresolved_threads_page_query",
+    "pull_request_merge_queue_reconciliation_query",
     "pull_request_queue_entry_query",
     "repository_default_branch_query",
     "resolve_thread_mutation",

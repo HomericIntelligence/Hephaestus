@@ -12,6 +12,7 @@ import math
 import re
 import threading
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
@@ -36,6 +37,14 @@ _REMEDIATION_JOURNAL_MARKER_RE = re.compile(
     r"pr=[1-9][0-9]*:head=[0-9a-f]{40}(?:[0-9a-f]{24})?:"
     r"batch=[0-9a-f]{32}:seq=(?:0|[1-9][0-9]*) -->"
 )
+
+
+class MergeQueueReconciliation(StrEnum):
+    """Classify a validated live merge-queue entry read."""
+
+    PRESENT = "present"
+    REMOVED = "removed"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -1064,6 +1073,7 @@ class MergeWaitCycleCompleted:
     readiness_fingerprint: tuple[str, ...] | None = None
     retryable: bool = False
     merge_sha: str | None = None
+    queue_residence_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         """Validate merge-cycle outcome metadata."""
@@ -1082,6 +1092,13 @@ class MergeWaitCycleCompleted:
             or any(character not in "0123456789abcdef" for character in self.merge_sha)
         ):
             raise ValueError("merge_sha must be a full commit SHA or None")
+        if self.queue_residence_timeout_s is not None and (
+            isinstance(self.queue_residence_timeout_s, bool)
+            or not isinstance(self.queue_residence_timeout_s, (int, float))
+            or not math.isfinite(self.queue_residence_timeout_s)
+            or self.queue_residence_timeout_s <= 0
+        ):
+            raise ValueError("queue_residence_timeout_s must be a finite positive number or None")
 
 
 @dataclass(frozen=True)

@@ -39,6 +39,7 @@ from hephaestus.automation.implementation_go_audit_receipt import (
     render_review_finding_journal,
 )
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.github_jobs import MergeQueueReconciliation
 from hephaestus.automation.pipeline.merge_wait_admission import (
     VerifiedRepositoryDefaultBranch,
 )
@@ -331,6 +332,8 @@ class _RulesetBypassGitHub:
             bypassable_ruleset_ids=self._bypassable_ruleset_ids,
             strict_update_enforced=self._strict_update_enforced,
             merge_queue_method=self._merge_queue_method,
+            check_response_timeout_minutes=(180 if self._merge_queue_method else None),
+            min_entries_to_merge_wait_minutes=(5 if self._merge_queue_method else None),
         )
 
     def list_unresolved_review_threads(self, _pr: int) -> list[object]:
@@ -424,6 +427,7 @@ def test_required_merge_queue_uses_exact_head_queue_admission(
 
     assert receipt.outcome == "merge_queued"
     assert receipt.attempted is True
+    assert receipt.queue_residence_timeout_s == 11100.0
     assert github.events == [
         "state",
         "label",
@@ -3429,6 +3433,94 @@ class TestConditionalMerge:
         assert result.queued is True
         assert result.body == {"merged": False, "queue_entry_id": "ENTRY_node"}
         assert graphql_mock.call_count == 2
+
+    @pytest.mark.parametrize(
+        ("entry", "live_node", "live_head", "expected"),
+        [
+            (
+                {"id": "ENTRY_node", "state": "AWAITING_CHECKS"},
+                "PR_node",
+                "a" * 40,
+                MergeQueueReconciliation.PRESENT,
+            ),
+            (None, "PR_node", "a" * 40, MergeQueueReconciliation.REMOVED),
+            ("malformed", "PR_node", "a" * 40, MergeQueueReconciliation.UNAVAILABLE),
+            (None, "PR_other", "a" * 40, MergeQueueReconciliation.UNAVAILABLE),
+            (None, "PR_node", "b" * 40, MergeQueueReconciliation.UNAVAILABLE),
+        ],
+        ids=("present", "removed", "malformed", "node-mismatch", "head-mismatch"),
+    )
+    def test_reconcile_merge_queue_entry_requires_exact_live_evidence(
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        entry: object,
+        live_node: str,
+        live_head: str,
+        expected: MergeQueueReconciliation,
+    ) -> None:
+        """Live queue reconciliation accepts only a valid exact-head read."""
+        adapter.repo = "repo"
+        monkeypatch.setattr(
+            adapter,
+            "_graphql_with_timeout",
+            MagicMock(
+                return_value={
+                    "id": live_node,
+                    "state": "OPEN",
+                    "headRefOid": live_head,
+                    "mergeQueueEntry": entry,
+                }
+            ),
+        )
+
+        result = adapter.reconcile_merge_queue_entry(
+            7,
+            "PR_node",
+            "a" * 40,
+            deadline_s=time.monotonic() + 30.0,
+            cancellation=threading.Event(),
+        )
+
+        assert result is expected
+
+    @pytest.mark.parametrize(
+        "failure",
+        ["cancelled", "expired", "transport"],
+    )
+    def test_reconcile_merge_queue_entry_fails_closed_at_each_operation_boundary(
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+    ) -> None:
+        """Cancellation, expiry, and transport failure cannot prove queue removal."""
+        adapter.repo = "repo"
+        cancellation = threading.Event()
+        if failure == "cancelled":
+            cancellation.set()
+        monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+        graphql = MagicMock(
+            side_effect=(RuntimeError("transport failed") if failure == "transport" else None),
+            return_value={
+                "id": "PR_node",
+                "state": "OPEN",
+                "headRefOid": "a" * 40,
+                "mergeQueueEntry": None,
+            },
+        )
+        monkeypatch.setattr(adapter, "_graphql_with_timeout", graphql)
+
+        result = adapter.reconcile_merge_queue_entry(
+            7,
+            "PR_node",
+            "a" * 40,
+            deadline_s=100.0 if failure == "expired" else 110.0,
+            cancellation=cancellation,
+        )
+
+        assert result is MergeQueueReconciliation.UNAVAILABLE
+        assert graphql.call_count == (1 if failure == "transport" else 0)
 
     def test_expired_queue_readback_budget_fails_closed(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch

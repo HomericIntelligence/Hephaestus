@@ -70,7 +70,7 @@ from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..events import StageEvent
-from ..github_jobs import GitHubJob, ImplementationReplyProgress
+from ..github_jobs import GitHubJob, ImplementationReplyProgress, MergeQueueReconciliation
 from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
 from ..merge_wait_admission import VerifiedRepositoryDefaultBranch
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
@@ -609,6 +609,18 @@ class StageGitHub(Protocol):
         cancellation: threading.Event | None = None,
     ) -> ConditionalMergeResult:
         """Request one server-enforced merge route for the reviewed head."""
+        pass
+
+    def reconcile_merge_queue_entry(
+        self,
+        pr_number: int,
+        pull_request_id: str,
+        reviewed_sha: str,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
+    ) -> MergeQueueReconciliation:
+        """Read the exact-head live merge-queue entry state."""
         pass
 
     # -- repo-stage surface (#1817) -----------------------------------------

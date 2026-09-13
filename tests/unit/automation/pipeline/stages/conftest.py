@@ -29,6 +29,7 @@ from hephaestus.automation.implementation_go_audit_receipt import (
 )
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.events import StageEvent
+from hephaestus.automation.pipeline.github_jobs import MergeQueueReconciliation
 from hephaestus.automation.pipeline.merge_wait_admission import (
     VerifiedRepositoryDefaultBranch,
 )
@@ -116,6 +117,7 @@ class FakeStageGitHub(FakeGitHub):
         journal_read_error: str | None = None,
         issue_body_owned_by_viewer: bool = True,
         dependency_fact_batches: list[tuple[DependencyFact, ...] | Exception] | None = None,
+        queue_reconciliation: MergeQueueReconciliation = (MergeQueueReconciliation.UNAVAILABLE),
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -153,6 +155,7 @@ class FakeStageGitHub(FakeGitHub):
                 discovery.
             dependency_fact_batches: Optional live dependency results. The
                 final result repeats after the scripted transitions finish.
+            queue_reconciliation: Canned live queue-entry result.
 
         """
         super().__init__()
@@ -207,6 +210,8 @@ class FakeStageGitHub(FakeGitHub):
         self.operation_deadlines: list[tuple[float, threading.Event | None]] = []
         self._dependency_fact_batches = deque(dependency_fact_batches or [])
         self.dependency_fact_requests: list[tuple[int, ...]] = []
+        self._queue_reconciliation = queue_reconciliation
+        self.queue_reconciliation_calls: list[tuple[int, str, str, float]] = []
 
     @contextmanager
     def operation_deadline(
@@ -868,6 +873,22 @@ class FakeStageGitHub(FakeGitHub):
         self._log("merge_pr_if_head", pr_number, reviewed_sha)
         self._pr_state = {"state": "MERGED"}
         return ConditionalMergeResult(status=200, body={"merged": True})
+
+    def reconcile_merge_queue_entry(
+        self,
+        pr_number: int,
+        pull_request_id: str,
+        reviewed_sha: str,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
+    ) -> MergeQueueReconciliation:
+        """Return and record the configured queue-entry result."""
+        del cancellation
+        self.queue_reconciliation_calls.append(
+            (pr_number, pull_request_id, reviewed_sha, deadline_s)
+        )
+        return self._queue_reconciliation
 
     def ensure_state_labels(self) -> None:
         """Mirror the repo-stage label-vocabulary ensure (records mutation)."""

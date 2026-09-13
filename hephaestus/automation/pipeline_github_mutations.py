@@ -15,6 +15,7 @@ from hephaestus.automation.github_api import (
 )
 from hephaestus.automation.operation_deadlines import operation_deadline_after
 
+from .pipeline.github_jobs import MergeQueueReconciliation
 from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_comments import PipelineGitHubIssueComments
 from .pipeline_github_transport import *
@@ -22,6 +23,45 @@ from .pipeline_github_transport import *
 
 class PipelineGitHubMutations(PipelineGitHubIssueComments):
     """Own coordinator-approved non-review GitHub mutations."""
+
+    def reconcile_merge_queue_entry(
+        self,
+        pr_number: int,
+        pull_request_id: str,
+        reviewed_sha: str,
+        *,
+        deadline_s: float,
+        cancellation: Event,
+    ) -> MergeQueueReconciliation:
+        """Classify the live queue entry for one exact open pull-request head."""
+        if cancellation.is_set():
+            return MergeQueueReconciliation.UNAVAILABLE
+        timeout = deadline_s - time.monotonic()
+        if timeout <= 0:
+            return MergeQueueReconciliation.UNAVAILABLE
+        owner, name = self._owner_name()
+        try:
+            pull_request = self._graphql_with_timeout(
+                github_api.pull_request_merge_queue_reconciliation_query(owner, name, pr_number),
+                timeout,
+                number=pr_number,
+            )
+        except (GraphQLResponseError, RuntimeError, OSError, subprocess.SubprocessError):
+            return MergeQueueReconciliation.UNAVAILABLE
+        if cancellation.is_set() or time.monotonic() >= deadline_s:
+            return MergeQueueReconciliation.UNAVAILABLE
+        if (
+            pull_request.get("id") != pull_request_id
+            or pull_request.get("state") != "OPEN"
+            or pull_request.get("headRefOid") != reviewed_sha
+        ):
+            return MergeQueueReconciliation.UNAVAILABLE
+        entry = pull_request.get("mergeQueueEntry")
+        if isinstance(entry, dict):
+            return MergeQueueReconciliation.PRESENT
+        if entry is None:
+            return MergeQueueReconciliation.REMOVED
+        return MergeQueueReconciliation.UNAVAILABLE
 
     def _existing_queue_result(
         self,
