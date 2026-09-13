@@ -3934,12 +3934,12 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True, (result.error, result.stdout_tail, result.stderr_tail)
         assert result.value["head_sha"] == head
         assert result.value["immutable_source"] is True
+        assert result.value["platform"] == "darwin"
+        assert result.value["status"] == "passed"
         assert _immutable_runner_checkout_state(checkout) == checkout_before
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
-    def test_immutable_host_allows_unix_socket_in_scratch_only(
-        self, pool: WorkerPool
-    ) -> None:
+    def test_immutable_host_allows_unix_socket_in_scratch_only(self, pool: WorkerPool) -> None:
         """Permit one scratch socket while all other network operations stay denied."""
         checkout = Path.cwd().resolve()
         head = _git(checkout, "rev-parse", "HEAD")
@@ -4001,9 +4001,7 @@ class TestWorkerPoolSubmitComplete:
         assert _immutable_runner_checkout_state(checkout) == checkout_before
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
-    def test_immutable_host_runs_fleet_podman_unix_socket_fixture(
-        self, pool: WorkerPool
-    ) -> None:
+    def test_immutable_host_runs_fleet_podman_unix_socket_fixture(self, pool: WorkerPool) -> None:
         """The immutable host runs the real temporary Podman socket fixture."""
         checkout = Path.cwd().resolve()
         head = _git(checkout, "rev-parse", "HEAD")
@@ -4038,6 +4036,8 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True, (result.error, result.stdout_tail, result.stderr_tail)
         assert result.value["head_sha"] == head
         assert result.value["immutable_source"] is True
+        assert result.value["platform"] == "darwin"
+        assert result.value["status"] == "passed"
         assert _immutable_runner_checkout_state(checkout) == checkout_before
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
