@@ -38,6 +38,8 @@ _FILE_BUDGETS = {
     # Effective classic and ruleset policy reads form one stable snapshot. The
     # bound includes the authenticated absent-classic-protection parser.
     "hephaestus/automation/pipeline_github_check_policy.py": 450,
+    # Complete policy values remain separate from mutable policy reads.
+    "hephaestus/automation/pipeline_github_merge_policy.py": 75,
     "hephaestus/automation/pipeline_github_merge_rules.py": 125,
     # Parent-ruleset selectors and branch matching are one bounded concern.
     "hephaestus/automation/pipeline_github_ruleset_conditions.py": 200,
@@ -86,6 +88,7 @@ _COLLABORATOR_MODULES = frozenset(
         "pipeline_github_review_queries",
         "pipeline_github_contract",
         "pipeline_github_check_policy",
+        "pipeline_github_merge_policy",
         "pipeline_github_merge_rules",
         "pipeline_github_commit_statuses",
         "pipeline_github_check_run_inventory",
@@ -200,6 +203,20 @@ def test_shared_namespaces_declare_static_exports() -> None:
             for element in exports[0].elts
         ):
             violations.append(relative)
+    assert violations == []
+
+
+def test_merge_policy_value_dependencies_remain_pure() -> None:
+    """Keep policy values independent of readers, transport, and execution."""
+    path = _ROOT / "hephaestus/automation/pipeline_github_merge_policy.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    allowed = {(0, "__future__"), (0, "dataclasses"), (1, "pipeline_github_merge_rules")}
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            violations.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and (node.level, node.module) not in allowed:
+            violations.append(f"{node.level}:{node.module}")
     assert violations == []
 
 
