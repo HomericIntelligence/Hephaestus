@@ -14263,6 +14263,7 @@ class TestGitOps:
             )
 
         assert result is not None and result.ok is False
+        assert result.error is not None
         assert result.error.startswith("rebase conflict resolution required")
         assert result.value == receipt
 
