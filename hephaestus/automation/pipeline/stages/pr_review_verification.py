@@ -85,7 +85,10 @@ def _host_verification_specs(
     if normalized_existing_paths is None or not set(normalized_existing_paths) <= changed_paths:
         return ()
     path_triggered_specs = tuple(
-        spec for spec in _PATH_HOST_VERIFICATION_SPECS if spec.changed_path in changed_paths
+        spec
+        for spec in _PATH_HOST_VERIFICATION_SPECS
+        if spec.changed_path in changed_paths
+        or bool(changed_paths.intersection(spec.additional_changed_paths))
     )
     coverage_specs = (
         (_FULL_UNIT_COVERAGE_SPEC,) if changed_paths & {"coverage.toml", "pyproject.toml"} else ()

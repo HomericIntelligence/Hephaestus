@@ -12,6 +12,7 @@ import re
 import selectors
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -1920,6 +1921,33 @@ def _immutable_runner_checkout_state(checkout: Path) -> tuple[str, str]:
         _git(checkout, "rev-parse", "HEAD"),
         _git(checkout, "status", "--porcelain=v1", "--untracked-files=all"),
     )
+
+
+def _assert_scratch_only_unix_socket_policy(*, scratch: Path, source: Path) -> None:
+    """Check the socket operations that the immutable host permits and denies."""
+    allowed_socket = scratch / "allowed.sock"
+    previous_directory = Path.cwd()
+    try:
+        os.chdir(scratch)
+        with socket.socket(socket.AF_UNIX) as endpoint:
+            endpoint.bind(allowed_socket.name)
+    finally:
+        os.chdir(previous_directory)
+        allowed_socket.unlink(missing_ok=True)
+
+    try:
+        os.chdir(source)
+        with socket.socket(socket.AF_UNIX) as endpoint:
+            with pytest.raises(PermissionError):
+                endpoint.bind("denied.sock")
+    finally:
+        os.chdir(previous_directory)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:
+        with pytest.raises(PermissionError):
+            endpoint.bind(("127.0.0.1", 0))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:
+        with pytest.raises(PermissionError):
+            endpoint.connect(("127.0.0.1", 9))
 
 
 class TestHostVerificationGitExecPath:
@@ -3833,6 +3861,19 @@ class TestWorkerPoolSubmitComplete:
         self, tmp_path: Path
     ) -> None:
         """Only the separate scratch tree is writable to PR-controlled code."""
+        checkout = Path.cwd().resolve()
+        checkout_before = _immutable_runner_checkout_state(checkout)
+        try:
+            active_environment = build_nested_host_verification_env(checkout)
+        except ValueError:
+            active_environment = None
+        if active_environment is not None:
+            _assert_scratch_only_unix_socket_policy(
+                scratch=Path(active_environment["TMPDIR"]),
+                source=checkout,
+            )
+            assert _immutable_runner_checkout_state(checkout) == checkout_before
+
         source = tmp_path / "source"
         scratch = tmp_path / "scratch"
         runtime = tmp_path / "runtime"
@@ -3934,6 +3975,8 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True, (result.error, result.stdout_tail, result.stderr_tail)
         assert result.value["head_sha"] == head
         assert result.value["immutable_source"] is True
+        assert result.value["platform"] == "darwin"
+        assert result.value["status"] == "passed"
         assert _immutable_runner_checkout_state(checkout) == checkout_before
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
