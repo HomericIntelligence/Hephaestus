@@ -2322,6 +2322,12 @@ GitHub job whose deadline has expired returns `github_timeout`. These jobs do
 not create lock records or start work. An already-set shutdown signal takes
 priority and returns `interrupted`.
 
+An explicit absolute Git deadline bounds both admission and execution. Before
+lock admission, a Git job whose deadline has expired returns `timeout`. A
+GitHub job whose deadline has expired returns `github_timeout`. These jobs do
+not create lock records or start work. An already-set shutdown signal takes
+priority and returns `interrupted`.
+
 The owner record has mode `0600`. It contains only the version, repository,
 operation, process ID, acquisition token, and UTC acquisition time. A waiter
 reports `lock_timeout` only when it verifies an active owner. Missing,
