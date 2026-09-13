@@ -1062,9 +1062,15 @@ Architectural contract:
   and charged round. Publication retries reuse that verdict and do not charge
   the logical round again. The stage checks current plan identity before
   publication, after the audit write, and after the label transition.
-- A changed plan returns to planning. If this review wrote a proposed label,
-  the stage restores exclusive `state:needs-plan` with readback. An operator
-  `state:plan-blocked` label has priority.
+- Before a Codex implementation GO, plan review uses the implementation scope
+  parser on the exact canonical plan. The plan must declare at least one safe
+  path under `## Files to Modify`, `## Files to Create`, or `## File Changes`.
+  An invalid scope or a changed canonical plan blocks admission. The blocked
+  audit states the accepted form and the required operator recovery steps.
+- A changed plan returns to planning unless a Codex implementation GO is
+  pending. If this review wrote a proposed label, the stage restores exclusive
+  `state:needs-plan` with readback. An operator `state:plan-blocked` label has
+  priority.
 - Invalid output and reviewer-session replacement share a bounded error
   sequence. Two consecutive retries are allowed; the third failure stops the
   item. Session replacement preserves logical review rounds.
