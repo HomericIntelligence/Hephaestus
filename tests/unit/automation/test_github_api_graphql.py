@@ -22,6 +22,7 @@ from hephaestus.automation.github_api.graphql import (
     create_pending_review_mutation,
     enqueue_pull_request_mutation,
     pipeline_thread_snapshot_page_query,
+    pull_request_merge_queue_reconciliation_query,
     pull_request_queue_entry_query,
     repository_default_branch_query,
     resolve_thread_mutation,
@@ -464,6 +465,43 @@ def test_pull_request_queue_entry_query_binds_identity_and_head() -> None:
 
     assert result["headRefOid"] == "a" * 40
     assert result["mergeQueueEntry"] == {"id": "MQE_node", "state": "AWAITING_CHECKS"}
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ({"id": "MQE_node", "state": "AWAITING_CHECKS"}, True),
+        (None, False),
+    ],
+    ids=("present", "removed"),
+)
+def test_pull_request_merge_queue_reconciliation_query_accepts_exact_entry_states(
+    entry: object, expected: bool
+) -> None:
+    """Reconciliation accepts only a valid entry or GitHub's explicit removal."""
+    spec = pull_request_merge_queue_reconciliation_query("org", "repo", 7)
+    response = {
+        "data": {
+            "repository": {
+                "owner": {"login": "org"},
+                "name": "repo",
+                "pullRequest": {
+                    "id": "PR_node",
+                    "number": 7,
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "mergeQueueEntry": entry,
+                },
+            }
+        }
+    }
+    with patch(
+        "hephaestus.automation.github_api.graphql._raw_gh_call",
+        return_value=completed(stdout=json.dumps(response)),
+    ):
+        result = run_graphql(spec, {"owner": "org", "name": "repo", "number": 7})
+
+    assert (result["mergeQueueEntry"] is not None) is expected
 
 
 @pytest.mark.parametrize(

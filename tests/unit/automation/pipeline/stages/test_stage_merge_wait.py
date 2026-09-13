@@ -10,7 +10,11 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.pipeline.github_jobs import GitHubJob, RunMergeWaitCycleRequest
+from hephaestus.automation.pipeline.github_jobs import (
+    GitHubJob,
+    MergeQueueReconciliation,
+    RunMergeWaitCycleRequest,
+)
 from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.merge_wait_admission import VerifiedRepositoryDefaultBranch
 from hephaestus.automation.pipeline.routing import Disposition, StageName
@@ -63,6 +67,7 @@ class _ConditionalGitHub(FakeStageGitHub):
         required_checks_green: bool = True,
         merge_queue_method: str | None = None,
         strict_update_enforced: bool = True,
+        queue_reconciliations: list[MergeQueueReconciliation] | None = None,
     ) -> None:
         scripted_states = states or [_open_pr()]
         super().__init__(
@@ -103,6 +108,23 @@ class _ConditionalGitHub(FakeStageGitHub):
         self.checked_heads: list[str] = []
         self.policy_bases: list[str] = []
         self.events: list[str] = []
+        self._queue_reconciliations = list(queue_reconciliations or [])
+
+    def reconcile_merge_queue_entry(
+        self,
+        pr_number: int,
+        pull_request_id: str,
+        reviewed_sha: str,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
+    ) -> MergeQueueReconciliation:
+        """Return the next scripted live queue-entry state."""
+        del pr_number, pull_request_id, deadline_s, cancellation
+        self.events.append(f"queue:{reviewed_sha}")
+        if self._queue_reconciliations:
+            return self._queue_reconciliations.pop(0)
+        return MergeQueueReconciliation.PRESENT
 
     def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
         del pr_number
@@ -348,6 +370,59 @@ def test_reconstructed_item_accepts_reconciled_queue_admission_without_replay(
     assert second == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert github.merge_attempts == [(12, "a" * 40)]
     assert item.payload["merge_queue_admitted_head_sha"] == "a" * 40
+
+
+def test_removed_queue_entry_permits_one_new_exact_head_admission(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A GitHub-proven queue removal clears admission proof before a new request."""
+    queued = ConditionalMergeResult(
+        status=200,
+        body={"merged": False, "queue_entry_id": "MQE_node"},
+        queued=True,
+    )
+    github = _ConditionalGitHub(
+        states=[_open_pr(), _open_pr(), _open_pr(), _open_pr()],
+        merge_results=[queued, queued],
+        merge_queue_method="SQUASH",
+        strict_update_enforced=False,
+        queue_reconciliations=[MergeQueueReconciliation.REMOVED],
+    )
+    ctx = make_ctx(github=github)
+    item = _reviewed_item(make_work_item)
+    item.payload["merge_queue_admitted_head_sha"] = "a" * 40
+    item.payload["merge_queue_admitted_proof_generation"] = 0
+
+    stage = MergeWaitStage()
+    first = _complete_merge_cycle(stage, item, ctx)
+    result = _complete_merge_cycle(stage, item, ctx)
+
+    assert first == StageOutcome(Disposition.RETRY, "merge_not_ready")
+    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert github.events == [f"queue:{'a' * 40}", f"checks:{'a' * 40}", f"merge:{'a' * 40}"]
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+
+def test_unavailable_queue_reconciliation_preserves_proof_without_replay(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Ambiguous live queue state ends the item without another admission."""
+    github = _ConditionalGitHub(
+        states=[_open_pr()],
+        merge_queue_method="SQUASH",
+        strict_update_enforced=False,
+        queue_reconciliations=[MergeQueueReconciliation.UNAVAILABLE],
+    )
+    item = _reviewed_item(make_work_item)
+    item.payload["merge_queue_admitted_head_sha"] = "a" * 40
+    item.payload["merge_queue_admitted_proof_generation"] = 0
+
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_queue_reconciliation_unavailable")
+    assert item.payload["merge_queue_admitted_head_sha"] == "a" * 40
+    assert item.payload["merge_queue_admitted_proof_generation"] == 0
+    assert github.merge_attempts == []
 
 
 def test_failed_queue_reconciliation_is_terminal_without_mutation_replay(

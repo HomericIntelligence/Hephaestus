@@ -39,6 +39,7 @@ from hephaestus.automation.implementation_go_audit_receipt import (
     render_review_finding_journal,
 )
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.github_jobs import MergeQueueReconciliation
 from hephaestus.automation.pipeline.merge_wait_admission import (
     VerifiedRepositoryDefaultBranch,
 )
@@ -3429,6 +3430,47 @@ class TestConditionalMerge:
         assert result.queued is True
         assert result.body == {"merged": False, "queue_entry_id": "ENTRY_node"}
         assert graphql_mock.call_count == 2
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            ({"id": "ENTRY_node", "state": "AWAITING_CHECKS"}, MergeQueueReconciliation.PRESENT),
+            (None, MergeQueueReconciliation.REMOVED),
+            ("malformed", MergeQueueReconciliation.UNAVAILABLE),
+        ],
+        ids=("present", "removed", "malformed"),
+    )
+    def test_reconcile_merge_queue_entry_requires_exact_live_evidence(
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        entry: object,
+        expected: MergeQueueReconciliation,
+    ) -> None:
+        """Live queue reconciliation accepts only a valid exact-head read."""
+        adapter.repo = "repo"
+        monkeypatch.setattr(
+            adapter,
+            "_graphql_with_timeout",
+            MagicMock(
+                return_value={
+                    "id": "PR_node",
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "mergeQueueEntry": entry,
+                }
+            ),
+        )
+
+        result = adapter.reconcile_merge_queue_entry(
+            7,
+            "PR_node",
+            "a" * 40,
+            deadline_s=time.monotonic() + 30.0,
+            cancellation=threading.Event(),
+        )
+
+        assert result is expected
 
     def test_expired_queue_readback_budget_fails_closed(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch

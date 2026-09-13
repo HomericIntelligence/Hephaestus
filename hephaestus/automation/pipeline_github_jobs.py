@@ -25,6 +25,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     InspectDirtyDirectPrStateRequest,
     InspectRebaseConflictRequest,
     InspectRebaseReviewRequest,
+    MergeQueueReconciliation,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
     PublishRebaseReviewRequest,
@@ -1650,9 +1651,26 @@ class PipelineGitHubJobRunner:
         record_status = rebase_record_outcome()
         if record_status is not None:
             return complete(record_status)
-        _, initial_snapshot = admitted
+        state, initial_snapshot = admitted
         if request.queue_admitted:
-            return complete("merge_queue_wait")
+            pull_request_id = state.get("id")
+            if not isinstance(pull_request_id, str) or not pull_request_id:
+                return complete("merge_queue_reconciliation_unavailable")
+            try:
+                reconciliation = github.reconcile_merge_queue_entry(
+                    request.pr_number,
+                    pull_request_id,
+                    request.merge_head_sha,
+                    deadline_s=request.deadline_s,
+                    cancellation=request.cancellation,
+                )
+            except Exception:
+                reconciliation = MergeQueueReconciliation.UNAVAILABLE
+            if reconciliation is MergeQueueReconciliation.PRESENT:
+                return complete("merge_queue_wait")
+            if reconciliation is MergeQueueReconciliation.REMOVED:
+                return complete("merge_queue_removed")
+            return complete("merge_queue_reconciliation_unavailable")
         base_branch = initial_snapshot.base_branch
         try:
             policy = github.effective_merge_policy(

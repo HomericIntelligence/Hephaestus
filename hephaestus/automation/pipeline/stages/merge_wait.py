@@ -266,6 +266,13 @@ class MergeWaitStage(Stage):
         if outcome == "merge_queue_wait":
             item.state = MERGE
             return self._park_for_readiness(item, ctx)
+        if outcome == "merge_queue_removed":
+            item.payload.pop(_QUEUE_ADMITTED_HEAD, None)
+            item.payload.pop(_QUEUE_ADMITTED_PROOF_GENERATION, None)
+            item.state = MERGE
+            return self._retry(item, ctx)
+        if outcome == "merge_queue_reconciliation_unavailable":
+            return StageOutcome(Disposition.FINISH_FAIL, outcome)
         if outcome in {"not_implementation_go", "reviewed_head_drift"}:
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome == "merge_conflicting":

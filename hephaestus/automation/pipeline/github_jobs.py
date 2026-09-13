@@ -12,6 +12,7 @@ import math
 import re
 import threading
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
@@ -36,6 +37,14 @@ _REMEDIATION_JOURNAL_MARKER_RE = re.compile(
     r"pr=[1-9][0-9]*:head=[0-9a-f]{40}(?:[0-9a-f]{24})?:"
     r"batch=[0-9a-f]{32}:seq=(?:0|[1-9][0-9]*) -->"
 )
+
+
+class MergeQueueReconciliation(StrEnum):
+    """Classify a validated live merge-queue entry read."""
+
+    PRESENT = "present"
+    REMOVED = "removed"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
