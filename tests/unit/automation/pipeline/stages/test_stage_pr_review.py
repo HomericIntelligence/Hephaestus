@@ -2675,6 +2675,30 @@ class TestPrReviewStageStep:
             "--tb=short",
         )
 
+    def test_changed_worker_pool_runs_host_profile_boundary(self) -> None:
+        """A worker-pool change runs the fixed host-profile regression."""
+        path = "tests/unit/automation/pipeline/test_worker_pool.py"
+        specs = _host_verification_specs(
+            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        )
+
+        spec = next(spec for spec in specs if spec.descr == "review_worker_pool_host_profile")
+
+        assert spec.changed_path == path
+        assert spec.argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            (
+                f"{path}::TestWorkerPoolSubmitComplete::"
+                "test_host_verification_profile_keeps_source_outside_writable_root"
+            ),
+            "-q",
+            "--tb=short",
+        )
+
     def test_changed_conftest_verifies_containing_directory_once(self) -> None:
         """A support-only conftest change must not be a no-tests pytest target."""
         directory = "tests/unit/automation/pipeline/stages"
