@@ -8,7 +8,9 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -23,7 +25,7 @@ from hephaestus.automation.event_log_retention import (
 )
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.loop_repo_manager import _detect_cwd_repo, _iter_gh_repos
-from hephaestus.automation.models import DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
+from hephaestus.automation.models import DEFAULT_WORKER_COUNT
 from hephaestus.automation.pipeline.coordinator_types import (
     PipelineConfig,
     PromptCatalogPreflightError,
@@ -53,6 +55,7 @@ from hephaestus.utils.helpers import get_repo_root
 
 LOG = logging.getLogger(__name__)
 _ORG_AUTODETECT = object()
+_PIPELINE_DIAGNOSTICS_DIR = ".hephaestus-diagnostics"
 MAIN_STAGES = tuple(
     stage for stage in ROUTES if stage not in {StageName.LEARNING, StageName.FINISHED}
 )
@@ -197,17 +200,54 @@ def _parse_metrics_port(value: str) -> int:
 def _pipeline_event_log_path(
     projects_dir: Path, repos: list[str], *, has_repo_source: bool = False
 ) -> Path | None:
-    """Return the default durable event-log path for a loop invocation.
+    """Return the default diagnostic event-log path for a loop invocation.
 
     The coordinator writes ``run_start`` before repo discovery. Keeping the
-    default log under the local automation state dir avoids creating
-    ``projects_dir / repo`` early, which would look like a cloned checkout to
-    the repo stage.
+    log in a user diagnostic directory prevents registered worktrees and
+    repository clone destinations from containing pre-intake files. If that
+    directory is in a checkout, use the host temporary directory. Do not use
+    a candidate that has a Git worktree as an ancestor.
     """
     if not repos and not has_repo_source:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return Path(DEFAULT_STATE_DIR) / f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
+    diagnostics_dir = next(
+        (
+            root / _PIPELINE_DIAGNOSTICS_DIR / projects_dir.name
+            for root in _pipeline_diagnostics_roots()
+            if not _has_git_worktree_ancestor(root / _PIPELINE_DIAGNOSTICS_DIR / projects_dir.name)
+        ),
+        None,
+    )
+    if diagnostics_dir is None:
+        LOG.warning("No event-log path is outside a Git worktree; event logging is disabled")
+        return None
+    return diagnostics_dir / f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
+
+
+def _pipeline_diagnostics_roots() -> Iterator[Path]:
+    """Yield each available default root without coupling provider failures."""
+    with suppress(OSError, RuntimeError):
+        yield Path.home()
+    with suppress(OSError, RuntimeError):
+        yield Path(tempfile.gettempdir())
+
+
+def _has_git_worktree_ancestor(path: Path) -> bool:
+    """Return whether the path is in a Git worktree or cannot be resolved safely."""
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return True
+    for candidate in (resolved, *resolved.parents):
+        try:
+            (candidate / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        return True
+    return False
 
 
 def _preflight_token_scopes(org: str, probe_repo: str, *, timeout: int = 120) -> None:

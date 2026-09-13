@@ -5,10 +5,12 @@ from __future__ import annotations
 import builtins
 import errno
 import json
+import logging
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,8 +21,10 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation import git_runtime
+from hephaestus.automation import git_runtime, pipeline_cli
+from hephaestus.automation.event_log_retention import event_log_lifecycle
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.coordinator_observability import record_event
 from hephaestus.automation.repo_intake import (
     RepoIntakeError,
     RepoIntakeManager,
@@ -747,6 +751,115 @@ def test_empty_legacy_caller_state_does_not_block_intake(tmp_path: Path) -> None
     receipt = _manager(caller, remote).prepare()
 
     assert receipt.path.is_dir()
+
+
+@pytest.mark.parametrize(
+    "writer_relative",
+    (Path("build/.worktrees/writer"), Path("writer")),
+    ids=("automation-worktree", "direct-child-worktree"),
+)
+def test_nested_registered_writer_event_log_does_not_block_intake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer_relative: Path,
+) -> None:
+    """Pre-intake diagnostics stay outside a registered writer worktree."""
+    caller, remote = _make_repository(tmp_path)
+    monkeypatch.setattr(
+        Path,
+        "home",
+        classmethod(lambda cls: tmp_path / "user-home"),
+    )
+    writer = caller / writer_relative
+    _run_git(caller, "worktree", "add", "--detach", str(writer), "HEAD")
+    monkeypatch.chdir(writer)
+    config = pipeline_cli.build_config(
+        pipeline_cli.parse_args([]),
+        "acme",
+        ["repo"],
+    )
+    assert config.event_log_path is not None
+    coordinator = SimpleNamespace(
+        config=config,
+        event_log=[],
+        _event_log_disabled=False,
+    )
+
+    with event_log_lifecycle(
+        config.event_log_path,
+        retention_days=30,
+        retention_count=100,
+        dry_run=False,
+    ):
+        record_event(
+            coordinator,
+            "repo_submit",
+            "repo#1",
+            now_fn=lambda: 0.0,
+            logger=logging.getLogger(__name__),
+        )
+
+    diagnostics_dir = config.event_log_path.parent
+    assert config.event_log_path.is_file()
+    assert (diagnostics_dir / f".{config.event_log_path.name}.lock").is_file()
+    assert (diagnostics_dir / ".pipeline-events-retention.lock").is_file()
+    for registered_root in (caller.resolve(), writer.resolve()):
+        assert registered_root not in config.event_log_path.resolve().parents
+
+    receipt = _manager(writer, remote).prepare()
+
+    assert receipt.path.is_dir()
+
+
+def test_registered_home_event_log_does_not_dirty_or_block_intake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-intake diagnostics do not dirty a home directory that is a worktree."""
+    caller, remote = _make_repository(tmp_path)
+    host_temp = tmp_path / "host-temp"
+    host_temp.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: caller))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+    monkeypatch.chdir(caller)
+    config = pipeline_cli.build_config(
+        pipeline_cli.parse_args([]),
+        "acme",
+        ["repo"],
+    )
+    assert config.event_log_path is not None
+    coordinator = SimpleNamespace(
+        config=config,
+        event_log=[],
+        _event_log_disabled=False,
+    )
+
+    with event_log_lifecycle(
+        config.event_log_path,
+        retention_days=30,
+        retention_count=100,
+        dry_run=False,
+    ):
+        record_event(
+            coordinator,
+            "repo_submit",
+            "repo#1",
+            now_fn=lambda: 0.0,
+            logger=logging.getLogger(__name__),
+        )
+
+    assert config.event_log_path.parent == (
+        host_temp / ".hephaestus-diagnostics" / config.projects_dir.name
+    )
+    assert config.event_log_path.is_file()
+    status = _run_git(
+        caller,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    ).stdout
+    assert status == ""
+    assert _manager(caller, remote).prepare().path.is_dir()
 
 
 def test_current_destination_state_is_preserved_during_reuse(tmp_path: Path) -> None:

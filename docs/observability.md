@@ -40,15 +40,26 @@ are constructed only when a metrics port is configured.
   existing lifecycle fields.
 - **Structured event log (JSONL).** When a loop runs, the coordinator can append
   a best-effort JSONL diagnostic log (default:
-  `build/.issue_implementer/pipeline-events-<timestamp>-<pid>.jsonl`, set via
-  `PipelineConfig.event_log_path`). Each metrics tick appends a
+  `~/.hephaestus-diagnostics/<projects-root-name>/pipeline-events-<timestamp>-<pid>.jsonl`,
+  set via `PipelineConfig.event_log_path`). Each metrics tick appends a
   `metrics_snapshot` record, and every alert transition appends an
   `alert_fired` or `alert_resolved` record carrying the alert `name`,
   `severity`, and `message`. Local JSONL and the in-memory event window are
-  diagnostic only: a write failure disables further JSONL writes without
-  changing routing, and restart always reconstructs from GitHub labels,
+  diagnostic only. The loop verifies that the user-owned directory is outside
+  a Git worktree. If it is in a worktree, the loop uses
+  `<system-temporary-directory>/.hephaestus-diagnostics/<projects-root-name>`.
+  If a location lookup fails, the loop tries the other location. If neither
+  location is safe or available, the loop disables the optional event log.
+  This policy keeps pre-intake files outside repository clone destinations and
+  registered worktrees. It does not require write access to the projects-root
+  parent. A write failure disables further
+  JSONL writes without changing routing, and restart always reconstructs from GitHub labels,
   comments, and PR state rather than this file. These are useful lines to cite
   when escalating, not a durable authority.
+
+  The default path does not move diagnostics that already exist in registered
+  worktrees. Archive or reconcile those files with the recovery procedure
+  before the next intake run.
 
   The automation-loop wrapper retains inactive event logs for 30 days and caps
   the recognized set at 100 files by default. Operators can override these

@@ -9,6 +9,8 @@ The queue-based pipeline is the only automation-loop path (epic #1809, cutover
 
 from __future__ import annotations
 
+import logging
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -23,7 +25,6 @@ from hephaestus.automation.event_log_retention import (
     DEFAULT_EVENT_LOG_RETENTION_COUNT,
     DEFAULT_EVENT_LOG_RETENTION_DAYS,
 )
-from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.stages.base import StageContext, stage_model
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
@@ -84,8 +85,14 @@ def test_dry_run_skips_preflight(dispatch: dict[str, MagicMock]) -> None:
     dispatch["preflight"].assert_not_called()
 
 
-def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -> None:
+def test_build_pipeline_config_maps_cli_fields(
+    dispatch: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """_build_pipeline_config carries the CLI scope into PipelineConfig."""
+    user_home = tmp_path / "user-home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
     loop_runner.main(
         [
             "--loops",
@@ -120,7 +127,9 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.scope is None
     assert config.event_log_path is not None
     assert config.event_log_path.name.startswith("pipeline-events-")
-    assert config.event_log_path.parent == Path(DEFAULT_STATE_DIR)
+    assert config.event_log_path.parent == (
+        user_home / ".hephaestus-diagnostics" / config.projects_dir.name
+    )
     dispatch["event_log_lifecycle"].assert_called_once_with(
         config.event_log_path,
         retention_days=DEFAULT_EVENT_LOG_RETENTION_DAYS,
@@ -197,13 +206,103 @@ def test_build_pipeline_config_maps_explicit_gh_root(
     assert config.gh_extra_path_root == gh_root
 
 
-def test_default_pipeline_event_log_path_does_not_create_repo_checkout() -> None:
+@pytest.mark.parametrize("repository", ("repo-a", "build"))
+def test_default_pipeline_event_log_path_does_not_create_repo_checkout(
+    repository: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The default event log path must not live under a repo clone directory."""
-    path = loop_runner._pipeline_event_log_path(DEFAULT_PROJECTS_DIR, ["repo-a"])
+    user_home = tmp_path / "user-home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+    path = loop_runner._pipeline_event_log_path(DEFAULT_PROJECTS_DIR, [repository])
 
     assert path is not None
-    assert path.parent == Path(DEFAULT_STATE_DIR)
-    assert DEFAULT_PROJECTS_DIR / "repo-a" not in path.parents
+    assert path.parent == user_home / ".hephaestus-diagnostics" / DEFAULT_PROJECTS_DIR.name
+    assert DEFAULT_PROJECTS_DIR / repository not in path.parents
+
+
+def test_default_pipeline_event_log_path_does_not_require_projects_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default event log uses user storage instead of the projects parent."""
+    user_home = tmp_path / "user-home"
+    projects_dir = tmp_path / "read-only-parent" / "projects"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+
+    path = loop_runner._pipeline_event_log_path(projects_dir, ["repo-a"])
+
+    assert path is not None
+    assert path.parent == user_home / ".hephaestus-diagnostics" / projects_dir.name
+    assert projects_dir.parent not in path.parents
+
+
+def test_default_pipeline_event_log_path_disables_unverified_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The optional event log stays off when all candidates are in a worktree."""
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: checkout))
+    monkeypatch.setattr(
+        tempfile,
+        "gettempdir",
+        lambda: str(checkout / "host-temp"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=loop_runner.LOG.name):
+        path = loop_runner._pipeline_event_log_path(tmp_path / "projects", ["repo-a"])
+
+    assert path is None
+    assert any("event logging is disabled" in record.message for record in caplog.records)
+
+
+def test_default_pipeline_event_log_path_uses_temp_when_home_lookup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed home lookup does not hide a safe temporary directory."""
+    host_temp = tmp_path / "host-temp"
+
+    def unavailable_home(cls: type[Path]) -> Path:
+        del cls
+        raise OSError("home lookup failed")
+
+    monkeypatch.setattr(Path, "home", classmethod(unavailable_home))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+
+    with caplog.at_level(logging.WARNING, logger=loop_runner.LOG.name):
+        path = loop_runner._pipeline_event_log_path(tmp_path / "projects", ["repo-a"])
+
+    assert path is not None
+    assert path.parent == host_temp / ".hephaestus-diagnostics" / "projects"
+    assert not caplog.records
+
+
+def test_default_pipeline_event_log_path_uses_home_when_temp_lookup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed temporary lookup does not hide a safe home directory."""
+    user_home = tmp_path / "user-home"
+
+    def unavailable_temp() -> str:
+        raise OSError("temporary-directory lookup failed")
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+    monkeypatch.setattr(tempfile, "gettempdir", unavailable_temp)
+
+    with caplog.at_level(logging.WARNING, logger=loop_runner.LOG.name):
+        path = loop_runner._pipeline_event_log_path(tmp_path / "projects", ["repo-a"])
+
+    assert path is not None
+    assert path.parent == user_home / ".hephaestus-diagnostics" / "projects"
+    assert not caplog.records
 
 
 def test_build_pipeline_config_maps_planning_stages_to_scope(
