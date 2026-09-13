@@ -3832,7 +3832,7 @@ class TestWorkerPoolSubmitComplete:
     def test_host_verification_profile_keeps_source_outside_writable_root(
         self, tmp_path: Path
     ) -> None:
-        """Only the separate scratch tree is writable to PR-controlled code."""
+        """Keep host writes and Unix socket binds in the scratch tree."""
         source = tmp_path / "source"
         scratch = tmp_path / "scratch"
         runtime = tmp_path / "runtime"
@@ -3889,6 +3889,69 @@ class TestWorkerPoolSubmitComplete:
             f"(allow file-write* {scratch_entry})",
             f"(allow file-write* {pi_smoke_logs_entry})",
         )
+
+        if sys.platform != "darwin":
+            return
+
+        for directory in (source, scratch, pi_smoke_logs, tmp_path / "metadata.git"):
+            directory.mkdir(parents=True, exist_ok=True)
+        program = (
+            "import os, socket\n"
+            "from pathlib import Path\n"
+            "scratch = Path(os.environ['TMPDIR'])\n"
+            "previous = Path.cwd()\n"
+            "try:\n"
+            "    os.chdir(scratch)\n"
+            "    with socket.socket(socket.AF_UNIX) as endpoint:\n"
+            "        endpoint.bind('allowed.sock')\n"
+            "finally:\n"
+            "    os.chdir(previous)\n"
+            "with socket.socket(socket.AF_UNIX) as endpoint:\n"
+            "    try:\n"
+            "        endpoint.bind('denied.sock')\n"
+            "    except PermissionError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('source Unix socket bind was allowed')\n"
+            "with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:\n"
+            "    try:\n"
+            "        endpoint.bind(('127.0.0.1', 0))\n"
+            "    except PermissionError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('IP socket bind was allowed')\n"
+            "with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:\n"
+            "    try:\n"
+            "        endpoint.connect(('127.0.0.1', 9))\n"
+            "    except PermissionError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('outbound connection was allowed')\n"
+        )
+        command = _host_verification_command(
+            argv=(sys.executable, "-I", "-S", "-c", program),
+            source=source,
+            scratch=scratch,
+            runtime_environment=Path(sys.prefix),
+            git_metadata=tmp_path / "metadata.git",
+            pi_smoke_logs=pi_smoke_logs,
+            git_executable=Path("/usr/bin/git"),
+            git_exec_path=Path("/usr/libexec/git-core"),
+            git_system_config=Path("/etc/gitconfig"),
+        )
+        environment = _host_verification_env(scratch, sys.executable, Path(sys.prefix))
+
+        result = subprocess.run(
+            command,
+            cwd=source,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert result.returncode == 0, (result.stdout, result.stderr)
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
     def test_immutable_host_allows_descriptor_walk_to_scratch(self, pool: WorkerPool) -> None:
