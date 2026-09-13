@@ -110,6 +110,7 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspaceReceipt,
     SourceWorkspaceRecoveryKind,
     SourceWorkspaceTerminalReference,
+    normalize_source_workspace_creation_failure,
 )
 from hephaestus.automation.state_labels import (
     STATE_BLOCKED,
@@ -4437,6 +4438,11 @@ class ImplementationStage(Stage):
             result_value = result.value if isinstance(result.value, dict) else {}
             if result_value.get("failure_kind") == "source_workspace_terminal":
                 item.payload["source_workspace_preserve"] = True
+                item.payload["source_workspace_creation_failure"] = (
+                    normalize_source_workspace_creation_failure(
+                        result_value.get("source_workspace_creation_failure")
+                    ).value
+                )
                 try:
                     reference = SourceWorkspaceTerminalReference.from_dict(
                         result_value.get("source_workspace_terminal")

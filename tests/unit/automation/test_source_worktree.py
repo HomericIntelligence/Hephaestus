@@ -3225,7 +3225,11 @@ def test_terminal_failure_preserves_journal_on_handoff_exception(tmp_path: Path)
 
 
 def _terminal_failed_transition(
-    tmp_path: Path, phase: str = "prepared"
+    tmp_path: Path,
+    phase: str = "prepared",
+    creation_failure: source_worktree.SourceWorkspaceCreationFailure = (
+        source_worktree.SourceWorkspaceCreationFailure.UNKNOWN
+    ),
 ) -> tuple[SourceWorkspaceManager, source_worktree.SourceWorkspaceTerminalReference]:
     repo, first, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
@@ -3239,7 +3243,10 @@ def _terminal_failed_transition(
             assert journal is not None
             manager._update_writer_transition_phase(9, journal.journal_digest, phase)
             raise source_worktree.SourceWorkspaceTerminalError(
-                "terminal failure", requested_branch="writer-branch", requested_base_sha=second
+                "terminal failure",
+                requested_branch="writer-branch",
+                requested_base_sha=second,
+                creation_failure=creation_failure,
             )
     reference = raised.value.terminal_reference
     assert reference is not None
@@ -3257,6 +3264,41 @@ def test_terminal_failure_retains_each_durable_phase(tmp_path: Path, phase: str)
     assert phase in view.action and "writer-branch" in view.action
     assert view.reservation_disposition == "preserve"
     assert manager._transition_path(9).exists()
+
+
+def test_terminal_failure_retains_validated_creation_category(tmp_path: Path) -> None:
+    """A restarted reader recovers the closed creation-failure category."""
+    manager, reference = _terminal_failed_transition(
+        tmp_path,
+        creation_failure=source_worktree.SourceWorkspaceCreationFailure.WRITER_RECEIPT,
+    )
+
+    restarted = SourceWorkspaceManager(manager.repo_root, repository="example/project")
+    view = restarted.read_terminal_failure(9, reference)
+
+    assert view.creation_failure is source_worktree.SourceWorkspaceCreationFailure.WRITER_RECEIPT
+
+
+def test_terminal_legacy_schema_retains_validated_result_with_unknown_category(
+    tmp_path: Path,
+) -> None:
+    """A legacy terminal record keeps its result with a safe category."""
+    manager, reference = _terminal_failed_transition(tmp_path)
+    path = manager.state_dir / reference.identity
+    payload = json.loads(path.read_text())
+    payload.pop("creation_failure")
+    payload["schema_version"] = 1
+    payload.pop("terminal_content_sha256")
+    digest = source_worktree._terminal_json_digest(payload)
+    payload["terminal_content_sha256"] = digest
+    path.write_text(json.dumps(payload))
+    legacy_reference = source_worktree.SourceWorkspaceTerminalReference(reference.identity, digest)
+
+    view = manager.read_terminal_failure(9, legacy_reference)
+
+    assert view.cause == "source_workspace_transition_incomplete"
+    assert view.action
+    assert view.creation_failure is source_worktree.SourceWorkspaceCreationFailure.UNKNOWN
 
 
 @pytest.mark.parametrize(
@@ -3461,6 +3503,7 @@ def test_terminal_capture_classifies_invalid_source_evidence(
         ("outcome", "complete"),
         ("action", ""),
         ("reservation_disposition", "release"),
+        ("creation_failure", "private"),
         ("transition_identity", "10-impl-transition.json"),
         ("transition_journal_digest", "a" * 64),
         ("source_receipt_sha256", "a" * 64),
