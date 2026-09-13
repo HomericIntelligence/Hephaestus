@@ -1935,9 +1935,13 @@ def _assert_scratch_only_unix_socket_policy(*, scratch: Path, source: Path) -> N
         os.chdir(previous_directory)
         allowed_socket.unlink(missing_ok=True)
 
-    with socket.socket(socket.AF_UNIX) as endpoint:
-        with pytest.raises(PermissionError):
-            endpoint.bind(str(source / "denied.sock"))
+    try:
+        os.chdir(source)
+        with socket.socket(socket.AF_UNIX) as endpoint:
+            with pytest.raises(PermissionError):
+                endpoint.bind("denied.sock")
+    finally:
+        os.chdir(previous_directory)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:
         with pytest.raises(PermissionError):
             endpoint.bind(("127.0.0.1", 0))
