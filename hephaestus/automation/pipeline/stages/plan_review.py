@@ -1271,11 +1271,27 @@ class PlanReviewStage(Stage):
         outcome = self._complete_blocked(item, ctx)
         if outcome.disposition == Disposition.RETRY:
             return outcome
+        if expected_review is not None:
+            identity_outcome = self._review_identity_outcome(
+                item,
+                ctx,
+                expected_review,
+            )
+            if identity_outcome is not None:
+                return identity_outcome
         ctx.github.upsert_issue_comment(
             item.issue,
             PLAN_REVIEW_CANONICAL_MARKER,
             comment_body,
         )
+        if expected_review is not None:
+            identity_outcome = self._review_identity_outcome(
+                item,
+                ctx,
+                expected_review,
+            )
+            if identity_outcome is not None:
+                return identity_outcome
         return outcome
 
     def _complete_go(
