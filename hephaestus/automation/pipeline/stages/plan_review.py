@@ -721,7 +721,21 @@ class PlanReviewStage(Stage):
             item.payload["plan_revision"] = snapshot.revision
             if is_exclusive_plan_state(labels, STATE_PLAN_GO):
                 if reason := _plan_scope_admission_failure(snapshot.current_plan, ctx):
-                    return self._complete_scope_blocked(item, ctx, reason)
+                    expected_review = _AcceptedPlanReview(
+                        verdict=_plan_scope_blocked_verdict(),
+                        revision=snapshot.revision,
+                        fingerprint=plan_fingerprint(snapshot.current_plan),
+                        # The existing GO label is the restart authority.
+                        # Retract it if the plan identity changes before the
+                        # blocking write.
+                        label_proposed=True,
+                    )
+                    return self._complete_scope_blocked(
+                        item,
+                        ctx,
+                        reason,
+                        expected_review,
+                    )
                 logger.info("plan_review:%d: already plan-go; advancing", item.issue)
                 return StageOutcome(Disposition.ADVANCE, "plan already approved")
             if snapshot.current_review and snapshot.current_review_revision == snapshot.revision:
@@ -1194,7 +1208,7 @@ class PlanReviewStage(Stage):
         item: WorkItem,
         ctx: StageContext,
         reason: str,
-        review: _AcceptedPlanReview | None = None,
+        review: _AcceptedPlanReview,
     ) -> StageOutcome:
         """Block implementation admission and publish one host validation audit."""
         logger.warning(
