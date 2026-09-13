@@ -798,6 +798,21 @@ class SourceCoordinator(_CoordinatorHost):
                 item.payload["pending_implementation_go_audit_findings"] = [
                     dict(record) for record in entry.pending_implementation_go_audit.finding_records
                 ]
+                item.payload["pending_implementation_go_audit_compacted_outcomes"] = dict(
+                    entry.pending_implementation_go_audit.compacted_outcomes
+                )
+                item.payload["review_finding_records"] = [
+                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
+                ]
+                item.payload["review_finding_compacted_outcomes"] = dict(
+                    entry.pending_implementation_go_audit.compacted_outcomes
+                )
+                item.payload["carried_review_finding_records"] = [
+                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
+                ]
+                item.payload["carried_review_finding_compacted_outcomes"] = dict(
+                    entry.pending_implementation_go_audit.compacted_outcomes
+                )
                 item.payload["pending_implementation_go_label_confirmed"] = (
                     entry.pending_implementation_go_label_confirmed
                 )
@@ -827,6 +842,21 @@ class SourceCoordinator(_CoordinatorHost):
                 item.payload["pending_implementation_go_audit_findings"] = [
                     dict(record) for record in entry.pending_implementation_go_audit.finding_records
                 ]
+                item.payload["pending_implementation_go_audit_compacted_outcomes"] = dict(
+                    entry.pending_implementation_go_audit.compacted_outcomes
+                )
+                item.payload["review_finding_records"] = [
+                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
+                ]
+                item.payload["review_finding_compacted_outcomes"] = dict(
+                    entry.pending_implementation_go_audit.compacted_outcomes
+                )
+                item.payload["carried_review_finding_records"] = [
+                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
+                ]
+                item.payload["carried_review_finding_compacted_outcomes"] = dict(
+                    entry.pending_implementation_go_audit.compacted_outcomes
+                )
                 item.payload["pending_implementation_go_label_confirmed"] = (
                     entry.pending_implementation_go_label_confirmed
                 )
@@ -836,6 +866,15 @@ class SourceCoordinator(_CoordinatorHost):
             item.payload["carried_review_finding_records"] = [
                 dict(record) for record in entry.pending_review_finding_journal.finding_records
             ]
+            item.payload["carried_review_finding_compacted_outcomes"] = dict(
+                entry.pending_review_finding_journal.compacted_outcomes
+            )
+            item.payload["review_finding_records"] = [
+                dict(record) for record in entry.pending_review_finding_journal.finding_records
+            ]
+            item.payload["review_finding_compacted_outcomes"] = dict(
+                entry.pending_review_finding_journal.compacted_outcomes
+            )
             item.payload["review_finding_journal_head"] = (
                 entry.pending_review_finding_journal.head_sha
             )

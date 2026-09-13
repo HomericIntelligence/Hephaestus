@@ -22,10 +22,10 @@ import pytest
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.github_api import issue_body_digest
+from hephaestus.automation.github_api.diff import normalize_review_finding_collection
 from hephaestus.automation.implementation_go_audit_receipt import (
     PendingImplementationGoAudit,
     PendingReviewFindingJournal,
-    normalize_review_finding_records,
 )
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.events import StageEvent
@@ -735,11 +735,13 @@ class FakeStageGitHub(FakeGitHub):
         finding_records: object = (),
     ) -> None:
         """Persist the exact-head recovery record before the label transition."""
+        records, compacted = normalize_review_finding_collection(finding_records)
         self.pending_go_audits[pr_number] = PendingImplementationGoAudit(
             pr_number=pr_number,
             head_sha=head_sha,
             audit=audit,
-            finding_records=normalize_review_finding_records(finding_records),
+            finding_records=records,
+            compacted_outcomes=compacted,
         )
         self._log("persist_pending_implementation_go_audit", pr_number, head_sha)
 
@@ -747,10 +749,12 @@ class FakeStageGitHub(FakeGitHub):
         self, pr_number: int, head_sha: str, finding_records: object
     ) -> None:
         """Persist the fake exact-head finding journal."""
+        records, compacted = normalize_review_finding_collection(finding_records)
         self.pending_finding_journals[pr_number] = PendingReviewFindingJournal(
             pr_number=pr_number,
             head_sha=head_sha,
-            finding_records=normalize_review_finding_records(finding_records),
+            finding_records=records,
+            compacted_outcomes=compacted,
         )
         self._log("persist_review_finding_journal", pr_number, head_sha)
 

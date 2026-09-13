@@ -26,6 +26,7 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
+from hephaestus.automation.implementation_go_audit_receipt import PendingReviewFindingJournal
 from hephaestus.automation.pipeline import worker_pool as worker_pool_module
 from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
@@ -990,6 +991,43 @@ class TestQuiescence:
         assert item.kind is ItemKind.ISSUE
         assert item.pr == 701
         assert item.payload["existing_pr"] is True
+
+    def test_review_finding_seed_restores_compacted_outcomes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A restarted item restores retained and compacted finding history."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        compacted = {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
+            "identities": [["e" * 64, "9" * 40, "p", "a"]],
+        }
+        entry = SeedEntry(
+            kind="issue",
+            identifier=601,
+            stage=StageName.PR_REVIEW,
+            reason="open PR awaiting review",
+            pr_number=701,
+            pending_review_finding_journal=PendingReviewFindingJournal(
+                pr_number=701,
+                head_sha="a" * 40,
+                finding_records=(),
+                compacted_outcomes=compacted,
+            ),
+        )
+
+        item = coordinator._entry_to_item(entry, "repo-a")
+
+        assert item.payload["carried_review_finding_records"] == []
+        assert item.payload["carried_review_finding_compacted_outcomes"] == compacted
+        assert item.payload["review_finding_records"] == []
+        assert item.payload["review_finding_compacted_outcomes"] == compacted
+        item.result = ItemResult(
+            passed=True,
+            reason="ok",
+            final_stage=StageName.FINISHED,
+        )
+        coordinator._record_terminal_result(item)
+        assert coordinator._terminal_summary.review_finding_outcomes == {"published": 1}
 
     def test_direct_unlinked_pr_finishes_failed_before_review(self, tmp_path: Path) -> None:
         """A PR number cannot substitute for linked issue requirements."""

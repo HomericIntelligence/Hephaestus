@@ -23,7 +23,10 @@ from hephaestus.agents import runtime as agent_runtime
 from hephaestus.agents.execution_policy import AgentOperation
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import parse_addressed_replies
-from hephaestus.automation.github_api.diff import _validate_comments_to_diff
+from hephaestus.automation.github_api.diff import (
+    _validate_comments_to_diff,
+    normalize_review_finding_records,
+)
 from hephaestus.automation.pipeline.github_jobs import (
     EnsureScopeExpansionChildrenRequest,
     FrozenJson,
@@ -31,6 +34,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     PrReviewReconciled,
     ReconcilePrReviewRequest,
     ReconcileScopeExpansionDependenciesRequest,
+    RecoverPendingReviewFindingsRequest,
     ScopeExpansionChildrenEnsured,
     ScopeExpansionDependenciesReconciled,
 )
@@ -64,6 +68,7 @@ from hephaestus.automation.pipeline.stages.pr_review_scope_expansion import (
 from hephaestus.automation.pipeline.stages.pr_review_threads import (
     ADOPT_WORKTREE_WAIT,
     CLEANUP_REVIEW_WORKTREE_WAIT,
+    ENTER,
     HOST_VERIFICATION_WAIT,
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
@@ -80,6 +85,7 @@ from hephaestus.automation.pipeline.stages.pr_review_verification import (
     _FULL_UNIT_COVERAGE_SPEC,
     _host_verification_specs,
 )
+from hephaestus.automation.pipeline.summary import _review_finding_outcomes
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
@@ -93,6 +99,10 @@ from hephaestus.automation.scope_expansion_domain import ScopeExpansion
 from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_NO_GO, STATE_SKIP
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+_PENDING_RECOVERY_DIFF = (
+    "diff --git a/a.py b/a.py\n--- /dev/null\n+++ b/a.py\n@@ -0,0 +1 @@\n+new\n"
+)
 
 
 def _valid_audit() -> ReviewAudit:
@@ -1043,11 +1053,46 @@ class TestPrReviewStageOnEnter:
         github = ResolvingGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="POST")
+        retained_record: dict[str, object] = {
+            "finding_id": "f" * 64,
+            "source_head": "9" * 40,
+            "severity": "minor",
+            "body": "Preserve the prior advisory.",
+            "original_anchor": {"path": "old.py", "line": 2, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "corrected",
+            "surface": "audit",
+            "reason": "line_not_in_diff",
+        }
+        low = 1
+        high = 16_384
+        largest_legacy: dict[str, object] | None = None
+        while low <= high:
+            size = (low + high) // 2
+            candidate: dict[str, object] = {
+                **retained_record,
+                "body": "<" * size,
+                "evidence": "e" * 1_000,
+            }
+            try:
+                normalize_review_finding_records([candidate])
+            except ValueError:
+                high = size - 1
+            else:
+                largest_legacy = candidate
+                low = size + 1
+        assert largest_legacy is not None
+        retained_record = largest_legacy
         item.payload.update(
             {
                 "reviewer_comment_validation_only": True,
                 "reviewed_pr_head_sha": "a" * 40,
                 "validation_result": '{"resolved":["thread-1"],"unaddressed":[]}',
+                "carried_review_finding_records": [retained_record],
+                "carried_review_finding_compacted_outcomes": {
+                    "counts": {"corrected": 0, "not_publishable": 1, "published": 0},
+                    "identities": [["e" * 64, "8" * 40, "n", "a"]],
+                },
             }
         )
 
@@ -1056,6 +1101,88 @@ class TestPrReviewStageOnEnter:
         assert result == Continue(next_state="REVIEW_WAIT")
         assert 1001 not in github.reviews
         assert "review_audit" not in item.payload
+        journal = github.pending_review_finding_journal(1001)
+        assert journal is not None
+        assert journal.finding_records == ()
+        assert journal.compacted_outcomes["identities"] == [
+            ["e" * 64, "8" * 40, "n", "a"],
+            ["f" * 64, "9" * 40, "c", "a"],
+        ]
+
+    def test_head_drift_drops_stale_pending_before_reply_validation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Reply validation receives the terminal history after a journal head change."""
+        github = FakeStageGitHub(
+            unresolved=[(1, 0)],
+            pr_review_context={
+                "pr_head_sha": "b" * 40,
+                "pr_title": "fix: current reply",
+                "pr_description": "Current implementation.",
+            },
+        )
+        github._thread_replies["live-thread-1001-0"] = [
+            {
+                "id": "implementation-reply-live-thread-1001-0",
+                "author": "hephaestus[bot]",
+                "body": "[Response] Fixed on the current head.",
+            }
+        ]
+        retained = {
+            "finding_id": "f" * 64,
+            "source_head": "9" * 40,
+            "severity": "minor",
+            "body": "Preserve the terminal advisory.",
+            "original_anchor": {"path": "old.py", "line": 2, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "corrected",
+            "surface": "audit",
+            "reason": "line_not_in_diff",
+        }
+        stale_pending = {
+            "finding_id": "d" * 64,
+            "source_head": "a" * 40,
+            "severity": "major",
+            "body": "This pending publication belongs to the old head.",
+            "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "status": "pending",
+            "surface": "inline",
+            "reason": None,
+        }
+        compacted = {
+            "counts": {"corrected": 0, "not_publishable": 1, "published": 0},
+            "identities": [["e" * 64, "8" * 40, "n", "a"]],
+        }
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewer_comment_validation_only": True,
+                "reviewed_pr_head_sha": "b" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "validation_result": ('{"resolved":["live-thread-1001-0"],"unaddressed":[]}'),
+                "carried_review_finding_records": [retained, stale_pending],
+                "carried_review_finding_compacted_outcomes": compacted,
+                "review_finding_records": [retained, stale_pending],
+                "review_finding_compacted_outcomes": compacted,
+            }
+        )
+        stage = PrReviewStage()
+        ctx = make_ctx(github=github)
+
+        assert stage._prepare_pending_finding_recovery(item, ctx) is None
+        assert item.payload["carried_review_finding_records"] == [retained]
+        assert item.payload["review_finding_records"] == [retained]
+        assert item.payload["carried_review_finding_compacted_outcomes"] == compacted
+        assert item.payload["review_finding_compacted_outcomes"] == compacted
+
+        result = _complete_github_job(stage, item, ctx)
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        journal = github.pending_review_finding_journal(1001)
+        assert journal is not None
+        assert journal.finding_records == (retained,)
+        assert journal.compacted_outcomes == compacted
 
     def test_on_enter_double_call_rechecks_unarmed_state_without_mutation(
         self, make_ctx: Any, make_work_item: Any
@@ -1633,6 +1760,60 @@ class TestPrReviewStageStep:
         assert isinstance(result.job, GitHubJob)
         assert isinstance(result.job.request, ReconcileScopeExpansionDependenciesRequest)
         assert result.job.request.source_head_sha == "a" * 40
+
+    def test_normal_entry_recovers_pending_publication_before_thread_handoff(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Normal entry recovers a saved publication before it routes threads."""
+        stage = PrReviewStage()
+        ctx = make_ctx(github=FakeStageGitHub(by_severity=[(1, 0, 0)]))
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        pending_record = TestAuditPublication._pending_restart_record()
+        item.payload.update(
+            {
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": [pending_record],
+            }
+        )
+        dependency = stage.step(item, ctx)
+        assert isinstance(dependency, JobRequest)
+        request = dependency.job.request
+        assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ScopeExpansionDependenciesReconciled(
+                    request=request,
+                    status="none",
+                    child_issue_numbers=(),
+                ),
+            ),
+            ctx,
+        )
+        item.state = dependency.on_done_state
+
+        recovery = stage.step(item, ctx)
+
+        assert isinstance(recovery, JobRequest)
+        assert isinstance(recovery.job, GitHubJob)
+        assert isinstance(recovery.job.request, RecoverPendingReviewFindingsRequest)
+        assert recovery.job.descr == "recover_pending_review_findings"
+        assert "implementation_remediation" not in item.payload
+        published = {**pending_record, "status": "published"}
+        receipt = PrReviewReconciled(
+            request=recovery.job.request,
+            action="apply",
+            posted_receipts=FrozenJson.snapshot([]),
+            unresolved_threads=FrozenJson.snapshot([]),
+            remediation_threads=FrozenJson.snapshot([]),
+            final_finding_records=FrozenJson.snapshot([published]),
+        )
+        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+        item.state = recovery.on_done_state
+
+        assert stage.step(item, ctx) == Continue(next_state="ENTER")
+        assert "review_worktree_cleanup_done" not in item.payload
 
     def test_open_scope_dependency_parks_before_checkout_or_budget(
         self, make_ctx: Any, make_work_item: Any
@@ -5274,6 +5455,48 @@ class TestEvalVerdicts:
             for comment in github.comments[1001]
         )
 
+    def test_restarted_go_publish_restores_terminal_finding_history(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restarted GO publication restores full and compact terminal history."""
+        audit = _valid_audit()
+        record = {
+            "finding_id": "f" * 64,
+            "source_head": "b" * 40,
+            "severity": "minor",
+            "body": "Keep this full terminal record.",
+            "original_anchor": {"path": "a.py", "line": 4, "side": "LEFT"},
+            "final_anchor": None,
+            "status": "corrected",
+            "surface": "audit",
+            "reason": "unsupported_side",
+        }
+        compacted = {
+            "counts": {"corrected": 0, "not_publishable": 1, "published": 0},
+            "identities": [["e" * 64, "9" * 40, "n", "b"]],
+        }
+        item = make_work_item(issue=1, pr=1001, state="GO_AUDIT_PUBLISH")
+        item.payload.update(
+            {
+                "review_audit": audit,
+                "reviewed_pr_head_sha": "a" * 40,
+                "pending_implementation_go_audit": audit,
+                "pending_implementation_go_audit_head": "a" * 40,
+                "pending_implementation_go_audit_findings": [record],
+                "pending_implementation_go_audit_compacted_outcomes": compacted,
+            }
+        )
+
+        result = PrReviewStage().step(item, make_ctx(github=FakeStageGitHub()))
+
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
+        assert item.payload["review_finding_records"] == [record]
+        assert item.payload["review_finding_compacted_outcomes"] == compacted
+        assert item.payload["carried_review_finding_records"] == [record]
+        assert item.payload["carried_review_finding_compacted_outcomes"] == compacted
+        assert "pending_implementation_go_audit_findings" not in item.payload
+        assert _review_finding_outcomes(item) == {"corrected": 1, "not_publishable": 1}
+
     def test_go_removes_only_the_matching_recovery_handoff_after_public_audit(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -7535,6 +7758,47 @@ class TestAuditPublication:
         assert result == StageOutcome(Disposition.FINISH_FAIL, "review_finding_not_publishable")
         assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
 
+    def test_compacted_blocking_not_publishable_outcome_still_stops(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A compacted blocking publication failure keeps the terminal NO-GO."""
+        compacted = {
+            "counts": {"corrected": 0, "not_publishable": 1, "published": 0},
+            "identities": [["f" * 64, "9" * 40, "n", "b"]],
+        }
+        item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        request = ReconcilePrReviewRequest(
+            pr_number=1001,
+            reviewed_head_sha="a" * 40,
+            validated_receipt_fingerprints=None,
+            validated_metadata_fingerprint=None,
+            resolved_thread_ids=(),
+            feedback=FrozenJson.snapshot({}),
+            findings=FrozenJson.snapshot([]),
+            finding_records=FrozenJson.snapshot([]),
+            review_diff="diff",
+            deadline_s=time.monotonic() + 60,
+            compacted_outcomes=FrozenJson.snapshot(compacted),
+        )
+        receipt = PrReviewReconciled(
+            request=request,
+            action="apply",
+            posted_receipts=FrozenJson.snapshot([]),
+            unresolved_threads=FrozenJson.snapshot([]),
+            remediation_threads=FrozenJson.snapshot([]),
+            final_finding_records=FrozenJson.snapshot([]),
+            final_compacted_outcomes=FrozenJson.snapshot(compacted),
+        )
+        item.payload[pr_review_jobs._PENDING_GITHUB_REQUEST] = request
+        item.payload[pr_review_jobs._PR_REVIEW_RECEIPT] = receipt
+        github = FakeStageGitHub()
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "review_finding_not_publishable")
+        assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
+
     def test_pending_record_from_old_head_does_not_bind_current_publication(
         self, make_work_item: Any
     ) -> None:
@@ -7568,30 +7832,34 @@ class TestAuditPublication:
 
         assert records == [current]
 
-    def test_carried_terminal_records_make_room_for_a_new_finding(
+    def test_recovered_finding_capacity_compacts_oldest_terminal_outcome(
         self, make_work_item: Any
     ) -> None:
-        """A full terminal journal retains the new outcome within its bound."""
-        item = make_work_item(issue=50, pr=1001)
-
-        def record(index: int) -> dict[str, object]:
-            return {
+        """A new finding remains complete when recovered history reaches its limit."""
+        carried: list[dict[str, object]] = [
+            {
                 "finding_id": f"{index:064x}",
                 "source_head": "a" * 40,
-                "severity": "major",
-                "body": f"Finding {index}.",
+                "severity": "minor",
+                "body": f"Historical finding {index}.",
                 "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
                 "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
                 "status": "published",
                 "surface": "inline",
                 "reason": None,
             }
-
-        carried = [record(index) for index in range(64)]
-        current = record(64)
+            for index in range(64)
+        ]
+        current: dict[str, object] = {
+            **carried[0],
+            "finding_id": f"{64:064x}",
+            "source_head": "b" * 40,
+            "body": "Current finding.",
+        }
+        item = make_work_item(issue=50, pr=1001)
         item.payload.update(
             {
-                "reviewed_pr_head_sha": "a" * 40,
+                "reviewed_pr_head_sha": "b" * 40,
                 "review_finding_journal_head": "a" * 40,
                 "carried_review_finding_records": carried,
             }
@@ -7600,11 +7868,693 @@ class TestAuditPublication:
         records = pr_review_jobs._carry_review_finding_records(item, [current])
 
         assert len(records) == 64
-        assert [entry["finding_id"] for entry in records] == [
-            *(f"{index:064x}" for index in range(1, 64)),
-            current["finding_id"],
+        assert [record["finding_id"] for record in records] == [
+            *[f"{index:064x}" for index in range(1, 64)],
+            f"{64:064x}",
         ]
-        assert sum(entry["status"] == "published" for entry in records) == 64
+        assert item.payload["review_finding_compacted_outcomes"] == {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
+            "identities": [[f"{0:064x}", "a" * 40, "p", "a"]],
+        }
+
+    def test_full_compact_identity_reserve_stops_before_reviewer(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A full identity reserve stops before a reviewer can add new findings."""
+        identities: list[list[str]] = [
+            [f"{index:064x}", "a" * 40, "p", "a"] for index in range(256)
+        ]
+        item = make_work_item(issue=50, pr=1001)
+        item.payload["carried_review_finding_compacted_outcomes"] = {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 256},
+            "identities": identities,
+        }
+
+        result = PrReviewStage()._submit_review_job(item, make_ctx(github=FakeStageGitHub()))
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_full")
+
+    def test_mixed_identity_reserve_stops_before_reviewer(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Retained and compact identities use the same reviewer reserve."""
+        records: list[dict[str, object]] = [
+            {
+                "finding_id": f"{index:064x}",
+                "source_head": "a" * 40,
+                "severity": "minor",
+                "body": f"Retained finding {index}.",
+                "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+                "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+                "status": "published",
+                "surface": "inline",
+                "reason": None,
+            }
+            for index in range(64)
+        ]
+        identities: list[list[str]] = [
+            [f"{index + 64:064x}", "a" * 40, "p", "a"] for index in range(192)
+        ]
+        item = make_work_item(issue=50, pr=1001)
+        item.payload["carried_review_finding_records"] = records
+        item.payload["carried_review_finding_compacted_outcomes"] = {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 192},
+            "identities": identities,
+        }
+
+        result = PrReviewStage()._submit_review_job(item, make_ctx(github=FakeStageGitHub()))
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_full")
+
+    def test_compact_history_reserves_transport_space_for_large_current_batch(
+        self, make_work_item: Any
+    ) -> None:
+        """A near-limit compact history can carry one complete large review batch."""
+        identities: list[list[str]] = [
+            [f"{index:064x}", "a" * 40, "p", "a"] for index in range(128)
+        ]
+        item = make_work_item(issue=50, pr=1001)
+        item.payload["reviewed_pr_head_sha"] = "b" * 40
+        item.payload["carried_review_finding_compacted_outcomes"] = {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 128},
+            "identities": identities,
+        }
+        current: list[dict[str, object]] = [
+            {
+                "finding_id": f"{index + 128:064x}",
+                "source_head": "b" * 40,
+                "severity": "minor",
+                "body": f"Finding {index}." + "x" * 8,
+                "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+                "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+                "status": "published",
+                "surface": "inline",
+                "reason": None,
+            }
+            for index in range(64)
+        ]
+
+        assert pr_review_jobs._review_finding_history_has_capacity(item)
+        records = pr_review_jobs._carry_review_finding_records(item, current)
+
+        assert len(records) == 64
+        assert len(item.payload["review_finding_compacted_outcomes"]["identities"]) == 128
+
+    def test_new_review_batch_uses_reserved_transport_bound(self) -> None:
+        """A new batch cannot consume space reserved for compact history."""
+        finding = {
+            "finding_id": "f" * 64,
+            "path": "a.py",
+            "line": 1,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "x" * 16_384,
+            "evidence": "y" * 10_000,
+        }
+
+        with pytest.raises(ValueError, match="batch exceeds its aggregate size limit"):
+            pr_review_jobs._build_review_finding_records(
+                source_head="a" * 40,
+                initial_valid=[finding],
+                corrections=[],
+                corrected_inline=[],
+                corrected_audit=[],
+                not_publishable=[],
+            )
+
+    def test_compact_history_stops_when_transport_reserve_is_full(
+        self, make_work_item: Any
+    ) -> None:
+        """Serialized compact state cannot consume the next review batch reserve."""
+        identities: list[list[str]] = [
+            [f"{index:064x}", "a" * 40, "p", "a"] for index in range(140)
+        ]
+        item = make_work_item(issue=50, pr=1001)
+        item.payload["carried_review_finding_compacted_outcomes"] = {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 140},
+            "identities": identities,
+        }
+
+        assert not pr_review_jobs._review_finding_history_has_capacity(item)
+
+    def test_restart_capacity_discards_pending_records_from_an_old_head(
+        self, make_work_item: Any
+    ) -> None:
+        """Old-head pending intents do not consume capacity after restart."""
+        pending: list[dict[str, object]] = [
+            {
+                "finding_id": f"{index:064x}",
+                "source_head": "a" * 40,
+                "severity": "minor",
+                "body": f"Stale pending finding {index}.",
+                "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+                "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+                "status": "pending",
+                "surface": "inline",
+                "reason": None,
+            }
+            for index in range(64)
+        ]
+        identities: list[list[str]] = [
+            [f"{index + 64:064x}", "a" * 40, "p", "a"] for index in range(129)
+        ]
+        item = make_work_item(issue=50, pr=1001)
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "b" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": pending,
+                "carried_review_finding_compacted_outcomes": {
+                    "counts": {
+                        "corrected": 0,
+                        "not_publishable": 0,
+                        "published": 129,
+                    },
+                    "identities": identities,
+                },
+            }
+        )
+
+        assert pr_review_jobs._review_finding_history_has_capacity(item)
+        assert "review_finding_records" not in item.payload
+
+    @staticmethod
+    def _pending_restart_record() -> dict[str, object]:
+        """Build one saved exact-head publication intent."""
+        return {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "major",
+            "body": "Guard this value.",
+            "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "status": "pending",
+            "surface": "inline",
+            "reason": None,
+        }
+
+    def _run_pending_restart_recovery(
+        self,
+        *,
+        github: FakeStageGitHub,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> tuple[Any, Any]:
+        """Run one saved publication intent through the GitHub worker."""
+        pending = self._pending_restart_record()
+        item = make_work_item(issue=50, pr=1001)
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": [pending],
+                "pr_diff": _PENDING_RECOVERY_DIFF,
+            }
+        )
+        item.state = REVIEW_CHECKOUT_WAIT
+        ctx = make_ctx(github=github)
+        stage = PrReviewStage()
+
+        recovery = stage._route_threads_before_broad_review(item, ctx)
+
+        assert isinstance(recovery, JobRequest)
+        assert isinstance(recovery.job, GitHubJob)
+        assert recovery.job.descr == "recover_pending_review_findings"
+        assert isinstance(recovery.job.request, RecoverPendingReviewFindingsRequest)
+        receipt = PipelineGitHubJobRunner._recover_pending_review_findings(
+            recovery.job.request, github
+        )
+        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+        item.state = recovery.on_done_state
+        return item, stage.step(item, ctx)
+
+    def test_restart_promotes_visible_owned_pending_finding(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An owned exact-head thread completes its saved publication intent."""
+
+        class VisiblePendingGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                body = "<!-- hephaestus-severity: major -->\nGuard this value."
+                return [
+                    {
+                        "id": "visible-pending",
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "severity": "major",
+                        "body": body,
+                        "author": "hephaestus[bot]",
+                        "authors": ["hephaestus[bot]"],
+                        "review_id": "review-visible",
+                        "comments": [
+                            {
+                                "id": "comment-visible",
+                                "author": "hephaestus[bot]",
+                                "body": body,
+                                "viewer_did_author": True,
+                                "review_commit_sha": "a" * 40,
+                                "review_id": "review-visible",
+                                "review_state": "COMMENTED",
+                            }
+                        ],
+                    }
+                ]
+
+        github = VisiblePendingGitHub()
+
+        item, result = self._run_pending_restart_recovery(
+            github=github,
+            make_ctx=make_ctx,
+            make_work_item=make_work_item,
+        )
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+        assert item.payload["review_finding_records"][0]["status"] == "published"
+        assert item.payload["carried_review_finding_records"][0]["status"] == "published"
+        assert not any(entry[0] == "gh_pr_review_post" for entry in github.mutation_log)
+
+    def test_pending_recovery_precedes_current_reply_validation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Publication recovery finishes before normal reply validation starts."""
+
+        class RepliedPendingGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.receipt_reads = 0
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                body = "<!-- hephaestus-severity: major -->\nGuard this value."
+                return [
+                    {
+                        "id": "visible-pending",
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "severity": "major",
+                        "body": body,
+                        "author": "hephaestus[bot]",
+                        "authors": ["hephaestus[bot]"],
+                        "review_id": "review-visible",
+                        "comments": [
+                            {
+                                "id": "review-root",
+                                "body": body,
+                                "viewer_did_author": True,
+                                "review_commit_sha": "a" * 40,
+                                "review_id": "review-visible",
+                                "review_state": "COMMENTED",
+                            },
+                            {
+                                "id": "implementation-reply-visible-pending",
+                                "body": "The implementation corrects this finding.",
+                            },
+                        ],
+                    }
+                ]
+
+            def reviewer_validation_receipts(
+                self,
+                pr_number: int,
+                *,
+                reviewed_head_sha: str,
+                threads: list[dict[str, Any]],
+            ) -> list[dict[str, Any]]:
+                self.receipt_reads += 1
+                return super().reviewer_validation_receipts(
+                    pr_number,
+                    reviewed_head_sha=reviewed_head_sha,
+                    threads=threads,
+                )
+
+        github = RepliedPendingGitHub()
+
+        item, result = self._run_pending_restart_recovery(
+            github=github,
+            make_ctx=make_ctx,
+            make_work_item=make_work_item,
+        )
+
+        assert result == Continue(next_state="VALIDATE_WAIT")
+        assert item.payload["review_finding_records"][0]["status"] == "published"
+        assert github.receipt_reads == 1
+        item.state = result.next_state
+
+        validation = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert isinstance(validation, JobRequest)
+        assert isinstance(validation.job, AgentJob)
+        assert validation.on_done_state == "POST"
+        assert "review_worktree_cleanup_done" not in item.payload
+        PrReviewStage().on_job_done(
+            item,
+            JobResult(ok=True, value={"resolved": ["visible-pending"], "unaddressed": []}),
+            make_ctx(github=github),
+        )
+        assert item.payload["validation_result"] == {
+            "resolved": ["visible-pending"],
+            "unaddressed": [],
+        }
+
+    def test_restart_retries_transient_pending_recovery_failure(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A transient worker failure resubmits the same saved recovery request."""
+        pending = self._pending_restart_record()
+        item = make_work_item(issue=50, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": [pending],
+                "pr_diff": _PENDING_RECOVERY_DIFF,
+            }
+        )
+        ctx = make_ctx(github=FakeStageGitHub())
+        stage = PrReviewStage()
+        first = stage._route_threads_before_broad_review(item, ctx)
+        assert isinstance(first, JobRequest)
+        assert isinstance(first.job, GitHubJob)
+        stage.on_job_done(item, JobResult(ok=False, error="transient GitHub error"), ctx)
+        item.state = first.on_done_state
+
+        second = stage.step(item, ctx)
+
+        assert isinstance(second, JobRequest)
+        assert isinstance(second.job, GitHubJob)
+        assert second.job.descr == "recover_pending_review_findings"
+        assert second.job.request == first.job.request
+
+    def test_pending_recovery_head_drift_requests_a_fresh_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A head change during recovery refreshes the detached review checkout."""
+        pending = self._pending_restart_record()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_head_sha": "b" * 40,
+                "pr_title": "fix: move the head",
+                "pr_description": "Current implementation.",
+            }
+        )
+        item = make_work_item(issue=50, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": [pending],
+                "pr_diff": _PENDING_RECOVERY_DIFF,
+                "review_worktree": item.worktree,
+                "review_worktree_expected_head": "a" * 40,
+            }
+        )
+        ctx = make_ctx(github=github)
+        stage = PrReviewStage()
+        recovery = stage._route_threads_before_broad_review(item, ctx)
+        assert isinstance(recovery, JobRequest)
+        assert isinstance(recovery.job, GitHubJob)
+        request = cast(RecoverPendingReviewFindingsRequest, recovery.job.request)
+        receipt = PipelineGitHubJobRunner._recover_pending_review_findings(request, github)
+        assert receipt.action == "fresh_review"
+
+        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+        item.state = recovery.on_done_state
+
+        assert stage.step(item, ctx) == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        assert item.payload["pending_finding_recovery_needs_checkout"] is True
+        assert item.payload[pr_review_jobs._PENDING_FINDING_RECOVERY_DEADLINE] == request.deadline_s
+        item.state = CLEANUP_REVIEW_WORKTREE_WAIT
+        removal = stage.step(item, ctx)
+        assert isinstance(removal, JobRequest)
+        assert isinstance(removal.job, GitJob)
+        assert removal.job.op == "remove_worktree"
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+        item.state = removal.on_done_state
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "pending finding recovery head changed"
+        )
+        assert item.state == ENTER
+        assert item.worktree == ""
+
+    def test_exhausted_pending_recovery_keeps_cleanup_result_ownership(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Cleanup consumes its result after pending recovery exhausts."""
+        pending = self._pending_restart_record()
+        item = make_work_item(issue=50, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": [pending],
+                "pr_diff": _PENDING_RECOVERY_DIFF,
+                "review_worktree": item.worktree,
+                "review_worktree_expected_head": "a" * 40,
+            }
+        )
+        ctx = make_ctx(github=FakeStageGitHub())
+        stage = PrReviewStage()
+        request = stage._route_threads_before_broad_review(item, ctx)
+        assert isinstance(request, JobRequest)
+
+        for attempt in range(REVIEW_ERROR_RETRY_CAP + 1):
+            stage.on_job_done(item, JobResult(ok=False, error="transient GitHub error"), ctx)
+            item.state = request.on_done_state
+            result = stage.step(item, ctx)
+            if attempt < REVIEW_ERROR_RETRY_CAP:
+                assert isinstance(result, JobRequest)
+                request = result
+
+        assert result == Continue(next_state="EVAL")
+        assert pr_review_jobs._PENDING_FINDING_RECOVERY not in item.payload
+        item.state = result.next_state
+        cleanup_route = stage.step(item, ctx)
+        assert cleanup_route == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        item.state = cleanup_route.next_state
+        removal = stage.step(item, ctx)
+        assert isinstance(removal, JobRequest)
+        assert isinstance(removal.job, GitJob)
+        assert removal.job.op == "remove_worktree"
+
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+        item.state = removal.on_done_state
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "review audit format failure"
+        )
+
+    def test_restart_retries_absent_pending_finding_without_reviewer(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An absent thread is published again from its saved exact anchor."""
+
+        class AbsentPendingGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.live: list[dict[str, Any]] = []
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live]
+
+            def post_review_threads(
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                *,
+                expected_head_sha: str,
+                review_diff: str,
+            ) -> list[dict[str, Any]]:
+                receipts = super().post_review_threads(
+                    pr_number,
+                    threads,
+                    expected_head_sha=expected_head_sha,
+                    review_diff=review_diff,
+                )
+                self.live.extend(dict(receipt) for receipt in receipts)
+                return receipts
+
+        github = AbsentPendingGitHub()
+
+        item, result = self._run_pending_restart_recovery(
+            github=github,
+            make_ctx=make_ctx,
+            make_work_item=make_work_item,
+        )
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+        assert item.payload["review_finding_records"][0]["status"] == "published"
+        assert item.payload["carried_review_finding_records"][0]["status"] == "published"
+        assert [entry[0] for entry in github.mutation_log].count("gh_pr_review_post") == 1
+
+    def test_restart_capacity_accepts_legacy_large_terminal_record(
+        self, make_work_item: Any
+    ) -> None:
+        """A large record from the old transport bound remains valid on restart."""
+        record: dict[str, object] = {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "minor",
+            "body": "x" * 16_384,
+            "evidence": "y" * 12_000,
+            "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "corrected",
+            "surface": "audit",
+            "reason": "line_not_in_diff",
+        }
+        item = make_work_item(issue=50, pr=1001)
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "b" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": [record],
+            }
+        )
+
+        assert pr_review_jobs._review_finding_history_has_capacity(item)
+        assert "review_finding_records" not in item.payload
+
+    @pytest.mark.parametrize(
+        ("compacted", "note"),
+        [
+            ({"counts": {}, "identities": []}, "review_finding_history_invalid"),
+            (
+                {
+                    "counts": {
+                        "corrected": 0,
+                        "not_publishable": 0,
+                        "published": 256,
+                    },
+                    "identities": [[f"{index:064x}", "a" * 40, "p", "a"] for index in range(256)],
+                },
+                "review_finding_history_full",
+            ),
+        ],
+        ids=["invalid", "full"],
+    )
+    def test_checkout_history_guard_schedules_review_worktree_cleanup(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        compacted: dict[str, object],
+        note: str,
+    ) -> None:
+        """A terminal history guard removes the detached review checkout."""
+        stage = PrReviewStage()
+        item = make_work_item(issue=50, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "review_checkout_ready": True,
+                "review_checkout_expected_head": "a" * 40,
+                "review_worktree": item.worktree,
+                "review_worktree_expected_head": "a" * 40,
+                "pr_diff": "diff --git a/a.py b/a.py",
+                "carried_review_finding_compacted_outcomes": compacted,
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=FakeStageGitHub()))
+
+        assert result == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        assert item.payload["review_worktree_cleanup_outcome"] == "finish_fail"
+        assert item.payload["review_worktree_cleanup_note"] == note
+        if note == "review_finding_history_full":
+            assert item.payload["review_finding_records"] == []
+            assert item.payload["review_finding_compacted_outcomes"] == compacted
+            assert _review_finding_outcomes(item) == {"published": 256}
+
+    def test_current_finding_decompacts_prior_identity_and_keeps_first_source_head(
+        self, make_work_item: Any
+    ) -> None:
+        """A repeated finding returns to full state without duplicate outcome counts."""
+        finding_id = "f" * 64
+        current: dict[str, object] = {
+            "finding_id": finding_id,
+            "source_head": "b" * 40,
+            "severity": "minor",
+            "body": "Repeated finding.",
+            "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "not_publishable",
+            "surface": "not_publishable",
+            "reason": "line_not_in_diff",
+        }
+        item = make_work_item(issue=50, pr=1001)
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "b" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_records": [],
+                "carried_review_finding_compacted_outcomes": {
+                    "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
+                    "identities": [[finding_id, "a" * 40, "p", "a"]],
+                },
+            }
+        )
+
+        records = pr_review_jobs._carry_review_finding_records(item, [current])
+
+        assert records == [{**current, "source_head": "a" * 40, "publication_head": "b" * 40}]
+        assert item.payload["review_finding_compacted_outcomes"] == {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 0},
+            "identities": [],
+        }
+
+    def test_repeated_compacted_finding_recovers_on_new_publication_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A repeated finding keeps first-source and publication-head identity."""
+        finding_id = "f" * 64
+        current: dict[str, object] = {
+            "finding_id": finding_id,
+            "source_head": "b" * 40,
+            "severity": "major",
+            "body": "Guard this value.",
+            "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "final_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
+            "status": "pending",
+            "surface": "inline",
+            "reason": None,
+        }
+        first = make_work_item(issue=50, pr=1001)
+        first.payload.update(
+            {
+                "reviewed_pr_head_sha": "b" * 40,
+                "review_finding_journal_head": "a" * 40,
+                "carried_review_finding_compacted_outcomes": {
+                    "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
+                    "identities": [[finding_id, "a" * 40, "p", "b"]],
+                },
+            }
+        )
+        carried = pr_review_jobs._carry_review_finding_records(first, [current])
+        restarted = make_work_item(issue=50, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        restarted.payload.update(
+            {
+                "reviewed_pr_head_sha": "b" * 40,
+                "review_finding_journal_head": "b" * 40,
+                "carried_review_finding_records": carried,
+                "pr_diff": _PENDING_RECOVERY_DIFF,
+            }
+        )
+
+        recovery = PrReviewStage()._route_threads_before_broad_review(
+            restarted, make_ctx(github=FakeStageGitHub())
+        )
+
+        assert carried[0]["source_head"] == "a" * 40
+        assert carried[0]["publication_head"] == "b" * 40
+        assert isinstance(recovery, JobRequest)
+        assert isinstance(recovery.job.request, RecoverPendingReviewFindingsRequest)
+        assert recovery.job.request.reviewed_head_sha == "b" * 40
 
     def test_recovered_publication_updates_terminal_finding_records(
         self, make_ctx: Any, make_work_item: Any

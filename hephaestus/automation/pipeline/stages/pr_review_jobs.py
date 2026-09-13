@@ -12,9 +12,18 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.github_api.diff import (
+    MAX_COMPACTED_REVIEW_FINDINGS,
+    MAX_REVIEW_FINDINGS,
     ReviewAnchorCorrection,
     ReviewAnchorCorrectionReason,
+    ReviewFindingCompactedOutcomes,
     _validate_comments_to_diff,
+    compact_terminal_review_finding_collection,
+    empty_review_finding_compacted_outcomes,
+    normalize_review_finding_batch_records,
+    normalize_review_finding_collection,
+    normalize_review_finding_compacted_outcomes,
+    review_finding_compacted_outcomes_leave_batch_capacity,
 )
 from hephaestus.automation.implementation_go_audit_receipt import (
     normalize_review_finding_records,
@@ -35,6 +44,7 @@ from ..github_jobs import (
     GitHubJob,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
+    RecoverPendingReviewFindingsRequest,
 )
 from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
@@ -48,6 +58,8 @@ from .pr_review_threads import POST_APPLY
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
+_PENDING_FINDING_RECOVERY = "_pending_review_finding_recovery"
+_PENDING_FINDING_RECOVERY_DEADLINE = "_pending_review_finding_recovery_deadline_s"
 _ANCHOR_CORRECTION_JOB_PENDING = "review_anchor_correction_job_pending"
 _ANCHOR_CORRECTION_RESULT = "review_anchor_correction_result"
 
@@ -156,44 +168,188 @@ def _build_review_finding_records(
                 reason=correction.reason,
             )
         )
-    return [dict(record) for record in normalize_review_finding_records(records)]
+    return [dict(record) for record in normalize_review_finding_batch_records(records)]
+
+
+def _effective_recovered_review_finding_records(
+    item: WorkItem,
+) -> list[dict[str, object]]:
+    """Return recovered records that can apply to the current review head."""
+    recovered = list(
+        normalize_review_finding_records(item.payload.get("carried_review_finding_records", []))
+    )
+    if item.payload.get("review_finding_journal_head") != item.payload.get("reviewed_pr_head_sha"):
+        recovered = [record for record in recovered if record["status"] != "pending"]
+    return recovered
+
+
+def _publication_head(record: dict[str, object]) -> object:
+    """Return the exact head that owns one pending publication."""
+    return record.get("publication_head", record.get("source_head"))
+
+
+def _restore_review_finding_provenance(
+    record: dict[str, object],
+    prior: dict[str, object] | None,
+    compacted_prior: list[str] | None,
+) -> dict[str, object]:
+    """Restore first-source provenance for one current finding."""
+    value = dict(record)
+    publication_head = _publication_head(value)
+    if prior is not None:
+        value["source_head"] = prior["source_head"]
+        if prior["status"] == "pending" and value["surface"] == "inline":
+            value["status"] = "pending"
+    elif compacted_prior is not None:
+        value["source_head"] = compacted_prior[1]
+    if publication_head != value["source_head"]:
+        value["publication_head"] = publication_head
+    else:
+        value.pop("publication_head", None)
+    return value
+
+
+def _pending_review_finding(record: dict[str, object]) -> dict[str, object]:
+    """Restore one pending finding from its saved exact anchor."""
+    anchor = record["final_anchor"]
+    if not isinstance(anchor, dict):
+        raise ValueError("pending review finding has no final anchor")
+    finding: dict[str, object] = {
+        "finding_id": record["finding_id"],
+        "path": anchor["path"],
+        "line": anchor["line"],
+        "side": anchor["side"],
+        "severity": record["severity"],
+        "body": record["body"],
+    }
+    for key in ("evidence", "scope_retraction_paths"):
+        if key in record:
+            finding[key] = record[key]
+    return finding
+
+
+def _review_finding_history_has_capacity(item: WorkItem) -> bool:
+    """Prepare effective history and reserve one maximum reviewer response."""
+    recovered = _effective_recovered_review_finding_records(item)
+    compacted = normalize_review_finding_compacted_outcomes(
+        item.payload.get(
+            "carried_review_finding_compacted_outcomes",
+            empty_review_finding_compacted_outcomes(),
+        ),
+        retained_finding_ids=[record["finding_id"] for record in recovered],
+    )
+
+    def preserve_terminal_history() -> None:
+        """Keep normalized history for terminal summary and diagnostics."""
+        item.payload["review_finding_records"] = [dict(record) for record in recovered]
+        item.payload["review_finding_compacted_outcomes"] = compacted
+
+    if any(record["status"] == "pending" for record in recovered):
+        preserve_terminal_history()
+        return False
+    projected_identities = [list(identity) for identity in compacted["identities"]]
+    projected_counts = dict(compacted["counts"])
+    outcome_codes = {"corrected": "c", "not_publishable": "n", "published": "p"}
+    for record in recovered:
+        status = str(record["status"])
+        projected_counts[status] += 1
+        projected_identities.append(
+            [
+                str(record["finding_id"]),
+                str(record["source_head"]),
+                outcome_codes[status],
+                "b" if record["severity"] in {"critical", "major"} else "a",
+            ]
+        )
+    if len(projected_identities) > MAX_COMPACTED_REVIEW_FINDINGS - MAX_REVIEW_FINDINGS:
+        preserve_terminal_history()
+        return False
+    projected = normalize_review_finding_compacted_outcomes(
+        {"counts": projected_counts, "identities": projected_identities}
+    )
+    if not review_finding_compacted_outcomes_leave_batch_capacity(projected):
+        preserve_terminal_history()
+        return False
+    return True
 
 
 def _carry_review_finding_records(
     item: WorkItem, current: list[dict[str, object]]
 ) -> list[dict[str, object]]:
-    """Combine current outcomes with the bounded necessary review history."""
-    recovered = list(
-        normalize_review_finding_records(item.payload.get("carried_review_finding_records", []))
-    )
+    """Combine current outcomes with the bounded versioned review history."""
+    recovered = _effective_recovered_review_finding_records(item)
     current = [dict(record) for record in normalize_review_finding_records(current)]
-    if item.payload.get("review_finding_journal_head") != item.payload.get("reviewed_pr_head_sha"):
-        recovered = [record for record in recovered if record["status"] != "pending"]
+    compacted = normalize_review_finding_compacted_outcomes(
+        item.payload.get(
+            "carried_review_finding_compacted_outcomes",
+            empty_review_finding_compacted_outcomes(),
+        ),
+        retained_finding_ids=[record["finding_id"] for record in recovered],
+    )
+    compacted_by_id = {identity[0]: list(identity) for identity in compacted["identities"]}
     combined = {str(record["finding_id"]): dict(record) for record in recovered}
     for record in current:
         finding_id = str(record["finding_id"])
         prior = combined.get(finding_id)
-        value = dict(record)
+        compacted_prior = compacted_by_id.pop(finding_id, None)
+        value = _restore_review_finding_provenance(record, prior, compacted_prior)
         if prior is not None:
-            value["source_head"] = prior["source_head"]
-            if prior["status"] == "pending" and value["surface"] == "inline":
-                value["status"] = "pending"
+            combined.pop(finding_id)
         combined[finding_id] = value
     current_ids = {str(record["finding_id"]) for record in current}
-    removable_ids = [
-        str(record["finding_id"])
-        for record in recovered
-        if record["status"] != "pending" and str(record["finding_id"]) not in current_ids
-    ]
+    protected_ids = current_ids | {
+        finding_id for finding_id, record in combined.items() if record["status"] == "pending"
+    }
+    outcome_codes = {"corrected": "c", "not_publishable": "n", "published": "p"}
+
+    def compacted_value() -> ReviewFindingCompactedOutcomes:
+        """Return normalized counts for the current compact identities."""
+        identities = list(compacted_by_id.values())
+        counts = {"corrected": 0, "not_publishable": 0, "published": 0}
+        outcome_by_code = {
+            "c": "corrected",
+            "n": "not_publishable",
+            "p": "published",
+        }
+        for identity in identities:
+            counts[outcome_by_code[identity[2]]] += 1
+        return normalize_review_finding_compacted_outcomes(
+            {"counts": counts, "identities": identities},
+            retained_finding_ids=list(combined),
+        )
+
     while True:
+        records = list(combined.values())
         try:
-            return [
-                dict(record) for record in normalize_review_finding_records(list(combined.values()))
-            ]
+            normalized_records, normalized_compacted = normalize_review_finding_collection(
+                records,
+                compacted_outcomes=compacted_value(),
+            )
+            if len(normalized_records) <= MAX_REVIEW_FINDINGS:
+                break
         except ValueError:
-            if not removable_ids:
-                raise
-            combined.pop(removable_ids.pop(0), None)
+            normalized_records = ()
+        candidate_id = next(
+            (
+                finding_id
+                for finding_id, record in combined.items()
+                if finding_id not in protected_ids and record["status"] != "pending"
+            ),
+            None,
+        )
+        if candidate_id is None:
+            raise ValueError("review finding history has no compactable terminal record")
+        candidate = combined.pop(candidate_id)
+        if candidate_id in compacted_by_id:
+            raise ValueError("review finding compacted identity is duplicated")
+        compacted_by_id[candidate_id] = [
+            candidate_id,
+            str(candidate["source_head"]),
+            outcome_codes[str(candidate["status"])],
+            "b" if candidate["severity"] in {"critical", "major"} else "a",
+        ]
+    item.payload["review_finding_compacted_outcomes"] = normalized_compacted
+    return [dict(record) for record in normalized_records]
 
 
 def empty_diff_outcome(item: WorkItem) -> StageOutcome | None:
@@ -560,7 +716,22 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
 
     def _submit_review_job(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Create the agent job after the checkout/head barrier succeeds."""
+        pending_recovery = self._prepare_pending_finding_recovery(item, ctx)
+        if pending_recovery is not None:
+            return pending_recovery
         issue = _issue_number(item)
+        try:
+            has_capacity = _review_finding_history_has_capacity(item)
+        except ValueError:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
+            )
+        if not has_capacity:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_full"),
+            )
         round_index = item.payload.get("pr_review_round", 0)
         logger.info(
             "pr_review:%d: requesting review job (round %d, PR #%d)",
@@ -628,6 +799,112 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload["review_job_pending"] = True
         return JobRequest(job, on_done_state=VALIDATE_WAIT)
 
+    def _prepare_pending_finding_recovery(
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult | None:
+        """Reconcile an exact-head pending publication before a new review."""
+        try:
+            records = list(
+                normalize_review_finding_records(
+                    item.payload.get("carried_review_finding_records", [])
+                )
+            )
+            compacted = normalize_review_finding_compacted_outcomes(
+                item.payload.get(
+                    "carried_review_finding_compacted_outcomes",
+                    empty_review_finding_compacted_outcomes(),
+                ),
+                retained_finding_ids=[record["finding_id"] for record in records],
+            )
+        except ValueError:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
+            )
+        pending_records = [record for record in records if record["status"] == "pending"]
+        if not pending_records:
+            return None
+        if item.pr is None:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "no_pr"),
+            )
+        reviewed_head = str(item.payload.get("review_finding_journal_head") or "")
+        if not is_full_commit_sha(reviewed_head):
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
+            )
+        active_head = item.payload.get("reviewed_pr_head_sha")
+        if is_full_commit_sha(active_head) and active_head != reviewed_head:
+            terminal_records = [record for record in records if record["status"] != "pending"]
+            effective_records = [dict(record) for record in terminal_records]
+            item.payload["carried_review_finding_records"] = effective_records
+            item.payload["carried_review_finding_compacted_outcomes"] = compacted
+            item.payload["review_finding_records"] = [dict(record) for record in effective_records]
+            item.payload["review_finding_compacted_outcomes"] = compacted
+            item.payload.pop("pending_finding_recovery_needs_checkout", None)
+            item.payload.pop(_PENDING_FINDING_RECOVERY_DEADLINE, None)
+            return None
+        if any(_publication_head(record) != reviewed_head for record in pending_records):
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
+            )
+        try:
+            findings = [_pending_review_finding(record) for record in pending_records]
+        except ValueError:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
+            )
+        prior_request = item.payload.get(_PENDING_GITHUB_REQUEST)
+        saved_deadline = item.payload.get(_PENDING_FINDING_RECOVERY_DEADLINE)
+        deadline_s = (
+            prior_request.deadline_s
+            if isinstance(prior_request, RecoverPendingReviewFindingsRequest)
+            else saved_deadline
+            if isinstance(saved_deadline, (int, float)) and not isinstance(saved_deadline, bool)
+            else operation_deadline_after(stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
+        )
+        request = RecoverPendingReviewFindingsRequest(
+            issue_number=item.issue,
+            pr_number=item.pr,
+            reviewed_head_sha=reviewed_head,
+            findings=FrozenJson.snapshot(findings),
+            finding_records=FrozenJson.snapshot(records),
+            deadline_s=deadline_s,
+            review_diff=str(item.payload.get("pr_diff") or ""),
+            compacted_outcomes=FrozenJson.snapshot(compacted),
+        )
+        if prior_request is None:
+            item.payload[_PENDING_GITHUB_REQUEST] = request
+        elif prior_request != request:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_finding_recovery_identity_invalid"),
+            )
+        item.payload["review_finding_records"] = [dict(record) for record in records]
+        item.payload["review_finding_compacted_outcomes"] = compacted
+        item.payload.pop("pending_finding_recovery_needs_checkout", None)
+        item.payload[_PENDING_FINDING_RECOVERY] = True
+        return self._pending_finding_recovery_job(item, ctx, request)
+
+    @staticmethod
+    def _pending_finding_recovery_job(
+        item: WorkItem, ctx: StageContext, request: RecoverPendingReviewFindingsRequest
+    ) -> JobRequest:
+        """Dispatch one exact saved finding-recovery request."""
+        return JobRequest(
+            GitHubJob(
+                repo=item.repo,
+                repo_root=Path(str(ctx.paths.repo_root)).resolve(),
+                request=request,
+                descr="recover_pending_review_findings",
+            ),
+            on_done_state=POST_APPLY,
+        )
+
     def _route_threads_before_broad_review(  # noqa: C901
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult:
@@ -643,6 +920,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item,
                 StageOutcome(Disposition.FINISH_FAIL, "reviewed_head_unavailable"),
             )
+        pending_recovery = self._prepare_pending_finding_recovery(item, ctx)
+        if pending_recovery is not None:
+            return pending_recovery
         try:
             live_threads = ctx.github.list_unresolved_review_threads(item.pr)
             receipts = ctx.github.reviewer_validation_receipts(
@@ -846,6 +1126,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item.payload["carried_review_finding_records"] = [
                     dict(record) for record in item.payload["review_finding_records"]
                 ]
+                item.payload["carried_review_finding_compacted_outcomes"] = dict(
+                    item.payload["review_finding_compacted_outcomes"]
+                )
             except ValueError:
                 item.payload["review_audit_failure"] = True
                 return Continue(next_state=EVAL)
@@ -990,6 +1273,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             item.payload["carried_review_finding_records"] = [
                 dict(record) for record in item.payload["review_finding_records"]
             ]
+            item.payload["carried_review_finding_compacted_outcomes"] = dict(
+                item.payload["review_finding_compacted_outcomes"]
+            )
         except ValueError:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
@@ -1229,13 +1515,16 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         """Store one completed job result for the current review wait state."""
         if self._consume_scope_expansion_result(item, result):
             return
+        if self._consume_review_worktree_cleanup_result(item, result):
+            return
+        if item.payload.get(_PENDING_FINDING_RECOVERY):
+            self._on_reconciliation_done(item, result)
+            return
         if item.payload.pop(_ANCHOR_CORRECTION_JOB_PENDING, None):
             item.payload[_ANCHOR_CORRECTION_RESULT] = result.value if result.ok else None
             return
         if item.state == POST:
             self._on_reconciliation_done(item, result)
-            return
-        if self._consume_review_worktree_cleanup_result(item, result):
             return
         if self._consume_direct_worktree_result(item, result):
             return
@@ -1394,34 +1683,77 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             return
         item.payload[_PR_REVIEW_RECEIPT] = receipt
 
-    def _post_apply(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _post_apply(  # noqa: C901
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult:
         """Apply the matching receipt and hand unresolved work to implementation."""
+        pending_finding_recovery = bool(item.payload.get(_PENDING_FINDING_RECOVERY))
         error = item.payload.pop(_PR_REVIEW_RECEIPT_ERROR, None)
         if error == "retry":
+            if pending_finding_recovery:
+                request = item.payload.get(_PENDING_GITHUB_REQUEST)
+                if not isinstance(request, RecoverPendingReviewFindingsRequest):
+                    return self._cleanup_review_worktree_then(
+                        item,
+                        StageOutcome(
+                            Disposition.FINISH_FAIL,
+                            "review_finding_recovery_identity_invalid",
+                        ),
+                    )
+                return self._pending_finding_recovery_job(item, ctx, request)
             item.state = POST
             return StageOutcome(Disposition.RETRY, "pr_review_reconciliation_retry")
         if error in {"failed", "invalid"}:
+            if pending_finding_recovery:
+                item.payload.pop(_PENDING_FINDING_RECOVERY, None)
+                item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+                item.payload.pop(_PENDING_FINDING_RECOVERY_DEADLINE, None)
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         receipt = item.payload.pop(_PR_REVIEW_RECEIPT, None)
         if not isinstance(receipt, PrReviewReconciled) or receipt.request != item.payload.get(
             _PENDING_GITHUB_REQUEST
         ):
+            if pending_finding_recovery:
+                item.payload.pop(_PENDING_FINDING_RECOVERY, None)
+                item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+                item.payload.pop(_PENDING_FINDING_RECOVERY_DEADLINE, None)
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         item.payload.pop(_PENDING_GITHUB_REQUEST, None)
         item.payload.pop("pr_review_reconciliation_retries", None)
+        item.payload.pop(_PENDING_FINDING_RECOVERY, None)
         if receipt.action == "revalidate":
             item.payload.pop("validation_result", None)
             item.payload.pop("validation_threads", None)
             item.payload.pop("validation_receipt_fingerprints", None)
             item.payload.pop("validation_pr_metadata_fingerprint", None)
+            if pending_finding_recovery:
+                item.payload[_PENDING_FINDING_RECOVERY_DEADLINE] = receipt.request.deadline_s
+                item.payload["pending_finding_recovery_needs_checkout"] = True
+                item.payload["existing_pr"] = True
+                item.payload["scope_dependency_entry_reconciled"] = True
+                return Continue(next_state=ENTER)
             return Continue(next_state=VALIDATE_WAIT)
         if receipt.action == "fresh_review":
             item.payload.pop("validation_result", None)
             item.payload.pop("validation_threads", None)
             item.payload.pop("validation_receipt_fingerprints", None)
             item.payload.pop("validation_pr_metadata_fingerprint", None)
+            if pending_finding_recovery:
+                item.payload[_PENDING_FINDING_RECOVERY_DEADLINE] = receipt.request.deadline_s
+                item.payload["pending_finding_recovery_needs_checkout"] = True
+                item.payload["existing_pr"] = True
+                item.payload["scope_dependency_entry_reconciled"] = True
+                if item.payload.get("review_worktree"):
+                    return self._cleanup_review_worktree_then(
+                        item,
+                        StageOutcome(
+                            Disposition.RETRY,
+                            "pending finding recovery head changed",
+                        ),
+                    )
+                return Continue(next_state=ENTER)
             return Continue(next_state=REVIEW_WAIT)
         if receipt.action == "audit_failure":
             item.payload["review_audit_failure"] = True
@@ -1431,12 +1763,26 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             if receipt.final_finding_records is not None
             else receipt.request.finding_records
         )
+        compacted_source = (
+            receipt.final_compacted_outcomes
+            if receipt.final_compacted_outcomes is not None
+            else receipt.request.compacted_outcomes
+        )
         try:
-            records = normalize_review_finding_records(record_source.thaw())
+            records, compacted = normalize_review_finding_collection(
+                record_source.thaw(),
+                compacted_outcomes=None if compacted_source is None else compacted_source.thaw(),
+            )
         except ValueError:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
         item.payload["review_finding_records"] = [dict(record) for record in records]
+        item.payload["review_finding_compacted_outcomes"] = compacted
+        if pending_finding_recovery:
+            item.payload.pop(_PENDING_FINDING_RECOVERY_DEADLINE, None)
+            item.payload["carried_review_finding_records"] = [dict(record) for record in records]
+            item.payload["carried_review_finding_compacted_outcomes"] = compacted
+            item.payload["review_finding_journal_head"] = receipt.request.reviewed_head_sha
         item.payload["review_publication_summary"] = {
             "published": [dict(record) for record in records if record["status"] == "published"],
             "corrected": [dict(record) for record in records if record["status"] == "corrected"],
@@ -1447,7 +1793,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         if any(
             record["status"] == "not_publishable" and record["severity"] in BLOCKING_SEVERITIES
             for record in records
-        ):
+        ) or any(identity[2] == "n" and identity[3] == "b" for identity in compacted["identities"]):
             no_go_outcome = PrReviewGate._write_no_go(item, ctx)
             if no_go_outcome is not None:
                 return no_go_outcome
@@ -1461,6 +1807,15 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         audit = item.payload.get("review_audit")
         if isinstance(audit, ReviewAudit) and audit.scope_expansions:
             return Continue(next_state=EVAL)
+        if pending_finding_recovery:
+            reviewed_head = item.payload.get("reviewed_pr_head_sha")
+            if not is_full_commit_sha(reviewed_head) or (
+                item.payload.get("reviewer_checkout_needed") and not item.worktree
+            ):
+                item.payload["existing_pr"] = True
+                item.payload["scope_dependency_entry_reconciled"] = True
+                return Continue(next_state=ENTER)
+            return self._route_threads_before_broad_review(item, ctx)
         return _apply_review_receipt(
             item,
             receipt,
@@ -1489,14 +1844,50 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         findings = (
             [] if validation_only else [dict(t) for t in item.payload.get("review_threads") or []]
         )
-        raw_finding_records = [] if validation_only else item.payload.get("review_finding_records")
         try:
             finding_records = [
-                dict(record) for record in normalize_review_finding_records(raw_finding_records)
+                dict(record)
+                for record in normalize_review_finding_records(
+                    item.payload.get("review_finding_records", [])
+                )
             ]
+            compacted_outcomes = normalize_review_finding_compacted_outcomes(
+                item.payload.get(
+                    "review_finding_compacted_outcomes",
+                    empty_review_finding_compacted_outcomes(),
+                ),
+                retained_finding_ids=[record["finding_id"] for record in finding_records],
+            )
+            if validation_only and not finding_records and not compacted_outcomes["identities"]:
+                finding_records = [
+                    dict(record)
+                    for record in normalize_review_finding_records(
+                        item.payload.get("carried_review_finding_records", [])
+                    )
+                ]
+                compacted_outcomes = normalize_review_finding_compacted_outcomes(
+                    item.payload.get(
+                        "carried_review_finding_compacted_outcomes",
+                        empty_review_finding_compacted_outcomes(),
+                    ),
+                    retained_finding_ids=[record["finding_id"] for record in finding_records],
+                )
         except ValueError:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
+        if validation_only and all(record["status"] != "pending" for record in finding_records):
+            try:
+                normalized_records, compacted_outcomes = compact_terminal_review_finding_collection(
+                    finding_records,
+                    compacted_outcomes,
+                )
+                finding_records = [dict(record) for record in normalized_records]
+            except ValueError:
+                item.payload["review_audit_failure"] = True
+                return Continue(next_state=EVAL)
+        if validation_only:
+            item.payload["review_finding_records"] = finding_records
+            item.payload["review_finding_compacted_outcomes"] = compacted_outcomes
         item.payload["raw_review_threads"] = findings
         validated_fingerprints = item.payload.get("validation_receipt_fingerprints")
         if validated_fingerprints is not None and not isinstance(validated_fingerprints, dict):
@@ -1568,6 +1959,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             finding_records=FrozenJson.snapshot(finding_records),
             review_diff=str(item.payload.get("pr_diff") or ""),
             deadline_s=deadline_s,
+            compacted_outcomes=FrozenJson.snapshot(compacted_outcomes),
         )
         if pending is None:
             item.payload[_PENDING_GITHUB_REQUEST] = request

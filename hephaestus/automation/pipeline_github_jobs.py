@@ -36,6 +36,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     RebaseReviewPublished,
     ReconcilePrReviewRequest,
     ReconcileScopeExpansionDependenciesRequest,
+    RecoverPendingReviewFindingsRequest,
     RecoverRemediationReplyJournalRequest,
     RecoverReplyJournalRequest,
     RemediationReplyJournalRecovered,
@@ -113,6 +114,7 @@ class PipelineGitHubJobRunner:
                     AppendReplyJournalRequest,
                     DeliverReplyHandoffRequest,
                     ReconcilePrReviewRequest,
+                    RecoverPendingReviewFindingsRequest,
                     ReadRateBudgetRequest,
                     ReadCurrentPlanScopeRequest,
                     RunMergeWaitCycleRequest,
@@ -283,6 +285,8 @@ class PipelineGitHubJobRunner:
                 return attempt_reply_handoff(job.request, github)
             case ReconcilePrReviewRequest():
                 return self._reconcile_pr_review(job.request, github)
+            case RecoverPendingReviewFindingsRequest():
+                return self._recover_pending_review_findings(job.request, github)
             case RunMergeWaitCycleRequest():
                 return self._run_merge_wait_cycle(job.request, github)
             case EnsureScopeExpansionChildrenRequest():
@@ -951,14 +955,26 @@ class PipelineGitHubJobRunner:
         )
 
     @staticmethod
+    def _recover_pending_review_findings(
+        request: RecoverPendingReviewFindingsRequest,
+        github: Any,
+    ) -> PrReviewReconciled:
+        """Recover saved publications without reviewer-response reconciliation."""
+        return PipelineGitHubJobRunner._reconcile_pr_review(request, github)
+
+    @staticmethod
     def _reconcile_pr_review(  # noqa: C901
-        request: ReconcilePrReviewRequest,
+        request: ReconcilePrReviewRequest | RecoverPendingReviewFindingsRequest,
         github: Any,
     ) -> PrReviewReconciled:
         """Run fresh receipt reconciliation, publication, and late-thread readback."""
-        from hephaestus.automation.github_api.diff import _validate_comments_to_diff
-        from hephaestus.automation.implementation_go_audit_receipt import (
+        from hephaestus.automation.github_api.diff import (
+            _validate_comments_to_diff,
+            compact_terminal_review_finding_collection,
+            empty_review_finding_compacted_outcomes,
+            normalize_review_finding_collection,
             normalize_review_finding_records,
+            review_finding_collection_payload,
         )
         from hephaestus.automation.pipeline.stages.pr_review_threads import (
             _durable_thread_id,
@@ -984,6 +1000,7 @@ class PipelineGitHubJobRunner:
             corrections: Any = (),
             unpublishable: Any = (),
             final_finding_records: Any = None,
+            final_compacted_outcomes: Any = None,
         ) -> PrReviewReconciled:
             return PrReviewReconciled(
                 request=request,
@@ -997,6 +1014,11 @@ class PipelineGitHubJobRunner:
                     None
                     if final_finding_records is None
                     else FrozenJson.snapshot(list(final_finding_records))
+                ),
+                final_compacted_outcomes=(
+                    None
+                    if final_compacted_outcomes is None
+                    else FrozenJson.snapshot(dict(final_compacted_outcomes))
                 ),
             )
 
@@ -1043,62 +1065,72 @@ class PipelineGitHubJobRunner:
                 return None
             return [record for record in records if record is not None]
 
-        live_for_reconciliation = github.list_unresolved_review_threads(request.pr_number)
-        validation_receipts = github.reviewer_validation_receipts(
-            request.pr_number,
-            reviewed_head_sha=request.reviewed_head_sha,
-            threads=live_for_reconciliation,
-        )
         pr_context = github.pr_review_context(request.pr_number)
-        live_fingerprints = _validation_receipt_fingerprints(validation_receipts)
-        if live_fingerprints is None:
-            return receipt("audit_failure")
-        validated_fingerprints = (
-            request.validated_receipt_fingerprints.thaw()
-            if request.validated_receipt_fingerprints is not None
-            else None
-        )
-        live_metadata = _validation_pr_metadata_fingerprint(
-            pr_context,
-            request.reviewed_head_sha,
-        )
-        metadata_guard_expected = request.validated_receipt_fingerprints is not None or (
-            request.validated_metadata_fingerprint is not None
-        )
-        if metadata_guard_expected and (
-            live_metadata is None or request.validated_metadata_fingerprint != live_metadata
+        if (
+            not isinstance(pr_context, dict)
+            or pr_context.get("pr_head_sha") != request.reviewed_head_sha
         ):
-            return receipt("revalidate")
-        if validated_fingerprints is not None and validated_fingerprints != live_fingerprints:
-            return receipt("revalidate")
-
-        if validation_receipts:
-            expected_ids = {_durable_thread_id(entry) for entry in validation_receipts}
-            feedback = request.feedback.thaw()
-            if not isinstance(feedback, dict) or None in expected_ids:
-                return receipt("audit_failure")
-            feedback_ids = set(feedback)
-            resolved_ids = set(request.resolved_thread_ids)
-            if (
-                resolved_ids & feedback_ids
-                or resolved_ids | feedback_ids != expected_ids
-                or not all(isinstance(value, str) and value.strip() for value in feedback.values())
-            ):
-                return receipt("audit_failure")
-            reconciliation = github.reconcile_reviewer_validated_threads(
+            return receipt("fresh_review")
+        publication_only = isinstance(request, RecoverPendingReviewFindingsRequest)
+        review_diff = request.review_diff
+        if isinstance(request, ReconcilePrReviewRequest):
+            live_for_reconciliation = github.list_unresolved_review_threads(request.pr_number)
+            validation_receipts = github.reviewer_validation_receipts(
                 request.pr_number,
                 reviewed_head_sha=request.reviewed_head_sha,
-                receipts=validation_receipts,
-                resolved_thread_ids=resolved_ids,
-                feedback=feedback,
+                threads=live_for_reconciliation,
             )
-            completed_ids = set(reconciliation.resolved_thread_ids) | set(
-                reconciliation.feedback_thread_ids
-            )
-            if not completed_ids.issubset(expected_ids):
+            live_fingerprints = _validation_receipt_fingerprints(validation_receipts)
+            if live_fingerprints is None:
                 return receipt("audit_failure")
-            if reconciliation.blocked_thread_ids:
-                return receipt("fresh_review")
+            validated_fingerprints = (
+                request.validated_receipt_fingerprints.thaw()
+                if request.validated_receipt_fingerprints is not None
+                else None
+            )
+            live_metadata = _validation_pr_metadata_fingerprint(
+                pr_context,
+                request.reviewed_head_sha,
+            )
+            metadata_guard_expected = request.validated_receipt_fingerprints is not None or (
+                request.validated_metadata_fingerprint is not None
+            )
+            if metadata_guard_expected and (
+                live_metadata is None or request.validated_metadata_fingerprint != live_metadata
+            ):
+                return receipt("revalidate")
+            if validated_fingerprints is not None and validated_fingerprints != live_fingerprints:
+                return receipt("revalidate")
+
+            if validation_receipts:
+                expected_ids = {_durable_thread_id(entry) for entry in validation_receipts}
+                feedback = request.feedback.thaw()
+                if not isinstance(feedback, dict) or None in expected_ids:
+                    return receipt("audit_failure")
+                feedback_ids = set(feedback)
+                resolved_ids = set(request.resolved_thread_ids)
+                if (
+                    resolved_ids & feedback_ids
+                    or resolved_ids | feedback_ids != expected_ids
+                    or not all(
+                        isinstance(value, str) and value.strip() for value in feedback.values()
+                    )
+                ):
+                    return receipt("audit_failure")
+                reconciliation = github.reconcile_reviewer_validated_threads(
+                    request.pr_number,
+                    reviewed_head_sha=request.reviewed_head_sha,
+                    receipts=validation_receipts,
+                    resolved_thread_ids=resolved_ids,
+                    feedback=feedback,
+                )
+                completed_ids = set(reconciliation.resolved_thread_ids) | set(
+                    reconciliation.feedback_thread_ids
+                )
+                if not completed_ids.issubset(expected_ids):
+                    return receipt("audit_failure")
+                if reconciliation.blocked_thread_ids:
+                    return receipt("fresh_review")
 
         live_before_post = github.list_unresolved_review_threads(request.pr_number)
         live_by_id = {
@@ -1112,8 +1144,16 @@ class PipelineGitHubJobRunner:
         ):
             return receipt("audit_failure")
         raw_records = request.finding_records.thaw()
+        raw_compacted_outcomes = (
+            None if request.compacted_outcomes is None else request.compacted_outcomes.thaw()
+        )
+        if publication_only and raw_compacted_outcomes == empty_review_finding_compacted_outcomes():
+            raw_compacted_outcomes = None
         try:
-            finding_records = normalize_review_finding_records(raw_records)
+            finding_records, compacted_outcomes = normalize_review_finding_collection(
+                raw_records,
+                compacted_outcomes=raw_compacted_outcomes,
+            )
         except ValueError:
             return receipt("audit_failure")
         pending_finding_ids = {
@@ -1194,7 +1234,7 @@ class PipelineGitHubJobRunner:
         for record in finding_records:
             if record["status"] != "pending":
                 continue
-            if record["source_head"] != request.reviewed_head_sha:
+            if record.get("publication_head", record["source_head"]) != request.reviewed_head_sha:
                 return receipt("audit_failure")
             anchor = record["final_anchor"]
             if not isinstance(anchor, dict):
@@ -1233,7 +1273,7 @@ class PipelineGitHubJobRunner:
                 visible_pending_ids.add(finding_id)
             elif pending_identity in all_live_finding_identities:
                 return receipt("audit_failure")
-        if visible_pending_ids:
+        if visible_pending_ids and not publication_only:
             finding_records = normalize_review_finding_records(
                 [
                     {
@@ -1260,6 +1300,8 @@ class PipelineGitHubJobRunner:
         finding_ids = [str(finding.get("finding_id") or "") for finding in raw_findings]
         findings_by_id = {str(finding.get("finding_id") or ""): finding for finding in raw_findings}
         missing_pending_ids = pending_finding_ids - visible_pending_ids
+        if publication_only and missing_pending_ids and not review_diff:
+            return receipt("revalidate")
         if (
             len(set(finding_ids)) != len(finding_ids)
             or not set(finding_ids).issubset(inline_records)
@@ -1297,12 +1339,21 @@ class PipelineGitHubJobRunner:
                 or str(finding.get("evidence") or "").strip() != str(record.get("evidence") or "")
             ):
                 return receipt("audit_failure")
+        findings_to_validate = (
+            [
+                finding
+                for finding in raw_findings
+                if str(finding.get("finding_id") or "") in missing_pending_ids
+            ]
+            if publication_only
+            else raw_findings
+        )
         validation = _validate_comments_to_diff(
-            raw_findings,
-            request.review_diff,
+            findings_to_validate,
+            review_diff,
             preserve_finding_ids=True,
         )
-        if validation.corrections or len(validation.valid) != len(raw_findings):
+        if validation.corrections or len(validation.valid) != len(findings_to_validate):
             return receipt("audit_failure")
         try:
             findings = _without_duplicate_live_findings(list(validation.valid), live_by_id)
@@ -1320,17 +1371,22 @@ class PipelineGitHubJobRunner:
                 for record in finding_records
             ]
         )
-        github.persist_review_finding_journal(
-            request.pr_number,
-            request.reviewed_head_sha,
-            prepublication_records,
-        )
+        if not publication_only:
+            github.persist_review_finding_journal(
+                request.pr_number,
+                request.reviewed_head_sha,
+                (
+                    review_finding_collection_payload(prepublication_records, compacted_outcomes)
+                    if compacted_outcomes["identities"]
+                    else prepublication_records
+                ),
+            )
         publication = (
             github.post_review_threads(
                 request.pr_number,
                 findings,
                 expected_head_sha=request.reviewed_head_sha,
-                review_diff=request.review_diff,
+                review_diff=review_diff,
             )
             if findings
             else []
@@ -1351,22 +1407,41 @@ class PipelineGitHubJobRunner:
                 corrections=corrections,
                 unpublishable=unpublishable,
             )
-        final_finding_records = normalize_review_finding_records(
-            [
-                {
-                    **record,
-                    "status": ("corrected" if record["reason"] is not None else "published"),
-                }
-                if str(record["finding_id"]) in posting_ids and record["status"] == "pending"
-                else record
+        if publication_only:
+            proven_ids = posting_ids | visible_pending_ids
+            proven_outcomes = {
+                str(record["finding_id"]): (
+                    "corrected" if record["reason"] is not None else "published"
+                )
                 for record in prepublication_records
-            ]
-        )
-        if prepublication_records != final_finding_records:
+                if str(record["finding_id"]) in proven_ids and record["status"] == "pending"
+            }
+            final_finding_records, compacted_outcomes = compact_terminal_review_finding_collection(
+                prepublication_records,
+                compacted_outcomes,
+                proven_outcomes=proven_outcomes,
+            )
+        else:
+            final_finding_records = normalize_review_finding_records(
+                [
+                    {
+                        **record,
+                        "status": ("corrected" if record["reason"] is not None else "published"),
+                    }
+                    if str(record["finding_id"]) in posting_ids and record["status"] == "pending"
+                    else record
+                    for record in prepublication_records
+                ]
+            )
+        if publication_only or prepublication_records != final_finding_records:
             github.persist_review_finding_journal(
                 request.pr_number,
                 request.reviewed_head_sha,
-                final_finding_records,
+                (
+                    review_finding_collection_payload(final_finding_records, compacted_outcomes)
+                    if publication_only or compacted_outcomes["identities"]
+                    else final_finding_records
+                ),
             )
         live_threads = github.list_unresolved_review_threads(request.pr_number)
         remediation_threads = _normalize_remediation_threads(live_threads)
@@ -1380,6 +1455,7 @@ class PipelineGitHubJobRunner:
             corrections=corrections,
             unpublishable=unpublishable,
             final_finding_records=final_finding_records,
+            final_compacted_outcomes=compacted_outcomes,
         )
 
     @staticmethod

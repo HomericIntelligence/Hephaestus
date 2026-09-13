@@ -159,9 +159,13 @@ class PrReviewScopeExpansionMixin:
             # unresolved threads to implementation before that audit runs.
             item.payload["existing_pr"] = True
         else:
-            thread_outcome = self._route_existing_threads_before_audit(item, ctx)
-            if thread_outcome is not None:
-                return cast(StepResult, thread_outcome)
+            if not item.payload.get("pending_finding_recovery_needs_checkout"):
+                recovery = self._prepare_pending_finding_recovery(item, ctx)
+                if recovery is not None:
+                    return cast(StepResult, recovery)
+                thread_outcome = self._route_existing_threads_before_audit(item, ctx)
+                if thread_outcome is not None:
+                    return cast(StepResult, thread_outcome)
         if not item.worktree and (
             item.kind is ItemKind.PR
             or item.payload.get("existing_pr")

@@ -280,6 +280,29 @@ class TestPrintSummaryRows:
         }
         assert "review-finding outcomes:" in caplog.text
 
+    def test_finding_outcomes_include_compacted_identity_counts(self) -> None:
+        """Terminal totals include bounded outcomes whose full records were compacted."""
+        item = _item(9, StageName.FINISHED, passed=False, reason="review failed")
+        item.payload["review_finding_records"] = [
+            {"finding_id": "a" * 64, "status": "corrected"},
+        ]
+        item.payload["review_finding_compacted_outcomes"] = {
+            "counts": {"corrected": 0, "not_publishable": 1, "published": 1},
+            "identities": [
+                ["b" * 64, "9" * 40, "n", "b"],
+                ["c" * 64, "8" * 40, "p", "a"],
+            ],
+        }
+        aggregate = TerminalSummary()
+
+        aggregate.record(item)
+
+        assert aggregate.review_finding_outcomes == {
+            "corrected": 1,
+            "not_publishable": 1,
+            "published": 1,
+        }
+
     def test_summary_uses_latest_logical_item_for_aggregates(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:

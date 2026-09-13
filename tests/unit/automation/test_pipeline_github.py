@@ -6437,7 +6437,16 @@ class TestMutatorMapping:
                 "reason": "line_not_in_diff",
             },
         )
-        marker, body = render_review_finding_journal(5, head, records)
+        compacted = {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
+            "identities": [["e" * 64, "9" * 40, "p", "a"]],
+        }
+        collection = {
+            "format": 1,
+            "findings": list(records),
+            "compacted_outcomes": compacted,
+        }
+        marker, body = render_review_finding_journal(5, head, collection)
         upsert = MagicMock()
         monkeypatch.setattr(adapter, "upsert_issue_comment", upsert)
         monkeypatch.setattr(
@@ -6446,12 +6455,13 @@ class TestMutatorMapping:
             MagicMock(return_value=[{"body": body, "databaseId": 12, "viewerDidAuthor": True}]),
         )
 
-        adapter.persist_review_finding_journal(5, head, records)
+        adapter.persist_review_finding_journal(5, head, collection)
 
         upsert.assert_called_once_with(5, marker, body)
         journal = adapter.pending_review_finding_journal(5)
         assert journal is not None
         assert journal.finding_records == records
+        assert journal.compacted_outcomes == compacted
 
     def test_review_finding_journal_read_rejects_ambiguous_owned_records(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch

@@ -408,6 +408,7 @@ class ReconcilePrReviewRequest:
     review_diff: str
     deadline_s: float
     issue_number: int | None = None
+    compacted_outcomes: FrozenJson | None = None
 
     def __post_init__(self) -> None:
         """Validate the exact-head reconciliation request."""
@@ -430,8 +431,38 @@ class ReconcilePrReviewRequest:
         _json_root(self.feedback, dict, "feedback")
         _json_root(self.findings, list, "findings")
         _json_root(self.finding_records, list, "finding_records")
+        if self.compacted_outcomes is not None:
+            _json_root(self.compacted_outcomes, dict, "compacted_outcomes")
         if not isinstance(self.review_diff, str):
             raise ValueError("review_diff must be a string")
+        _deadline(self.deadline_s)
+        if self.issue_number is not None:
+            _positive_identifier(self.issue_number, "issue_number")
+
+
+@dataclass(frozen=True)
+class RecoverPendingReviewFindingsRequest:
+    """Recover saved publications for one exact pull-request head."""
+
+    pr_number: int
+    reviewed_head_sha: str
+    findings: FrozenJson
+    finding_records: FrozenJson
+    deadline_s: float
+    review_diff: str = ""
+    issue_number: int | None = None
+    compacted_outcomes: FrozenJson | None = None
+
+    def __post_init__(self) -> None:
+        """Validate one bounded publication-only recovery request."""
+        _positive_identifier(self.pr_number, "pr_number")
+        _full_sha(self.reviewed_head_sha, "reviewed_head_sha")
+        _json_root(self.findings, list, "findings")
+        _json_root(self.finding_records, list, "finding_records")
+        if not isinstance(self.review_diff, str):
+            raise ValueError("review_diff must be a string")
+        if self.compacted_outcomes is not None:
+            _json_root(self.compacted_outcomes, dict, "compacted_outcomes")
         _deadline(self.deadline_s)
         if self.issue_number is not None:
             _positive_identifier(self.issue_number, "issue_number")
@@ -845,6 +876,7 @@ type GitHubRequest = (
     | AppendReplyJournalRequest
     | DeliverReplyHandoffRequest
     | ReconcilePrReviewRequest
+    | RecoverPendingReviewFindingsRequest
     | RunMergeWaitCycleRequest
     | EnsureScopeExpansionChildrenRequest
     | ReconcileScopeExpansionDependenciesRequest
@@ -881,6 +913,7 @@ class GitHubJob:
                 AppendReplyJournalRequest,
                 DeliverReplyHandoffRequest,
                 ReconcilePrReviewRequest,
+                RecoverPendingReviewFindingsRequest,
                 RunMergeWaitCycleRequest,
                 EnsureScopeExpansionChildrenRequest,
                 ReconcileScopeExpansionDependenciesRequest,
@@ -991,7 +1024,7 @@ class ReplyHandoffAttempted:
 class PrReviewReconciled:
     """Immutable result of fresh PR-review reconciliation."""
 
-    request: ReconcilePrReviewRequest
+    request: ReconcilePrReviewRequest | RecoverPendingReviewFindingsRequest
     action: Literal["apply", "revalidate", "fresh_review", "audit_failure"]
     posted_receipts: FrozenJson
     unresolved_threads: FrozenJson
@@ -999,6 +1032,7 @@ class PrReviewReconciled:
     anchor_corrections: FrozenJson = field(default_factory=_empty_frozen_list)
     unpublishable_findings: FrozenJson = field(default_factory=_empty_frozen_list)
     final_finding_records: FrozenJson | None = None
+    final_compacted_outcomes: FrozenJson | None = None
 
     def __post_init__(self) -> None:
         """Validate immutable review response snapshots."""
@@ -1011,6 +1045,8 @@ class PrReviewReconciled:
         _json_root(self.unpublishable_findings, list, "unpublishable_findings")
         if self.final_finding_records is not None:
             _json_root(self.final_finding_records, list, "final_finding_records")
+        if self.final_compacted_outcomes is not None:
+            _json_root(self.final_compacted_outcomes, dict, "final_compacted_outcomes")
 
     @property
     def corrections(self) -> FrozenJson:
