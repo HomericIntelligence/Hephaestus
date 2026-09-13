@@ -1186,7 +1186,7 @@ class PlanReviewStage(Stage):
                 snapshot=snapshot,
             )
         if reason := _plan_scope_admission_failure(snapshot.current_plan, ctx):
-            return self._complete_scope_blocked(item, ctx, reason)
+            return self._complete_scope_blocked(item, ctx, reason, review)
         return None
 
     def _complete_scope_blocked(
@@ -1194,6 +1194,7 @@ class PlanReviewStage(Stage):
         item: WorkItem,
         ctx: StageContext,
         reason: str,
+        review: _AcceptedPlanReview | None = None,
     ) -> StageOutcome:
         """Block implementation admission and publish one host validation audit."""
         logger.warning(
@@ -1205,6 +1206,7 @@ class PlanReviewStage(Stage):
             item,
             ctx,
             _plan_scope_blocked_verdict(),
+            expected_review=review,
         )
         if outcome.disposition is Disposition.BLOCKED:
             return StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
@@ -1232,12 +1234,23 @@ class PlanReviewStage(Stage):
         verdict: ReviewVerdict,
         *,
         revision: int | None = None,
+        expected_review: _AcceptedPlanReview | None = None,
     ) -> StageOutcome:
         """Latch BLOCKED, confirm it, then persist the required explanation."""
         assert item.issue is not None  # noqa: S101 - _eval narrows the issue
         # Resolve the current roles before the latch mutation. This keeps a
         # marker conflict outside every label-changing path.
-        current_revision = _current_revision(ctx.github.issue_comments(item.issue))
+        snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
+        if expected_review is not None:
+            identity_outcome = self._review_identity_outcome(
+                item,
+                ctx,
+                expected_review,
+                snapshot=snapshot,
+            )
+            if identity_outcome is not None:
+                return identity_outcome
+        current_revision = snapshot.revision
         review_revision = revision or int(item.payload.get("plan_revision") or current_revision)
         comment_body = _normalize_review_comment(verdict.raw, revision=review_revision)
         validate_planning_body_for_write(PLAN_REVIEW_CANONICAL_MARKER, comment_body)
