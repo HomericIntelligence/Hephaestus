@@ -223,21 +223,17 @@ def _configure_file_handler(
 ) -> None:
     """Configure one file destination while the setup lock is held."""
     abs_log_file = os.path.abspath(log_file)
-    existing_file = next(
-        (
-            handler
-            for handler in logger.handlers
-            if isinstance(handler, logging.FileHandler) and handler.baseFilename == abs_log_file
-        ),
-        None,
-    )
-    if existing_file is None:
+    has_file = False
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler) and handler.baseFilename == abs_log_file:
+            has_file = True
+            if handler in _setup_file_handlers:
+                handler.setFormatter(formatter)
+    if not has_file:
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         _setup_file_handlers.add(file_handler)
-    elif existing_file in _setup_file_handlers:
-        existing_file.setFormatter(formatter)
 
 
 def setup_logging(

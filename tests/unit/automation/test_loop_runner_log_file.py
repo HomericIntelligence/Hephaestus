@@ -178,6 +178,41 @@ def test_owned_file_can_change_from_json_to_text(tmp_path: Path) -> None:
     assert lines[1] == "TEXT second"
 
 
+@pytest.mark.parametrize("json_format", [False, True])
+def test_owned_file_formatter_updates_after_external_matching_handler(
+    tmp_path: Path, json_format: bool
+) -> None:
+    """Update the owned handler when an external handler precedes it."""
+    root = logging.getLogger()
+    path = tmp_path / "shared.log"
+    setup_logging(primary_stream=None, log_file=str(path), json_format=not json_format)
+    owned = root.handlers[0]
+    external = logging.FileHandler(path)
+    formatter = logging.Formatter("EXTERNAL %(message)s")
+    external.setFormatter(formatter)
+    root.removeHandler(owned)
+    root.addHandler(external)
+    root.addHandler(owned)
+
+    setup_logging(
+        primary_stream=None,
+        log_file=str(path),
+        json_format=json_format,
+        format_string="TEXT %(message)s",
+    )
+    logging.warning("record")
+
+    assert root.handlers == [external, owned]
+    assert external.formatter is formatter
+    lines = path.read_text().splitlines()
+    assert len(lines) == 2
+    assert lines[0] == "EXTERNAL record"
+    if json_format:
+        assert json.loads(lines[1])["message"] == "record"
+    else:
+        assert lines[1] == "TEXT record"
+
+
 @pytest.mark.parametrize("replace_owned", [False, True])
 @pytest.mark.parametrize("external_json", [False, True])
 def test_external_file_formatter_survives_setup_and_path_reuse(
