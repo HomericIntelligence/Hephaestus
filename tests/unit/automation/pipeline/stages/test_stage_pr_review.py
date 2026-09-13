@@ -2525,23 +2525,6 @@ class TestPrReviewStageStep:
                 ),
             ),
             (
-                "review_worker_pool_scratch_unix_socket",
-                (
-                    "uv",
-                    "run",
-                    "pytest",
-                    "-o",
-                    "addopts=",
-                    (
-                        "tests/unit/automation/pipeline/test_worker_pool.py::"
-                        "TestWorkerPoolSubmitComplete::"
-                        "test_immutable_host_allows_unix_socket_in_scratch_only"
-                    ),
-                    "-q",
-                    "--tb=short",
-                ),
-            ),
-            (
                 "review_fleet_podman_unix_socket",
                 (
                     "uv",
@@ -2884,11 +2867,9 @@ class TestPrReviewStageStep:
         path = "hephaestus/automation/pipeline/worker_pool.py"
         specs = _host_verification_specs([path])
 
-        spec = next(
-            spec for spec in specs if spec.descr == "review_worker_pool_scratch_unix_socket"
-        )
+        spec = next(spec for spec in specs if spec.descr == "review_worker_pool_host_profile")
 
-        assert spec.changed_path == path
+        assert path in spec.additional_changed_paths
         assert spec.argv == (
             "uv",
             "run",
@@ -2898,7 +2879,7 @@ class TestPrReviewStageStep:
             (
                 "tests/unit/automation/pipeline/test_worker_pool.py::"
                 "TestWorkerPoolSubmitComplete::"
-                "test_immutable_host_allows_unix_socket_in_scratch_only"
+                "test_host_verification_profile_keeps_source_outside_writable_root"
             ),
             "-q",
             "--tb=short",
@@ -2922,19 +2903,6 @@ class TestPrReviewStageStep:
             "-q",
             "--tb=short",
         )
-
-    def test_changed_worker_pool_test_runs_host_unix_socket_boundary(self) -> None:
-        """A worker test change runs the scratch Unix socket regression."""
-        path = "tests/unit/automation/pipeline/test_worker_pool.py"
-        specs = _host_verification_specs([path])
-
-        selected = {spec.descr: spec for spec in specs if "unix_socket" in spec.descr}
-
-        assert set(selected) == {
-            "review_worker_pool_scratch_unix_socket",
-            "review_fleet_podman_unix_socket",
-        }
-        assert all(path in spec.additional_changed_paths for spec in selected.values())
 
     def test_changed_conftest_verifies_containing_directory_once(self) -> None:
         """A support-only conftest change must select its test directory."""

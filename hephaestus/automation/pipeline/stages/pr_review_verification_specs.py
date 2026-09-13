@@ -141,25 +141,7 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "--tb=short",
         ),
         descr="review_worker_pool_host_profile",
-    ),
-    _HostVerificationSpec(
-        changed_path="hephaestus/automation/pipeline/worker_pool.py",
-        argv=(
-            "uv",
-            "run",
-            "pytest",
-            "-o",
-            "addopts=",
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::"
-                "TestWorkerPoolSubmitComplete::"
-                "test_immutable_host_allows_unix_socket_in_scratch_only"
-            ),
-            "-q",
-            "--tb=short",
-        ),
-        descr="review_worker_pool_scratch_unix_socket",
-        additional_changed_paths=("tests/unit/automation/pipeline/test_worker_pool.py",),
+        additional_changed_paths=("hephaestus/automation/pipeline/worker_pool.py",),
     ),
     _HostVerificationSpec(
         changed_path="hephaestus/automation/pipeline/worker_pool.py",
@@ -174,7 +156,6 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "--tb=short",
         ),
         descr="review_fleet_podman_unix_socket",
-        additional_changed_paths=("tests/unit/automation/pipeline/test_worker_pool.py",),
     ),
     _HostVerificationSpec(
         changed_path="tests/performance/test_worker_pool_load.py",

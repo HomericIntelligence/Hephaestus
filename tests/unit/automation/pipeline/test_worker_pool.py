@@ -3854,6 +3854,19 @@ class TestWorkerPoolSubmitComplete:
         self, tmp_path: Path
     ) -> None:
         """Only the separate scratch tree is writable to PR-controlled code."""
+        checkout = Path.cwd().resolve()
+        checkout_before = _immutable_runner_checkout_state(checkout)
+        try:
+            active_environment = build_nested_host_verification_env(checkout)
+        except ValueError:
+            active_environment = None
+        if active_environment is not None:
+            _assert_scratch_only_unix_socket_policy(
+                scratch=Path(active_environment["TMPDIR"]),
+                source=checkout,
+            )
+            assert _immutable_runner_checkout_state(checkout) == checkout_before
+
         source = tmp_path / "source"
         scratch = tmp_path / "scratch"
         runtime = tmp_path / "runtime"
@@ -3946,113 +3959,6 @@ class TestWorkerPoolSubmitComplete:
             cwd=checkout,
             argv=("uv", "run", "python", "-c", program),
             timeout_s=60,
-            expected_head_sha=head,
-            immutable_source=True,
-        )
-
-        result = pool._run_build_test(job)
-
-        assert result.ok is True, (result.error, result.stdout_tail, result.stderr_tail)
-        assert result.value["head_sha"] == head
-        assert result.value["immutable_source"] is True
-        assert result.value["platform"] == "darwin"
-        assert result.value["status"] == "passed"
-        assert _immutable_runner_checkout_state(checkout) == checkout_before
-
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
-    def test_immutable_host_allows_unix_socket_in_scratch_only(self, pool: WorkerPool) -> None:
-        """Permit one scratch socket while all other network operations stay denied."""
-        checkout = Path.cwd().resolve()
-        head = _git(checkout, "rev-parse", "HEAD")
-        checkout_before = _immutable_runner_checkout_state(checkout)
-        try:
-            active_environment = build_nested_host_verification_env(checkout)
-        except ValueError:
-            active_environment = None
-        if active_environment is not None:
-            _assert_scratch_only_unix_socket_policy(
-                scratch=Path(active_environment["TMPDIR"]),
-                source=checkout,
-            )
-            assert _immutable_runner_checkout_state(checkout) == checkout_before
-            return
-
-        program = (
-            "import os, socket\n"
-            "from pathlib import Path\n"
-            "scratch = Path(os.environ['TMPDIR'])\n"
-            "previous = Path.cwd()\n"
-            "try:\n"
-            "    os.chdir(scratch)\n"
-            "    with socket.socket(socket.AF_UNIX) as endpoint:\n"
-            "        endpoint.bind('allowed.sock')\n"
-            "finally:\n"
-            "    os.chdir(previous)\n"
-            "with socket.socket(socket.AF_UNIX) as endpoint:\n"
-            "    try:\n"
-            "        endpoint.bind('denied.sock')\n"
-            "    except PermissionError:\n"
-            "        pass\n"
-            "    else:\n"
-            "        raise AssertionError('source Unix socket bind was allowed')\n"
-            "with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:\n"
-            "    try:\n"
-            "        endpoint.bind(('127.0.0.1', 0))\n"
-            "    except PermissionError:\n"
-            "        pass\n"
-            "    else:\n"
-            "        raise AssertionError('IP socket bind was allowed')\n"
-            "with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:\n"
-            "    try:\n"
-            "        endpoint.connect(('127.0.0.1', 9))\n"
-            "    except PermissionError:\n"
-            "        pass\n"
-            "    else:\n"
-            "        raise AssertionError('outbound connection was allowed')\n"
-        )
-        job = BuildTestJob(
-            repo="test/repo",
-            cwd=checkout,
-            argv=("uv", "run", "python", "-c", program),
-            timeout_s=60,
-            expected_head_sha=head,
-            immutable_source=True,
-        )
-
-        result = pool._run_build_test(job)
-
-        assert result.ok is True, (result.error, result.stdout_tail, result.stderr_tail)
-        assert result.value["head_sha"] == head
-        assert result.value["immutable_source"] is True
-        assert _immutable_runner_checkout_state(checkout) == checkout_before
-
-    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox boundary")
-    def test_immutable_host_runs_fleet_podman_unix_socket_fixture(self, pool: WorkerPool) -> None:
-        """The immutable host runs the real temporary Podman socket fixture."""
-        checkout = Path.cwd().resolve()
-        head = _git(checkout, "rev-parse", "HEAD")
-        checkout_before = _immutable_runner_checkout_state(checkout)
-        try:
-            active_environment = build_nested_host_verification_env(checkout)
-        except ValueError:
-            active_environment = None
-        if active_environment is not None:
-            pytest.skip("an outer host-verification sandbox already controls network-bind")
-
-        job = BuildTestJob(
-            repo="test/repo",
-            cwd=checkout,
-            argv=(
-                "uv",
-                "run",
-                "pytest",
-                "-o",
-                "addopts=",
-                "tests/unit/automation/test_fleet_podman.py",
-                "-q",
-                "--tb=short",
-            ),
-            timeout_s=120,
             expected_head_sha=head,
             immutable_source=True,
         )

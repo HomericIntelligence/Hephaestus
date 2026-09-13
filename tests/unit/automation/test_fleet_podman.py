@@ -59,6 +59,13 @@ def engine_process(monkeypatch, tmp_path: Path):
             engine.close()
 
 
+def test_engine_fixture_stays_below_pytest_scratch(engine_process, tmp_path: Path) -> None:
+    """Keep the engine socket below the verifier-provided pytest scratch path."""
+    _, private = engine_process
+
+    assert private.is_relative_to(tmp_path.resolve())
+
+
 def test_explicit_engine_context_and_finite_container_environment(engine_process, tmp_path):
     """No ambient context, image environment, proxy, or authority can enter a tool container."""
     from hephaestus.automation.fleet_containment import TOOL_ENVIRONMENT
