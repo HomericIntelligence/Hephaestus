@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import importlib
 import threading
@@ -191,7 +192,7 @@ class TestCircuitBreakerIgnoredExceptions:
 
         Asserting only ``state is HALF_OPEN`` is NOT enough: the state does not
         change on an ignored exception whether or not the slot was released, so
-        such a test stays green even if ``_release_half_open_slot`` is a no-op.
+        such a test stays green if the cleanup path does not release a slot.
         Prove the release by admitting a LATER probe through the single slot.
         """
         breaker = CircuitBreaker(
@@ -362,7 +363,7 @@ class TestCircuitBreakerStates:
     @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
     def test_open_to_half_open_after_recovery_timeout(self, mock_monotonic: MagicMock) -> None:
         """Circuit transitions from OPEN to HALF_OPEN after recovery timeout."""
-        mock_monotonic.return_value = 1000.0  # baseline stamped by _record_failure
+        mock_monotonic.return_value = 1000.0  # baseline stamped by the failed call
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0)
         failing_func = MagicMock(side_effect=RuntimeError("fail"))
 
@@ -527,6 +528,139 @@ class TestCircuitBreakerOpenError:
         )
         assert err.reason == "half_open_exhausted"
         assert err.reason is CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED
+
+
+class TestAdmissionAccounting:
+    """Tests for accounting that is bound to the admitted breaker phase."""
+
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_stale_closed_success_cannot_close_new_open_phase(
+        self, mock_monotonic: MagicMock
+    ) -> None:
+        """A success admitted before a failure cannot close the new OPEN phase."""
+        mock_monotonic.return_value = 100.0
+        breaker = CircuitBreaker("stale-success", failure_threshold=1, recovery_timeout=30.0)
+        started = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+
+        def held_success() -> str:
+            started.set()
+            assert release.wait(timeout=1.0), "test did not release held call"
+            return "old result"
+
+        def run_held_call() -> None:
+            try:
+                breaker.call(held_success)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_held_call)
+        thread.start()
+        try:
+            assert started.wait(timeout=1.0), "held call did not start"
+            with pytest.raises(RuntimeError, match="new failure"):
+                breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("new failure")))
+            failure_time = breaker.snapshot()["last_failure_time"]
+            release.set()
+            thread.join(timeout=1.0)
+            assert not thread.is_alive(), "held call did not finish"
+            assert not errors
+            assert breaker.state is CircuitBreakerState.OPEN
+            assert breaker.snapshot()["last_failure_time"] == failure_time
+        finally:
+            release.set()
+            thread.join(timeout=1.0)
+
+    @pytest.mark.parametrize(
+        "cancelled",
+        [KeyboardInterrupt(), SystemExit(), asyncio.CancelledError()],
+        ids=["keyboard-interrupt", "system-exit", "asyncio-cancelled"],
+    )
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_half_open_cancellation_releases_admitted_slot(
+        self, mock_monotonic: MagicMock, cancelled: BaseException
+    ) -> None:
+        """Cancellation propagates and makes its admitted HALF_OPEN slot available."""
+        mock_monotonic.return_value = 100.0
+        breaker = CircuitBreaker(
+            "cancelled-probe",
+            failure_threshold=1,
+            recovery_timeout=30.0,
+            success_threshold=2,
+        )
+        with pytest.raises(RuntimeError):
+            breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("open")))
+
+        mock_monotonic.return_value = 130.0
+        with pytest.raises(type(cancelled)) as raised:
+            breaker.call(lambda: (_ for _ in ()).throw(cancelled))
+        assert raised.value is cancelled
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+        assert breaker.call(lambda: "replacement") == "replacement"
+
+    def test_reset_invalidates_active_failure_completion(self) -> None:
+        """A failure admitted before reset cannot score the reset breaker phase."""
+        breaker = CircuitBreaker("reset-active", failure_threshold=2)
+        started = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+
+        def held_failure() -> None:
+            started.set()
+            assert release.wait(timeout=1.0), "test did not release held call"
+            raise RuntimeError("old failure")
+
+        def run_held_call() -> None:
+            try:
+                breaker.call(held_failure)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_held_call)
+        thread.start()
+        try:
+            assert started.wait(timeout=1.0), "held call did not start"
+            breaker.reset()
+            release.set()
+            thread.join(timeout=1.0)
+            assert not thread.is_alive(), "held call did not finish"
+            assert len(errors) == 1
+            assert isinstance(errors[0], RuntimeError)
+            assert breaker.snapshot()["failure_count"] == 0
+            assert breaker.state is CircuitBreakerState.CLOSED
+        finally:
+            release.set()
+            thread.join(timeout=1.0)
+
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_predicate_error_releases_admitted_slot(self, mock_monotonic: MagicMock) -> None:
+        """An ignore-predicate error propagates without retaining a probe slot."""
+        mock_monotonic.return_value = 100.0
+
+        predicate_calls = 0
+
+        def broken_ignore(_: BaseException) -> bool:
+            nonlocal predicate_calls
+            predicate_calls += 1
+            if predicate_calls == 1:
+                return False
+            raise LookupError("predicate failure")
+
+        breaker = CircuitBreaker(
+            "predicate-error",
+            failure_threshold=1,
+            recovery_timeout=30.0,
+            success_threshold=2,
+            ignore=broken_ignore,
+        )
+        with pytest.raises(RuntimeError):
+            breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("open")))
+
+        mock_monotonic.return_value = 130.0
+        with pytest.raises(LookupError, match="predicate failure"):
+            breaker.call(lambda: (_ for _ in ()).throw(ValueError("service result")))
+        assert breaker.call(lambda: "replacement") == "replacement"
 
 
 class TestCircuitBreakerReset:
