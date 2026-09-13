@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+import os
+from pathlib import Path
 
 from .pr_review_verification_specs import (
     _FULL_UNIT_COVERAGE_SPEC as _FULL_UNIT_COVERAGE_SPEC,
@@ -17,41 +17,39 @@ from .pr_review_verification_specs import (
 
 HOST_VERIFICATION_TIMEOUT_S = 300
 HOST_VERIFICATION_DIAGNOSTIC_MAX = 4_000
+_REVIEW_CHANGED_PATH_MAX = 512
+_REVIEW_CHANGED_PATH_BYTES_MAX = 64 * 1024
 
-_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", flags=re.MULTILINE)
 
-
-def _changed_new_side_paths(pr_diff: str) -> frozenset[str]:
-    """Return non-deleted changed paths from each diff's new-file side."""
-    paths: set[str] = set()
-    pending_header_path: str | None = None
-
-    def flush_pending_header_path() -> None:
-        nonlocal pending_header_path
-        if pending_header_path is not None:
-            paths.add(pending_header_path)
-            pending_header_path = None
-
-    for raw_line in pr_diff.splitlines():
-        header = _DIFF_GIT_HEADER_RE.match(raw_line)
-        if header:
-            flush_pending_header_path()
-            pending_header_path = header.group(2)
-            continue
-
-        if raw_line.startswith("+++ ") and pending_header_path is not None:
-            target = raw_line[4:].strip()
-            pending_header_path = None
-            if target == "/dev/null":
-                continue
-            paths.add(target[2:] if target.startswith("b/") else target)
-
-    flush_pending_header_path()
-    return frozenset(paths)
+def _review_changed_paths(value: object) -> tuple[str, ...] | None:
+    """Return bounded safe paths, or return None for invalid input."""
+    if not isinstance(value, (list, tuple)) or len(value) > _REVIEW_CHANGED_PATH_MAX:
+        return None
+    paths: list[str] = []
+    encoded_bytes = 0
+    for path in value:
+        if not isinstance(path, str):
+            return None
+        relative = Path(path)
+        if (
+            not path
+            or "\x00" in path
+            or relative.is_absolute()
+            or relative.as_posix() != path
+            or any(component in {"", ".", ".."} for component in relative.parts)
+        ):
+            return None
+        encoded_bytes += len(os.fsencode(path)) + 1
+        if encoded_bytes > _REVIEW_CHANGED_PATH_BYTES_MAX:
+            return None
+        paths.append(path)
+    if len(set(paths)) != len(paths):
+        return None
+    return tuple(paths)
 
 
 def _changed_unit_pytest_argv(target: str) -> tuple[str, ...]:
-    """Return the changed-unit pytest command while preserving host exclusions."""
+    """Return a focused unit-test command with host exclusions."""
     ignore_args = tuple(
         f"--ignore={path}"
         for path in sorted(_NONHERMETIC_HOST_UNIT_TEST_PATHS)
@@ -70,11 +68,22 @@ def _changed_unit_pytest_argv(target: str) -> tuple[str, ...]:
     )
 
 
-def _host_verification_specs(pr_diff: object, *, profile: str | None = "hephaestus") -> _HostPlan:
-    """Return the complete fixed host plan activated by the verified diff."""
-    if profile != "hephaestus" or not isinstance(pr_diff, str):
+def _host_verification_specs(
+    review_changed_paths: object,
+    *,
+    existing_changed_paths: object | None = None,
+    profile: str | None = "hephaestus",
+) -> _HostPlan:
+    """Return the fixed host plan for checkout-derived changed paths."""
+    normalized_paths = _review_changed_paths(review_changed_paths)
+    if profile != "hephaestus" or normalized_paths is None:
         return ()
-    changed_paths = {match.group(2) for match in _DIFF_GIT_HEADER_RE.finditer(pr_diff)}
+    changed_paths = frozenset(normalized_paths)
+    normalized_existing_paths = _review_changed_paths(
+        normalized_paths if existing_changed_paths is None else existing_changed_paths
+    )
+    if normalized_existing_paths is None or not set(normalized_existing_paths) <= changed_paths:
+        return ()
     path_triggered_specs = tuple(
         spec for spec in _PATH_HOST_VERIFICATION_SPECS if spec.changed_path in changed_paths
     )
@@ -85,11 +94,10 @@ def _host_verification_specs(pr_diff: object, *, profile: str | None = "hephaest
         path.endswith(".py") or path in _PYTHON_VALIDATION_CONFIG_PATHS for path in changed_paths
     ):
         return path_triggered_specs
-    changed_new_side_paths = _changed_new_side_paths(pr_diff)
     changed_unit_paths = tuple(
         sorted(
             path
-            for path in changed_new_side_paths
+            for path in normalized_existing_paths
             if path.startswith("tests/unit/")
             and path.endswith(".py")
             and path not in _NONHERMETIC_HOST_UNIT_TEST_PATHS
@@ -137,10 +145,9 @@ def _host_verification_specs(pr_diff: object, *, profile: str | None = "hephaest
 
 # fmt: off
 __all__ = [
-    'HOST_VERIFICATION_DIAGNOSTIC_MAX', 'HOST_VERIFICATION_TIMEOUT_S', '_DIFF_GIT_HEADER_RE',
+    'HOST_VERIFICATION_DIAGNOSTIC_MAX', 'HOST_VERIFICATION_TIMEOUT_S',
     '_NONHERMETIC_HOST_UNIT_TEST_PATHS', '_PATH_HOST_VERIFICATION_SPECS',
     '_PYTHON_HOST_VERIFICATION_SPECS', '_PYTHON_VALIDATION_CONFIG_PATHS', '_HostPlan',
-    '_HostVerificationSpec',
-    '_changed_new_side_paths', '_changed_unit_pytest_argv', '_host_verification_specs',
-    'annotations', 'dataclass', 're']
+    '_HostVerificationSpec', '_changed_unit_pytest_argv', '_host_verification_specs',
+    '_review_changed_paths']
 # fmt: on

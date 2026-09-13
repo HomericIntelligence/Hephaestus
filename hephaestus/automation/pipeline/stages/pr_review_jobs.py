@@ -54,6 +54,7 @@ from .pr_review_receipts import store_host_verification_result
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 from .pr_review_threads import POST_APPLY
+from .pr_review_verification import _review_changed_paths
 
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
@@ -673,6 +674,16 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item,
                 StageOutcome(Disposition.FINISH_FAIL, "review_checkout_head_drift"),
             )
+        normalized_paths = _review_changed_paths(item.payload.get("review_changed_paths"))
+        if normalized_paths is None:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "review_checkout_path_manifest_invalid",
+                ),
+            )
+        item.payload["review_changed_paths"] = list(normalized_paths)
         item.payload["reviewed_pr_head_sha"] = expected_head
         item.payload["reviewed_pr_node_id"] = item.payload.get("pr_node_id")
         prior_generation = item.payload.get("reviewed_pr_proof_generation", 0)
@@ -1587,12 +1598,17 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         if ready and not isinstance(review_diff, str):
             item.payload["review_checkout_error"] = "checkout job returned no bound diff"
             ready = False
-        if ready:
+        normalized_paths = _review_changed_paths(changed_paths)
+        if ready and normalized_paths is None:
+            item.payload["review_checkout_error"] = (
+                "checkout job returned no bound path manifest"
+                if changed_paths is None
+                else "checkout job returned an invalid path manifest"
+            )
+            ready = False
+        if ready and normalized_paths is not None:
             item.payload["pr_diff"] = review_diff
-            if isinstance(changed_paths, list) and all(
-                isinstance(path, str) and bool(path) for path in changed_paths
-            ):
-                item.payload["review_changed_paths"] = list(changed_paths)
+            item.payload["review_changed_paths"] = list(normalized_paths)
             if is_full_commit_sha(review_base):
                 item.payload["reviewed_pr_base_sha"] = review_base
         item.payload["review_checkout_ready"] = ready
