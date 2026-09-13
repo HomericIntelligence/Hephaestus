@@ -1926,10 +1926,13 @@ def _immutable_runner_checkout_state(checkout: Path) -> tuple[str, str]:
 def _assert_scratch_only_unix_socket_policy(*, scratch: Path, source: Path) -> None:
     """Check the socket operations that the immutable host permits and denies."""
     allowed_socket = scratch / "allowed.sock"
+    previous_directory = Path.cwd()
     try:
+        os.chdir(scratch)
         with socket.socket(socket.AF_UNIX) as endpoint:
-            endpoint.bind(str(allowed_socket))
+            endpoint.bind(allowed_socket.name)
     finally:
+        os.chdir(previous_directory)
         allowed_socket.unlink(missing_ok=True)
 
     with socket.socket(socket.AF_UNIX) as endpoint:
