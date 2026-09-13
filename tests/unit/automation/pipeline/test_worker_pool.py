@@ -12,6 +12,7 @@ import re
 import selectors
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -1920,6 +1921,26 @@ def _immutable_runner_checkout_state(checkout: Path) -> tuple[str, str]:
         _git(checkout, "rev-parse", "HEAD"),
         _git(checkout, "status", "--porcelain=v1", "--untracked-files=all"),
     )
+
+
+def _assert_scratch_only_unix_socket_policy(*, scratch: Path, source: Path) -> None:
+    """Check the socket operations that the immutable host permits and denies."""
+    allowed_socket = scratch / "allowed.sock"
+    try:
+        with socket.socket(socket.AF_UNIX) as endpoint:
+            endpoint.bind(str(allowed_socket))
+    finally:
+        allowed_socket.unlink(missing_ok=True)
+
+    with socket.socket(socket.AF_UNIX) as endpoint:
+        with pytest.raises(PermissionError):
+            endpoint.bind(str(source / "denied.sock"))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:
+        with pytest.raises(PermissionError):
+            endpoint.bind(("127.0.0.1", 0))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:
+        with pytest.raises(PermissionError):
+            endpoint.connect(("127.0.0.1", 9))
 
 
 class TestHostVerificationGitExecPath:
@@ -3949,7 +3970,12 @@ class TestWorkerPoolSubmitComplete:
         except ValueError:
             active_environment = None
         if active_environment is not None:
-            pytest.skip("an outer host-verification sandbox already controls network-bind")
+            _assert_scratch_only_unix_socket_policy(
+                scratch=Path(active_environment["TMPDIR"]),
+                source=checkout,
+            )
+            assert _immutable_runner_checkout_state(checkout) == checkout_before
+            return
 
         program = (
             "import os, socket\n"

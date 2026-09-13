@@ -12,6 +12,7 @@ class _HostVerificationSpec:
     changed_path: str | None
     argv: tuple[str, ...]
     descr: str
+    additional_changed_paths: tuple[str, ...] = ()
 
 
 _HostPlan = tuple[_HostVerificationSpec, ...]
@@ -158,6 +159,7 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "--tb=short",
         ),
         descr="review_worker_pool_scratch_unix_socket",
+        additional_changed_paths=("tests/unit/automation/pipeline/test_worker_pool.py",),
     ),
     _HostVerificationSpec(
         changed_path="hephaestus/automation/pipeline/worker_pool.py",
@@ -172,6 +174,7 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "--tb=short",
         ),
         descr="review_fleet_podman_unix_socket",
+        additional_changed_paths=("tests/unit/automation/pipeline/test_worker_pool.py",),
     ),
     _HostVerificationSpec(
         changed_path="tests/performance/test_worker_pool_load.py",

@@ -2923,6 +2923,19 @@ class TestPrReviewStageStep:
             "--tb=short",
         )
 
+    def test_changed_worker_pool_test_runs_host_unix_socket_boundary(self) -> None:
+        """A worker test change runs the scratch Unix socket regression."""
+        path = "tests/unit/automation/pipeline/test_worker_pool.py"
+        specs = _host_verification_specs([path])
+
+        selected = {spec.descr: spec for spec in specs if "unix_socket" in spec.descr}
+
+        assert set(selected) == {
+            "review_worker_pool_scratch_unix_socket",
+            "review_fleet_podman_unix_socket",
+        }
+        assert all(path in spec.additional_changed_paths for spec in selected.values())
+
     def test_changed_conftest_verifies_containing_directory_once(self) -> None:
         """A support-only conftest change must select its test directory."""
         directory = "tests/unit/automation/pipeline/stages"
