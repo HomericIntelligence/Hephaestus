@@ -22,7 +22,7 @@ def engine_process(monkeypatch):
     from hephaestus.automation import fleet_podman
 
     with tempfile.TemporaryDirectory(prefix="hephaestus-podman-", dir="/tmp") as directory:
-        private = Path(directory) / "engine"
+        private = Path(directory).resolve() / "engine"
         private.mkdir(mode=0o700)
         executable = private / "podman"
         executable.write_text(
