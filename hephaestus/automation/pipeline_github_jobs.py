@@ -1671,9 +1671,7 @@ class PipelineGitHubJobRunner:
             except Exception:
                 reconciliation = MergeQueueReconciliation.UNAVAILABLE
             if reconciliation is MergeQueueReconciliation.PRESENT:
-                base_branch = state.get("baseRefName")
-                if not isinstance(base_branch, str) or not base_branch:
-                    return complete("merge_queue_reconciliation_unavailable")
+                base_branch = initial_snapshot.base_branch
                 try:
                     policy = github.effective_merge_policy(
                         request.pr_number,
@@ -1683,7 +1681,7 @@ class PipelineGitHubJobRunner:
                     )
                 except Exception:
                     policy = None
-                unsafe = policy_safety(policy)
+                unsafe = policy_safety(policy, initial_snapshot)
                 if (
                     unsafe is not None
                     or not isinstance(policy, EffectiveMergePolicy)
