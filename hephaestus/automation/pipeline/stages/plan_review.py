@@ -91,6 +91,7 @@ from hephaestus.automation.protocol import (
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
+    JournalSnapshot,
     current_plan_context,
     is_pending_review,
     journal_snapshot,
@@ -177,7 +178,6 @@ AMEND_WAIT = "AMEND_WAIT"
 REVIEW_ERROR_RETRY_CAP = 2
 
 _PLAN_SCOPE_INVALID = "plan_scope_invalid"
-_PLAN_SCOPE_CHANGED = "plan_scope_changed"
 
 
 def _plan_scope_admission_failure(plan_text: str, ctx: StageContext) -> str | None:
@@ -189,22 +189,15 @@ def _plan_scope_admission_failure(plan_text: str, ctx: StageContext) -> str | No
     return _PLAN_SCOPE_INVALID
 
 
-def _plan_scope_blocked_verdict(reason: str) -> ReviewVerdict:
+def _plan_scope_blocked_verdict() -> ReviewVerdict:
     """Build the host audit record for a rejected implementation admission."""
-    if reason == _PLAN_SCOPE_CHANGED:
-        body = (
-            "Host validation rejected implementation admission because the canonical plan changed "
-            "after review. Diagnostic: plan_scope_changed. Obtain a new review for the current "
-            "canonical plan."
-        )
-    else:
-        body = (
-            "Host validation rejected implementation admission because the canonical plan has no "
-            "valid implementation file scope. Diagnostic: plan_scope_invalid. Use a `## Files to "
-            "Modify`, `## Files to Create`, or `## File Changes` section. Start each file "
-            "declaration with a backticked repository-relative path. Correct the canonical plan, "
-            "obtain review, and replace the blocked state before the loop can continue."
-        )
+    body = (
+        "Host validation rejected implementation admission because the canonical plan has no "
+        "valid implementation file scope. Diagnostic: plan_scope_invalid. Use a `## Files to "
+        "Modify`, `## Files to Create`, or `## File Changes` section. Start each file "
+        "declaration with a backticked repository-relative path. Correct the canonical plan, "
+        "obtain review, and replace the blocked state before the loop can continue."
+    )
     return ReviewVerdict(grade=None, verdict="BLOCKED", raw=f"{body}\n\n{STATE_PLAN_BLOCKED}")
 
 
@@ -1044,10 +1037,10 @@ class PlanReviewStage(Stage):
                 "plan was blocked externally while review was in flight",
             )
 
-        if verdict.is_go and (scope_outcome := self._scope_admission_outcome(item, ctx, review)):
-            return scope_outcome
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
+        if verdict.is_go and (scope_outcome := self._scope_admission_outcome(item, ctx, review)):
+            return scope_outcome
         if review.charged_round is None:
             round_done = int(item.payload.get("review_round", 0)) + 1
             review = replace(review, charged_round=round_done)
@@ -1138,11 +1131,16 @@ class PlanReviewStage(Stage):
 
     @staticmethod
     def _review_identity_outcome(
-        item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview
+        item: WorkItem,
+        ctx: StageContext,
+        review: _AcceptedPlanReview,
+        *,
+        snapshot: JournalSnapshot | None = None,
     ) -> StageOutcome | None:
         """Reject a changed plan and remove any label this result proposed."""
         assert item.issue is not None  # noqa: S101 - EVAL validates the issue
-        snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
+        if snapshot is None:
+            snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
         if (
             snapshot.current_plan
             and snapshot.revision == review.revision
@@ -1171,7 +1169,7 @@ class PlanReviewStage(Stage):
     def _scope_admission_outcome(
         self, item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview
     ) -> StageOutcome | None:
-        """Reject a Codex GO when its reviewed plan changed or has no scope."""
+        """Reject a Codex GO when its current reviewed plan has no scope."""
         assert item.issue is not None  # noqa: S101 - EVAL validates the issue
         if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
             return None
@@ -1181,11 +1179,11 @@ class PlanReviewStage(Stage):
             or snapshot.revision != review.revision
             or plan_fingerprint(snapshot.current_plan) != review.fingerprint
         ):
-            return self._complete_scope_blocked(
+            return self._review_identity_outcome(
                 item,
                 ctx,
-                _PLAN_SCOPE_CHANGED,
-                revision=snapshot.revision,
+                review,
+                snapshot=snapshot,
             )
         if reason := _plan_scope_admission_failure(snapshot.current_plan, ctx):
             return self._complete_scope_blocked(item, ctx, reason)
@@ -1196,8 +1194,6 @@ class PlanReviewStage(Stage):
         item: WorkItem,
         ctx: StageContext,
         reason: str,
-        *,
-        revision: int | None = None,
     ) -> StageOutcome:
         """Block implementation admission and publish one host validation audit."""
         logger.warning(
@@ -1208,8 +1204,7 @@ class PlanReviewStage(Stage):
         outcome = self._complete_blocked_with_audit(
             item,
             ctx,
-            _plan_scope_blocked_verdict(reason),
-            revision=revision,
+            _plan_scope_blocked_verdict(),
         )
         if outcome.disposition is Disposition.BLOCKED:
             return StageOutcome(Disposition.BLOCKED, "plan scope is invalid")

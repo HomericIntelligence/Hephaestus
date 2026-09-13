@@ -1793,7 +1793,7 @@ class TestPlanScopeAdmission:
             "gh_issue_upsert_comment",
         ]
 
-    def test_fresh_codex_go_blocks_when_the_canonical_plan_changes(
+    def test_fresh_codex_go_returns_to_planning_when_the_canonical_plan_changes(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A review cannot authorize a later canonical plan revision."""
@@ -1812,10 +1812,68 @@ class TestPlanScopeAdmission:
             make_ctx(github=github, config_overrides={"agent": "codex"}),
         )
 
-        assert outcome == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
-        assert github.labels[1] == {STATE_PLAN_BLOCKED}
-        assert github.comments[1][-1].endswith(STATE_PLAN_BLOCKED)
-        assert "plan_scope_changed" in github.comments[1][-1]
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+        assert github.labels[1] == {STATE_NEEDS_PLAN}
+        assert github.mutation_log == []
+
+    @pytest.mark.parametrize(
+        ("replacement_plan", "expected_reason"),
+        [
+            (None, "plan_missing"),
+            ("## Files to Modify\n- `tests/unit/two.py`", "plan_changed"),
+        ],
+    )
+    def test_scope_admission_uses_its_captured_plan_identity(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        replacement_plan: str | None,
+        expected_reason: str,
+    ) -> None:
+        """A transient identity mismatch cannot bypass scope admission."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        plan = "## Files to Modify\n- `tests/unit/one.py`"
+        _seed_canonical_plan(github, 1, plan)
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+        matching_comments = github.issue_comments(1)
+        replacement_bodies = (
+            []
+            if replacement_plan is None
+            else [
+                render_current_plan(replacement_plan, revision=2),
+                render_pending_review(revision=2),
+            ]
+        )
+        replacement_comments = [
+            IssueComment(
+                body=body,
+                author_login="hephaestus[bot]",
+                viewer_did_author=True,
+            )
+            for body in replacement_bodies
+        ]
+        reads = iter([matching_comments, replacement_comments, matching_comments])
+
+        def sequenced_comments(_issue_number: int) -> list[IssueComment]:
+            return next(reads, matching_comments)
+
+        def unexpected_scope_parse(_plan: str) -> tuple[str, ...]:
+            raise AssertionError("scope parser received an identity-mismatched plan")
+
+        monkeypatch.setattr(github, "issue_comments", sequenced_comments)
+        monkeypatch.setattr(plan_review, "parse_publication_scope_files", unexpected_scope_parse)
+
+        outcome = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, expected_reason)
+        assert github.labels[1] == {STATE_NEEDS_PLAN}
+        assert github.mutation_log == []
 
 
 class TestDurableWriteOrdering:
