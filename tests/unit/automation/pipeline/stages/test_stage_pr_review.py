@@ -2403,6 +2403,7 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "review_changed_paths": [
+                    "hephaestus/automation/pipeline/worker_pool.py",
                     "tests/unit/automation/pipeline/stages/test_stage_pr_review.py",
                     "tests/unit/automation/pipeline/test_worker_pool.py",
                     "tests/performance/test_worker_pool_load.py",
@@ -2519,6 +2520,36 @@ class TestPrReviewStageStep:
                         "TestWorkerPoolSubmitComplete::"
                         "test_host_verification_profile_keeps_source_outside_writable_root"
                     ),
+                    "-q",
+                    "--tb=short",
+                ),
+            ),
+            (
+                "review_worker_pool_scratch_unix_socket",
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    (
+                        "tests/unit/automation/pipeline/test_worker_pool.py::"
+                        "TestWorkerPoolSubmitComplete::"
+                        "test_immutable_host_allows_unix_socket_in_scratch_only"
+                    ),
+                    "-q",
+                    "--tb=short",
+                ),
+            ),
+            (
+                "review_fleet_podman_unix_socket",
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    "tests/unit/automation/test_fleet_podman.py",
                     "-q",
                     "--tb=short",
                 ),
@@ -2844,6 +2875,50 @@ class TestPrReviewStageStep:
                 f"{path}::TestWorkerPoolSubmitComplete::"
                 "test_host_verification_profile_keeps_source_outside_writable_root"
             ),
+            "-q",
+            "--tb=short",
+        )
+
+    def test_changed_worker_pool_source_runs_host_unix_socket_boundary(self) -> None:
+        """A worker source change runs the scratch Unix socket regression."""
+        path = "hephaestus/automation/pipeline/worker_pool.py"
+        specs = _host_verification_specs([path])
+
+        spec = next(
+            spec for spec in specs if spec.descr == "review_worker_pool_scratch_unix_socket"
+        )
+
+        assert spec.changed_path == path
+        assert spec.argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            (
+                "tests/unit/automation/pipeline/test_worker_pool.py::"
+                "TestWorkerPoolSubmitComplete::"
+                "test_immutable_host_allows_unix_socket_in_scratch_only"
+            ),
+            "-q",
+            "--tb=short",
+        )
+
+    def test_changed_worker_pool_source_runs_fleet_podman_boundary(self) -> None:
+        """A worker source change runs the real Podman socket fixture."""
+        path = "hephaestus/automation/pipeline/worker_pool.py"
+        specs = _host_verification_specs([path])
+
+        spec = next(spec for spec in specs if spec.descr == "review_fleet_podman_unix_socket")
+
+        assert spec.changed_path == path
+        assert spec.argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            "tests/unit/automation/test_fleet_podman.py",
             "-q",
             "--tb=short",
         )
