@@ -28,10 +28,17 @@ from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageNam
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
+from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
+from hephaestus.automation.pipeline.stages.planning import PlanningStage
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.review_journal import (
+    IssueComment,
+    render_current_plan,
+    render_pending_review,
+)
 from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
-from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.automation.state_labels import STATE_NEEDS_PLAN, STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -47,6 +54,54 @@ _LABEL_MUTATIONS = {
     "mark_pr_implementation_no_go",
     "arm_auto_merge",
 }
+
+
+def test_changed_restart_plan_cannot_reuse_stale_plan_go(
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan drift returns to planning without authority to advance."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+    original_plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+    replacement_plan = "## Files to Modify\n- `tests/unit/two.py`"
+    github.comments[1] = [
+        render_current_plan(original_plan, revision=1),
+        render_pending_review(revision=1),
+    ]
+    original_comments = github.issue_comments(1)
+    replacement_comments = [
+        IssueComment(
+            body=body,
+            author_login="hephaestus[bot]",
+            viewer_did_author=True,
+        )
+        for body in (
+            render_current_plan(replacement_plan, revision=1),
+            render_pending_review(revision=1),
+        )
+    ]
+    reads = iter([original_comments, replacement_comments])
+
+    def sequenced_comments(_issue_number: int) -> list[IssueComment]:
+        return next(reads, replacement_comments)
+
+    monkeypatch.setattr(github, "issue_comments", sequenced_comments)
+    ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+    item = make_work_item(issue=1, state="ENTER")
+
+    review_outcome = PlanReviewStage().on_enter(item, ctx)
+
+    assert review_outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+    assert ROUTES[StageName.PLAN_REVIEW].fail_routes["*"] is StageName.PLANNING
+    assert github.labels[1] == {STATE_NEEDS_PLAN}
+
+    item.state = "ENTER"
+    assert PlanningStage().on_enter(item, ctx) is None
+
+    item.state = "ENTER"
+    assert PlanReviewStage().on_enter(item, ctx) is None
+    assert github.labels[1] == {STATE_NEEDS_PLAN}
 
 
 def _adopted_writer_result(item: Any) -> dict[str, object]:

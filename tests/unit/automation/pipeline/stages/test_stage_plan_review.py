@@ -224,6 +224,55 @@ class TestPlanReviewStageOnEnter:
         assert github.comments[1][-1].endswith(STATE_PLAN_BLOCKED)
         assert "plan_scope_invalid" in github.comments[1][-1]
 
+    @pytest.mark.parametrize(
+        ("replacement_plan", "replacement_revision"),
+        [
+            ("## Exact file scope and ownership\n- `tests/unit/two.py`", 1),
+            ("## Exact file scope and ownership\n- `tests/unit/one.py`", 2),
+        ],
+    )
+    def test_on_enter_revalidates_scope_plan_identity_before_blocking(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        replacement_plan: str,
+        replacement_revision: int,
+    ) -> None:
+        """A restart scope decision cannot block a plan that changes before its write."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+        _seed_canonical_plan(github, 1, plan)
+        matching_comments = github.issue_comments(1)
+        replacement_comments = [
+            IssueComment(
+                body=body,
+                author_login="hephaestus[bot]",
+                viewer_did_author=True,
+            )
+            for body in (
+                render_current_plan(replacement_plan, revision=replacement_revision),
+                render_pending_review(revision=replacement_revision),
+            )
+        ]
+        reads = iter([matching_comments, replacement_comments])
+
+        def sequenced_comments(_issue_number: int) -> list[IssueComment]:
+            return next(reads, replacement_comments)
+
+        monkeypatch.setattr(github, "issue_comments", sequenced_comments)
+        item = make_work_item(issue=1, state="ENTER")
+
+        outcome = stage.on_enter(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+        assert github.labels[1] == {STATE_NEEDS_PLAN}
+        assert [entry[0] for entry in github.mutation_log] == ["edit_labels"]
+
     def test_on_enter_advances_codex_go_with_accepted_scope_heading(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
