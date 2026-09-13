@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import stat
+import subprocess
 import threading
 import time
 import uuid
@@ -106,6 +107,47 @@ def repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
     """Return the stable primary repository-lock path."""
     directory = lock_dir or get_repo_root() / DEFAULT_STATE_DIR / "locks"
     return directory / f"git-{repo.replace('/', '_')}.lock"
+
+
+def _validate_admission(
+    operation: str,
+    timeout_s: float | None,
+    deadline_s: float | None,
+    wait_deadline_s: float | None,
+) -> None:
+    """Validate admission inputs before the lock reserves any resources."""
+    if not isinstance(operation, str) or not operation or len(operation) > 200:
+        raise ValueError("operation must contain between 1 and 200 characters")
+    if timeout_s is not None and (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(float(timeout_s))
+        or timeout_s < 0
+    ):
+        raise ValueError("timeout_s must be a finite non-negative number")
+    for name, value in (("deadline_s", deadline_s), ("wait_deadline_s", wait_deadline_s)):
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"{name} must be a finite positive monotonic time")
+
+
+def _admission_deadlines(
+    started: float,
+    timeout_s: float | None,
+    wait_deadline_s: float | None,
+    deadline_s: float | None,
+) -> tuple[float | None, float | None]:
+    """Select the first contention deadline. Passive expiry wins a tie."""
+    passive = None if timeout_s is None else started + timeout_s
+    if wait_deadline_s is not None:
+        passive = wait_deadline_s if passive is None else min(passive, wait_deadline_s)
+    if deadline_s is not None and (passive is None or deadline_s < passive):
+        return deadline_s, deadline_s
+    return passive, None
 
 
 def _identity(metadata: os.stat_result) -> _FileIdentity:
@@ -240,12 +282,21 @@ class RepositoryOperationLock:
         *,
         operation: str,
         timeout_s: float | None = None,
+        deadline_s: float | None = None,
+        wait_deadline_s: float | None = None,
         reserved: bool = False,
     ) -> Iterator[None]:
-        """Acquire the in-process lock and publish its local holder."""
+        """Acquire the in-process lock and publish its local holder.
+
+        Absolute wait and operation deadlines remain unchanged. For verified
+        contention, the first deadline determines the failure type and passive
+        expiry wins a tie. An expired operation prevents free admission.
+        """
         with self._acquire(
             operation=operation,
             timeout_s=timeout_s,
+            deadline_s=deadline_s,
+            wait_deadline_s=wait_deadline_s,
             include_file_lock=False,
             reserved=reserved,
         ):
@@ -257,13 +308,23 @@ class RepositoryOperationLock:
         *,
         operation: str,
         timeout_s: float,
+        deadline_s: float | None = None,
+        wait_deadline_s: float | None = None,
         include_file_lock: bool = True,
         reserved: bool = False,
     ) -> Iterator[None]:
-        """Acquire all requested layers under one monotonic deadline."""
+        """Acquire all requested layers under one monotonic deadline.
+
+        The passive timeout starts here. Absolute wait and operation deadlines
+        remain unchanged. For verified contention, the first deadline determines
+        the failure type and passive expiry wins a tie. An expired operation
+        prevents free admission.
+        """
         with self._acquire(
             operation=operation,
             timeout_s=timeout_s,
+            deadline_s=deadline_s,
+            wait_deadline_s=wait_deadline_s,
             include_file_lock=include_file_lock,
             reserved=reserved,
         ):
@@ -275,35 +336,34 @@ class RepositoryOperationLock:
         *,
         operation: str,
         timeout_s: float | None,
+        deadline_s: float | None,
+        wait_deadline_s: float | None,
         include_file_lock: bool,
         reserved: bool,
     ) -> Iterator[None]:
-        if not isinstance(operation, str) or not operation or len(operation) > 200:
-            raise ValueError("operation must contain between 1 and 200 characters")
-        if timeout_s is not None and (
-            isinstance(timeout_s, bool)
-            or not isinstance(timeout_s, (int, float))
-            or not math.isfinite(float(timeout_s))
-            or timeout_s < 0
-        ):
-            raise ValueError("timeout_s must be a finite non-negative number")
+        _validate_admission(operation, timeout_s, deadline_s, wait_deadline_s)
         if not reserved:
             self.reserve()
         started = self._monotonic()
-        deadline = None if timeout_s is None else started + float(timeout_s)
+        deadline, contention_deadline_s = _admission_deadlines(
+            started, timeout_s, wait_deadline_s, deadline_s
+        )
         holder: _Holder | None = None
         in_process_acquired = False
         published = False
         locks = ExitStack()
         try:
             try:
-                self._acquire_thread_lock(deadline, started, operation)
+                self._acquire_thread_lock(
+                    deadline, started, operation, deadline_s, contention_deadline_s
+                )
                 in_process_acquired = True
                 self._raise_if_deadline_elapsed(
                     deadline,
                     operation=operation,
                     started=started,
                     source="in_process",
+                    operation_deadline_s=deadline_s,
                 )
                 self._raise_if_shutdown(operation, started)
                 holder = self._new_holder(operation)
@@ -317,6 +377,8 @@ class RepositoryOperationLock:
                             started=started,
                             operation=operation,
                             layer="primary",
+                            operation_deadline_s=deadline_s,
+                            contention_deadline_s=contention_deadline_s,
                         )
                     )
                     self._prepare_owner_paths()
@@ -327,7 +389,16 @@ class RepositoryOperationLock:
                             started=started,
                             operation=operation,
                             layer="owner",
+                            operation_deadline_s=deadline_s,
+                            contention_deadline_s=contention_deadline_s,
                         )
+                    )
+                    self._raise_if_deadline_elapsed(
+                        deadline,
+                        operation=operation,
+                        started=started,
+                        source="lock_metadata",
+                        operation_deadline_s=deadline_s,
                     )
                     self._write_owner_record(holder)
                     published = True
@@ -336,11 +407,19 @@ class RepositoryOperationLock:
                         operation=operation,
                         started=started,
                         source="lock_metadata",
+                        operation_deadline_s=deadline_s,
                     )
             except (LockTimeoutError, LockMetadataError, LockInterruptedError):
                 raise
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 raise self._metadata_failure(operation, started, None, "lock_metadata") from exc
+            self._raise_if_deadline_elapsed(
+                deadline,
+                operation=operation,
+                started=started,
+                source="lock_metadata" if include_file_lock else "in_process",
+                operation_deadline_s=deadline_s,
+            )
             yield
         finally:
             if published and holder is not None:
@@ -371,15 +450,26 @@ class RepositoryOperationLock:
             acquired_at=acquired_at,
         )
 
-    def _acquire_thread_lock(self, deadline: float | None, started: float, operation: str) -> None:
+    def _acquire_thread_lock(
+        self,
+        deadline: float | None,
+        started: float,
+        operation: str,
+        operation_deadline_s: float | None,
+        contention_deadline_s: float | None,
+    ) -> None:
         """Acquire the process lock with interruptible polling."""
-        while not self.lock.acquire(blocking=False):
+        while True:
             self._raise_if_shutdown(operation, started)
-            now = self._monotonic()
+            self._raise_if_operation_expired(contention_deadline_s)
+            if self.lock.acquire(blocking=False):
+                return
+            now = self._operation_time(contention_deadline_s)
             if deadline is not None and now >= deadline:
                 with self._state_guard:
                     holder = self._holder
                 if holder is None:
+                    self._raise_if_operation_expired(operation_deadline_s)
                     raise self._metadata_failure(operation, started, None, "in_process")
                 raise self._timeout_failure(operation, started, holder, "in_process")
             if self._shutdown.wait(timeout=min(_POLL_S, _remaining(deadline, now))):
@@ -394,10 +484,13 @@ class RepositoryOperationLock:
         started: float,
         operation: str,
         layer: str,
+        operation_deadline_s: float | None,
+        contention_deadline_s: float | None,
     ) -> Iterator[None]:
         """Poll one exclusive file lock under the shared deadline."""
         while True:
             self._raise_if_shutdown(operation, started)
+            self._raise_if_operation_expired(contention_deadline_s)
             stack = ExitStack()
             try:
                 stack.enter_context(file_lock(path, blocking=False, require_exclusive=True))
@@ -411,14 +504,16 @@ class RepositoryOperationLock:
                 ) from exc
             except LockUnavailableError as exc:
                 stack.close()
-                now = self._monotonic()
+                now = self._operation_time(contention_deadline_s)
                 if deadline is not None and now >= deadline:
                     if layer == "owner":
+                        self._raise_if_operation_expired(operation_deadline_s)
                         raise self._metadata_failure(
                             operation, started, None, "owner_sentinel"
                         ) from exc
                     holder = self._probe_external_holder()
                     if holder is None:
+                        self._raise_if_operation_expired(operation_deadline_s)
                         raise self._metadata_failure(
                             operation, started, None, "owner_sidecar"
                         ) from exc
@@ -437,6 +532,7 @@ class RepositoryOperationLock:
                         operation=operation,
                         started=started,
                         source="owner_sentinel" if layer == "owner" else "lock_metadata",
+                        operation_deadline_s=operation_deadline_s,
                     )
                     self._raise_if_shutdown(operation, started)
                     yield
@@ -626,10 +722,24 @@ class RepositoryOperationLock:
         operation: str,
         started: float,
         source: str,
+        operation_deadline_s: float | None,
     ) -> None:
         """Stop acquisition when its shared deadline has elapsed."""
-        if deadline is not None and self._monotonic() >= deadline:
+        now = self._operation_time(operation_deadline_s)
+        if deadline is not None and now >= deadline:
             raise self._metadata_failure(operation, started, None, source)
+
+    def _raise_if_operation_expired(self, deadline_s: float | None) -> None:
+        """Keep an operation deadline distinct from passive lock contention."""
+        if deadline_s is not None:
+            self._operation_time(deadline_s)
+
+    def _operation_time(self, deadline_s: float | None) -> float:
+        """Read the admission clock and reject an expired operation."""
+        now = self._monotonic()
+        if deadline_s is not None and now >= deadline_s:
+            raise subprocess.TimeoutExpired("repository lock operation deadline", 0)
+        return now
 
     def _timeout_failure(
         self, operation: str, started: float, holder: _Holder, source: str

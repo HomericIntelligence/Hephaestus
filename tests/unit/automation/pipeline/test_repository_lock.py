@@ -74,6 +74,77 @@ def _sidecar(repository: str = "owner/repo") -> dict[str, object]:
 class TestRepositoryOperationLock:
     """Verify the three-layer repository lock contract."""
 
+    @pytest.mark.parametrize(
+        ("timeout_s", "passive_expires_first"),
+        [(4.0, True), (9.0, True), (14.0, False)],
+        ids=["passive-first", "equal", "operation-first"],
+    )
+    @pytest.mark.parametrize("absolute_wait", [False, True])
+    def test_contention_uses_the_first_deadline(
+        self,
+        tmp_path: Path,
+        timeout_s: float,
+        passive_expires_first: bool,
+        absolute_wait: bool,
+    ) -> None:
+        """A clock jump must not change which admission budget expired first."""
+        now = [1.0]
+        lock = RepositoryOperationLock("owner/repo", lock_dir=tmp_path, monotonic=lambda: now[0])
+        with lock.acquire_in_process(operation="holder", timeout_s=30):
+            thread_lock = lock.lock
+
+            def delayed_contention(*, blocking: bool) -> bool:
+                acquired = thread_lock.acquire(blocking=blocking)
+                assert not acquired
+                now[0] = 20.0
+                return acquired
+
+            with patch.object(lock, "lock", wraps=thread_lock) as proxy:
+                proxy.acquire.side_effect = delayed_contention
+                expected = LockTimeoutError if passive_expires_first else subprocess.TimeoutExpired
+                with pytest.raises(expected) as raised:
+                    with lock.acquire_in_process(
+                        operation="waiter",
+                        timeout_s=None if absolute_wait else timeout_s,
+                        wait_deadline_s=1.0 + timeout_s if absolute_wait else None,
+                        deadline_s=10.0,
+                    ):
+                        pytest.fail("an expired admission dispatched")
+
+            if passive_expires_first:
+                assert isinstance(raised.value, LockTimeoutError)
+                assert raised.value.details["holder_operation"] == "holder"
+                assert raised.value.details["holder_source"] == "in_process"
+            assert lock.users == 1
+
+        assert lock.users == 0
+
+    def test_absolute_wait_deadline_does_not_restart_after_reservation(
+        self, tmp_path: Path
+    ) -> None:
+        """Reservation time must not extend an existing passive wait deadline."""
+        now = [1.0]
+        lock = RepositoryOperationLock("owner/repo", lock_dir=tmp_path, monotonic=lambda: now[0])
+        with lock.acquire_in_process(operation="holder", timeout_s=30):
+            reserve = lock.reserve
+
+            def late_reservation() -> None:
+                reserve()
+                now[0] = 6.0
+
+            with (
+                patch.object(lock, "reserve", side_effect=late_reservation),
+                pytest.raises(LockTimeoutError) as raised,
+            ):
+                with lock.acquire_in_process(operation="waiter", wait_deadline_s=5.0):
+                    pytest.fail("an expired passive admission dispatched")
+
+            assert raised.value.details["holder_operation"] == "holder"
+            assert raised.value.details["holder_source"] == "in_process"
+            assert lock.users == 1
+
+        assert lock.users == 0
+
     def test_publishes_and_removes_holder_record(self, tmp_path: Path) -> None:
         """A Git critical section publishes and removes its owner record."""
         lock = RepositoryOperationLock("owner/repo", lock_dir=tmp_path)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +15,7 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.automation import git_runtime, git_utils
+from hephaestus.automation.pipeline import repository_lock
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
@@ -26,7 +29,7 @@ from hephaestus.automation.pipeline.repository_lock import RepositoryOperationLo
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.review_journal import CommentJournalReadError
-from hephaestus.utils.file_lock import LockUnavailableError
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 
 def test_git_runtime_refuses_commit_after_the_operation_deadline(
@@ -116,6 +119,131 @@ def test_checkout_timeout_after_admission_is_not_lock_contention(tmp_path: Path)
 
     assert result.error == "timeout"
     assert result.value is None
+
+
+@pytest.mark.parametrize("job_kind", ["git", "github", "github_default"])
+@pytest.mark.parametrize("expire_at", ["reservation", "thread_acquisition", "thread_contention"])
+def test_operation_deadline_expiry_during_lock_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    job_kind: str,
+    expire_at: str,
+) -> None:
+    """An expired admission must not publish a holder or dispatch work."""
+    now = [1.0]
+    monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.time.monotonic", lambda: now[0])
+    runner = Mock(gh_timeout=9 if job_kind == "github_default" else 120)
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        github_job_runner=runner,
+    )
+    entry = RepositoryOperationLock("repo", lock_dir=tmp_path / "locks", monotonic=lambda: now[0])
+    pool._repo_locks["repo"] = entry
+    publish = Mock(wraps=entry._write_owner_record)
+    monkeypatch.setattr(entry, "_write_owner_record", publish)
+    dispatch = Mock(return_value=JobResult(ok=True))
+    monkeypatch.setattr(pool, "_dispatch_locked_git", dispatch)
+    if expire_at == "reservation":
+        reserve = entry.reserve
+
+        def expire_on_reservation() -> None:
+            reserve()
+            now[0] = 11.0
+
+        monkeypatch.setattr(entry, "reserve", expire_on_reservation)
+    else:
+        thread_lock = entry.lock
+        proxy = Mock(wraps=thread_lock)
+
+        def expire_on_acquisition(*, blocking: bool) -> bool:
+            acquired = False
+            if expire_at != "thread_contention":
+                acquired = thread_lock.acquire(blocking=blocking)
+            now[0] = 11.0
+            return acquired
+
+        proxy.acquire.side_effect = expire_on_acquisition
+        monkeypatch.setattr(entry, "lock", proxy)
+    try:
+        if job_kind == "git":
+            result = pool._run_git(GitJob("repo", "clone", 120, deadline_s=10.0))
+        elif job_kind == "github_default":
+            marker = (
+                f"<!-- hephaestus-implementation-reply-handoff:pr=1:head={'a' * 40}"
+                f":batch={'b' * 32} -->"
+            )
+            request = AppendReplyJournalRequest(1, marker, f"{marker}\n<!-- payload -->")
+            result = pool._run_github(GitHubJob("repo", tmp_path, request, "append"))
+        else:
+            result = pool._run_github(
+                GitHubJob("repo", tmp_path.resolve(), _recovery_request(10.0), "recover")
+            )
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.error == ("timeout" if job_kind == "git" else "github_timeout")
+    assert not result.ok
+    publish.assert_not_called()
+    dispatch.assert_not_called()
+    runner.run.assert_not_called()
+    assert not (tmp_path / "locks").exists()
+    assert entry.users == 0
+    assert not entry.lock.locked()
+
+
+@pytest.mark.parametrize("layer", ["primary", "owner"])
+@pytest.mark.parametrize("contended", [False, True])
+def test_git_operation_deadline_expiry_during_file_lock_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    layer: str,
+    contended: bool,
+) -> None:
+    """An expired file-lock admission cannot publish owner data or dispatch."""
+    now = [1.0]
+    monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.time.monotonic", lambda: now[0])
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+    )
+    entry = RepositoryOperationLock("repo", lock_dir=tmp_path / "locks", monotonic=lambda: now[0])
+    pool._repo_locks["repo"] = entry
+    publish = Mock(wraps=entry._write_owner_record)
+    monkeypatch.setattr(entry, "_write_owner_record", publish)
+    dispatch = Mock(return_value=JobResult(ok=True))
+    monkeypatch.setattr(pool, "_dispatch_locked_git", dispatch)
+
+    @contextmanager
+    def expire_on_file_lock(
+        path: Path, *, blocking: bool, require_exclusive: bool
+    ) -> Iterator[None]:
+        selected = path.name.endswith(".owner.lock") == (layer == "owner")
+        if selected and contended:
+            now[0] = 11.0
+            raise LockUnavailableError("held")
+        with file_lock(path, blocking=blocking, require_exclusive=require_exclusive):
+            if selected:
+                now[0] = 11.0
+            yield
+
+    monkeypatch.setattr(repository_lock, "file_lock", expire_on_file_lock)
+    try:
+        result = pool._run_git(GitJob("repo", "clone", 120, deadline_s=10.0))
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.error == "timeout"
+    assert not result.ok
+    publish.assert_not_called()
+    dispatch.assert_not_called()
+    assert not list((tmp_path / "locks").glob("*.owner.json"))
+    assert entry.users == 0
+    assert not entry.lock.locked()
 
 
 def test_checkout_admission_starts_operation_deadline_after_both_repository_locks(

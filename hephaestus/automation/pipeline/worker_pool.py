@@ -4436,6 +4436,7 @@ class WorkerPool:
         repo: str,
         *,
         deadline_s: float | None = None,
+        wait_deadline_s: float | None = None,
         diagnostic_path: Path | None = None,
         operation: str = "repository_operation",
         timeout_s: float | None = None,
@@ -4451,17 +4452,17 @@ class WorkerPool:
                     lock_dir=self._lock_dir,
                     shutdown=self._shutdown,
                     on_idle=self._evict_repo_lock,
+                    monotonic=time.monotonic,
                 )
                 self._repo_locks[repo] = entry
             entry.reserve()
         try:
-            if deadline_s is not None:
-                remaining_s = max(deadline_s - time.monotonic(), 0.0)
-                timeout_s = remaining_s if timeout_s is None else min(timeout_s, remaining_s)
             if include_file_lock:
                 with entry.acquire(
                     operation=operation,
                     timeout_s=0.0 if timeout_s is None else timeout_s,
+                    deadline_s=deadline_s,
+                    wait_deadline_s=wait_deadline_s,
                     reserved=True,
                 ):
                     yield
@@ -4469,6 +4470,8 @@ class WorkerPool:
                 with entry.acquire_in_process(
                     operation=operation,
                     timeout_s=timeout_s,
+                    deadline_s=deadline_s,
+                    wait_deadline_s=wait_deadline_s,
                     reserved=True,
                 ):
                     yield
@@ -5275,6 +5278,7 @@ class WorkerPool:
             with self._repo_lock(
                 job.repo,
                 deadline_s=deadline_s,
+                wait_deadline_s=started_s + self._github_job_runner.gh_timeout,
                 operation=_repository_lock_operation(
                     job.descr,
                     type(job.request).__name__,
@@ -6081,16 +6085,12 @@ class WorkerPool:
             if job.repository_lock_wait_timeout_s is not None
             else self._git_lock_timeout
         )
-        if job.deadline_s is not None:
-            lock_wait_timeout_s = min(
-                lock_wait_timeout_s,
-                max(job.deadline_s - lock_attempt_started_s, 0.0),
-            )
         try:
             with self._repo_lock(
                 job.repo,
                 operation=_repository_lock_operation(job.descr, job.op),
                 timeout_s=lock_wait_timeout_s,
+                deadline_s=job.deadline_s,
                 include_file_lock=True,
             ):
                 operation_deadline_s = time.monotonic() + job.timeout_s
@@ -8719,7 +8719,7 @@ class WorkerPool:
             )
             with self._repo_lock(
                 preparation_key,
-                deadline_s=job.deadline_s,
+                wait_deadline_s=job.deadline_s,
                 operation=_repository_lock_operation(job.descr, job.op),
             ):
                 with self._repo_intake_leases_guard:
