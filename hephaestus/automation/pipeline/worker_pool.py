@@ -5262,11 +5262,16 @@ class WorkerPool:
         """Execute one closed GitHub operation exactly once per submission."""
         if self._github_job_runner is None:
             raise RuntimeError("GitHubJob submitted without a GitHubJobRunner")
+        if self._shutdown.is_set():
+            return JobResult(ok=False, error="interrupted", interrupted=True)
         try:
-            deadline_s = time.monotonic() + self._github_job_runner.gh_timeout
+            started_s = time.monotonic()
+            deadline_s = started_s + self._github_job_runner.gh_timeout
             request_deadline = getattr(job.request, "deadline_s", None)
             if request_deadline is not None:
                 deadline_s = min(deadline_s, request_deadline)
+            if deadline_s <= started_s:
+                raise subprocess.TimeoutExpired("GitHub operation deadline", 0)
             with self._repo_lock(
                 job.repo,
                 deadline_s=deadline_s,
@@ -6066,7 +6071,11 @@ class WorkerPool:
         Passive lock wait has a separate budget. The Git command receives a
         fresh execution deadline only after all repository locks are held.
         """
+        if self._shutdown.is_set():
+            return JobResult(ok=False, error="interrupted", interrupted=True)
         lock_attempt_started_s = time.monotonic()
+        if job.deadline_s is not None and job.deadline_s <= lock_attempt_started_s:
+            return JobResult(ok=False, error="timeout")
         lock_wait_timeout_s = (
             job.repository_lock_wait_timeout_s
             if job.repository_lock_wait_timeout_s is not None
@@ -6097,13 +6106,7 @@ class WorkerPool:
                     shutdown=self._shutdown,
                 ):
                     return self._dispatch_locked_git(timed_job)
-        except RepositoryLockError as exc:
-            return _git_lock_failure_result(
-                exc,
-                job=job,
-                attempt_started_s=lock_attempt_started_s,
-            )
-        except (_GitLockTimeoutError, _GitLockInterruptedError) as exc:
+        except (RepositoryLockError, _GitLockTimeoutError, _GitLockInterruptedError) as exc:
             return _git_lock_failure_result(
                 exc,
                 job=job,
