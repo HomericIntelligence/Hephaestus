@@ -106,6 +106,7 @@ CHECKOUT_CONTENTION_RESULT_KEY = "checkout_contention_result"
 CHECKOUT_CONTENTION_WAIT_KEY = "checkout_contention_wait_s"
 CHECKOUT_CONTENTION_FIRST_WAIT_KEY = "checkout_contention_first_wait_s"
 CHECKOUT_CONTENTION_PENDING_KEY = "checkout_contention_pending"
+CHECKOUT_LOCK_FAILURE_KEY = "checkout_lock_failure"
 _LOCK_RESULT_FIELDS = frozenset(
     {
         "repository",
@@ -119,6 +120,14 @@ _LOCK_RESULT_FIELDS = frozenset(
         "holder_metadata_advisory",
         "holder_metadata",
         "holder_metadata_stale",
+        "failure_kind",
+        "waiting_operation",
+        "waiting_process_id",
+        "holder_operation",
+        "holder_process_id",
+        "holder_acquired_at",
+        "holder_source",
+        "wait_duration_s",
     }
 )
 _REPOSITORY_CONTENTION_BACKOFF_BASE_S = 5.0
@@ -485,6 +494,8 @@ class RepoStage(Stage):
                 Disposition.RETRY,
                 note="repository contention: lock_timeout",
             )
+        if item.payload.pop(CHECKOUT_LOCK_FAILURE_KEY, None) == "lock_metadata_error":
+            return StageOutcome(Disposition.FINISH_FAIL, note="lock_metadata_error")
         # Checkout preparation failure handling (budget clone=2): on_job_done
         # records the failure while retaining CLONE_WAIT, so retry cannot fall
         # through into label work or discovery after a failed fetch.
@@ -665,9 +676,13 @@ class RepoStage(Stage):
             return
         if item.state != "CLONE_WAIT":
             return
+        if result.error == "lock_metadata_error":
+            _clear_checkout_contention(item)
+            item.payload[CHECKOUT_LOCK_FAILURE_KEY] = result.error
+            return
         if result.error == "lock_timeout":
             value = result.value if isinstance(result.value, dict) else {}
-            raw_attempt_wait = value.get("attempt_wait_s", 0.0)
+            raw_attempt_wait = value.get("attempt_wait_s", value.get("wait_duration_s", 0.0))
             attempt_wait_s = (
                 max(0.0, float(raw_attempt_wait))
                 if isinstance(raw_attempt_wait, (int, float))
@@ -681,7 +696,7 @@ class RepoStage(Stage):
             contention = {key: value[key] for key in _LOCK_RESULT_FIELDS if key in value}
             contention.setdefault(
                 "operation",
-                str(item.payload.get("checkout_op", "unknown")),
+                str(value.get("waiting_operation") or item.payload.get("checkout_op", "unknown")),
             )
             item.payload[CHECKOUT_CONTENTION_WAIT_KEY] = (
                 float(item.payload.get(CHECKOUT_CONTENTION_WAIT_KEY, 0.0)) + attempt_wait_s

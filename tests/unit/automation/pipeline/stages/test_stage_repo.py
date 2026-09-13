@@ -247,6 +247,25 @@ class TestOnEnterAndCloneStates:
         assert result.disposition is Disposition.RETRY
         assert result.note.startswith("repository contention")
 
+    def test_lock_metadata_error_finishes_without_clone_retry(
+        self, repo_item: WorkItem, repo_ctx: Any
+    ) -> None:
+        """Invalid lock metadata stops checkout without a Git retry."""
+        stage = RepoStage()
+        repo_item.state = "CLONE_WAIT"
+
+        stage.on_job_done(
+            repo_item,
+            JobResult(ok=False, error="lock_metadata_error"),
+            repo_ctx,
+        )
+
+        assert repo_item.attempts.get("clone", 0) == 0
+        result = stage.step(repo_item, repo_ctx)
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert result.note == "lock_metadata_error"
+
     def test_slow_successful_clone_after_contention_does_not_consume_contention_budget(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
     ) -> None:
@@ -412,6 +431,35 @@ class TestOnEnterAndCloneStates:
         assert retained["lock_path"] == diagnostic["lock_path"]
         assert retained["holder_metadata"] == {"pid": 7}
         assert retained["retry_count"] == 1
+        assert retained["first_wait_s"] == 1.5
+        assert retained["cumulative_wait_s"] == 1.5
+
+    def test_contention_accepts_repository_operation_lock_diagnostics(
+        self, repo_item: WorkItem, repo_ctx: Any
+    ) -> None:
+        """Checkout retry accounting accepts the new closed lock record."""
+        repo_item.state = "CLONE_WAIT"
+        stage = RepoStage()
+        stage.step(repo_item, repo_ctx)
+        diagnostic = {
+            "failure_kind": "lock_timeout",
+            "repository": "repo-a",
+            "waiting_operation": "clone",
+            "waiting_process_id": 8,
+            "holder_operation": "commit_push",
+            "holder_process_id": 7,
+            "holder_acquired_at": "2026-09-03T12:00:00Z",
+            "holder_source": "owner_sidecar",
+            "wait_duration_s": 1.5,
+        }
+
+        stage.on_job_done(
+            repo_item, JobResult(ok=False, error="lock_timeout", value=diagnostic), repo_ctx
+        )
+
+        retained = repo_item.payload[CHECKOUT_CONTENTION_RESULT_KEY]
+        assert retained["holder_operation"] == "commit_push"
+        assert retained["holder_process_id"] == 7
         assert retained["first_wait_s"] == 1.5
         assert retained["cumulative_wait_s"] == 1.5
 

@@ -56,36 +56,111 @@ def test_publish_lease_failure_has_specific_durable_error_class() -> None:
     assert fields["error"] == "publish_remote_head_unchanged"
 
 
-def test_lock_timeout_event_retains_bounded_contention_evidence() -> None:
-    """A lock completion keeps its safe holder and attempt diagnostics."""
+def test_git_lock_timeout_has_specific_durable_error_class() -> None:
+    """A lock completion keeps its closed verified-holder fields."""
     fields = CoordinatorRuntime._job_result_event_fields(
         JobResult(
             ok=False,
             error="lock_timeout",
             value={
+                "failure_kind": "lock_timeout",
                 "repository": "repo-a",
-                "operation": "sync_checkout",
-                "lock_layer": "advisory",
-                "lock_path": "/tmp/git-repo-a.lock",
-                "configured_lock_wait_s": 2.0,
-                "attempt_wait_s": 1.25,
-                "run_identity": "run-7",
-                "holder_metadata_status": "unverified",
-                "holder_metadata_advisory": True,
-                "holder_metadata": {
-                    "pid": 123,
-                    "run_identity": "run-6",
-                    "repository": "repo-a",
-                    "operation": "commit_push",
-                    "acquired_at_unix_s": 42.0,
-                },
+                "waiting_operation": "sync_checkout",
+                "waiting_process_id": 124,
+                "holder_operation": "commit_push",
+                "holder_process_id": 123,
+                "holder_acquired_at": "2026-09-03T12:00:00Z",
+                "holder_source": "owner_sidecar",
+                "wait_duration_s": 1.2519,
             },
         )
     )
 
     assert fields["error"] == "lock_timeout"
-    assert fields["lock_contention"]["run_identity"] == "run-7"
-    assert fields["lock_contention"]["holder_metadata"]["operation"] == "commit_push"
+    assert fields["lock"] == {
+        "failure_kind": "lock_timeout",
+        "repository": "repo-a",
+        "waiting_operation": "sync_checkout",
+        "waiting_process_id": 124,
+        "holder_operation": "commit_push",
+        "holder_process_id": 123,
+        "holder_acquired_at": "2026-09-03T12:00:00Z",
+        "holder_source": "owner_sidecar",
+        "wait_duration_s": 1.252,
+    }
+
+
+def test_lock_metadata_error_has_specific_durable_class() -> None:
+    """Unverifiable lock ownership retains its safe failure class and fields."""
+    fields = CoordinatorRuntime._job_result_event_fields(
+        JobResult(
+            ok=False,
+            error="lock_metadata_error",
+            value={
+                "failure_kind": "lock_metadata_error",
+                "repository": "repo-a",
+                "waiting_operation": "commit_push",
+                "waiting_process_id": 124,
+                "holder_operation": None,
+                "holder_process_id": None,
+                "holder_acquired_at": None,
+                "holder_source": "owner_sentinel",
+                "wait_duration_s": 30.0,
+            },
+        )
+    )
+
+    assert fields["error"] == "lock_metadata_error"
+    assert fields["lock"]["waiting_operation"] == "commit_push"
+
+
+def test_lock_event_rejects_raw_or_unexpected_metadata() -> None:
+    """An unexpected lock field prevents durable diagnostic publication."""
+    fields = CoordinatorRuntime._job_result_event_fields(
+        JobResult(
+            ok=False,
+            error="lock_timeout",
+            value={
+                "failure_kind": "lock_timeout",
+                "repository": "repo-a",
+                "waiting_operation": "sync_checkout",
+                "waiting_process_id": 124,
+                "holder_operation": "commit_push",
+                "holder_process_id": 123,
+                "holder_acquired_at": "2026-09-03T12:00:00Z",
+                "holder_source": "owner_sidecar",
+                "wait_duration_s": 1.0,
+                "lock_path": "/private/path",
+            },
+        )
+    )
+
+    assert "lock" not in fields
+    assert "lock_contention" not in fields
+
+
+def test_lock_event_rejects_unverified_error_with_claimed_holder() -> None:
+    """A metadata error cannot publish holder fields as verified data."""
+    fields = CoordinatorRuntime._job_result_event_fields(
+        JobResult(
+            ok=False,
+            error="lock_metadata_error",
+            value={
+                "failure_kind": "lock_metadata_error",
+                "repository": "repo-a",
+                "waiting_operation": "sync_checkout",
+                "waiting_process_id": 124,
+                "holder_operation": "commit_push",
+                "holder_process_id": 123,
+                "holder_acquired_at": "2026-09-03T12:00:00Z",
+                "holder_source": "owner_sidecar",
+                "wait_duration_s": 1.0,
+            },
+        )
+    )
+
+    assert "lock" not in fields
+    assert "lock_contention" not in fields
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,6 @@ import hashlib
 import io
 import json
 import logging
-import math
 import os
 import queue as queue_mod
 import re
@@ -87,7 +86,6 @@ from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
 from hephaestus.automation.git_runtime import current_operation_shutdown, operation_file_lock
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
-from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillExecutor,
     AthenaSkillJob,
@@ -98,7 +96,6 @@ from hephaestus.automation.pipeline.diagnostics import redact_diagnostic_text
 from hephaestus.automation.pipeline.git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
-    GIT_OPS,
     IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
@@ -152,6 +149,13 @@ from hephaestus.automation.pipeline.rebase_review import (
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
     implementation_remediation_reply_handoff_journal_entry,
+)
+from hephaestus.automation.pipeline.repository_lock import (
+    LockMetadataError,
+    LockTimeoutError,
+    RepositoryLockError,
+    RepositoryOperationLock,
+    repo_lock_path,
 )
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
@@ -3686,231 +3690,14 @@ def _compare_and_swap_linked_branch(  # noqa: C901
 
 
 def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
-    """Cross-process advisory lock file for *repo*.
-
-    Anchored at ``<repo_root>/<DEFAULT_STATE_DIR>/locks`` (the shared
-    automation state dir) rather than the bare CWD, so every process that
-    operates on this checkout resolves the SAME sentinel file regardless of
-    which subdirectory it was launched from. ``file_lock`` creates the parent
-    directory on first acquisition.
-
-    Args:
-        repo: Repository slug (``owner/name``); slashes are flattened.
-        lock_dir: Override directory for the sentinel files (tests inject a
-            temp dir here).
-
-    Returns:
-        Path of the sentinel lock file for *repo*.
-
-    """
-    if lock_dir is None:
-        lock_dir = get_repo_root() / DEFAULT_STATE_DIR / "locks"
-    return lock_dir / f"git-{repo.replace('/', '_')}.lock"
+    """Return the shared primary repository-lock path."""
+    return repo_lock_path(repo, lock_dir)
 
 
-_LOCK_HOLDER_SCHEMA_VERSION = 1
-_LOCK_HOLDER_MAX_BYTES = 4096
-_LOCK_HOLDER_MAX_AGE_S = 86_400.0
-_LOCK_HOLDER_FIELDS = frozenset(
-    {
-        "schema_version",
-        "pid",
-        "run_identity",
-        "repository",
-        "operation",
-        "acquired_at_unix_s",
-    }
-)
-
-
-@dataclass(frozen=True)
-class _HolderSidecarIdentity:
-    """Bind one holder record to its parent and file identities."""
-
-    parent: _FilesystemIdentity
-    file: _FilesystemIdentity
-
-
-def _repo_lock_holder_path(lock_path: Path) -> Path:
-    """Return the diagnostic sidecar path for one repository lock."""
-    return lock_path.with_name(f"{lock_path.name}.holder.json")
-
-
-def _holder_metadata(
-    *,
-    repo: str,
-    operation: str,
-    run_identity: str,
-    acquired_at_unix_s: float | None = None,
-) -> dict[str, object]:
-    """Build bounded diagnostic data for a repository lock holder."""
-    return {
-        "schema_version": _LOCK_HOLDER_SCHEMA_VERSION,
-        "pid": os.getpid(),
-        "run_identity": run_identity[:128],
-        "repository": repo[:256],
-        "operation": operation[:128],
-        "acquired_at_unix_s": time.time() if acquired_at_unix_s is None else acquired_at_unix_s,
-    }
-
-
-def _write_repo_lock_holder(path: Path, metadata: dict[str, object]) -> _HolderSidecarIdentity:
-    """Atomically write one owner-only repository-lock diagnostic sidecar."""
-    payload = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if len(payload) > _LOCK_HOLDER_MAX_BYTES:
-        raise ValueError("repository-lock holder metadata is too large")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    parent_fd, parent_identity = _open_directory_no_follow(path.parent)
-    temporary = f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-    if os.name == "posix":
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor: int | None = None
-    temporary_exists = False
-    try:
-        try:
-            current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            if not stat.S_ISREG(current.st_mode):
-                raise OSError("repository-lock holder sidecar is not a regular file")
-        descriptor = os.open(temporary, flags, 0o600, dir_fd=parent_fd)
-        temporary_exists = True
-        os.fchmod(descriptor, 0o600)
-        written_bytes = 0
-        while written_bytes < len(payload):
-            count = os.write(descriptor, payload[written_bytes:])
-            if count <= 0:
-                raise OSError("repository-lock holder write made no progress")
-            written_bytes += count
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
-        os.replace(
-            temporary,
-            path.name,
-            src_dir_fd=parent_fd,
-            dst_dir_fd=parent_fd,
-        )
-        temporary_exists = False
-        os.fsync(parent_fd)
-        installed = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-        if not stat.S_ISREG(installed.st_mode):
-            raise OSError("repository-lock holder sidecar replacement is unsafe")
-        return _HolderSidecarIdentity(parent_identity, _filesystem_identity(installed))
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        if temporary_exists:
-            with suppress(OSError):
-                os.unlink(temporary, dir_fd=parent_fd)
-        os.close(parent_fd)
-
-
-def _read_repo_lock_holder(path: Path, *, expected_repo: str | None = None) -> dict[str, object]:
-    """Read bounded advisory holder data without trusting holder activity."""
-    unavailable = {
-        "holder_metadata_status": "unavailable",
-        "holder_metadata_advisory": True,
-    }
-    unverified = {
-        "holder_metadata_status": "unverified",
-        "holder_metadata_advisory": True,
-    }
-    try:
-        parent_fd, _parent_identity = _open_directory_no_follow(path.parent)
-    except FileNotFoundError:
-        return unavailable
-    except (OSError, RuntimeError):
-        logger.warning("repository-lock holder sidecar read failed")
-        return unavailable
-    try:
-        payload, identity = _read_bounded_regular_at(
-            parent_fd,
-            path.name,
-            max_bytes=_LOCK_HOLDER_MAX_BYTES,
-        )
-        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-        if _filesystem_identity(current) != identity or stat.S_IMODE(current.st_mode) & 0o077:
-            raise RuntimeError("repository-lock holder sidecar permissions are unsafe")
-    except FileNotFoundError:
-        return unavailable
-    except (OSError, RuntimeError):
-        logger.warning("repository-lock holder sidecar read failed")
-        return unverified
-    finally:
-        os.close(parent_fd)
-    try:
-        value = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        logger.warning("repository-lock holder sidecar JSON is invalid")
-        return unverified
-    if not isinstance(value, dict) or set(value) != _LOCK_HOLDER_FIELDS:
-        logger.warning("repository-lock holder sidecar schema is invalid")
-        return unverified
-    if (
-        value.get("schema_version") != _LOCK_HOLDER_SCHEMA_VERSION
-        or isinstance(value.get("pid"), bool)
-        or not isinstance(value.get("pid"), int)
-        or int(value["pid"]) <= 0
-        or not all(
-            isinstance(value.get(field), str) and 0 < len(str(value[field])) <= limit
-            for field, limit in (
-                ("run_identity", 128),
-                ("repository", 256),
-                ("operation", 128),
-            )
-        )
-        or (expected_repo is not None and value.get("repository") != expected_repo)
-        or value.get("operation") not in GIT_OPS
-        or isinstance(value.get("acquired_at_unix_s"), bool)
-        or not isinstance(value.get("acquired_at_unix_s"), (int, float))
-    ):
-        logger.warning("repository-lock holder sidecar values are invalid")
-        return unverified
-    acquired_at = float(value["acquired_at_unix_s"])
-    if not math.isfinite(acquired_at):
-        logger.warning("repository-lock holder sidecar timestamp is invalid")
-        return unverified
-    if abs(time.time() - acquired_at) > _LOCK_HOLDER_MAX_AGE_S:
-        logger.warning("repository-lock holder sidecar is stale")
-        return {**unverified, "holder_metadata_stale": True}
-    result = dict(unverified)
-    result["holder_metadata"] = {
-        "pid": value["pid"],
-        "run_identity": value["run_identity"],
-        "repository": value["repository"],
-        "operation": value["operation"],
-        "acquired_at_unix_s": acquired_at,
-    }
-    return result
-
-
-def _remove_repo_lock_holder(path: Path, expected: _HolderSidecarIdentity) -> None:
-    """Remove the exact holder record through its unchanged parent."""
-    try:
-        parent_fd, parent_identity = _open_directory_no_follow(path.parent)
-    except FileNotFoundError:
-        return
-    try:
-        if parent_identity != expected.parent:
-            raise OSError("repository-lock holder parent changed")
-        info = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-        if _filesystem_identity(info) != expected.file:
-            raise OSError("repository-lock holder sidecar changed")
-        os.unlink(path.name, dir_fd=parent_fd)
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
-
-
-@dataclass
-class _RepoLockEntry:
-    """In-process git lock plus active/waiting user count."""
-
-    lock: threading.Lock
-    users: int = 0
+def _repository_lock_operation(description: str, fallback: str) -> str:
+    """Return one bounded operation name for repository-lock metadata."""
+    selected = description if isinstance(description, str) and description else fallback
+    return selected[:200]
 
 
 class _GitLockTimeoutError(TimeoutError):
@@ -3941,38 +3728,40 @@ def _ignore_local_agent_failure(error: BaseException) -> bool:
 
 
 def _git_lock_failure_result(
-    exc: _GitLockTimeoutError | _GitLockInterruptedError,
+    exc: RepositoryLockError | _GitLockTimeoutError | _GitLockInterruptedError,
     *,
     job: GitJob | None = None,
-    default_lock_path: Path | None = None,
     attempt_started_s: float | None = None,
-    run_identity: str = "unknown",
 ) -> JobResult:
     """Map a typed Git-lock failure to the corresponding bounded job result."""
+    if isinstance(exc, RepositoryLockError):
+        details = dict(exc.details)
+        if job is not None:
+            details["repository"] = job.repo
+            details["waiting_operation"] = _repository_lock_operation(job.descr, job.op)
+        if isinstance(exc, (LockTimeoutError, LockMetadataError)):
+            return JobResult(ok=False, error=exc.failure_kind, value=details)
+        return JobResult(
+            ok=False,
+            interrupted=True,
+            error="interrupted_waiting_for_git_lock",
+            value=details,
+        )
     if isinstance(exc, _GitLockTimeoutError):
         if job is None or attempt_started_s is None:
-            return JobResult(ok=False, error="lock_timeout")
-        now = time.monotonic()
-        lock_path = exc.lock_path or default_lock_path
+            return JobResult(ok=False, error="lock_metadata_error")
         value: dict[str, object] = {
+            "failure_kind": "lock_metadata_error",
             "repository": job.repo,
-            "operation": job.op,
-            "lock_layer": exc.lock_layer,
-            "lock_path": str(lock_path) if lock_path is not None else "unavailable",
-            "configured_lock_wait_s": float(job.repository_lock_wait_timeout_s or job.timeout_s),
-            "attempt_wait_s": max(0.0, now - attempt_started_s),
-            "run_identity": run_identity,
-            "holder_metadata_status": "unavailable",
-            "holder_metadata_advisory": True,
+            "waiting_operation": _repository_lock_operation(job.descr, job.op),
+            "waiting_process_id": os.getpid(),
+            "holder_operation": None,
+            "holder_process_id": None,
+            "holder_acquired_at": None,
+            "holder_source": "lock_metadata",
+            "wait_duration_s": round(max(time.monotonic() - attempt_started_s, 0.0), 3),
         }
-        if default_lock_path is not None:
-            value.update(
-                _read_repo_lock_holder(
-                    _repo_lock_holder_path(default_lock_path),
-                    expected_repo=job.repo,
-                )
-            )
-        return JobResult(ok=False, error="lock_timeout", value=value)
+        return JobResult(ok=False, error="lock_metadata_error", value=value)
     return JobResult(
         ok=False,
         interrupted=True,
@@ -4013,7 +3802,7 @@ def _interruptible_file_lock(
 
         with ExitStack() as stack:
             try:
-                stack.enter_context(file_lock(path, blocking=False))
+                stack.enter_context(file_lock(path, blocking=False, require_exclusive=True))
             except LockUnavailableError as exc:
                 now = time.monotonic()
                 if now >= deadline:
@@ -4564,6 +4353,7 @@ class WorkerPool:
         host_verification_pyxis_placement: PyxisExecutionPlacement | None = None,
         podman_machine: str | None = None,
         run_identity: str = "unknown",
+        git_lock_timeout: int = 7200,
     ) -> None:
         """Initialize the pool.
 
@@ -4593,13 +4383,17 @@ class WorkerPool:
             host_verification_pyxis_placement: Optional host-selected allocation and node.
             podman_machine: Selected connection for the verified local CI runner.
             run_identity: Bounded identity for holder diagnostics from this run.
+            git_lock_timeout: Maximum passive wait for an ordinary Git job.
 
         """
         if podman_machine is not None:
             validate_podman_machine_name(podman_machine)
         if not run_identity or len(run_identity) > 128:
             raise ValueError("run_identity must contain between 1 and 128 characters")
+        if isinstance(git_lock_timeout, bool) or git_lock_timeout <= 0:
+            raise ValueError("git_lock_timeout must be a positive integer")
         self._run_identity = run_identity
+        self._git_lock_timeout = git_lock_timeout
         self._podman_machine = podman_machine
         self._executor = ThreadPoolExecutor(
             max_workers=size,
@@ -4609,7 +4403,7 @@ class WorkerPool:
         self._completion_q = completion_q
         self._completion_wakeup: threading.Event | None = None
         self._completion_saturation: threading.Event | None = None
-        self._repo_locks: dict[str, _RepoLockEntry] = {}
+        self._repo_locks: dict[str, RepositoryOperationLock] = {}
         self._repo_locks_guard = threading.Lock()
         self._repo_intake_leases: dict[Path, AbstractContextManager[None]] = {}
         self._repo_intake_leases_guard = threading.Lock()
@@ -4636,78 +4430,49 @@ class WorkerPool:
         *,
         deadline_s: float | None = None,
         diagnostic_path: Path | None = None,
+        operation: str = "repository_operation",
+        timeout_s: float | None = None,
+        include_file_lock: bool = False,
     ) -> Iterator[None]:
-        """Serialize in-process worker operations for one repository."""
+        """Acquire the selected layers through one cached repository lock."""
+        del diagnostic_path
         with self._repo_locks_guard:
             entry = self._repo_locks.get(repo)
             if entry is None:
-                entry = _RepoLockEntry(threading.Lock())
-                self._repo_locks[repo] = entry
-            entry.users += 1
-
-        acquired = False
-        try:
-            while not acquired:
-                if self._shutdown.is_set():
-                    raise _GitLockInterruptedError
-                wait_s = _GIT_LOCK_WAIT_POLL_S
-                if deadline_s is not None:
-                    remaining_s = deadline_s - time.monotonic()
-                    if remaining_s <= 0:
-                        raise _GitLockTimeoutError(
-                            lock_path=diagnostic_path, lock_layer="in_process"
-                        )
-                    wait_s = min(wait_s, remaining_s)
-                acquired = entry.lock.acquire(timeout=wait_s)
-            if self._shutdown.is_set():
-                raise _GitLockInterruptedError
-            if deadline_s is not None and time.monotonic() >= deadline_s:
-                raise _GitLockTimeoutError(lock_path=diagnostic_path, lock_layer="in_process")
-            yield
-        finally:
-            if acquired:
-                entry.lock.release()
-            with self._repo_locks_guard:
-                entry.users -= 1
-                if entry.users == 0 and self._repo_locks.get(repo) is entry:
-                    self._repo_locks.pop(repo, None)
-
-    @contextmanager
-    def _advisory_repo_lock(
-        self,
-        job: GitJob,
-        path: Path,
-        *,
-        timeout_s: float | None = None,
-        deadline_s: float | None = None,
-    ) -> Iterator[None]:
-        """Hold the advisory lock and its best-effort diagnostic record."""
-        with _interruptible_file_lock(
-            path,
-            shutdown=self._shutdown,
-            timeout_s=timeout_s,
-            deadline_s=deadline_s,
-            lock_layer="advisory",
-        ):
-            holder_path = _repo_lock_holder_path(path)
-            holder_identity: _HolderSidecarIdentity | None = None
-            try:
-                holder_identity = _write_repo_lock_holder(
-                    holder_path,
-                    _holder_metadata(
-                        repo=job.repo, operation=job.op, run_identity=self._run_identity
-                    ),
+                entry = RepositoryOperationLock(
+                    repo,
+                    lock_dir=self._lock_dir,
+                    shutdown=self._shutdown,
+                    on_idle=self._evict_repo_lock,
                 )
-            except (OSError, RuntimeError, TypeError, ValueError):
-                logger.warning("repository-lock holder sidecar write failed")
-            try:
-                yield
-            finally:
-                if holder_identity is not None:
-                    try:
-                        _remove_repo_lock_holder(holder_path, holder_identity)
-                    except (OSError, RuntimeError):
-                        logger.warning("repository-lock holder sidecar cleanup failed")
+                self._repo_locks[repo] = entry
+            entry.reserve()
+        try:
+            if deadline_s is not None:
+                remaining_s = max(deadline_s - time.monotonic(), 0.0)
+                timeout_s = remaining_s if timeout_s is None else min(timeout_s, remaining_s)
+            if include_file_lock:
+                with entry.acquire(
+                    operation=operation,
+                    timeout_s=0.0 if timeout_s is None else timeout_s,
+                    reserved=True,
+                ):
+                    yield
+            else:
+                with entry.acquire_in_process(
+                    operation=operation,
+                    timeout_s=timeout_s,
+                    reserved=True,
+                ):
+                    yield
+        finally:
+            entry.release_reservation()
+
+    def _evict_repo_lock(self, entry: RepositoryOperationLock) -> None:
+        """Remove one idle repository lock from the pool cache."""
+        with self._repo_locks_guard:
+            if entry.users == 0 and self._repo_locks.get(entry.repository) is entry:
+                self._repo_locks.pop(entry.repository, None)
 
     def set_completion_notifiers(
         self,
@@ -5495,10 +5260,19 @@ class WorkerPool:
             request_deadline = getattr(job.request, "deadline_s", None)
             if request_deadline is not None:
                 deadline_s = min(deadline_s, request_deadline)
-            with self._repo_lock(job.repo, deadline_s=deadline_s):
+            with self._repo_lock(
+                job.repo,
+                deadline_s=deadline_s,
+                operation=_repository_lock_operation(
+                    job.descr,
+                    type(job.request).__name__,
+                ),
+            ):
                 receipt = self._github_job_runner.run(
                     job, shutdown=self._shutdown, deadline_s=deadline_s
                 )
+        except RepositoryLockError as exc:
+            return _git_lock_failure_result(exc)
         except _GitLockInterruptedError as exc:
             return _git_lock_failure_result(exc)
         except Exception as exc:
@@ -6280,75 +6054,53 @@ class WorkerPool:
             return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
 
     def _run_git(self, job: GitJob) -> JobResult:
-        """Run a git job (serialized per-repo, in-process AND cross-process).
+        """Run one Git job under the complete repository-lock contract.
 
-        Lock layering (documented invariant): the in-process
-        ``threading.Lock`` is OUTER and the cross-process
-        :func:`~hephaestus.utils.file_lock.file_lock` is INNER. The thread
-        lock elects a single thread per process first, so at most one thread
-        per process ever opens/holds the flock descriptor — sidestepping
-        flock's confusing same-process semantics (multiple fds on one file
-        within one process can still exclude each other) and keeping the
-        blocking flock wait to one thread. Both locks are held for the entire
-        operation because worktrees share ``.git``.
+        Passive lock wait has a separate budget. The Git command receives a
+        fresh execution deadline only after all repository locks are held.
         """
-        lock_path = _repo_lock_path(job.repo, self._lock_dir)
         lock_attempt_started_s = time.monotonic()
+        lock_wait_timeout_s = (
+            job.repository_lock_wait_timeout_s
+            if job.repository_lock_wait_timeout_s is not None
+            else self._git_lock_timeout
+        )
+        if job.deadline_s is not None:
+            lock_wait_timeout_s = min(
+                lock_wait_timeout_s,
+                max(job.deadline_s - lock_attempt_started_s, 0.0),
+            )
         try:
-            if job.repository_lock_wait_timeout_s is not None:
-                admission_deadline_s = lock_attempt_started_s + job.repository_lock_wait_timeout_s
-                with (
-                    self._repo_lock(
-                        job.repo,
-                        deadline_s=admission_deadline_s,
-                        diagnostic_path=lock_path,
-                    ),
-                    self._advisory_repo_lock(
-                        job,
-                        lock_path,
-                        deadline_s=admission_deadline_s,
-                    ),
-                ):
-                    operation_deadline_s = time.monotonic() + job.timeout_s
-                    timed_job = replace(
-                        job,
-                        deadline_s=operation_deadline_s,
-                        repository_lock_wait_timeout_s=None,
-                    )
-                    with git_utils.operation_deadline(
-                        operation_deadline_s,
-                        shutdown=self._shutdown,
-                    ):
-                        return self._dispatch_locked_git(timed_job)
-
-            deadline_s = time.monotonic() + job.timeout_s
-            if job.deadline_s is not None:
-                deadline_s = min(deadline_s, job.deadline_s)
-            job = replace(job, deadline_s=deadline_s)
-            with (
-                git_utils.operation_deadline(job.deadline_s, shutdown=self._shutdown),
-                self._repo_lock(
-                    job.repo,
-                    deadline_s=job.deadline_s,
-                    diagnostic_path=lock_path,
-                ),
-                self._advisory_repo_lock(
-                    job,
-                    lock_path,
-                    timeout_s=cast(
-                        float,
-                        git_utils.remaining_operation_timeout(job.timeout_s),
-                    ),
-                ),
+            with self._repo_lock(
+                job.repo,
+                operation=_repository_lock_operation(job.descr, job.op),
+                timeout_s=lock_wait_timeout_s,
+                include_file_lock=True,
             ):
-                return self._dispatch_locked_git(job)
+                operation_deadline_s = time.monotonic() + job.timeout_s
+                if job.deadline_s is not None:
+                    operation_deadline_s = min(operation_deadline_s, job.deadline_s)
+                timed_job = replace(
+                    job,
+                    deadline_s=operation_deadline_s,
+                    repository_lock_wait_timeout_s=None,
+                )
+                with git_utils.operation_deadline(
+                    operation_deadline_s,
+                    shutdown=self._shutdown,
+                ):
+                    return self._dispatch_locked_git(timed_job)
+        except RepositoryLockError as exc:
+            return _git_lock_failure_result(
+                exc,
+                job=job,
+                attempt_started_s=lock_attempt_started_s,
+            )
         except (_GitLockTimeoutError, _GitLockInterruptedError) as exc:
             return _git_lock_failure_result(
                 exc,
                 job=job,
-                default_lock_path=lock_path,
                 attempt_started_s=lock_attempt_started_s,
-                run_identity=self._run_identity,
             )
         except (_RebaseSigningEnvironmentError, _RemoteGitAuthenticationError) as exc:
             return _git_environment_failure_result(exc)
@@ -8952,8 +8704,14 @@ class WorkerPool:
                 remote_config=remote_config,
             )
             common_dir = manager.common_dir
-            preparation_key = f"repository-intake:{common_dir}"
-            with self._repo_lock(preparation_key, deadline_s=job.deadline_s):
+            preparation_key = (
+                f"repository-intake:{hashlib.sha256(os.fsencode(common_dir)).hexdigest()}"
+            )
+            with self._repo_lock(
+                preparation_key,
+                deadline_s=job.deadline_s,
+                operation=_repository_lock_operation(job.descr, job.op),
+            ):
                 with self._repo_intake_leases_guard:
                     lease = self._repo_intake_leases.get(common_dir)
                 acquired_lease = lease is None

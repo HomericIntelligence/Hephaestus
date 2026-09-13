@@ -344,6 +344,8 @@ class PipelineConfig:
     repository_lock_wait_timeout: int = 120
     repository_contention_timeout: int = 600
     run_identity: str = field(default_factory=lambda: uuid4().hex)
+    # Passive ordinary Git-job waits do not reduce subprocess timeouts.
+    git_lock_timeout: int = 7200
 
     @property
     def enable_advise(self) -> bool:

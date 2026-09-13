@@ -581,6 +581,7 @@ def _commit_issue_metadata(item: WorkItem) -> tuple[str, str] | None:
 #: failures never burn the implement budget, but a persistently broken
 #: remote must still terminate. Reset on any successful git job.
 GIT_ERROR_RETRY_CAP = 2
+_TERMINAL_GIT_LOCK_FAILURES = frozenset({"lock_timeout", "lock_metadata_error"})
 _TRANSIENT_REMEDIATION_PUBLICATION_FAILURES = frozenset({"unknown", "timeout", "transport"})
 
 #: A provider error can contain details from an untrusted tool event. Keep only
@@ -2027,6 +2028,10 @@ class ImplementationStage(Stage):
             # pre-agent work and must never be interpreted as permission to
             # overwrite the other owner.
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_reservation_collision")
+        lock_failure = item.payload.pop("git_lock_failure", None)
+        if lock_failure in _TERMINAL_GIT_LOCK_FAILURES:
+            item.payload.pop("git_error_retries", None)
+            return StageOutcome(Disposition.FINISH_FAIL, lock_failure)
         if item.payload.pop("git_error", None):
             # Worktree creation failed: transient infrastructure, not an
             # implement outcome. If the retry budget remains, retry the
@@ -4102,6 +4107,10 @@ class ImplementationStage(Stage):
     @staticmethod
     def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
         """Record publication success, a no-commit result, or Git failure."""
+        if not result.ok and result.error in _TERMINAL_GIT_LOCK_FAILURES:
+            item.payload["git_lock_failure"] = result.error
+            item.payload.pop("git_error_retries", None)
+            return
         if (
             isinstance(item.payload.get("remediation_pretest_input"), RemediationPretestInput)
             and not result.ok
@@ -4421,6 +4430,10 @@ class ImplementationStage(Stage):
         """
         if not result.ok:
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
+            if result.error in _TERMINAL_GIT_LOCK_FAILURES:
+                item.payload["git_lock_failure"] = result.error
+                item.payload.pop("git_error_retries", None)
+                return
             result_value = result.value if isinstance(result.value, dict) else {}
             if result_value.get("failure_kind") == "source_workspace_terminal":
                 item.payload["source_workspace_preserve"] = True
@@ -5282,6 +5295,10 @@ class ImplementationStage(Stage):
         if item.payload.pop("remediation_publish_permanent", False):
             item.payload.pop("git_error", None)
             return StageOutcome(Disposition.FINISH_FAIL, "remediation_publication_failed")
+        lock_failure = item.payload.pop("git_lock_failure", None)
+        if lock_failure in _TERMINAL_GIT_LOCK_FAILURES:
+            item.payload.pop("git_error_retries", None)
+            return StageOutcome(Disposition.FINISH_FAIL, lock_failure)
         if item.payload.pop("git_error", None):
             # Push failed: transient git/network trouble — RETRY the stage
             # without burning the implement budget, bounded by
