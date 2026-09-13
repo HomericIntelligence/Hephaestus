@@ -1819,6 +1819,56 @@ class TestPlanReviewStageOnJobDone:
 class TestPlanScopeAdmission:
     """Codex plan GO requires the implementation scope grammar."""
 
+    @pytest.mark.parametrize(
+        ("verdict", "snapshot_reads"),
+        [("GO", 3), ("BLOCKED", 2)],
+    )
+    def test_operator_block_after_snapshot_preserves_the_operator_audit(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        verdict: str,
+        snapshot_reads: int,
+    ) -> None:
+        """An operator block after the snapshot prevents stage writes."""
+        operator_audit = render_current_review(
+            "Wait for the operator to confirm the requirements.\n\nstate:plan-blocked",
+            revision=1,
+        )
+
+        class OperatorBlocksAfterSnapshotGitHub(FakeStageGitHub):
+            reads_until_block = 0
+
+            def issue_comments(self, issue_number: int) -> list[IssueComment]:
+                comments = super().issue_comments(issue_number)
+                if self.reads_until_block:
+                    self.reads_until_block -= 1
+                    if not self.reads_until_block:
+                        self.labels[issue_number] = {STATE_PLAN_BLOCKED}
+                        self.comments[issue_number][1] = operator_audit
+                return comments
+
+        github = OperatorBlocksAfterSnapshotGitHub(labels=[STATE_NEEDS_PLAN])
+        plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+        _seed_canonical_plan(github, 1, plan)
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict(verdict)
+        github.reads_until_block = snapshot_reads
+
+        outcome = PlanReviewStage().step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert github.reads_until_block == 0
+        assert github.mutation_log == []
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+        assert github.comments[1] == [render_current_plan(plan), operator_audit]
+        assert outcome == StageOutcome(
+            Disposition.BLOCKED,
+            "plan was blocked externally while review was in flight",
+        )
+
     def test_fresh_codex_go_blocks_an_unsupported_scope_heading(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
