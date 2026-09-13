@@ -22,12 +22,14 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
+from weakref import WeakSet
 
 from hephaestus.constants import LOG_FORMAT
 from hephaestus.logging.formatters import JsonFormatter, _LocalizedFormatter
 
 # Module-level lock protects the check-then-add TOCTOU in get_logger()
 _handler_setup_lock = threading.Lock()
+_setup_file_handlers: WeakSet[logging.FileHandler] = WeakSet()
 
 # Keep high-volume dependency traces out of Hephaestus verbose output.
 _MINIMUM_DEPENDENCY_LOG_LEVELS = {"markdown_it": logging.WARNING}
@@ -216,6 +218,28 @@ def _remove_console_handlers(logger: logging.Logger) -> None:
             handler.close()
 
 
+def _configure_file_handler(
+    logger: logging.Logger, log_file: str, formatter: logging.Formatter
+) -> None:
+    """Configure one file destination while the setup lock is held."""
+    abs_log_file = os.path.abspath(log_file)
+    existing_file = next(
+        (
+            handler
+            for handler in logger.handlers
+            if isinstance(handler, logging.FileHandler) and handler.baseFilename == abs_log_file
+        ),
+        None,
+    )
+    if existing_file is None:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        _setup_file_handlers.add(file_handler)
+    elif existing_file in _setup_file_handlers:
+        existing_file.setFormatter(formatter)
+
+
 def setup_logging(
     level: int = logging.INFO,
     log_file: str | None = None,
@@ -230,6 +254,9 @@ def setup_logging(
     In verbose mode, dependency warnings and errors remain visible. High-volume
     dependency debug records do not hide Hephaestus diagnostics. Stricter
     global levels remain effective.
+
+    Repeated calls update the formatter only on file handlers created by this
+    function. External file handlers retain their formatter.
 
     Args:
         level: Default logging level
@@ -269,19 +296,7 @@ def setup_logging(
     with _handler_setup_lock:
         # Deduplicate FileHandler by resolved path
         if log_file:
-            abs_log_file = os.path.abspath(log_file)
-            existing_file = next(
-                (
-                    h
-                    for h in root_logger.handlers
-                    if isinstance(h, logging.FileHandler) and h.baseFilename == abs_log_file
-                ),
-                None,
-            )
-            if existing_file is None:
-                file_handler = logging.FileHandler(log_file)
-                file_handler.setFormatter(formatter)
-                root_logger.addHandler(file_handler)
+            _configure_file_handler(root_logger, log_file, formatter)
 
         if primary_stream is None:
             _remove_console_handlers(root_logger)

@@ -2055,8 +2055,9 @@ An unsuccessful result does not prove that no external effect occurred.
 During forced shutdown, a failed typed learning result remains interrupted
 after host execution starts. The coordinator retains the uncertain claim;
 restart must not repeat an unconfirmed delivery. A successful typed host
-result survives shutdown and a later workspace-cleanup error. The learning
-stage still validates its delivery receipt before it records success.
+result with a validated delivery receipt survives shutdown and a later
+workspace-cleanup error. The learning stage still validates its delivery
+receipt before it records success.
 Without forced shutdown, a typed host rejection retains the existing bounded
 retry policy.
 
@@ -2100,6 +2101,12 @@ Git operations hold all three locks for the complete operation because linked
 worktrees share `.git`. `--git-lock-timeout` controls only passive lock wait.
 The Git command timeout starts after all three locks are held. The three
 acquisition steps use one monotonic deadline and interruptible polling.
+
+An explicit absolute Git deadline bounds both admission and execution. Before
+lock admission, a Git job whose deadline has expired returns `timeout`. A
+GitHub job whose deadline has expired returns `github_timeout`. These jobs do
+not create lock records or start work. An already-set shutdown signal takes
+priority and returns `interrupted`.
 
 The owner record has mode `0600`. It contains only the version, repository,
 operation, process ID, acquisition token, and UTC acquisition time. A waiter
