@@ -1073,6 +1073,7 @@ class MergeWaitCycleCompleted:
     readiness_fingerprint: tuple[str, ...] | None = None
     retryable: bool = False
     merge_sha: str | None = None
+    queue_residence_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         """Validate merge-cycle outcome metadata."""
@@ -1091,6 +1092,13 @@ class MergeWaitCycleCompleted:
             or any(character not in "0123456789abcdef" for character in self.merge_sha)
         ):
             raise ValueError("merge_sha must be a full commit SHA or None")
+        if self.queue_residence_timeout_s is not None and (
+            isinstance(self.queue_residence_timeout_s, bool)
+            or not isinstance(self.queue_residence_timeout_s, (int, float))
+            or not math.isfinite(self.queue_residence_timeout_s)
+            or self.queue_residence_timeout_s <= 0
+        ):
+            raise ValueError("queue_residence_timeout_s must be a finite positive number or None")
 
 
 @dataclass(frozen=True)

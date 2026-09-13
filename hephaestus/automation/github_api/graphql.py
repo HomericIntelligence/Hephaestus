@@ -1687,12 +1687,16 @@ def pull_request_merge_queue_reconciliation_query(
     def validate(data: dict[str, Any]) -> dict[str, Any]:
         repository = _repo_identity(data, owner, name)
         pull_request = repository.get("pullRequest")
+        pull_request_id = pull_request.get("id") if isinstance(pull_request, dict) else None
+        head_sha = pull_request.get("headRefOid") if isinstance(pull_request, dict) else None
         if (
             not isinstance(pull_request, dict)
             or pull_request.get("number") != pr_number
-            or not isinstance(pull_request.get("id"), str)
+            or not isinstance(pull_request_id, str)
+            or not pull_request_id
             or pull_request.get("state") != "OPEN"
-            or not isinstance(pull_request.get("headRefOid"), str)
+            or not isinstance(head_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", head_sha) is None
         ):
             raise ValueError("pull-request queue identity was malformed")
         entry = pull_request.get("mergeQueueEntry")

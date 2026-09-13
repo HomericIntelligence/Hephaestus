@@ -1481,6 +1481,7 @@ class PipelineGitHubJobRunner:
             fingerprint: tuple[str, ...] | None = None,
             can_retry: bool = False,
             merge_sha: str | None = None,
+            queue_residence_timeout_s: float | None = None,
         ) -> MergeWaitCycleCompleted:
             return MergeWaitCycleCompleted(
                 request=request,
@@ -1489,6 +1490,7 @@ class PipelineGitHubJobRunner:
                 readiness_fingerprint=fingerprint,
                 retryable=can_retry,
                 merge_sha=merge_sha,
+                queue_residence_timeout_s=queue_residence_timeout_s,
             )
 
         def terminal(state: object) -> str | None:
@@ -1598,6 +1600,8 @@ class PipelineGitHubJobRunner:
                 return "merge_policy_unavailable"
             if policy.bypassable_ruleset_ids and not policy.merge_queue_required:
                 return "merge_policy_bypassable"
+            if policy.merge_queue_required and policy.merge_queue_residence_timeout_s is None:
+                return "merge_policy_unavailable"
             if not policy.merge_queue_required and not policy.strict_update_enforced:
                 return "merge_policy_not_strict"
             return conversation_safety(policy)
@@ -1667,7 +1671,29 @@ class PipelineGitHubJobRunner:
             except Exception:
                 reconciliation = MergeQueueReconciliation.UNAVAILABLE
             if reconciliation is MergeQueueReconciliation.PRESENT:
-                return complete("merge_queue_wait")
+                base_branch = state.get("baseRefName")
+                if not isinstance(base_branch, str) or not base_branch:
+                    return complete("merge_queue_reconciliation_unavailable")
+                try:
+                    policy = github.effective_merge_policy(
+                        request.pr_number,
+                        base_branch,
+                        deadline_s=request.deadline_s,
+                        cancellation=request.cancellation,
+                    )
+                except Exception:
+                    policy = None
+                unsafe = policy_safety(policy)
+                if (
+                    unsafe is not None
+                    or not isinstance(policy, EffectiveMergePolicy)
+                    or not policy.merge_queue_required
+                ):
+                    return complete("merge_queue_reconciliation_unavailable")
+                return complete(
+                    "merge_queue_wait",
+                    queue_residence_timeout_s=policy.merge_queue_residence_timeout_s,
+                )
             if reconciliation is MergeQueueReconciliation.REMOVED:
                 return complete("merge_queue_removed")
             return complete("merge_queue_reconciliation_unavailable")
@@ -1761,7 +1787,11 @@ class PipelineGitHubJobRunner:
                 return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
             return complete("merge_not_ready", attempted=True, can_retry=True)
         if getattr(result, "queued", False):
-            return complete("merge_queued", attempted=True)
+            return complete(
+                "merge_queued",
+                attempted=True,
+                queue_residence_timeout_s=current_policy.merge_queue_residence_timeout_s,
+            )
         if result.status == 200:
             if result.body is None or result.body.get("merged") is not True:
                 return complete("merge_not_merged", attempted=True)
