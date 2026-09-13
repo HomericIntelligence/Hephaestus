@@ -121,8 +121,10 @@ def test_auxiliary_learning_keeps_source_lease_until_host_returns(tmp_path: Path
 
     assert result.ok
     assert host.blocked_cause is SourceWorkspacePreparationCause.LANE_LOCK_UNAVAILABLE
-    with manager.acquire(binding):
-        assert manager._require_receipt(7, SourceLane.IMPLEMENTATION).revision == first
+    assert not binding.cwd.exists()
+    replacement = manager.prepare_bounded(7, SourceLane.IMPLEMENTATION, second)
+    with manager.acquire(replacement):
+        assert manager._require_receipt(7, SourceLane.IMPLEMENTATION).revision == second
     assert len(host.requests) == 1
 
 

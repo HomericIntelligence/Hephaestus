@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from hephaestus.automation import git_runtime
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.repo_intake import (
     RepoIntakeError,
     RepoIntakeManager,
@@ -600,7 +601,7 @@ def test_mismatched_state_root_is_preserved_and_fails_closed(tmp_path: Path) -> 
     assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == receipt.revision
 
 
-@pytest.mark.parametrize("directory_name", [".automation-state", ".issue_implementer"])
+@pytest.mark.parametrize("directory_name", [".automation-state", Path(DEFAULT_STATE_DIR).name])
 def test_legacy_caller_state_blocks_before_intake_and_is_preserved(
     tmp_path: Path,
     directory_name: str,
@@ -628,7 +629,7 @@ def test_legacy_caller_state_blocks_before_intake_and_is_preserved(
     assert _caller_state(caller) == before
 
 
-@pytest.mark.parametrize("directory_name", [".automation-state", ".issue_implementer"])
+@pytest.mark.parametrize("directory_name", [".automation-state", Path(DEFAULT_STATE_DIR).name])
 def test_linked_caller_detects_legacy_state_in_primary_worktree(
     tmp_path: Path,
     directory_name: str,
@@ -718,7 +719,7 @@ def test_linked_caller_reports_all_registered_legacy_state_sources(tmp_path: Pat
     linked = tmp_path / "linked-caller"
     _run_git(primary, "worktree", "add", "-b", "feature", str(linked), "HEAD")
     primary_source = primary / "build" / ".automation-state"
-    linked_source = linked / "build" / ".issue_implementer"
+    linked_source = linked / DEFAULT_STATE_DIR
     for source, content in (
         (primary_source, b"primary\n"),
         (linked_source, b"linked\n"),
@@ -740,7 +741,7 @@ def test_linked_caller_reports_all_registered_legacy_state_sources(tmp_path: Pat
 def test_empty_legacy_caller_state_does_not_block_intake(tmp_path: Path) -> None:
     """Empty ordinary legacy directories do not claim state authority."""
     caller, remote = _make_repository(tmp_path)
-    for directory_name in (".automation-state", ".issue_implementer"):
+    for directory_name in (".automation-state", Path(DEFAULT_STATE_DIR).name):
         (caller / "build" / directory_name).mkdir(parents=True)
 
     receipt = _manager(caller, remote).prepare()
@@ -824,7 +825,7 @@ def test_conflicting_legacy_and_destination_state_is_preserved(tmp_path: Path) -
     source.mkdir(parents=True)
     source_marker = source / "source.json"
     source_marker.write_bytes(b"source\n")
-    destination = manager.state_dir / "build" / ".issue_implementer"
+    destination = manager.state_dir / DEFAULT_STATE_DIR
     manager.state_parent.mkdir(mode=0o700, parents=True)
     manager.state_dir.mkdir(mode=0o700)
     destination.mkdir(parents=True)

@@ -266,6 +266,78 @@ def test_typed_host_failure_remains_retryable(
         pool.shutdown(mark_interrupted=False)
 
 
+@pytest.mark.parametrize(
+    ("host_error", "delivery_receipt", "delivery_confirmed"),
+    [
+        (
+            None,
+            {
+                "pr_url": "https://github.com/HomericIntelligence/Mnemosyne/pull/1",
+                "pr_number": 1,
+                "commit_sha": "a" * 40,
+                "readback_head_sha": "a" * 40,
+            },
+            True,
+        ),
+        (None, None, False),
+        (
+            None,
+            {
+                "pr_url": "https://github.com/HomericIntelligence/Mnemosyne/pull/1",
+                "pr_number": 1,
+                "commit_sha": "a" * 40,
+                "readback_head_sha": "b" * 40,
+            },
+            False,
+        ),
+        ("unconfirmed delivery after cancellation", None, False),
+    ],
+)
+def test_forced_shutdown_retains_host_result_and_marks_uncertain_failure(
+    learning_request: AthenaSkillRequest,
+    host_error: str | None,
+    delivery_receipt: dict[str, object] | None,
+    delivery_confirmed: bool,
+) -> None:
+    """A forced stop preserves confirmed delivery and fences unknown effects."""
+    auxiliary = importlib.import_module("hephaestus.automation.pipeline.auxiliary_worker_pool")
+    forced = threading.Event()
+    completions = CompletionQueue(maxsize=1)
+    outcome = AthenaSkillResult(
+        kind="learn",
+        error=host_error,
+        delivery_receipt=delivery_receipt,
+    )
+
+    class CancelledHost(_Host):
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            self.calls.append(request)
+            self.started.set()
+            assert self.cancelled.wait(timeout=2)
+            return outcome
+
+    host = CancelledHost()
+    pool = auxiliary.AuxiliaryWorkerPool(
+        size=1, shutdown=forced, completion_q=completions, athena_skill_executor=host
+    )
+    try:
+        handle = pool.submit(AthenaSkillJob(request=learning_request), "DONE")
+        assert host.started.wait(timeout=1)
+        pool.shutdown()
+        done, result = completions.get(timeout=2)
+
+        assert done is handle
+        assert result.ok is delivery_confirmed
+        assert result.interrupted is (not delivery_confirmed)
+        assert result.value is outcome
+        assert result.error == host_error
+        assert len(host.calls) == 1
+        assert not learning_request.cwd.exists()
+        assert completions.empty()
+    finally:
+        pool.shutdown()
+
+
 def test_cleanup_failure_preserves_a_successful_delivery_result(
     monkeypatch: pytest.MonkeyPatch,
     learning_request: AthenaSkillRequest,
@@ -315,7 +387,16 @@ def test_forced_shutdown_publishes_cancelled_queued_job(
         def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
             self.started.set()
             assert self.release.wait(timeout=2)
-            return super().execute(request)
+            self.calls.append(request)
+            return AthenaSkillResult(
+                kind=request.kind,
+                delivery_receipt={
+                    "pr_url": "https://github.com/HomericIntelligence/Mnemosyne/pull/1",
+                    "pr_number": 1,
+                    "commit_sha": "a" * 40,
+                    "readback_head_sha": "a" * 40,
+                },
+            )
 
     host = BlockingHost()
     pool = auxiliary.AuxiliaryWorkerPool(

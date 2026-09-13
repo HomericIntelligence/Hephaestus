@@ -38,6 +38,7 @@ from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
     render_review_finding_journal,
 )
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
     implementation_remediation_reply_handoff_journal_entry,
@@ -9377,7 +9378,7 @@ class TestCreatePr:
         assert adapter.create_pr(7, "feature", "title", "Closes #7") == 8
         assert signature_cwds == [checkout]
         assert adapter._implementation_reply_lock_path(7).parent == (
-            state_root / "build" / ".issue_implementer" / "locks"
+            state_root / DEFAULT_STATE_DIR / "locks"
         )
 
     def test_repo_scoped_reuses_existing_open_pr(

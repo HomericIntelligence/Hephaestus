@@ -121,7 +121,9 @@ def test_cancelled_learning_lease_returns_claim_to_pending_and_retries_after_res
     request = _prepare_request(coordinator, item, revision)
     journal = coordinator._ctx_for(item).learning_journal
     manager = SourceWorkspaceManager(repo_root, repository="repo")
-    lock_path = manager._lane_lock_path(1, SourceLane.IMPLEMENTATION)
+    workspace = request.job.request.workspace
+    assert workspace is not None and workspace.lane is SourceLane.REVIEW
+    lock_path = manager._lane_lock_path(1, workspace.lane)
     waiting = threading.Event()
     cancel_ready = threading.Event()
 
@@ -144,12 +146,14 @@ def test_cancelled_learning_lease_returns_claim_to_pending_and_retries_after_res
             coordinator._submit(item, request)
             assert waiting.wait(timeout=5)
             coordinator.force_shutdown_event.set()
-            cancel_ready.set()
-            handle, result = coordinator.auxiliary_completion_q.get(timeout=5)
-            assert result.interrupted and not result.ok
-            assert result.error == "interrupted_before_start"
-            assert result.stderr_tail.startswith(f"{stop_error.__name__}:")
-            coordinator._handle_completion(handle, result, auxiliary=True)
+        # Release the competing owner before the cancelled worker cleans its
+        # prepared workspace. The host stays blocked until cancellation resumes.
+        cancel_ready.set()
+        handle, result = coordinator.auxiliary_completion_q.get(timeout=5)
+        assert result.interrupted and not result.ok
+        assert result.error == "interrupted_before_start"
+        assert result.stderr_tail.startswith(f"{stop_error.__name__}:")
+        coordinator._handle_completion(handle, result, auxiliary=True)
 
         assert host.calls == []
         record = journal.load(intent.key)
