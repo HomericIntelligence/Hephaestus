@@ -292,6 +292,101 @@ _CODEX_IMPLEMENTATION_INVENTORY_QUIESCENCE_SECONDS = 1.0
 _CODEX_IMPLEMENTATION_PROVIDER_RELAY = "vsock://2:443"
 
 
+def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
+    """Return a finite causal chain in command execution order."""
+    ordered: list[BaseException] = []
+    seen: set[int] = set()
+
+    def visit(current: BaseException | None) -> None:
+        if current is None or id(current) in seen:
+            return
+        seen.add(id(current))
+        cause = current.__cause__
+        context = None if current.__suppress_context__ else current.__context__
+        if context is not cause:
+            visit(context)
+        visit(cause)
+        ordered.append(current)
+
+    visit(exc)
+    return tuple(ordered)
+
+
+def _git_exception_diagnostics(
+    exc: BaseException,
+) -> tuple[int | None, str, str, str]:
+    """Return the decisive class, return code, and safe ordered streams."""
+    failures = tuple(
+        current
+        for current in _exception_chain(exc)
+        if isinstance(current, (subprocess.CalledProcessError, subprocess.TimeoutExpired))
+    )
+    if not failures:
+        return None, type(exc).__name__, "", ""
+    decisive = failures[-1]
+    returncode = (
+        decisive.returncode if isinstance(decisive, subprocess.CalledProcessError) else None
+    )
+
+    def streams(attribute: str) -> str:
+        limit = max(1, _TAIL // len(failures))
+        parts: list[str] = []
+        for failure in failures:
+            value = getattr(failure, attribute, None)
+            if attribute == "stdout" and value is None:
+                value = getattr(failure, "output", None)
+            text = bounded_git_diagnostic(value, limit=limit)
+            if text:
+                parts.append(text)
+        return bounded_git_diagnostic("\n".join(parts), limit=_TAIL)
+
+    return returncode, type(decisive).__name__, streams("stdout"), streams("stderr")
+
+
+def _publication_failure_diagnostic(
+    exc: BaseException,
+    *,
+    phase: str,
+    remote_state: str,
+    head_sha: str | None,
+) -> tuple[dict[str, object], str, str]:
+    """Build one bounded diagnostic sidecar for a failed publication."""
+    returncode, exception_class, stdout_tail, stderr_tail = _git_exception_diagnostics(exc)
+    diagnostic: dict[str, object] = {
+        "failure_kind": "publication",
+        "phase": phase,
+        "head_sha": head_sha,
+        "exception_class": exception_class,
+        "remote_state": remote_state,
+    }
+    if returncode is not None:
+        diagnostic["returncode"] = returncode
+    return diagnostic, stdout_tail, stderr_tail
+
+
+def _publication_failure_location(exc: BaseException) -> tuple[str, str]:
+    """Return the phase and remote state for a publication failure."""
+    if isinstance(exc, git_utils.BranchPublicationRemoteHeadChangedError):
+        return "push", "changed"
+    if isinstance(exc, git_utils.BranchPublicationRemoteHeadUnchangedError):
+        return "push", "unchanged"
+    if isinstance(exc, git_utils.BranchPublicationRemoteProbeError):
+        return "remote_probe", "unverified"
+    return "push", "unverified"
+
+
+def _ordered_git_diagnostics(*values: object) -> str:
+    """Return non-empty diagnostics in input order within one fixed bound."""
+    nonempty = [value for value in values if value]
+    if not nonempty:
+        return ""
+    per_value_limit = max(1, _TAIL // len(nonempty))
+    return bounded_git_diagnostic(
+        "\n".join(bounded_git_diagnostic(value, limit=per_value_limit) for value in nonempty),
+        limit=_TAIL,
+    )
+
+
 def _remediation_review_input(
     job: GitJob,
     *,
@@ -5765,8 +5860,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=str(exc.stdout or "")[-_TAIL:],
-                stderr_tail=str(exc.stderr or "")[-_TAIL:],
+                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
             )
         except InterruptedError:
             return JobResult(ok=False, error="interrupted", interrupted=True)
@@ -5885,8 +5980,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=str(exc.stdout or "")[-_TAIL:],
-                stderr_tail=str(exc.stderr or "")[-_TAIL:],
+                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
             )
         except OSError as exc:
             return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
@@ -6063,8 +6158,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=str(exc.stdout or "")[-_TAIL:],
-                stderr_tail=str(exc.stderr or "")[-_TAIL:],
+                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
             )
         except OSError as exc:
             return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
@@ -6130,8 +6225,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=str(exc.stdout or "")[-_TAIL:],
-                stderr_tail=str(exc.stderr or "")[-_TAIL:],
+                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
             )
         except InterruptedError:
             return JobResult(ok=False, error="interrupted", interrupted=True)
@@ -6139,8 +6234,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error=f"rc={exc.returncode}",
-                stdout_tail=(exc.stdout or "")[-_TAIL:],
-                stderr_tail=(exc.stderr or "")[-_TAIL:],
+                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
             )
 
     def _dispatch_locked_git(self, job: GitJob) -> JobResult:
@@ -6160,21 +6255,39 @@ class WorkerPool:
         exc: git_utils.BranchPublicationRemoteHeadChangedError
         | git_utils.BranchPublicationRemoteHeadUnchangedError
         | git_utils.BranchPublicationRemoteProbeError,
+        *,
+        head_sha: str | None = None,
     ) -> JobResult:
         """Map exact publication failures to the existing queue results."""
         if isinstance(exc, git_utils.BranchPublicationRemoteHeadChangedError):
+            diagnostic, stdout_tail, stderr_tail = _publication_failure_diagnostic(
+                exc, phase="push", remote_state="changed", head_sha=head_sha
+            )
             if exc.failure_kind == "lease_drift":
                 return JobResult(
                     ok=False,
                     error="publish failed: lease drift",
-                    value={"failure_kind": "publish_lease_drift"},
+                    value={
+                        "failure_kind": "publish_lease_drift",
+                        "publication_failure_diagnostic": diagnostic,
+                    },
+                    stdout_tail=stdout_tail,
+                    stderr_tail=stderr_tail,
                 )
             return JobResult(
                 ok=False,
                 error="publish failed: remote head changed",
-                value={"failure_kind": "publish_remote_head_changed"},
+                value={
+                    "failure_kind": "publish_remote_head_changed",
+                    "publication_failure_diagnostic": diagnostic,
+                },
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
             )
         if isinstance(exc, git_utils.BranchPublicationRemoteHeadUnchangedError):
+            diagnostic, stdout_tail, stderr_tail = _publication_failure_diagnostic(
+                exc, phase="push", remote_state="unchanged", head_sha=head_sha
+            )
             unchanged_failure = {
                 "unknown": ("publish failed: unknown publication failure", "publish_unknown"),
                 "timeout": ("publish failed: timeout", "publish_timeout"),
@@ -6182,12 +6295,29 @@ class WorkerPool:
             }.get(exc.failure_kind)
             if unchanged_failure is not None:
                 error, failure_kind = unchanged_failure
-                return JobResult(ok=False, error=error, value={"failure_kind": failure_kind})
+                return JobResult(
+                    ok=False,
+                    error=error,
+                    value={
+                        "failure_kind": failure_kind,
+                        "publication_failure_diagnostic": diagnostic,
+                    },
+                    stdout_tail=stdout_tail,
+                    stderr_tail=stderr_tail,
+                )
             return JobResult(
                 ok=False,
                 error="publish failed: remote head unchanged",
-                value={"failure_kind": "publish_remote_head_unchanged"},
+                value={
+                    "failure_kind": "publish_remote_head_unchanged",
+                    "publication_failure_diagnostic": diagnostic,
+                },
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
             )
+        diagnostic, stdout_tail, stderr_tail = _publication_failure_diagnostic(
+            exc, phase="remote_probe", remote_state="unverified", head_sha=head_sha
+        )
         probe_failure = {
             "timeout": ("publish failed: remote probe timeout", "publish_timeout"),
             "transport": (
@@ -6197,11 +6327,25 @@ class WorkerPool:
         }.get(exc.failure_kind)
         if probe_failure is not None:
             error, failure_kind = probe_failure
-            return JobResult(ok=False, error=error, value={"failure_kind": failure_kind})
+            return JobResult(
+                ok=False,
+                error=error,
+                value={
+                    "failure_kind": failure_kind,
+                    "publication_failure_diagnostic": diagnostic,
+                },
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+            )
         return JobResult(
             ok=False,
             error="publish failed: remote head probe failed",
-            value={"failure_kind": "publish_remote_probe_failed"},
+            value={
+                "failure_kind": "publish_remote_probe_failed",
+                "publication_failure_diagnostic": diagnostic,
+            },
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
         )
 
     @staticmethod
@@ -6336,8 +6480,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=str(exc.stdout or "")[-_TAIL:],
-                stderr_tail=str(exc.stderr or "")[-_TAIL:],
+                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
             )
         except InterruptedError:
             return JobResult(ok=False, error="interrupted", interrupted=True)
@@ -6345,8 +6489,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error=f"rc={exc.returncode}",
-                stdout_tail=(exc.stdout or "")[-_TAIL:],
-                stderr_tail=(exc.stderr or "")[-_TAIL:],
+                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
             )
 
     def run_cleanup_git(self, job: GitJob) -> JobResult:
@@ -6844,12 +6988,20 @@ class WorkerPool:
                     revalidate_remote=revalidate,
                 )
                 published = True
-        except (OSError, RuntimeError, subprocess.SubprocessError):
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            phase, remote_state = _publication_failure_location(exc)
+            diagnostic, stdout_tail, stderr_tail = _publication_failure_diagnostic(
+                exc,
+                phase=phase,
+                remote_state=remote_state,
+                head_sha=target,
+            )
             return JobResult(
                 ok=False,
                 value={
                     "initial_reservation_pending": True,
                     "head_sha": target,
+                    "publication_failure_diagnostic": diagnostic,
                     **(
                         {"source_receipt_refresh_required": True}
                         if job.op == "continue_rebase"
@@ -6857,6 +7009,8 @@ class WorkerPool:
                     ),
                 },
                 error="initial reservation publication failed; preserve the prepared head",
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
             )
         return replace(
             result,
@@ -7299,16 +7453,18 @@ class WorkerPool:
                 cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
             )
             remote_env, remote_config = revalidate()
-            git_utils.push_head_to_branch(
-                branch,
-                expected,
-                cwd,
+            publication = self._publish_rebased_head(
+                job,
+                branch=branch,
+                expected_remote_sha=expected,
+                cwd=cwd,
                 source_sha=source_sha,
-                timeout=job.timeout_s,
-                env=remote_env,
+                remote_env=remote_env,
                 remote_config=remote_config,
                 revalidate_remote=revalidate,
             )
+            if publication is not None:
+                return publication
         completed = JobResult(
             ok=True,
             value={"rebased": True, "published": publish, "head_sha": source_sha},
@@ -8226,12 +8382,14 @@ class WorkerPool:
         )
         if continued is not None:
             return continued
-        source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
+        source_sha = self._completed_rebase_head(
+            cwd,
+            expected_remote_sha=expected_remote_sha,
+            timeout=job.timeout_s,
+            record_source=record_source,
+        )
         if isinstance(source_sha, JobResult):
             return source_sha
-        if source_sha == expected_remote_sha:
-            return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
-        record_source(source_sha)
         policy = self._select_rebase_policy(job.repo)
         structural = self._run_rebase_structural_validation(
             cwd,
@@ -8262,16 +8420,18 @@ class WorkerPool:
                 cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
             )
             remote_env, remote_config = revalidate_remote()
-            git_utils.push_head_to_branch(
-                branch,
-                expected_remote_sha,
-                cwd,
+            publication = self._publish_rebased_head(
+                job,
+                branch=branch,
+                expected_remote_sha=expected_remote_sha,
+                cwd=cwd,
                 source_sha=source_sha,
-                timeout=job.timeout_s,
-                env=remote_env,
+                remote_env=remote_env,
                 remote_config=remote_config,
                 revalidate_remote=revalidate_remote,
             )
+            if publication is not None:
+                return publication
         completed = JobResult(
             ok=True,
             value={
@@ -8282,6 +8442,55 @@ class WorkerPool:
             },
         )
         return self._retain_rebase_review(job, completed, record)
+
+    def _completed_rebase_head(
+        self,
+        cwd: Path,
+        *,
+        expected_remote_sha: str,
+        timeout: int,
+        record_source: Callable[[str], WorkspaceBinding],
+    ) -> str | JobResult:
+        """Read and record the rewritten head after rebase continuation."""
+        source_sha = self._read_publish_head(cwd, timeout=timeout)
+        if isinstance(source_sha, JobResult):
+            return source_sha
+        if source_sha == expected_remote_sha:
+            return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
+        record_source(source_sha)
+        return source_sha
+
+    def _publish_rebased_head(
+        self,
+        job: GitJob,
+        *,
+        branch: str,
+        expected_remote_sha: str,
+        cwd: Path,
+        source_sha: str,
+        remote_env: dict[str, str],
+        remote_config: tuple[str, ...],
+        revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]],
+    ) -> JobResult | None:
+        """Publish one rebased head or translate its exact failure."""
+        try:
+            git_utils.push_head_to_branch(
+                branch,
+                expected_remote_sha,
+                cwd,
+                source_sha=source_sha,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+                revalidate_remote=revalidate_remote,
+            )
+        except (
+            git_utils.BranchPublicationRemoteHeadChangedError,
+            git_utils.BranchPublicationRemoteHeadUnchangedError,
+            git_utils.BranchPublicationRemoteProbeError,
+        ) as exc:
+            return self._branch_publication_error(exc, head_sha=source_sha)
+        return None
 
     def _git_validate_rebase_conflict(self, job: GitJob) -> JobResult:
         """Classify agent edits without changing Git state."""
@@ -8568,9 +8777,9 @@ class WorkerPool:
                 env=env,
                 timeout=timeout,
             )
-        except subprocess.CalledProcessError as exc:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             next_receipt: dict[str, object] | JobResult | None = None
-            if phase == "rebase_continue":
+            if phase == "rebase_continue" and isinstance(exc, subprocess.CalledProcessError):
                 next_receipt = self._conflict_receipt(
                     cwd,
                     remote=remote,
@@ -8586,8 +8795,7 @@ class WorkerPool:
                         value=next_receipt,
                         error="rebase conflict resolution required: additional conflicts found",
                     )
-            stdout_tail = bounded_git_diagnostic(exc.stdout, limit=_TAIL)
-            stderr_tail = bounded_git_diagnostic(exc.stderr, limit=_TAIL)
+            returncode, exception_class, stdout_tail, stderr_tail = _git_exception_diagnostics(exc)
             diagnostic = f"{stdout_tail}\n{stderr_tail}".lower()
             signing_failure = any(
                 marker in diagnostic
@@ -8600,18 +8808,25 @@ class WorkerPool:
             )
             failure_kind = "signing" if signing_failure else "continuation"
             receipt_error = next_receipt.error if isinstance(next_receipt, JobResult) else None
+            value: dict[str, object] = {
+                "failure_kind": failure_kind,
+                "phase": phase,
+                "exception_class": exception_class,
+                "receipt_error": receipt_error or "",
+            }
+            if returncode is not None:
+                value["returncode"] = returncode
             return JobResult(
                 ok=False,
-                value={
-                    "failure_kind": failure_kind,
-                    "phase": phase,
-                    "returncode": exc.returncode,
-                    "receipt_error": receipt_error,
-                },
+                value=value,
                 error=(
                     "host rebase continuation signing failed"
                     if signing_failure
-                    else f"host rebase {phase} failed"
+                    else (
+                        f"host rebase {phase} timed out"
+                        if isinstance(exc, subprocess.TimeoutExpired)
+                        else f"host rebase {phase} failed"
+                    )
                 ),
                 stdout_tail=stdout_tail,
                 stderr_tail=stderr_tail,
@@ -12583,9 +12798,15 @@ class WorkerPool:
                 remote_config=remote_config,
                 source_sha=source_sha,
             )
-        except (OSError, RuntimeError, subprocess.SubprocessError):
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             return self._writer_publication_failure(
-                job, worktree_path, branch, source_sha, baseline, refresh_phase=None
+                job,
+                worktree_path,
+                branch,
+                source_sha,
+                baseline,
+                failure=exc,
+                refresh_phase=None,
             )
         return self._writer_publication_receipt("published", source_sha, baseline, source_sha)
 
@@ -12670,9 +12891,15 @@ class WorkerPool:
                     remote_config=remote_config,
                     revalidate_remote=revalidate,
                 )
-            except (OSError, RuntimeError, subprocess.SubprocessError):
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 return self._writer_publication_failure(
-                    job, worktree, branch, source, expected, refresh_phase="publish"
+                    job,
+                    worktree,
+                    branch,
+                    source,
+                    expected,
+                    failure=exc,
+                    refresh_phase="publish",
                 )
             return self._writer_publication_receipt(
                 "published", source, expected, source, refresh_phase="publish"
@@ -12735,9 +12962,11 @@ class WorkerPool:
         head: str,
         baseline: str | None,
         *,
+        failure: BaseException,
         refresh_phase: str | None,
     ) -> JobResult:
         """Classify a failed push from an authoritative remote read."""
+        _, _, push_stdout, push_stderr = _git_exception_diagnostics(failure)
         try:
             observed = self._read_remote_branch_head(
                 worktree,
@@ -12746,8 +12975,20 @@ class WorkerPool:
                 expected_repo=job.transport_repository,
                 timeout=job.timeout_s,
             )
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            observed = JobResult(ok=False)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            returncode, exception_class, probe_stdout, probe_stderr = _git_exception_diagnostics(
+                exc
+            )
+            value: dict[str, object] = {"exception_class": exception_class}
+            if returncode is not None:
+                value["returncode"] = returncode
+            observed = JobResult(
+                ok=False,
+                error="cannot verify remote writer head",
+                value=value,
+                stdout_tail=probe_stdout,
+                stderr_tail=probe_stderr,
+            )
         if isinstance(observed, JobResult):
             state, remote_head = "probe_failed", None
         else:
@@ -12757,8 +12998,17 @@ class WorkerPool:
                 if observed == head
                 else ("remote_unchanged" if observed == baseline else "remote_changed")
             )
-        return self._writer_publication_receipt(
+        receipt = self._writer_publication_receipt(
             state, head, baseline, remote_head, refresh_phase=refresh_phase
+        )
+        return replace(
+            receipt,
+            stdout_tail=_ordered_git_diagnostics(
+                push_stdout, observed.stdout_tail if isinstance(observed, JobResult) else ""
+            ),
+            stderr_tail=_ordered_git_diagnostics(
+                push_stderr, observed.stderr_tail if isinstance(observed, JobResult) else ""
+            ),
         )
 
     @staticmethod
@@ -12806,8 +13056,18 @@ class WorkerPool:
                 timeout=timeout,
                 env=remote_env,
             ).stdout.split()
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            return JobResult(ok=False, error="cannot verify remote writer head")
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            returncode, exception_class, stdout_tail, stderr_tail = _git_exception_diagnostics(exc)
+            value: dict[str, object] = {"exception_class": exception_class}
+            if returncode is not None:
+                value["returncode"] = returncode
+            return JobResult(
+                ok=False,
+                error="cannot verify remote writer head",
+                value=value,
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+            )
         if len(fields) != 2 or not _is_full_commit_sha(fields[0]) or fields[1] != expected_ref:
             return JobResult(ok=False, error="cannot verify remote writer head")
         return fields[0]

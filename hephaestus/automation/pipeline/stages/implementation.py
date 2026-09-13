@@ -2558,6 +2558,8 @@ class ImplementationStage(Stage):
 
     def _rebase_continue_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Let the host validate, complete, sign, and lease-publish a paused rebase."""
+        if item.payload.pop(_REBASE_HEAD_DRIFT, None):
+            return self._finish_rebase(item, ctx)
         if item.payload.pop("rebase_error", None):
             return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         if item.payload.pop("rebase_complete", None):
@@ -2628,6 +2630,9 @@ class ImplementationStage(Stage):
     @staticmethod
     def _rebase_failure_note(item: WorkItem) -> str:
         """Return the bounded host diagnostic for a terminal rebase failure."""
+        summary = item.payload.get("git_failure_summary")
+        if isinstance(summary, str) and summary:
+            return f"implementation_rebase_failed: {summary}"[:500]
         return str(item.payload.get("rebase_error_detail") or "implementation_rebase_failed")
 
     def _adopted(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -3730,7 +3735,7 @@ class ImplementationStage(Stage):
             elif (
                 isinstance(result.value, dict)
                 and result.value.get("rebase_admission_changed") is True
-            ):
+            ) or _publication_remote_changed(result):
                 item.payload[_REBASE_HEAD_DRIFT] = True
             elif result.error == "rebase conflict restart required":
                 value = result.value if isinstance(result.value, dict) else {}
@@ -3768,6 +3773,8 @@ class ImplementationStage(Stage):
                     if value.get("published") is True and item.pr is not None:
                         item.payload["_post_remediation_review_head_sha"] = head_sha
                 item.payload["rebase_complete"] = True
+            elif _publication_remote_changed(result):
+                item.payload[_REBASE_HEAD_DRIFT] = True
             elif (result.error or "").startswith("rebase conflict resolution required"):
                 self._record_rebase_conflict(item, result)
                 item.payload.pop("rebase_conflict_agent_complete", None)
@@ -4122,6 +4129,8 @@ class ImplementationStage(Stage):
         if _COMMIT_PUSH_TERMINAL in item.payload:
             return
         if result.ok:
+            item.payload.pop("publication_failure_diagnostic", None)
+            item.payload.pop("git_failure_summary", None)
             item.payload.pop("remediation_recovery_commit_sha", None)
             receipt = result.value if isinstance(result.value, dict) else {}
             receipt_head = receipt.get("head_sha")
@@ -4165,6 +4174,13 @@ class ImplementationStage(Stage):
         recovery_commit = receipt.get("recovery_commit_sha")
         if is_full_commit_sha(recovery_commit):
             item.payload["remediation_recovery_commit_sha"] = recovery_commit
+        diagnostic = _publication_failure_diagnostic(result)
+        if diagnostic is not None:
+            item.payload["publication_failure_diagnostic"] = diagnostic
+            item.payload["git_failure_summary"] = _git_failure_summary(diagnostic)
+        else:
+            item.payload.pop("publication_failure_diagnostic", None)
+            item.payload["git_failure_summary"] = _git_failure_fallback(result)
         item.payload["git_error"] = True
 
     @staticmethod
@@ -4362,6 +4378,17 @@ class ImplementationStage(Stage):
             item.payload["rebase_error_policy"] = policy
         else:
             item.payload.pop("rebase_error_policy", None)
+        diagnostic = _rebase_failure_diagnostic(result)
+        if diagnostic is not None:
+            item.payload["rebase_failure_diagnostic"] = diagnostic
+            item.payload["git_failure_summary"] = _git_failure_summary(diagnostic)
+            return
+        publication = _publication_failure_diagnostic(result)
+        if publication is not None:
+            item.payload["publication_failure_diagnostic"] = publication
+            item.payload["git_failure_summary"] = _git_failure_summary(publication)
+            return
+        item.payload.pop("git_failure_summary", None)
 
     @staticmethod
     def _record_rebase_conflict(
@@ -5309,7 +5336,13 @@ class ImplementationStage(Stage):
             # Push failed: transient git/network trouble — RETRY the stage
             # without burning the implement budget, bounded by
             # GIT_ERROR_RETRY_CAP (M5).
-            outcome = self._git_retry(item, "commit_push failed")
+            summary = item.payload.get("git_failure_summary")
+            safe_summary = summary if isinstance(summary, str) and summary else ""
+            retry_note = (
+                f"commit_push failed: {safe_summary}" if safe_summary else "commit_push failed"
+            )
+            terminal_note = f"git_error: {safe_summary}" if safe_summary else "git_error"
+            outcome = self._git_retry(item, retry_note, terminal_note=terminal_note)
             if outcome.disposition is Disposition.RETRY:
                 item.state = (
                     REMEDIATION_PUBLISH_WAIT
@@ -5336,7 +5369,7 @@ class ImplementationStage(Stage):
         return StageOutcome(Disposition.ADVANCE, f"PR #{item.pr} ready for review")
 
     @staticmethod
-    def _git_retry(item: WorkItem, note: str) -> StageOutcome:
+    def _git_retry(item: WorkItem, note: str, *, terminal_note: str = "git_error") -> StageOutcome:
         """RETRY a transient git failure, bounded by GIT_ERROR_RETRY_CAP (M5).
 
         Transient worktree/push failures never burn the implement budget,
@@ -5365,7 +5398,7 @@ class ImplementationStage(Stage):
                 retries,
                 GIT_ERROR_RETRY_CAP,
             )
-            return StageOutcome(Disposition.FINISH_FAIL, "git_error")
+            return StageOutcome(Disposition.FINISH_FAIL, terminal_note[:500])
         logger.warning(
             "implementation:%s: %s; git retry %d/%d (implement budget untouched)",
             item.issue,
@@ -5385,11 +5418,112 @@ def _rebase_failure_diagnostic(result: JobResult) -> dict[str, object] | None:
         return None
     if value.get("phase") not in {"stage_conflicts", "validate_index", "rebase_continue"}:
         return None
-    return {
+    returncode = value.get("returncode")
+    if returncode is not None and (isinstance(returncode, bool) or not isinstance(returncode, int)):
+        return None
+    exception_class = value.get("exception_class")
+    if exception_class is not None and (
+        not isinstance(exception_class, str)
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", exception_class) is None
+    ):
+        return None
+    diagnostic: dict[str, object] = {
         "failure_kind": value["failure_kind"],
         "phase": value["phase"],
-        "returncode": value.get("returncode"),
         "receipt_error": redact_diagnostic_text(str(value.get("receipt_error") or ""))[:500],
         "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
         "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
     }
+    if returncode is not None:
+        diagnostic["returncode"] = returncode
+    if exception_class is not None:
+        diagnostic["exception_class"] = exception_class
+    return diagnostic
+
+
+def _publication_remote_changed(result: JobResult) -> bool:
+    """Return whether exact publication proved that the remote head changed."""
+    value = result.value
+    return isinstance(value, dict) and value.get("failure_kind") in {
+        "publish_lease_drift",
+        "publish_remote_head_changed",
+    }
+
+
+def _publication_failure_diagnostic(result: JobResult) -> dict[str, object] | None:
+    """Extract one allowlisted publication failure from a worker result."""
+    value = result.value
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("publication_failure_diagnostic")
+    if isinstance(raw, dict):
+        required = {"failure_kind", "phase", "head_sha", "exception_class", "remote_state"}
+        if not required.issubset(raw) or set(raw) - (required | {"returncode"}):
+            return None
+        failure_kind = raw.get("failure_kind")
+        phase = raw.get("phase")
+        head_sha = raw.get("head_sha")
+        remote_state = raw.get("remote_state")
+        exception_class = raw.get("exception_class")
+        returncode = raw.get("returncode")
+        if (
+            failure_kind != "publication"
+            or phase not in {"push", "remote_probe"}
+            or not is_full_commit_sha(head_sha)
+            or remote_state not in {"unchanged", "changed", "unverified"}
+            or not isinstance(exception_class, str)
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", exception_class) is None
+            or (
+                returncode is not None
+                and (isinstance(returncode, bool) or not isinstance(returncode, int))
+            )
+        ):
+            return None
+    else:
+        state = value.get("publication_state")
+        states = {
+            "remote_unchanged": ("push", "unchanged"),
+            "remote_changed": ("push", "changed"),
+            "probe_failed": ("remote_probe", "unverified"),
+        }
+        if state not in states or not is_full_commit_sha(value.get("head_sha")):
+            return None
+        phase, remote_state = states[state]
+        failure_kind = "publication"
+        head_sha = value["head_sha"]
+        exception_class = None
+        returncode = None
+    diagnostic: dict[str, object] = {
+        "failure_kind": failure_kind,
+        "phase": phase,
+        "head_sha": head_sha,
+    }
+    if returncode is not None:
+        diagnostic["returncode"] = returncode
+    if exception_class is not None:
+        diagnostic["exception_class"] = exception_class
+    diagnostic["remote_state"] = remote_state
+    if result.stdout_tail:
+        diagnostic["stdout_tail"] = redact_diagnostic_text(result.stdout_tail)[-4000:]
+    if result.stderr_tail:
+        diagnostic["stderr_tail"] = redact_diagnostic_text(result.stderr_tail)[-4000:]
+    return diagnostic
+
+
+def _git_failure_summary(diagnostic: dict[str, object]) -> str:
+    """Return one deterministic, redacted Git failure summary."""
+    ordered = (
+        ("failure_kind", diagnostic.get("failure_kind")),
+        ("phase", diagnostic.get("phase")),
+        ("remote_state", diagnostic.get("remote_state")),
+        ("returncode", diagnostic.get("returncode")),
+        ("stderr", diagnostic.get("stderr_tail")),
+        ("stdout", diagnostic.get("stdout_tail")),
+    )
+    summary = "; ".join(f"{key}={value}" for key, value in ordered if value not in {None, ""})
+    return redact_diagnostic_text(summary)[:500]
+
+
+def _git_failure_fallback(result: JobResult) -> str:
+    """Return a bounded fallback when a worker did not supply a valid receipt."""
+    return redact_diagnostic_text(result.error or "Git operation failed")[:500]

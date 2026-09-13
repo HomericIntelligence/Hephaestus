@@ -1544,6 +1544,27 @@ class TestDryRun:
 class TestFailBackRouting:
     """The Disposition->action table's FAIL_BACK rows."""
 
+    def test_diagnostic_failure_reason_is_durable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bounded stage summary becomes the durable terminal reason."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(2797, StageName.IMPLEMENTATION)
+        summary = (
+            "implementation_rebase_failed: failure_kind=publication; phase=push; "
+            "remote_state=unchanged; returncode=1; stderr=hook rejected"
+        )
+
+        coordinator._push_item(item, StageName.IMPLEMENTATION, enter=False)
+        coordinator._route(
+            claim_test_item(coordinator, item),
+            StageOutcome(Disposition.FINISH_FAIL, summary),
+        )
+
+        assert item.result is not None
+        assert item.result.reason == summary
+        assert len(item.result.reason) <= 500
+
     def test_merge_wait_late_thread_stand_down_is_terminal_not_rerouted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

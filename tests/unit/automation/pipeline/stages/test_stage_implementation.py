@@ -1573,6 +1573,7 @@ class TestGate:
                     "failure_kind": "signing",
                     "phase": "rebase_continue",
                     "returncode": 128,
+                    "exception_class": "CalledProcessError",
                     "receipt_error": "receipt unavailable",
                 },
                 stdout_tail="safe stdout",
@@ -1585,10 +1586,18 @@ class TestGate:
             "failure_kind": "signing",
             "phase": "rebase_continue",
             "returncode": 128,
+            "exception_class": "CalledProcessError",
             "receipt_error": "receipt unavailable",
             "stdout_tail": "safe stdout",
             "stderr_tail": "safe stderr",
         }
+
+        item.state = "REBASE_CONTINUE_WAIT"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_rebase_failed: failure_kind=signing; "
+            "phase=rebase_continue; returncode=128; stderr=safe stderr; stdout=safe stdout",
+        )
 
     def test_rebase_continuation_failure_redacts_all_durable_diagnostics(
         self, make_ctx: Any, make_work_item: Any
@@ -1629,6 +1638,42 @@ class TestGate:
         assert all("<redacted>" in value for value in persisted)
         assert all(len(value) <= 500 for value in persisted[:2])
         assert all(len(value) <= 4000 for value in persisted[2:])
+
+    def test_rebase_publication_failure_is_terminal_without_resubmission(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed exact publication terminates the completed rebase."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="publish failed: remote head unchanged",
+                value={
+                    "failure_kind": "publish_remote_head_unchanged",
+                    "publication_failure_diagnostic": {
+                        "failure_kind": "publication",
+                        "phase": "push",
+                        "head_sha": "b" * 40,
+                        "returncode": 1,
+                        "exception_class": "CalledProcessError",
+                        "remote_state": "unchanged",
+                    },
+                },
+                stderr_tail="hook rejected",
+            ),
+            ctx,
+        )
+
+        assert item.payload["publication_failure_diagnostic"]["head_sha"] == "b" * 40
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_rebase_failed: failure_kind=publication; phase=push; "
+            "remote_state=unchanged; returncode=1; stderr=hook rejected",
+        )
 
     def test_successful_conflict_agent_requires_host_completion_before_flags_clear(
         self, make_ctx: Any, make_work_item: Any
@@ -2533,7 +2578,7 @@ class TestGitErrorRetryCap:
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.FINISH_FAIL
-        assert outcome.note == "git_error"
+        assert outcome.note == "git_error: remote hung up"
 
     @pytest.mark.parametrize("error", ["lock_timeout", "lock_metadata_error"])
     def test_push_lock_failure_finishes_without_git_retry(
@@ -7051,7 +7096,7 @@ class TestCommitPushAndPrCreate:
         item.state = "PR_CREATE"
         retry = stage.step(item, ctx)
 
-        assert retry == StageOutcome(Disposition.RETRY, "commit_push failed")
+        assert retry == StageOutcome(Disposition.RETRY, "commit_push failed: remote hung up")
         assert item.state == "COMMIT_PUSH_WAIT"
         assert github.mutation_log == []
 
@@ -7111,7 +7156,7 @@ class TestCommitPushAndPrCreate:
 
         assert stage.step(item, make_ctx()) == StageOutcome(
             Disposition.RETRY,
-            "commit_push failed",
+            "commit_push failed: recovery commit publication failed",
         )
         retry_job = stage.step(item, make_ctx())
 
@@ -7181,7 +7226,7 @@ class TestCommitPushAndPrCreate:
 
         assert stage.step(item, make_ctx()) == StageOutcome(
             Disposition.RETRY,
-            "commit_push failed",
+            "commit_push failed: recovery commit publication failed",
         )
         assert item.state == "REMEDIATION_PUBLISH_WAIT"
         assert item.payload["remediation_recovery_receipt"] is receipt
@@ -7732,6 +7777,123 @@ class TestWriterPublicationRefresh:
             "refresh_phase": phase,
         }
 
+    def test_commit_push_failure_stores_publication_diagnostic(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The stage stores one validated publication failure and safe summary."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        receipt = self.receipt("remote_unchanged")
+        receipt["observed_remote_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="writer publication unavailable",
+                value=receipt,
+                stdout_tail="hook stdout",
+                stderr_tail="hook stderr",
+            ),
+            make_ctx(),
+        )
+
+        assert item.payload["publication_failure_diagnostic"] == {
+            "failure_kind": "publication",
+            "phase": "push",
+            "head_sha": "b" * 40,
+            "remote_state": "unchanged",
+            "stdout_tail": "hook stdout",
+            "stderr_tail": "hook stderr",
+        }
+        assert item.payload["git_failure_summary"] == (
+            "failure_kind=publication; phase=push; remote_state=unchanged; "
+            "stderr=hook stderr; stdout=hook stdout"
+        )
+
+    def test_push_retry_exhaustion_includes_publication_diagnostic(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The last ordinary publication retry keeps its safe failure summary."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.payload["git_error_retries"] = GIT_ERROR_RETRY_CAP
+        receipt = self.receipt("remote_unchanged")
+        receipt["observed_remote_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="writer publication unavailable",
+                value=receipt,
+                stderr_tail="hook rejected the commit",
+            ),
+            ctx,
+        )
+        item.state = "PR_CREATE"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "git_error: failure_kind=publication; phase=push; remote_state=unchanged; "
+            "stderr=hook rejected the commit",
+        )
+
+    def test_commit_push_success_clears_stale_failure_diagnostics(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A successful publication retires diagnostics from the prior attempt."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.payload.update(
+            {
+                "publication_failure_diagnostic": {"failure_kind": "publication"},
+                "git_failure_summary": "stale",
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=self.receipt("published")),
+            make_ctx(),
+        )
+
+        assert "publication_failure_diagnostic" not in item.payload
+        assert "git_failure_summary" not in item.payload
+
+    def test_malformed_publication_diagnostic_uses_safe_fallback(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An invalid receipt cannot publish arbitrary fields in the summary."""
+        secret = "sk" + "-live_12345678901234567890"
+        stage = ImplementationStage()
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=f"writer failed token={secret}",
+                value={
+                    "publication_failure_diagnostic": {
+                        "failure_kind": "publication",
+                        "phase": "unknown",
+                        "head_sha": "b" * 40,
+                        "exception_class": "CalledProcessError",
+                        "remote_state": "unchanged",
+                        "untrusted": secret,
+                    }
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert "publication_failure_diagnostic" not in item.payload
+        assert secret not in item.payload["git_failure_summary"]
+        assert "<redacted>" in item.payload["git_failure_summary"]
+        assert len(item.payload["git_failure_summary"]) <= 500
+
     @pytest.mark.parametrize("state", ["published", "remote_at_source", "remote_changed"])
     def test_complete_worker_result_preserves_publication_and_source_identity(
         self, make_ctx: Any, make_work_item: Any, state: str
@@ -7821,7 +7983,10 @@ class TestWriterPublicationRefresh:
         expected = {"phase": "rebase", "source_sha": "b" * 40, "expected_remote_sha": "c" * 40}
         assert item.payload["_commit_push_refresh"] == expected
         item.state = "PR_CREATE"
-        assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "commit_push failed")
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY,
+            "commit_push failed: failure_kind=publication; phase=push; remote_state=changed",
+        )
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, GitJob)
