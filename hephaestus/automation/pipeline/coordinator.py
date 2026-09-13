@@ -16,6 +16,7 @@ import hephaestus.automation.pipeline.seeding as _seeding
 from hephaestus.automation.pipeline.athena_executor_scope import (
     pipeline_requires_athena_executor,
 )
+from hephaestus.automation.pipeline.host_capabilities import HdiutilQuotaBackend, WorkerCapabilities
 from hephaestus.automation.pipeline.jobs import JobHandle
 from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, ROUTES, StageName
@@ -162,6 +163,10 @@ class Coordinator(
                 host_verification_pyxis_sha256=config.host_verification_pyxis_sha256,
                 host_verification_pyxis_authority=config.host_verification_pyxis_authority,
                 host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
+                host_capabilities=WorkerCapabilities(
+                    quota_backend=HdiutilQuotaBackend(),
+                    execution_boundary_id=config.run_identity,
+                ),
                 podman_machine=config.podman_machine,
                 git_lock_timeout=config.git_lock_timeout,
                 **run_identity_options,
