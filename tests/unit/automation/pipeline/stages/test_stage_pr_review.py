@@ -2403,6 +2403,23 @@ class TestPrReviewStageStep:
                 ),
             ),
             (
+                "review_worker_pool_host_profile",
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    (
+                        "tests/unit/automation/pipeline/test_worker_pool.py::"
+                        "TestWorkerPoolSubmitComplete::"
+                        "test_host_verification_profile_keeps_source_outside_writable_root"
+                    ),
+                    "-q",
+                    "--tb=short",
+                ),
+            ),
+            (
                 "review_stalled_consumer_verification",
                 (
                     "uv",
@@ -2670,6 +2687,30 @@ class TestPrReviewStageStep:
             (
                 f"{path}::TestWorkerPoolSubmitComplete::"
                 "test_immutable_host_allows_descriptor_walk_to_scratch"
+            ),
+            "-q",
+            "--tb=short",
+        )
+
+    def test_changed_worker_pool_runs_host_profile_boundary(self) -> None:
+        """A worker-pool change runs the fixed host-profile regression."""
+        path = "tests/unit/automation/pipeline/test_worker_pool.py"
+        specs = _host_verification_specs(
+            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        )
+
+        spec = next(spec for spec in specs if spec.descr == "review_worker_pool_host_profile")
+
+        assert spec.changed_path == path
+        assert spec.argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            (
+                f"{path}::TestWorkerPoolSubmitComplete::"
+                "test_host_verification_profile_keeps_source_outside_writable_root"
             ),
             "-q",
             "--tb=short",
