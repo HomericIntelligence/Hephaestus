@@ -3859,6 +3859,7 @@ class TestWorkerPoolSubmitComplete:
             if line.strip().startswith("(allow network-bind ")
         )
         assert network_bind_rules == (f"(allow network-bind (local unix-socket {scratch_entry}))",)
+        assert "(allow system-socket (socket-domain AF_UNIX))" in profile
         assert "(allow system-socket)" not in profile
         assert "(deny network-inbound)" in profile
         assert "(deny network-outbound)" in profile

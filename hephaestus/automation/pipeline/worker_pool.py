@@ -1744,9 +1744,8 @@ def _host_verification_profile(
             f'(allow file-read-metadata (literal "{_sandbox_string(canonical_tmp)}"))',
             f'(allow file-write* (subpath "{_sandbox_string(scratch)}"))',
             f'(allow file-write* (subpath "{_sandbox_string(pi_smoke_logs)}"))',
-            # Limit Unix socket binds to scratch. The imported system profile
-            # supplies its narrow AF_SYSTEM permissions. Do not grant access
-            # to all system sockets.
+            # Permit Unix socket creation. Limit its bind path to scratch.
+            "(allow system-socket (socket-domain AF_UNIX))",
             f'(allow network-bind (local unix-socket (subpath "{_sandbox_string(scratch)}")))',
             "(deny network-inbound)",
             "(deny network-outbound)",
