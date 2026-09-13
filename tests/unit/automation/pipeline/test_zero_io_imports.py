@@ -41,12 +41,14 @@ _FORBIDDEN_PREFIXES = (
 # Modules exempt from the zero-I/O guard entirely.
 # These closed worker-side modules execute I/O. The main pool owns general
 # jobs. The auxiliary pool owns host learning and cleanup only. git_cleanup
-# is the shared low-level implementation of its two accepted Git operations.
+# implements its two accepted Git operations. repository_lock owns the
+# repository file-lock boundary.
 _ALLOWLIST = frozenset(
     {
         "auxiliary_worker_pool.py",
         "codex_worktree_boundary.py",
         "git_cleanup.py",
+        "repository_lock.py",
         "worker_pool.py",
     }
 )
@@ -284,3 +286,26 @@ def test_forbidden_direct_cases() -> None:
     assert _forbidden("hephaestus.automation.claude_invoke.helpers") is True
     assert _forbidden("json") is False
     assert _forbidden("hephaestus.automation.pipeline") is False
+
+
+def test_review_values_work_without_loading_github_transport() -> None:
+    """Review value validation does not load GitHub request capability."""
+    probe = (
+        "import json, sys\n"
+        "import hephaestus.automation.review_audit\n"
+        "import hephaestus.automation.implementation_go_audit_receipt\n"
+        "from hephaestus.automation.review_anchors import validate_comments_to_diff\n"
+        "result = validate_comments_to_diff([{'path': 'a.py', 'line': 1, 'body': 'fix'}], '')\n"
+        "from hephaestus.automation.review_finding_history import "
+        "normalize_review_finding_collection\n"
+        "records, compacted = normalize_review_finding_collection([])\n"
+        "assert records == () and compacted['identities'] == []\n"
+        "assert len(result.corrections) == 1\n"
+        "assert result.corrections[0].reason == 'reviewed_diff_unavailable'\n"
+        "print(json.dumps([name for name in sys.modules if "
+        "name.startswith(('hephaestus.automation.github_api', 'hephaestus.github'))]))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], check=True, text=True, capture_output=True, timeout=10
+    )
+    assert json.loads(result.stdout) == []

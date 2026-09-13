@@ -1,48 +1,17 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
-from collections.abc import Sequence
 
 import hephaestus.automation.pipeline_github_reply_recovery as reply_recovery
-from hephaestus.automation.github_api.diff import ReviewAnchorCorrection
+from hephaestus.automation.review_anchors import (
+    ReviewAnchorCorrection as ReviewAnchorCorrection,
+    ReviewPublicationResult as ReviewPublicationResult,
+)
 
 from .pipeline.github_jobs import ImplementationReplyProgress
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 
-__all__ = ["reply_recovery"]
-
-
-class ReviewPublicationResult(list[dict[str, Any]]):
-    """Return published receipts and preserve findings that need correction."""
-
-    def __init__(
-        self,
-        receipts: Sequence[dict[str, Any]],
-        *,
-        validated_findings: Sequence[dict[str, Any]] = (),
-        corrections: Sequence[ReviewAnchorCorrection] = (),
-        unpublishable: Sequence[ReviewAnchorCorrection] = (),
-    ) -> None:
-        """Create a result for one immutable review publication attempt."""
-        super().__init__(dict(receipt) for receipt in receipts)
-        self.validated_findings = tuple(dict(finding) for finding in validated_findings)
-        self.corrections = tuple(corrections)
-        self.unpublishable = tuple(unpublishable)
-
-    @property
-    def published_receipts(self) -> tuple[dict[str, Any], ...]:
-        """Return the immutable view of receipts accepted by the host."""
-        return tuple(self)
-
-    @property
-    def anchor_corrections(self) -> tuple[ReviewAnchorCorrection, ...]:
-        """Return findings that need a valid anchor selected by the reviewer."""
-        return self.corrections
-
-    @property
-    def not_publishable(self) -> tuple[ReviewAnchorCorrection, ...]:
-        """Return findings that the current review cannot publish inline."""
-        return self.unpublishable
+__all__ = ["ReviewAnchorCorrection", "reply_recovery"]
 
 
 class PipelineGitHubReviews(_PipelineGitHubHost):

@@ -621,6 +621,14 @@ if _typing.TYPE_CHECKING:
         ) -> StepResult:
             raise NotImplementedError
 
+        def _route_threads_before_broad_review(
+            self, item: WorkItem, ctx: StageContext
+        ) -> StepResult:
+            raise NotImplementedError
+
+        def _handoff_implementation(self, item: WorkItem, ctx: StageContext) -> StepResult:
+            raise NotImplementedError
+
 
 else:
 

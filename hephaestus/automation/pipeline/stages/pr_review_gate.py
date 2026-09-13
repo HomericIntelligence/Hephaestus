@@ -2,7 +2,6 @@
 # ruff: noqa: F403, F405
 from hephaestus.automation.review_audit import is_clean_go_review
 
-from .pr_review_repository import _require_reviewed_unarmed_state
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 
@@ -287,7 +286,22 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
     @staticmethod
     def _require_reviewed_unarmed(item: WorkItem, ctx: StageContext) -> StepResult | None:
         """Verify that the reviewed PR is open, unarmed, and at the reviewed head."""
-        return _require_reviewed_unarmed_state(item, ctx, review_wait=REVIEW_WAIT)
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        pr_state = ctx.github.gh_pr_state(item.pr)
+        if pr_state is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        if pr_state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        if not _is_confirmed_open_unarmed(pr_state):
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        live_head = str(pr_state.get("headRefOid") or "")
+        if not reviewed_head or not live_head or reviewed_head != live_head:
+            item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload.pop("reviewed_pr_node_id", None)
+            return Continue(next_state=REVIEW_WAIT)
+        return None
 
     @staticmethod
     def _bind_current_head_for_negative(item: WorkItem, ctx: StageContext) -> StageOutcome | None:

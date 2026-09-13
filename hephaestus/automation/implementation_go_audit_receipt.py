@@ -9,17 +9,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from html import escape
 
-from hephaestus.automation.github_api.diff import (
-    empty_review_finding_compacted_outcomes,
-    normalize_review_finding_collection,
+from hephaestus.automation.review_anchors import (
     normalize_review_finding_records as normalize_review_finding_records,
-    review_finding_collection_payload,
 )
 from hephaestus.automation.review_audit import (
     MAX_RAW_FEEDBACK_CHARS,
     MAX_REVIEW_SUMMARY_CHARS,
     ReviewAudit,
     is_clean_go_review,
+)
+from hephaestus.automation.review_finding_history import (
+    empty_review_finding_compacted_outcomes,
+    normalize_review_finding_collection,
+    review_finding_collection_payload,
 )
 
 IMPLEMENTATION_GO_AUDIT_PENDING_PREFIX = "<!-- hephaestus-implementation-go-audit-pending:"

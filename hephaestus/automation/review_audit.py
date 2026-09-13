@@ -14,13 +14,13 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Literal, cast
 
-from hephaestus.automation.github_api.diff import (
+from hephaestus.automation.review_finding_history import (
     normalize_review_finding_collection,
     review_finding_collection_payload,
 )
 
 if TYPE_CHECKING:
-    from hephaestus.automation.github_api.diff import ReviewAnchorCorrection
+    from hephaestus.automation.review_anchors import ReviewAnchorCorrection
 
 from hephaestus.automation.pipeline.scope_retraction import (
     SCOPE_RETRACTION_MARKER_PREFIX,

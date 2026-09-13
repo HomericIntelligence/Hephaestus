@@ -2469,6 +2469,22 @@ Collaborators must not import their assembly module. Tests inject the
 transport command runner or patch the actual external boundary. Facade symbol
 copies and runtime monkeypatch translators are removed.
 
+`review_anchors.py` owns review finding values, bounds, and diff validation.
+`review_finding_history.py` validates compacted outcomes and bounded history
+collections. Both modules have no transport or logging dependency.
+`pr_review_verification_specs.py` owns the common host checks and configuration
+paths. `pr_review_verification_paths.py` owns the checks that changed paths
+select.
+`github_api.diff` keeps its compatibility exports and emits transport diagnostics.
+The review stage uses the value modules directly. `pr_review_findings.py` builds
+finding records and applies ordinary review receipts. `pr_review_history.py`
+retains finding provenance and reserves space for the next review batch.
+`pr_review_recovery.py` reconciles pending publications and applies exact-request
+receipts before a new review. `coordinator_observability.py` records bounded
+finding outcome events without review text. These owners retain the existing
+identity, deadline, recovery, and source-size limits. The anchor correction job
+retains the `Read,Glob,Grep` tool scope and worker-owned I/O.
+
 ## 12. Interrupt semantics and exit codes
 
 The coordinator handles SIGINT, SIGTERM, SIGHUP as a two-step shutdown. The

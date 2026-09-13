@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import sys
 from pathlib import Path
 
 from .pr_review_verification_specs import (
@@ -39,7 +39,9 @@ def _review_changed_paths(value: object) -> tuple[str, ...] | None:
             or any(component in {"", ".", ".."} for component in relative.parts)
         ):
             return None
-        encoded_bytes += len(os.fsencode(path)) + 1
+        encoded_bytes += (
+            len(path.encode(sys.getfilesystemencoding(), sys.getfilesystemencodeerrors())) + 1
+        )
         if encoded_bytes > _REVIEW_CHANGED_PATH_BYTES_MAX:
             return None
         paths.append(path)

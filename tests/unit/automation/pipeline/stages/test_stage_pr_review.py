@@ -19,6 +19,7 @@ from unittest.mock import patch
 import pytest
 
 import hephaestus.automation.pipeline.stages.pr_review_jobs as pr_review_jobs
+import hephaestus.automation.pipeline.stages.pr_review_recovery as pr_review_recovery
 from hephaestus.agents import runtime as agent_runtime
 from hephaestus.agents.execution_policy import AgentOperation
 from hephaestus.agents.workspace import SourceLane
@@ -7926,7 +7927,7 @@ class TestAuditPublication:
             remediation_threads=FrozenJson.snapshot([]),
         )
         item.payload[pr_review_jobs._PENDING_GITHUB_REQUEST] = request
-        item.payload[pr_review_jobs._PR_REVIEW_RECEIPT] = receipt
+        item.payload[pr_review_recovery._PR_REVIEW_RECEIPT] = receipt
         item.payload["review_not_publishable_findings"] = [
             {
                 "finding_id": "f" * 64,
@@ -8003,7 +8004,7 @@ class TestAuditPublication:
             final_compacted_outcomes=FrozenJson.snapshot(compacted),
         )
         item.payload[pr_review_jobs._PENDING_GITHUB_REQUEST] = request
-        item.payload[pr_review_jobs._PR_REVIEW_RECEIPT] = receipt
+        item.payload[pr_review_recovery._PR_REVIEW_RECEIPT] = receipt
         github = FakeStageGitHub()
 
         result = PrReviewStage().step(item, make_ctx(github=github))
@@ -8498,7 +8499,10 @@ class TestAuditPublication:
 
         assert stage.step(item, ctx) == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
         assert item.payload["pending_finding_recovery_needs_checkout"] is True
-        assert item.payload[pr_review_jobs._PENDING_FINDING_RECOVERY_DEADLINE] == request.deadline_s
+        assert (
+            item.payload[pr_review_recovery._PENDING_FINDING_RECOVERY_DEADLINE]
+            == request.deadline_s
+        )
         item.state = CLEANUP_REVIEW_WORKTREE_WAIT
         removal = stage.step(item, ctx)
         assert isinstance(removal, JobRequest)
@@ -8807,7 +8811,7 @@ class TestAuditPublication:
             final_finding_records=FrozenJson.snapshot([published]),
         )
         item.payload[pr_review_jobs._PENDING_GITHUB_REQUEST] = request
-        item.payload[pr_review_jobs._PR_REVIEW_RECEIPT] = receipt
+        item.payload[pr_review_recovery._PR_REVIEW_RECEIPT] = receipt
         item.payload["review_finding_records"] = [pending]
 
         PrReviewStage().step(item, make_ctx(github=FakeStageGitHub()))
