@@ -45,11 +45,12 @@ are constructed only when a metrics port is configured.
   `metrics_snapshot` record, and every alert transition appends an
   `alert_fired` or `alert_resolved` record carrying the alert `name`,
   `severity`, and `message`. Local JSONL and the in-memory event window are
-  diagnostic only. The loop verifies that the user-owned directory is outside
-  a Git worktree. If it is in a worktree, the loop uses
+  diagnostic only. The loop first tries the user-owned directory. It rejects a
+  directory below the resolved projects root or in a Git worktree. If that
+  directory is unsafe or unavailable, the loop tries
   `<system-temporary-directory>/.hephaestus-diagnostics/<projects-root-name>`.
-  If a location lookup fails, the loop tries the other location. If neither
-  location is safe or available, the loop disables the optional event log.
+  If neither location is safe or available, the loop disables the optional
+  event log.
   This policy keeps pre-intake files outside repository clone destinations and
   registered worktrees. It does not require write access to the projects-root
   parent. A write failure disables further

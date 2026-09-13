@@ -238,6 +238,50 @@ def test_default_pipeline_event_log_path_does_not_require_projects_parent(
     assert projects_dir.parent not in path.parents
 
 
+def test_default_pipeline_event_log_path_uses_temp_when_home_is_projects_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repo named for diagnostics cannot collide with the home candidate."""
+    projects_dir = tmp_path / "projects"
+    host_temp = tmp_path / "host-temp"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: projects_dir))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+
+    path = loop_runner._pipeline_event_log_path(
+        projects_dir,
+        [".hephaestus-diagnostics"],
+    )
+
+    assert path is not None
+    assert path.parent == host_temp / ".hephaestus-diagnostics" / projects_dir.name
+    assert projects_dir.resolve() not in path.resolve().parents
+
+
+def test_default_pipeline_event_log_path_disables_candidates_in_projects_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The optional event log stays off if each candidate can block intake."""
+    projects_dir = tmp_path / "projects"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: projects_dir))
+    monkeypatch.setattr(
+        tempfile,
+        "gettempdir",
+        lambda: str(projects_dir / "host-temp"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=loop_runner.LOG.name):
+        path = loop_runner._pipeline_event_log_path(
+            projects_dir,
+            [".hephaestus-diagnostics"],
+        )
+
+    assert path is None
+    assert any("event logging is disabled" in record.message for record in caplog.records)
+
+
 def test_default_pipeline_event_log_path_disables_unverified_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

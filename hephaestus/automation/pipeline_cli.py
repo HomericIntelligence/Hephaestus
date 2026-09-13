@@ -206,7 +206,7 @@ def _pipeline_event_log_path(
     log in a user diagnostic directory prevents registered worktrees and
     repository clone destinations from containing pre-intake files. If that
     directory is in a checkout, use the host temporary directory. Do not use
-    a candidate that has a Git worktree as an ancestor.
+    a candidate below the projects root or a Git worktree.
     """
     if not repos and not has_repo_source:
         return None
@@ -215,12 +215,15 @@ def _pipeline_event_log_path(
         (
             root / _PIPELINE_DIAGNOSTICS_DIR / projects_dir.name
             for root in _pipeline_diagnostics_roots()
-            if not _has_git_worktree_ancestor(root / _PIPELINE_DIAGNOSTICS_DIR / projects_dir.name)
+            if _is_safe_pipeline_diagnostics_dir(
+                root / _PIPELINE_DIAGNOSTICS_DIR / projects_dir.name,
+                projects_dir,
+            )
         ),
         None,
     )
     if diagnostics_dir is None:
-        LOG.warning("No event-log path is outside a Git worktree; event logging is disabled")
+        LOG.warning("No safe event-log path is available; event logging is disabled")
         return None
     return diagnostics_dir / f"pipeline-events-{stamp}-{os.getpid()}.jsonl"
 
@@ -231,6 +234,18 @@ def _pipeline_diagnostics_roots() -> Iterator[Path]:
         yield Path.home()
     with suppress(OSError, RuntimeError):
         yield Path(tempfile.gettempdir())
+
+
+def _is_safe_pipeline_diagnostics_dir(path: Path, projects_dir: Path) -> bool:
+    """Return whether diagnostics cannot occupy a repo-intake destination."""
+    try:
+        resolved = path.resolve()
+        resolved_projects_dir = projects_dir.resolve()
+    except (OSError, RuntimeError):
+        return False
+    if resolved == resolved_projects_dir or resolved_projects_dir in resolved.parents:
+        return False
+    return not _has_git_worktree_ancestor(resolved)
 
 
 def _has_git_worktree_ancestor(path: Path) -> bool:

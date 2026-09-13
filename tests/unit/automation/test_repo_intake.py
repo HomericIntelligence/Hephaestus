@@ -817,13 +817,14 @@ def test_registered_home_event_log_does_not_dirty_or_block_intake(
 ) -> None:
     """Pre-intake diagnostics do not dirty a home directory that is a worktree."""
     caller, remote = _make_repository(tmp_path)
+    projects_dir = tmp_path / "projects"
     host_temp = tmp_path / "host-temp"
     host_temp.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: caller))
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
     monkeypatch.chdir(caller)
     config = pipeline_cli.build_config(
-        pipeline_cli.parse_args([]),
+        pipeline_cli.parse_args(["--projects-dir", str(projects_dir)]),
         "acme",
         ["repo"],
     )
