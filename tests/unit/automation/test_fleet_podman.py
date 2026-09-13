@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -17,11 +18,11 @@ pytestmark = pytest.mark.precommit
 
 
 @pytest.fixture
-def engine_process(monkeypatch):
+def engine_process(monkeypatch, tmp_path: Path):
     """Replace only Podman with an executable that records exact arguments and environment."""
     from hephaestus.automation import fleet_podman
 
-    with tempfile.TemporaryDirectory(prefix="hephaestus-podman-", dir="/tmp") as directory:
+    with tempfile.TemporaryDirectory(prefix="hephaestus-podman-", dir=tmp_path) as directory:
         private = Path(directory).resolve() / "engine"
         private.mkdir(mode=0o700)
         executable = private / "podman"
@@ -43,7 +44,12 @@ def engine_process(monkeypatch):
         home.mkdir(mode=0o700)
         with socket.socket(socket.AF_UNIX) as connection:
             socket_path = private / "engine.sock"
-            connection.bind(str(socket_path))
+            previous_directory = Path.cwd()
+            try:
+                os.chdir(private)
+                connection.bind(socket_path.name)
+            finally:
+                os.chdir(previous_directory)
             socket_path.chmod(0o600)
             monkeypatch.setenv("CONTAINER_HOST", "unix:///untrusted.sock")
             monkeypatch.setenv("AGAMEMNON_API_KEY", "synthetic-only")
