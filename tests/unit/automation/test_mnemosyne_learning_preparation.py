@@ -318,6 +318,11 @@ def test_prepared_interpreter_keeps_validation_failures_terminal(
     cli.write_text("cli")
     monkeypatch.setattr(shutil, "which", lambda name: str(node if name == "node" else cli))
     monkeypatch.setattr(preparation, "node_runtime_files", lambda path: (path,))
+    monkeypatch.setattr(
+        preparation,
+        "node_package_tree",
+        lambda path: SimpleNamespace(root=tmp_path, digest="a" * 64, verify=lambda: None),
+    )
     verified = Mock()
     if failure == "artifact":
         verified.side_effect = [None, LearnDeliveryError("learning dependency artifact changed")]
@@ -543,6 +548,11 @@ def test_markdownlint_failure_prevents_validation_receipt(
     cli.write_text("cli")
     monkeypatch.setattr(shutil, "which", lambda name: str(node if name == "node" else cli))
     monkeypatch.setattr(preparation, "node_runtime_files", lambda path: (path,))
+    monkeypatch.setattr(
+        preparation,
+        "node_package_tree",
+        lambda path: SimpleNamespace(root=tmp_path, digest="a" * 64, verify=lambda: None),
+    )
 
     @contextmanager
     def prepared(_path: Path, _runner: object) -> Iterator[SimpleNamespace]:
@@ -566,6 +576,88 @@ def test_markdownlint_failure_prevents_validation_receipt(
 
     with pytest.raises(LearnDeliveryError, match="markdownlint"):
         MnemosynePluginValidator(runner=runner).validate(tmp_path)
+
+
+def test_markdownlint_profile_binds_the_complete_npm_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Markdown lint receives one validated npm root and checks it after lint."""
+    import json
+    import platform
+    import shutil
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from hephaestus.automation import mnemosyne_learning_preparation as preparation
+
+    node = tmp_path / "node"
+    node.write_text("node")
+    npm_root = tmp_path / "npm" / "node_modules"
+    cli_package = npm_root / "markdownlint-cli2"
+    cli_package.mkdir(parents=True)
+    cli = cli_package / "markdownlint-cli2-bin.mjs"
+    cli.write_text("import { globby } from 'globby';\n")
+    (cli_package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "markdownlint-cli2",
+                "version": "0.20.0",
+                "bin": {"markdownlint-cli2": "markdownlint-cli2-bin.mjs"},
+            }
+        )
+    )
+    events: list[str] = []
+
+    def verify_package_scope() -> None:
+        events.append("tree-verify")
+
+    package_scope = SimpleNamespace(
+        root=npm_root, digest="a" * 64, verify=Mock(side_effect=verify_package_scope)
+    )
+    scope_calls: list[Path] = []
+
+    def package_tree(value: Path) -> SimpleNamespace:
+        scope_calls.append(value)
+        return package_scope
+
+    monkeypatch.setattr(shutil, "which", lambda name: str(node if name == "node" else cli))
+    monkeypatch.setattr(preparation, "node_runtime_files", lambda path: (path,))
+    monkeypatch.setattr(preparation, "node_package_tree", package_tree, raising=False)
+
+    @contextmanager
+    def prepared(_path: Path, _runner: object) -> Iterator[SimpleNamespace]:
+        yield SimpleNamespace(
+            root=tmp_path,
+            runtime=tmp_path,
+            environment=tmp_path / "environment",
+            uv=tmp_path / "uv",
+            verify=lambda _path: None,
+        )
+
+    monkeypatch.setattr(preparation, "prepare_dependencies", prepared)
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    original = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: str(path) == "/usr/bin/sandbox-exec" or original(path)
+    )
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[-1] == "skills/*.md":
+            events.append("lint")
+            profile = argv[2]
+            assert f"(subpath {json.dumps(str(npm_root))})" in profile
+            assert f"(subpath {json.dumps(str(npm_root.parent))})" not in profile
+            assert "(deny network*)" in profile
+        return subprocess.CompletedProcess(argv, 0)
+
+    result = MnemosynePluginValidator(runner=runner).validate(tmp_path)
+
+    assert result[1].endswith("skills/*.md")
+    assert scope_calls == [cli]
+    assert package_scope.verify.call_count == 1
+    assert events == ["lint", "tree-verify"]
 
 
 @pytest.mark.parametrize("bucket", ["pass", "fail", "pending", "cancel", "skipping", "unknown"])

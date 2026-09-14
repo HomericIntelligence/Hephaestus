@@ -1952,9 +1952,13 @@ def _git_exec_path_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
 
 @pytest.fixture
 def safe_git_exec_tmp_path(tmp_path: Path) -> Iterator[Path]:
-    """Put Git path fixtures below repository-owned safe path components."""
-    root = Path.cwd() / "build" / "pytest-host-git-exec-path" / f"{os.getpid()}-{tmp_path.name}"
-    root.mkdir(parents=True)
+    """Put Git path fixtures below a private user-cache child."""
+    cache_root = Path.home() / ".cache"
+    cache_root.mkdir(mode=0o700, exist_ok=True)
+    fixture_root = cache_root / "hephaestus-test-git-exec-path"
+    fixture_root.mkdir(mode=0o700, exist_ok=True)
+    root = fixture_root / f"{os.getpid()}-{tmp_path.name}"
+    root.mkdir(mode=0o700)
     try:
         yield root
     finally:
