@@ -658,6 +658,7 @@ class TestAdmissionAccounting:
         assert raised.value is cancelled
         assert breaker.state is CircuitBreakerState.HALF_OPEN
         assert breaker.call(lambda: "replacement") == "replacement"
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
 
     def test_reset_invalidates_active_failure_completion(self) -> None:
         """A failure admitted before reset cannot score the reset breaker phase."""
