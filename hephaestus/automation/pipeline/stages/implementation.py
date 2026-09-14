@@ -5493,8 +5493,22 @@ def _publication_failure_diagnostic(result: JobResult) -> dict[str, object] | No
         phase, remote_state = states[state]
         failure_kind = "publication"
         head_sha = value["head_sha"]
-        exception_class = None
-        returncode = None
+        process_failure = result.process_failure
+        if process_failure is None:
+            exception_class = None
+            returncode = None
+        else:
+            exception_class = process_failure.exception_class
+            returncode = process_failure.returncode
+            if (
+                not isinstance(exception_class, str)
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", exception_class) is None
+                or (
+                    returncode is not None
+                    and (isinstance(returncode, bool) or not isinstance(returncode, int))
+                )
+            ):
+                return None
     diagnostic: dict[str, object] = {
         "failure_kind": failure_kind,
         "phase": phase,

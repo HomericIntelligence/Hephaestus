@@ -9,6 +9,14 @@ from .routing import StageName
 
 
 @dataclass(frozen=True)
+class ProcessFailureMetadata:
+    """Closed exception metadata for one failed process."""
+
+    exception_class: str
+    returncode: int | None = None
+
+
+@dataclass(frozen=True)
 class JobResult:
     """Result of a completed pipeline job."""
 
@@ -24,6 +32,7 @@ class JobResult:
     session_binding: Any = None
     session_lost: bool = False
     observed_skill_invocations: tuple[str, ...] = ()
+    process_failure: ProcessFailureMetadata | None = None
 
 
 @dataclass(frozen=True, eq=False)

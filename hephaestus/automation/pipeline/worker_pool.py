@@ -92,7 +92,10 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillResult,
     athena_workspace_lease,
 )
-from hephaestus.automation.pipeline.diagnostics import redact_diagnostic_text
+from hephaestus.automation.pipeline.diagnostics import (
+    bounded_pipeline_diagnostic,
+    redact_diagnostic_text,
+)
 from hephaestus.automation.pipeline.git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
@@ -133,6 +136,7 @@ from hephaestus.automation.pipeline.jobs import (
     GitJob,
     JobHandle,
     JobResult,
+    ProcessFailureMetadata,
     RemediationPretestInput,
     remediation_pretest_result_digest,
     validate_job_workspace,
@@ -251,7 +255,6 @@ from hephaestus.config.child_environments import (
     build_python_phase_env,
     read_approved_parent_env,
 )
-from hephaestus.diagnostics import bounded_git_diagnostic
 from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
@@ -335,10 +338,10 @@ def _git_exception_diagnostics(
             value = getattr(failure, attribute, None)
             if attribute == "stdout" and value is None:
                 value = getattr(failure, "output", None)
-            text = bounded_git_diagnostic(value, limit=limit)
+            text = bounded_pipeline_diagnostic(value, limit=limit)
             if text:
                 parts.append(text)
-        return bounded_git_diagnostic("\n".join(parts), limit=_TAIL)
+        return bounded_pipeline_diagnostic("\n".join(parts), limit=_TAIL)
 
     return returncode, type(decisive).__name__, streams("stdout"), streams("stderr")
 
@@ -381,8 +384,8 @@ def _ordered_git_diagnostics(*values: object) -> str:
     if not nonempty:
         return ""
     per_value_limit = max(1, _TAIL // len(nonempty))
-    return bounded_git_diagnostic(
-        "\n".join(bounded_git_diagnostic(value, limit=per_value_limit) for value in nonempty),
+    return bounded_pipeline_diagnostic(
+        "\n".join(bounded_pipeline_diagnostic(value, limit=per_value_limit) for value in nonempty),
         limit=_TAIL,
     )
 
@@ -2273,9 +2276,7 @@ def _tail_file(path: Path) -> str:
     """Read a bounded diagnostic tail from a resource-limited child log."""
     try:
         with path.open("rb") as output:
-            output.seek(0, os.SEEK_END)
-            output.seek(max(output.tell() - _TAIL, 0))
-            return output.read().decode(errors="replace")
+            return bounded_pipeline_diagnostic(output.read(), limit=_TAIL)
     except OSError:
         return ""
 
@@ -4806,8 +4807,8 @@ class WorkerPool:
         return replace(
             result,
             duration_s=time.monotonic() - start,
-            stdout_tail=result.stdout_tail[-_TAIL:] if result.stdout_tail else "",
-            stderr_tail=result.stderr_tail[-_TAIL:] if result.stderr_tail else "",
+            stdout_tail=bounded_pipeline_diagnostic(result.stdout_tail, limit=_TAIL),
+            stderr_tail=bounded_pipeline_diagnostic(result.stderr_tail, limit=_TAIL),
             worker_id=worker_id,
         )
 
@@ -5591,8 +5592,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error=f"rc={exc.returncode}",
-                stdout_tail=(exc.stdout or "")[-_TAIL:],
-                stderr_tail=(exc.stderr or "")[-_TAIL:],
+                stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
             )
         except AgentSessionLostError:
             return JobResult(ok=False, error="review-session-lost", session_lost=True)
@@ -5624,14 +5625,14 @@ class WorkerPool:
                     return JobResult(
                         ok=False,
                         error=f"parse failed: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
-                        stdout_tail=stdout[-_TAIL:],
+                        stdout_tail=bounded_pipeline_diagnostic(stdout, limit=_TAIL),
                         session_id=session_id,
                         session_binding=agent_result.session_binding,
                     )
             return JobResult(
                 ok=True,
                 value=value if value is not None else stdout,
-                stdout_tail=stdout[-_TAIL:],
+                stdout_tail=bounded_pipeline_diagnostic(stdout, limit=_TAIL),
                 session_id=session_id,
                 session_binding=agent_result.session_binding,
                 observed_skill_invocations=agent_result.observed_skill_invocations,
@@ -5761,7 +5762,7 @@ class WorkerPool:
                 return JobResult(
                     ok=False,
                     error=f"parse failed: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
-                    stdout_tail=stdout[-_TAIL:],
+                    stdout_tail=bounded_pipeline_diagnostic(stdout, limit=_TAIL),
                     session_id=session_id,
                     session_binding=session_binding,
                 )
@@ -5769,7 +5770,7 @@ class WorkerPool:
         return JobResult(
             ok=True,
             value=value if value is not None else stdout,
-            stdout_tail=stdout[-_TAIL:],
+            stdout_tail=bounded_pipeline_diagnostic(stdout, limit=_TAIL),
             session_id=session_id,
             session_binding=session_binding,
             observed_skill_invocations=observed_skill_invocations,
@@ -5852,16 +5853,16 @@ class WorkerPool:
             return JobResult(
                 ok=result.returncode == 0,
                 value=None,
-                stdout_tail=result.stdout[-_TAIL:],
-                stderr_tail=result.stderr[-_TAIL:],
+                stdout_tail=bounded_pipeline_diagnostic(result.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(result.stderr, limit=_TAIL),
                 error=None if result.returncode == 0 else f"rc={result.returncode}",
             )
         except subprocess.TimeoutExpired as exc:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
-                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
+                stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
             )
         except InterruptedError:
             return JobResult(ok=False, error="interrupted", interrupted=True)
@@ -5980,8 +5981,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
-                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
+                stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
             )
         except OSError as exc:
             return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
@@ -6158,8 +6159,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
-                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
+                stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
             )
         except OSError as exc:
             return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
@@ -6225,8 +6226,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
-                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
+                stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
             )
         except InterruptedError:
             return JobResult(ok=False, error="interrupted", interrupted=True)
@@ -6234,8 +6235,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error=f"rc={exc.returncode}",
-                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
-                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
+                stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
             )
 
     def _dispatch_locked_git(self, job: GitJob) -> JobResult:
@@ -6480,8 +6481,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="timeout",
-                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
-                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
+                stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
             )
         except InterruptedError:
             return JobResult(ok=False, error="interrupted", interrupted=True)
@@ -6489,8 +6490,8 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error=f"rc={exc.returncode}",
-                stdout_tail=bounded_git_diagnostic(exc.stdout, limit=_TAIL),
-                stderr_tail=bounded_git_diagnostic(exc.stderr, limit=_TAIL),
+                stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
             )
 
     def run_cleanup_git(self, job: GitJob) -> JobResult:
@@ -10993,7 +10994,7 @@ class WorkerPool:
                 value={
                     "outcome": "failed",
                     "failure_kind": kind,
-                    "cause": bounded_git_diagnostic(cause, limit=_ERR_MAX),
+                    "cause": bounded_pipeline_diagnostic(cause, limit=_ERR_MAX),
                 },
             )
 
@@ -11122,7 +11123,7 @@ class WorkerPool:
 
         def fail(kind: str, cause: str) -> JobResult:
             receipt["failure_kind"] = kind
-            receipt["cause"] = bounded_git_diagnostic(cause, limit=_ERR_MAX)
+            receipt["cause"] = bounded_pipeline_diagnostic(cause, limit=_ERR_MAX)
             return JobResult(ok=False, value=dict(receipt), error=f"dirty recovery {kind}")
 
         if (
@@ -12979,7 +12980,13 @@ class WorkerPool:
         direct_reservation: bool = False,
     ) -> JobResult:
         """Classify a failed push from an authoritative remote read."""
-        _, _, push_stdout, push_stderr = _git_exception_diagnostics(failure)
+        push_returncode, push_exception_class, push_stdout, push_stderr = (
+            _git_exception_diagnostics(failure)
+        )
+        push_failure = ProcessFailureMetadata(
+            exception_class=push_exception_class,
+            returncode=push_returncode,
+        )
         try:
             observed = self._read_remote_branch_head(
                 worktree,
@@ -13001,6 +13008,10 @@ class WorkerPool:
                 value=value,
                 stdout_tail=probe_stdout,
                 stderr_tail=probe_stderr,
+                process_failure=ProcessFailureMetadata(
+                    exception_class=exception_class,
+                    returncode=returncode,
+                ),
             )
         if isinstance(observed, JobResult):
             state, remote_head = "probe_failed", None
@@ -13021,6 +13032,9 @@ class WorkerPool:
             ),
             stderr_tail=_ordered_git_diagnostics(
                 push_stderr, observed.stderr_tail if isinstance(observed, JobResult) else ""
+            ),
+            process_failure=(
+                observed.process_failure if isinstance(observed, JobResult) else push_failure
             ),
         )
         if not direct_reservation:
@@ -13121,6 +13135,10 @@ class WorkerPool:
                 value=value,
                 stdout_tail=stdout_tail,
                 stderr_tail=stderr_tail,
+                process_failure=ProcessFailureMetadata(
+                    exception_class=exception_class,
+                    returncode=returncode,
+                ),
             )
         if len(fields) != 2 or not _is_full_commit_sha(fields[0]) or fields[1] != expected_ref:
             return JobResult(ok=False, error="cannot verify remote writer head")

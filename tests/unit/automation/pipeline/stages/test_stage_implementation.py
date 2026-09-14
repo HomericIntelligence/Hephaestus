@@ -7861,6 +7861,74 @@ class TestWriterPublicationRefresh:
             "stderr=hook stderr; stdout=hook stdout"
         )
 
+    def test_ordinary_timeout_keeps_metadata_and_exact_publication_receipt(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+    ) -> None:
+        """A timeout keeps bounded failure facts and the exact publication receipt."""
+        source = "b" * 40
+        baseline = "a" * 40
+        timeout = subprocess.TimeoutExpired(
+            ["git", "push"],
+            60,
+            output="",
+            stderr="",
+        )
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            with (
+                patch.object(pool, "_writer_tracking_head", return_value=baseline),
+                patch.object(pool, "_read_remote_branch_head", return_value=baseline),
+                patch(
+                    "hephaestus.automation.pipeline.worker_pool.git_utils.push_branch",
+                    side_effect=timeout,
+                ),
+            ):
+                result = pool._publish_ordinary_writer(
+                    GitJob("test/repo", "commit_push", 60),
+                    "writer",
+                    tmp_path,
+                    source,
+                    {},
+                    (),
+                )
+        finally:
+            pool.shutdown()
+
+        assert result.ok is False
+        assert result.stdout_tail == ""
+        assert result.stderr_tail == ""
+        assert result.value == {
+            "publication_state": "remote_unchanged",
+            "head_sha": source,
+            "baseline_remote_sha": baseline,
+            "observed_remote_sha": baseline,
+            "pushed": False,
+            "refresh_phase": None,
+        }
+
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        ImplementationStage().on_job_done(item, result, make_ctx())
+
+        diagnostic = item.payload["publication_failure_diagnostic"]
+        assert diagnostic == {
+            "failure_kind": "publication",
+            "phase": "push",
+            "head_sha": source,
+            "exception_class": "TimeoutExpired",
+            "remote_state": "unchanged",
+        }
+        assert len(diagnostic["exception_class"]) <= 100
+        assert "returncode" not in diagnostic
+        assert item.payload["git_error"] is True
+
     def test_push_retry_exhaustion_includes_publication_diagnostic(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

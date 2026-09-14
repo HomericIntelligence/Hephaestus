@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable
 
 from hephaestus.automation.source_worktree import SourceWorkspaceRecoveryKind
-from hephaestus.diagnostics import bounded_git_diagnostic
+from hephaestus.diagnostics import redact_git_diagnostic
 
 _REDACTION = "<redacted>"
 _REBASE_CONFLICT_OUTCOMES = frozenset(
@@ -96,12 +96,22 @@ def redact_diagnostic_text(text: str) -> str:
     return redacted
 
 
+def bounded_pipeline_diagnostic(value: object, *, limit: int) -> str:
+    """Return fully redacted pipeline diagnostic text within one size limit."""
+    if limit <= 0:
+        raise ValueError("Pipeline diagnostic limit must be positive")
+    redacted = redact_diagnostic_text(redact_git_diagnostic(value))
+    # Repeat Git redaction because pipeline key patterns also match its sentinel.
+    redacted = redact_git_diagnostic(redacted)
+    return redacted[-limit:]
+
+
 def redact_bounded_diagnostic_tails(
     stdout_tail: str, stderr_tail: str, *, limit: int
 ) -> dict[str, str]:
     """Return non-empty diagnostic tails redacted and bounded for persistence."""
     return {
-        key: redact_diagnostic_text(bounded_git_diagnostic(tail, limit=limit))
+        key: bounded_pipeline_diagnostic(tail, limit=limit)
         for key, tail in (("stdout_tail", stdout_tail), ("stderr_tail", stderr_tail))
         if tail
     }

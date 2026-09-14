@@ -3905,6 +3905,95 @@ class TestWorkerPoolSubmitComplete:
         assert host_command.call_args.kwargs["git_system_config"] == (tmp_path / "gitconfig")
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
 
+    def test_immutable_archive_failure_redacts_before_source_reader_bound(
+        self, tmp_path: Path
+    ) -> None:
+        """An archive failure redacts credentials before the source reader bound."""
+        receipt_dir = tmp_path / f"pipeline-receipts-{'a' * 32}"
+        worker = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+            evidence_receipt_dir=receipt_dir,
+        )
+        credential_tail = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEF"
+        credential_value = ("q" * 4100) + credential_tail
+        archive_stderr = f"api_key={credential_value}"
+        surviving_suffixes = tuple(credential_tail[index:] for index in range(len(credential_tail)))
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=(sys.executable, "-c", "raise SystemExit(0)"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+            descr="host verification",
+        )
+
+        def fail_archive_reader(
+            _argv: tuple[str, ...],
+            *,
+            cwd: Path,
+            timeout: int | float,
+            max_bytes: int,
+            retain_text: bool,
+            env: dict[str, str] | None = None,
+            shutdown: threading.Event | None = None,
+        ) -> _BoundedGitOutput:
+            del env
+            return _run_bounded_git_output(
+                (
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stderr.write(sys.argv[1]); raise SystemExit(9)",
+                    archive_stderr,
+                ),
+                cwd=cwd,
+                timeout=timeout,
+                max_bytes=max_bytes,
+                retain_text=retain_text,
+                env=dict(os.environ),
+                shutdown=shutdown,
+            )
+
+        try:
+            with (
+                patch(f"{_WP}.sys.platform", "darwin"),
+                patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+                patch(f"{_WP}._trusted_executable", return_value=sys.executable),
+                patch(
+                    f"{_WP}._validated_git_exec_path",
+                    return_value=(
+                        "/usr/bin/git",
+                        tmp_path / "git-core",
+                        tmp_path / "gitconfig",
+                    ),
+                ),
+                patch(f"{_WP}._trusted_git_executable", return_value="/usr/bin/git"),
+                patch(
+                    f"{_WP}._verifier_owned_runtime_environment",
+                    return_value=Path(sys.prefix),
+                ),
+                patch(f"{_WP}._run_bounded_git_output", side_effect=fail_archive_reader),
+            ):
+                result = worker._run(
+                    job,
+                    claim_key="test/repo#3120",
+                    claim_stage="pr_review",
+                )
+        finally:
+            worker.shutdown()
+
+        worker_diagnostic = "\n".join((result.error or "", result.stdout_tail, result.stderr_tail))
+        receipt_paths = list(receipt_dir.glob("*.json"))
+        assert len(receipt_paths) == 1
+        receipt_text = receipt_paths[0].read_text(encoding="utf-8")
+        assert credential_value not in worker_diagnostic
+        assert all(suffix not in worker_diagnostic for suffix in surviving_suffixes)
+        assert credential_value not in receipt_text
+        assert all(suffix not in receipt_text for suffix in surviving_suffixes)
+
     def test_immutable_build_test_rejects_missing_linux_pyxis_image_before_execution(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:

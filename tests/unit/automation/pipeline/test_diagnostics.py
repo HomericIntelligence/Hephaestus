@@ -1,6 +1,9 @@
 """Tests for centralized durable-diagnostic redaction."""
 
-from hephaestus.automation.pipeline.diagnostics import redact_diagnostic_text
+from hephaestus.automation.pipeline.diagnostics import (
+    bounded_pipeline_diagnostic,
+    redact_diagnostic_text,
+)
 
 
 def test_redacts_github_tokens() -> None:
@@ -54,3 +57,25 @@ def test_leaves_plain_diagnostics_unchanged() -> None:
     """Non-secret diagnostic text passes through byte-for-byte unchanged."""
     text = "pytest output duplicate ADR number 0027\n1 failed in 0.3s"
     assert redact_diagnostic_text(text) == text
+
+
+def test_bounded_diagnostic_is_idempotent_and_keeps_runtime_values() -> None:
+    """Combined redaction keeps its sentinels and ordinary runtime values."""
+    diagnostic = (
+        "token=private-value\n"
+        "podman:hephaestus-ci\n"
+        "cache:hephaestus-ci\n"
+        "git@example.invalid:org/repository.git\n"
+        "github.com:org/private-repo"
+    )
+
+    result = bounded_pipeline_diagnostic(diagnostic, limit=200)
+
+    assert result == (
+        "token=<redacted-value>\n"
+        "podman:hephaestus-ci\n"
+        "cache:hephaestus-ci\n"
+        "<redacted-git-url>\n"
+        "<redacted-git-url>"
+    )
+    assert bounded_pipeline_diagnostic(result, limit=200) == result

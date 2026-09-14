@@ -7,10 +7,11 @@ import re
 _DEFAULT_DIAGNOSTIC_LIMIT = 2000
 _REDACTED_GIT_URL = "<redacted-git-url>"
 _REDACTED_VALUE = "<redacted-value>"
-_GIT_URL_RE = re.compile(r"\b(?:https?|ssh|git)://\S+", re.IGNORECASE)
-_GIT_SCP_REMOTE_RE = re.compile(r"(?<![\w./-])(?:[\w.-]+@)?[\w.-]+:\S+(?:\.git)?")
+_GIT_URL_RE = re.compile(r"(?:https?|ssh|git)://\S+", re.IGNORECASE)
+_GIT_SCP_REMOTE_RE = re.compile(r"(?<![\w./-])(?:[\w.-]+@[\w.-]+|[\w-]+(?:\.[\w-]+)+):\S+")
 _GIT_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(access_token|auth_token|oauth_token|token|password|passwd|secret|credential)="
+    r"(?i)\b(access[_-]?token|auth_token|oauth_token|token|api[_-]?key|apikey|"
+    r"client[_-]?secret|password|passwd|secret|credential)="
     r"([^&\s]+)"
 )
 _GIT_AUTH_HEADER_RE = re.compile(r"(?i)\b(authorization:\s*(?:basic|bearer)\s+)\S+")
@@ -24,8 +25,10 @@ def _diagnostic_text(value: object) -> str:
     """Return diagnostic stream data as safely decoded text."""
     if value is None:
         return ""
-    if isinstance(value, bytes):
+    if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8", errors="replace")
+    if isinstance(value, memoryview):
+        return value.tobytes().decode("utf-8", errors="replace")
     return str(value)
 
 

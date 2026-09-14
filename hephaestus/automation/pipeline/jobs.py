@@ -28,7 +28,7 @@ from hephaestus.agents.workspace import (
 )
 
 from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
-from .job_results import JobHandle, JobResult
+from .job_results import JobHandle, JobResult, ProcessFailureMetadata
 
 if TYPE_CHECKING:
     from hephaestus.agents.codex_isolation import CodexIsolationRequestV1
@@ -43,6 +43,7 @@ __all__ = [
     "JobHandle",
     "JobResult",
     "JobWorkspaceError",
+    "ProcessFailureMetadata",
     "validate_job_workspace",
 ]
 
