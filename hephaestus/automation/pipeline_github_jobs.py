@@ -49,6 +49,7 @@ from hephaestus.automation.pipeline.github_jobs import (
 )
 from hephaestus.automation.pipeline.merge_wait_admission import (
     MergeWaitAdmissionSnapshot,
+    RequiredChecksDeferred,
     validate_merge_wait_admission,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
@@ -60,7 +61,6 @@ from hephaestus.automation.pipeline.scope_retraction import normalize_scope_retr
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
-from hephaestus.automation.pipeline_github_contract import RequiredChecksDeferred
 from hephaestus.automation.pipeline_github_transport import rate_limit_remaining
 from hephaestus.automation.remediation_prepublication import (
     remove_prepublication_receipt,

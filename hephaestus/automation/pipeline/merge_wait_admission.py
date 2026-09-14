@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import TypeGuard
 
 
 def _exact_nonblank(value: object) -> TypeGuard[str]:
     """Return whether a value is a nonblank string without outer padding."""
     return isinstance(value, str) and bool(value) and value == value.strip()
+
+
+class RequiredChecksDeferred(Enum):
+    """Required checks need another bounded read before admission."""
+
+    PENDING = "pending"
+    UNSTABLE = "unstable"
 
 
 @dataclass(frozen=True)
@@ -88,6 +96,7 @@ def validate_merge_wait_admission(
 
 __all__ = [
     "MergeWaitAdmissionSnapshot",
+    "RequiredChecksDeferred",
     "VerifiedRepositoryDefaultBranch",
     "validate_merge_wait_admission",
 ]

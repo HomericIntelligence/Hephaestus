@@ -6,6 +6,9 @@ import ast
 from collections.abc import Iterator
 from pathlib import Path
 
+from hephaestus.automation import pipeline_github_contract
+from hephaestus.automation.pipeline.merge_wait_admission import RequiredChecksDeferred
+
 _ROOT = Path(__file__).parents[3]
 
 # These are source budgets, not measurements of the current checkout.  Every
@@ -44,9 +47,12 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline_github_commit_statuses.py": 225,
     # Check Suite and Check Run inventories share one bounded pagination owner.
     "hephaestus/automation/pipeline_github_check_run_inventory.py": 225,
+    # Check Run lifecycle validation stays separate from evidence evaluation.
+    "hephaestus/automation/pipeline_github_check_run_validation.py": 150,
     # Exact-head Check Runs use a complete paginated double-read. Keep this
     # separate repository-scoped merge-gate collaborator bounded.
     "hephaestus/automation/pipeline_github_required_checks.py": 425,
+    "hephaestus/automation/pipeline/merge_wait_admission.py": 125,
     "hephaestus/automation/pipeline_github_reviews.py": 1_475,
     "hephaestus/automation/pipeline_github_mutations.py": 475,
     "hephaestus/automation/pipeline/stages/pr_review.py": 550,
@@ -83,11 +89,13 @@ _COLLABORATOR_MODULES = frozenset(
         "pipeline_github_merge_rules",
         "pipeline_github_commit_statuses",
         "pipeline_github_check_run_inventory",
+        "pipeline_github_check_run_validation",
         "pipeline_github_ref_patterns",
         "pipeline_github_ruleset_conditions",
         "pipeline_github_queries",
         "pipeline_github_repository",
         "pipeline_github_required_checks",
+        "merge_wait_admission",
         "pipeline_github_reviews",
         "pipeline_github_mutations",
         "pr_review_threads",
@@ -144,6 +152,11 @@ def test_hotspot_file_budgets_are_non_increasing() -> None:
     for relative, predecomposition in _PREDECOMPOSITION_LINES.items():
         assert _FILE_BUDGETS[relative] < predecomposition
     assert failures == []
+
+
+def test_required_checks_deferred_keeps_its_contract_identity() -> None:
+    """The stable contract import exposes the canonical admission value."""
+    assert pipeline_github_contract.RequiredChecksDeferred is RequiredChecksDeferred
 
 
 def test_collaborators_do_not_import_their_facades() -> None:
