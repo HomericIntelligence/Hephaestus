@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import importlib
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -191,7 +193,7 @@ class TestCircuitBreakerIgnoredExceptions:
 
         Asserting only ``state is HALF_OPEN`` is NOT enough: the state does not
         change on an ignored exception whether or not the slot was released, so
-        such a test stays green even if ``_release_half_open_slot`` is a no-op.
+        such a test stays green if the cleanup path does not release a slot.
         Prove the release by admitting a LATER probe through the single slot.
         """
         breaker = CircuitBreaker(
@@ -362,7 +364,7 @@ class TestCircuitBreakerStates:
     @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
     def test_open_to_half_open_after_recovery_timeout(self, mock_monotonic: MagicMock) -> None:
         """Circuit transitions from OPEN to HALF_OPEN after recovery timeout."""
-        mock_monotonic.return_value = 1000.0  # baseline stamped by _record_failure
+        mock_monotonic.return_value = 1000.0  # baseline stamped by the failed call
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0)
         failing_func = MagicMock(side_effect=RuntimeError("fail"))
 
@@ -527,6 +529,410 @@ class TestCircuitBreakerOpenError:
         )
         assert err.reason == "half_open_exhausted"
         assert err.reason is CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED
+
+
+class TestAdmissionAccounting:
+    """Tests for accounting that is bound to the admitted breaker phase."""
+
+    @pytest.mark.parametrize(
+        "completion_order",
+        ["success-first", "failure-first"],
+    )
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic", return_value=100.0)
+    def test_current_generation_scores_outcomes_in_completion_order(
+        self,
+        _mock_monotonic: MagicMock,
+        completion_order: str,
+    ) -> None:
+        """Current concurrent outcomes update consecutive failures in completion order."""
+        breaker = CircuitBreaker("current-outcomes", failure_threshold=2)
+        ready = threading.Barrier(3)
+        release_success = threading.Event()
+        release_failure = threading.Event()
+
+        def held_success() -> str:
+            ready.wait(timeout=1.0)
+            assert release_success.wait(timeout=1.0), "test did not release successful call"
+            return "success"
+
+        def held_failure() -> None:
+            ready.wait(timeout=1.0)
+            assert release_failure.wait(timeout=1.0), "test did not release failed call"
+            raise RuntimeError("current failure")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            success = executor.submit(breaker.call, held_success)
+            failure = executor.submit(breaker.call, held_failure)
+            try:
+                ready.wait(timeout=1.0)
+                first, second = (
+                    (success, failure)
+                    if completion_order == "success-first"
+                    else (failure, success)
+                )
+                if first is success:
+                    release_success.set()
+                    assert first.result(timeout=1.0) == "success"
+                    assert breaker.snapshot()["failure_count"] == 0
+                    release_failure.set()
+                    with pytest.raises(RuntimeError, match="current failure"):
+                        second.result(timeout=1.0)
+                    expected_failures = 1
+                else:
+                    release_failure.set()
+                    with pytest.raises(RuntimeError, match="current failure"):
+                        first.result(timeout=1.0)
+                    assert breaker.snapshot()["failure_count"] == 1
+                    release_success.set()
+                    assert second.result(timeout=1.0) == "success"
+                    expected_failures = 0
+
+                assert breaker.state is CircuitBreakerState.CLOSED
+                assert breaker.snapshot()["failure_count"] == expected_failures
+            finally:
+                release_success.set()
+                release_failure.set()
+
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_stale_closed_success_cannot_close_new_open_phase(
+        self, mock_monotonic: MagicMock
+    ) -> None:
+        """A success admitted before a failure cannot close the new OPEN phase."""
+        mock_monotonic.return_value = 100.0
+        breaker = CircuitBreaker("stale-success", failure_threshold=1, recovery_timeout=30.0)
+        started = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+
+        def held_success() -> str:
+            started.set()
+            assert release.wait(timeout=1.0), "test did not release held call"
+            return "old result"
+
+        def run_held_call() -> None:
+            try:
+                breaker.call(held_success)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_held_call)
+        thread.start()
+        try:
+            assert started.wait(timeout=1.0), "held call did not start"
+            with pytest.raises(RuntimeError, match="new failure"):
+                breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("new failure")))
+            failure_time = breaker.snapshot()["last_failure_time"]
+            release.set()
+            thread.join(timeout=1.0)
+            assert not thread.is_alive(), "held call did not finish"
+            assert not errors
+            assert breaker.state is CircuitBreakerState.OPEN
+            assert breaker.snapshot()["last_failure_time"] == failure_time
+        finally:
+            release.set()
+            thread.join(timeout=1.0)
+
+    @pytest.mark.parametrize(
+        "cancelled",
+        [KeyboardInterrupt(), SystemExit(), asyncio.CancelledError()],
+        ids=["keyboard-interrupt", "system-exit", "asyncio-cancelled"],
+    )
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_half_open_cancellation_releases_admitted_slot(
+        self, mock_monotonic: MagicMock, cancelled: BaseException
+    ) -> None:
+        """Cancellation propagates and makes its admitted HALF_OPEN slot available."""
+        mock_monotonic.return_value = 100.0
+        breaker = CircuitBreaker(
+            "cancelled-probe",
+            failure_threshold=1,
+            recovery_timeout=30.0,
+            success_threshold=2,
+        )
+        with pytest.raises(RuntimeError):
+            breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("open")))
+
+        mock_monotonic.return_value = 130.0
+        with pytest.raises(type(cancelled)) as raised:
+            breaker.call(lambda: (_ for _ in ()).throw(cancelled))
+        assert raised.value is cancelled
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+        assert breaker.call(lambda: "replacement") == "replacement"
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+
+    def test_reset_invalidates_active_failure_completion(self) -> None:
+        """A failure admitted before reset cannot score the reset breaker phase."""
+        breaker = CircuitBreaker("reset-active", failure_threshold=2)
+        started = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+
+        def held_failure() -> None:
+            started.set()
+            assert release.wait(timeout=1.0), "test did not release held call"
+            raise RuntimeError("old failure")
+
+        def run_held_call() -> None:
+            try:
+                breaker.call(held_failure)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_held_call)
+        thread.start()
+        try:
+            assert started.wait(timeout=1.0), "held call did not start"
+            breaker.reset()
+            release.set()
+            thread.join(timeout=1.0)
+            assert not thread.is_alive(), "held call did not finish"
+            assert len(errors) == 1
+            assert isinstance(errors[0], RuntimeError)
+            assert breaker.snapshot()["failure_count"] == 0
+            assert breaker.state is CircuitBreakerState.CLOSED
+        finally:
+            release.set()
+            thread.join(timeout=1.0)
+
+    @pytest.mark.parametrize(
+        "outcome",
+        ["success", "failure", "ignored", "cancellation"],
+    )
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_reset_invalidates_active_half_open_completion(
+        self,
+        mock_monotonic: MagicMock,
+        outcome: str,
+    ) -> None:
+        """A HALF_OPEN completion cannot score or release after an explicit reset."""
+        mock_monotonic.return_value = 100.0
+        breaker = CircuitBreaker(
+            "reset-half-open",
+            failure_threshold=1,
+            recovery_timeout=30.0,
+            success_threshold=2,
+            ignore=lambda exc: isinstance(exc, ValueError),
+        )
+        with pytest.raises(RuntimeError, match="initial failure"):
+            breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("initial failure")))
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def held_call() -> str:
+            started.set()
+            assert release.wait(timeout=1.0), "test did not release held call"
+            if outcome == "failure":
+                raise RuntimeError("old failure")
+            if outcome == "ignored":
+                raise ValueError("old ignored result")
+            if outcome == "cancellation":
+                raise asyncio.CancelledError("old cancellation")
+            return "old success"
+
+        mock_monotonic.return_value = 130.0
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(breaker.call, held_call)
+            try:
+                assert started.wait(timeout=1.0), "held HALF_OPEN call did not start"
+                breaker.reset()
+                release.set()
+                if outcome == "success":
+                    assert future.result(timeout=1.0) == "old success"
+                else:
+                    expected = {
+                        "failure": RuntimeError,
+                        "ignored": ValueError,
+                        "cancellation": asyncio.CancelledError,
+                    }[outcome]
+                    with pytest.raises(expected):
+                        future.result(timeout=1.0)
+
+                assert breaker.state is CircuitBreakerState.CLOSED
+                assert breaker.snapshot() == {
+                    "name": "reset-half-open",
+                    "state": "closed",
+                    "failure_count": 0,
+                    "last_failure_time": 0.0,
+                }
+                assert breaker.call(lambda: "new phase") == "new phase"
+            finally:
+                release.set()
+
+    @pytest.mark.parametrize(
+        "old_outcome",
+        ["success", "failure", "ignored", "cancellation"],
+    )
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_stale_half_open_completion_preserves_new_phase_reservation(
+        self,
+        mock_monotonic: MagicMock,
+        old_outcome: str,
+    ) -> None:
+        """An old probe cannot release the only slot that belongs to a newer phase."""
+        mock_monotonic.return_value = 100.0
+        breaker = CircuitBreaker(
+            "new-reservation",
+            failure_threshold=1,
+            recovery_timeout=30.0,
+            success_threshold=2,
+            ignore=lambda exc: isinstance(exc, ValueError),
+        )
+        with pytest.raises(RuntimeError, match="initial failure"):
+            breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("initial failure")))
+
+        old_started = threading.Event()
+        old_release = threading.Event()
+        new_started = threading.Event()
+        new_release = threading.Event()
+
+        def old_probe() -> str:
+            old_started.set()
+            assert old_release.wait(timeout=1.0), "test did not release old probe"
+            if old_outcome == "failure":
+                raise RuntimeError("old failure")
+            if old_outcome == "ignored":
+                raise ValueError("old ignored result")
+            if old_outcome == "cancellation":
+                raise asyncio.CancelledError("old cancellation")
+            return "old success"
+
+        def new_probe() -> str:
+            new_started.set()
+            assert new_release.wait(timeout=1.0), "test did not release new probe"
+            return "new success"
+
+        mock_monotonic.return_value = 130.0
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            old_future = executor.submit(breaker.call, old_probe)
+            new_future: Future[str] | None = None
+            try:
+                assert old_started.wait(timeout=1.0), "old HALF_OPEN probe did not start"
+                breaker.reset()
+
+                mock_monotonic.return_value = 200.0
+                with pytest.raises(RuntimeError, match="new failure"):
+                    breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("new failure")))
+                new_failure_time = breaker.snapshot()["last_failure_time"]
+
+                mock_monotonic.return_value = 230.0
+                new_future = executor.submit(breaker.call, new_probe)
+                assert new_started.wait(timeout=1.0), "new HALF_OPEN probe did not start"
+
+                old_release.set()
+                if old_outcome == "success":
+                    assert old_future.result(timeout=1.0) == "old success"
+                else:
+                    expected = {
+                        "failure": RuntimeError,
+                        "ignored": ValueError,
+                        "cancellation": asyncio.CancelledError,
+                    }[old_outcome]
+                    with pytest.raises(expected):
+                        old_future.result(timeout=1.0)
+
+                with pytest.raises(CircuitBreakerOpenError) as exhausted:
+                    breaker.call(lambda: "replacement")
+                assert exhausted.value.reason is CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED
+                assert exhausted.value.time_until_recovery == 0.0
+                assert breaker.state is CircuitBreakerState.HALF_OPEN
+                snapshot = breaker.snapshot()
+                assert snapshot["failure_count"] == 1
+                assert snapshot["last_failure_time"] == new_failure_time
+
+                new_release.set()
+                assert new_future.result(timeout=1.0) == "new success"
+                assert breaker.state is CircuitBreakerState.HALF_OPEN
+                assert breaker.call(lambda: "final success") == "final success"
+                assert breaker.state is CircuitBreakerState.CLOSED
+            finally:
+                old_release.set()
+                new_release.set()
+                if new_future is not None:
+                    new_future.result(timeout=1.0)
+
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_stale_half_open_failure_cannot_reopen_after_successful_recovery(
+        self,
+        mock_monotonic: MagicMock,
+    ) -> None:
+        """An old probe failure cannot reopen after a peer closes the recovery phase."""
+        mock_monotonic.return_value = 100.0
+        breaker = CircuitBreaker(
+            "recovered-before-failure",
+            failure_threshold=1,
+            recovery_timeout=30.0,
+            half_open_max_calls=2,
+        )
+        with pytest.raises(RuntimeError, match="initial failure"):
+            breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("initial failure")))
+        recovery_time = breaker.snapshot()["last_failure_time"]
+
+        ready = threading.Barrier(3)
+        release_success = threading.Event()
+        release_failure = threading.Event()
+
+        def held_success() -> str:
+            ready.wait(timeout=1.0)
+            assert release_success.wait(timeout=1.0), "test did not release successful probe"
+            return "recovered"
+
+        def held_failure() -> None:
+            ready.wait(timeout=1.0)
+            assert release_failure.wait(timeout=1.0), "test did not release failed probe"
+            raise RuntimeError("stale failure")
+
+        mock_monotonic.return_value = 130.0
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            success = executor.submit(breaker.call, held_success)
+            failure = executor.submit(breaker.call, held_failure)
+            try:
+                ready.wait(timeout=1.0)
+                release_success.set()
+                assert success.result(timeout=1.0) == "recovered"
+                assert breaker.state is CircuitBreakerState.CLOSED
+
+                release_failure.set()
+                with pytest.raises(RuntimeError, match="stale failure"):
+                    failure.result(timeout=1.0)
+
+                assert breaker.state is CircuitBreakerState.CLOSED
+                snapshot = breaker.snapshot()
+                assert snapshot["failure_count"] == 0
+                assert snapshot["last_failure_time"] == recovery_time
+                assert breaker.call(lambda: "available") == "available"
+            finally:
+                release_success.set()
+                release_failure.set()
+
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_predicate_error_releases_admitted_slot(self, mock_monotonic: MagicMock) -> None:
+        """An ignore-predicate error propagates without retaining a probe slot."""
+        mock_monotonic.return_value = 100.0
+
+        predicate_calls = 0
+
+        def broken_ignore(_: BaseException) -> bool:
+            nonlocal predicate_calls
+            predicate_calls += 1
+            if predicate_calls == 1:
+                return False
+            raise LookupError("predicate failure")
+
+        breaker = CircuitBreaker(
+            "predicate-error",
+            failure_threshold=1,
+            recovery_timeout=30.0,
+            success_threshold=2,
+            ignore=broken_ignore,
+        )
+        with pytest.raises(RuntimeError):
+            breaker.call(lambda: (_ for _ in ()).throw(RuntimeError("open")))
+
+        mock_monotonic.return_value = 130.0
+        with pytest.raises(LookupError, match="predicate failure"):
+            breaker.call(lambda: (_ for _ in ()).throw(ValueError("service result")))
+        assert breaker.call(lambda: "replacement") == "replacement"
 
 
 class TestCircuitBreakerReset:
