@@ -113,6 +113,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _trusted_gh_executable,
     _trusted_git_executable,
     _unsafe_local_git_config_key,
+    _validate_git_exec_components,
     _validated_conflict_path,
     _validated_git_exec_path,
     _validated_signing_key,
@@ -1950,19 +1951,56 @@ def _git_exec_path_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return system_git, toolchain, git_exec_path, developer_git
 
 
+def _safe_git_exec_fixture_root(tmp_path: Path) -> Path:
+    """Create a checked private root for Git path fixtures."""
+    cache_root = Path.home() / ".cache"
+    _validate_git_exec_components(cache_root.parent)
+    cache_root.mkdir(mode=0o700, exist_ok=True)
+    _validate_git_exec_components(cache_root)
+    fixture_root = cache_root / "hephaestus-test-git-exec-path"
+    fixture_root.mkdir(mode=0o700, exist_ok=True)
+    _validate_git_exec_components(fixture_root)
+    root = fixture_root / f"{os.getpid()}-{tmp_path.name}"
+    root.mkdir(mode=0o700)
+    _validate_git_exec_components(root)
+    return root
+
+
 @pytest.fixture
 def safe_git_exec_tmp_path(tmp_path: Path) -> Iterator[Path]:
     """Put Git path fixtures below a private user-cache child."""
-    cache_root = Path.home() / ".cache"
-    cache_root.mkdir(mode=0o700, exist_ok=True)
-    fixture_root = cache_root / "hephaestus-test-git-exec-path"
-    fixture_root.mkdir(mode=0o700, exist_ok=True)
-    root = fixture_root / f"{os.getpid()}-{tmp_path.name}"
-    root.mkdir(mode=0o700)
+    root = _safe_git_exec_fixture_root(tmp_path)
     try:
         yield root
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_safe_git_exec_fixture_rejects_cache_link_before_child_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Git fixture does not create a child through an unsafe cache link."""
+    home = tmp_path / "home"
+    home.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    cache_root = home / ".cache"
+    cache_root.symlink_to(outside, target_is_directory=True)
+    original_validator = _validate_git_exec_components
+
+    def validate_fixture_path(path: Path) -> None:
+        if path != home:
+            original_validator(path)
+
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(f"{__name__}._validate_git_exec_components", validate_fixture_path)
+    with pytest.raises(
+        _HostVerificationBoundaryError,
+        match=r"^host_verification_git_exec_path_unsafe$",
+    ):
+        _safe_git_exec_fixture_root(tmp_path)
+
+    assert not (outside / "hephaestus-test-git-exec-path").exists()
 
 
 _NATIVE_FALLBACK_RUNNER = (
