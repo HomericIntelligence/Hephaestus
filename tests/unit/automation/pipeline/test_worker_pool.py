@@ -18470,9 +18470,11 @@ class TestGitLocking:
             *,
             operation: str,
             timeout_s: float,
+            deadline_s: float | None,
             include_file_lock: bool,
         ) -> Iterator[None]:
             assert operation == "commit_push"
+            assert deadline_s is None
             assert include_file_lock is True
             lock_budgets.append(timeout_s)
             yield
@@ -18518,9 +18520,11 @@ class TestGitLocking:
             *,
             operation: str,
             timeout_s: float,
+            deadline_s: float | None,
             include_file_lock: bool,
         ) -> Iterator[None]:
             assert operation == "commit_push"
+            assert deadline_s == 108.0
             assert include_file_lock is True
             lock_budgets.append(timeout_s)
             yield
@@ -18540,7 +18544,7 @@ class TestGitLocking:
             pool.shutdown()
 
         assert result.ok is True
-        assert lock_budgets == [8.0]
+        assert lock_budgets == [30]
         assert dispatched_deadlines == [108.0]
 
     def test_two_process_commit_push_holder_serializes_checkout_then_continues(
