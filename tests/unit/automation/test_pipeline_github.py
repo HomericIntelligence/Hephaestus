@@ -57,6 +57,7 @@ from hephaestus.automation.pipeline_github_check_policy import (
     EffectiveMergePolicy,
     RequiredCheck,
 )
+from hephaestus.automation.pipeline_github_contract import RequiredChecksDeferred
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_COMMENT_MARKER,
@@ -592,7 +593,21 @@ def test_policy_drift_after_status_evidence_blocks_merge(drift: str) -> None:
     ]
 
 
-def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
+@pytest.mark.parametrize(
+    ("check_result", "expected"),
+    [
+        (False, "required_checks_not_green"),
+        (None, "required_checks_not_green"),
+        (1, "required_checks_not_green"),
+        ("success", "required_checks_not_green"),
+        (RuntimeError("unavailable"), "required_checks_not_green"),
+        (RequiredChecksDeferred.PENDING, "required_checks_pending"),
+        (RequiredChecksDeferred.UNSTABLE, "required_checks_unstable"),
+    ],
+)
+def test_failed_checks_before_final_admission_block_conditional_merge(
+    check_result: object, expected: str
+) -> None:
     """A failed complete Check Runs traversal prevents final admission."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
@@ -663,10 +678,12 @@ def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
             *,
             deadline_s: float,
             cancellation: object,
-        ) -> bool:
+        ) -> object:
             del policy, deadline_s, cancellation
             events.append("checks")
-            return False
+            if isinstance(check_result, Exception):
+                raise check_result
+            return check_result
 
         def merge_pr_if_head(self, _pr: int, _head: str, **_kwargs: object) -> SimpleNamespace:
             events.append("merge")
@@ -689,7 +706,9 @@ def test_failed_checks_before_final_admission_block_conditional_merge() -> None:
 
     receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, ChangedChecksGitHub())
 
-    assert receipt.outcome == "required_checks_not_green"
+    assert receipt.outcome == expected
+    assert receipt.attempted is False
+    assert receipt.readiness_fingerprint is None
     assert "merge" not in events
 
 
@@ -3660,7 +3679,7 @@ class TestExactHeadChecks:
         policy: EffectiveMergePolicy,
         *,
         suite_inventory: tuple[tuple[int, int | None], ...] | None = None,
-    ) -> bool:
+    ) -> bool | RequiredChecksDeferred:
         """Run the exact-head gate with its required bounded inputs."""
         if suite_inventory is None:
             pinned_apps = {
@@ -4641,14 +4660,15 @@ class TestExactHeadChecks:
         assert self._passes(adapter, head, self._policy("required-ci")) is False
 
     @pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending"])
-    def test_documented_active_required_run_fails_during_first_snapshot(
+    def test_documented_active_required_run_returns_pending_after_stable_reads(
         self,
         adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         command_runner: MagicMock,
         status: str,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A required active run fails during the first snapshot."""
+        """A stable active run waits without a terminal-field warning."""
         adapter.repo = "repo"
         head = "a" * 40
         response = self._json_response(
@@ -4675,8 +4695,214 @@ class TestExactHeadChecks:
             ]
         )
 
-        assert self._passes(adapter, head, self._policy("required-ci")) is False
-        assert command_runner.call_count == 1
+        assert (
+            self._passes(adapter, head, self._policy("required-ci"))
+            is RequiredChecksDeferred.PENDING
+        )
+        assert command_runner.call_count == 4
+        assert "malformed terminal evidence" not in caplog.text
+
+    def _stable_run_result(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        runs: list[dict[str, object]],
+        *,
+        contexts: tuple[str, ...] = ("required-ci",),
+        app_id: int | None = 1,
+        statuses: list[dict[str, object]] | None = None,
+        second: list[dict[str, object]] | None = None,
+    ) -> object:
+        """Read controlled complete responses through the real adapter."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        status_response = self._json_response(
+            {"sha": head, "total_count": len(statuses or []), "statuses": statuses or []}
+        )
+        command_runner.side_effect = [
+            self._json_response({"total_count": len(runs), "check_runs": runs}),
+            self._json_response(
+                {
+                    "total_count": len(second if second is not None else runs),
+                    "check_runs": second if second is not None else runs,
+                }
+            ),
+            status_response,
+            status_response,
+        ]
+        return self._passes(adapter, head, self._policy(*contexts, app_id=app_id))
+
+    def test_active_required_run_with_zero_completion_timestamp_is_pending(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """An active GraphQL representation does not need terminal fields."""
+        result = self._stable_run_result(
+            adapter,
+            command_runner,
+            [
+                self._check_run(
+                    "a" * 40,
+                    status="IN_PROGRESS",
+                    conclusion="",
+                    completed_at="0001-01-01T00:00:00Z",
+                )
+            ],
+        )
+        assert result is RequiredChecksDeferred.PENDING
+
+    def test_active_required_run_with_rest_null_fields_is_pending(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """An active REST representation can have null terminal fields."""
+        result = self._stable_run_result(
+            adapter,
+            command_runner,
+            [self._check_run("a" * 40, status="in_progress", conclusion=None, completed_at=None)],
+        )
+        assert result is RequiredChecksDeferred.PENDING
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("conclusion", None),
+            ("conclusion", ""),
+            ("conclusion", "unknown"),
+            ("completed_at", None),
+            ("completed_at", ""),
+            ("completed_at", "invalid"),
+            ("completed_at", 1),
+        ],
+    )
+    def test_completed_required_run_with_invalid_terminal_fields_is_malformed(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+        field: str,
+        value: object,
+    ) -> None:
+        """Completed runs still need valid terminal evidence."""
+        run = self._check_run("a" * 40)
+        run[field] = value
+        assert self._stable_run_result(adapter, command_runner, [run]) is False
+        assert "malformed terminal evidence" in caplog.text
+
+    @pytest.mark.parametrize("status", ["", " queued", "queued ", "unknown", None, True, 1])
+    def test_unknown_or_invalid_check_run_lifecycle_is_rejected(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        status: object,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Only documented lifecycle values are valid."""
+        run = self._check_run("a" * 40)
+        run["status"] = status
+        assert self._stable_run_result(adapter, command_runner, [run]) is False
+        assert "malformed lifecycle" in caplog.text
+
+    @pytest.mark.parametrize("older_run", [False, True])
+    @pytest.mark.parametrize("commit_status", [False, True])
+    def test_active_required_run_cannot_be_masked_by_passing_evidence(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        older_run: bool,
+        commit_status: bool,
+    ) -> None:
+        """An active run prevents admission despite other passing evidence."""
+        head = "a" * 40
+        runs = [self._check_run(head, status="queued", conclusion=None, completed_at=None)]
+        if older_run:
+            runs.append(self._check_run(head, check_run_id=2))
+        statuses = [self._commit_status(head)] if commit_status else []
+        result = self._stable_run_result(
+            adapter, command_runner, runs, app_id=None, statuses=statuses
+        )
+        assert result is RequiredChecksDeferred.PENDING
+
+    @pytest.mark.parametrize("other", ["failed", "missing", "malformed-status", "ambiguous-app"])
+    def test_pending_does_not_hide_invalid_required_evidence(
+        self, adapter: PipelineGitHub, command_runner: MagicMock, other: str
+    ) -> None:
+        """Pending is valid only when all other requirements have valid evidence."""
+        head = "a" * 40
+        runs = [self._check_run(head, status="queued", conclusion=None, completed_at=None)]
+        statuses = []
+        if other == "failed":
+            runs.append(self._check_run(head, check_run_id=2, name="other", conclusion="failure"))
+        elif other == "malformed-status":
+            status = self._commit_status(head)
+            status["updated_at"] = None
+            statuses.append(status)
+        elif other == "ambiguous-app":
+            runs.append(self._check_run(head, check_run_id=2, app_id=2))
+        assert (
+            self._stable_run_result(
+                adapter,
+                command_runner,
+                runs,
+                contexts=("required-ci", "other"),
+                app_id=None,
+                statuses=statuses,
+            )
+            is False
+        )
+
+    def test_malformed_second_snapshot_is_rejected(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """A malformed second read cannot become a deferred lifecycle change."""
+        first = self._check_run("a" * 40, status="queued", conclusion=None, completed_at=None)
+        second = self._check_run("a" * 40, completed_at=None)
+        assert self._stable_run_result(adapter, command_runner, [first], second=[second]) is False
+
+    def test_active_snapshot_normalizes_lifecycle_case(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """Case alone does not change the active lifecycle snapshot."""
+        first = self._check_run("a" * 40, status="queued", conclusion=None, completed_at=None)
+        second = dict(first, status="QUEUED", conclusion="", completed_at="0001-01-01T00:00:00Z")
+        assert (
+            self._stable_run_result(adapter, command_runner, [first], second=[second])
+            is RequiredChecksDeferred.PENDING
+        )
+
+    def test_active_and_completed_runs_with_ambiguous_apps_are_rejected(
+        self,
+        adapter: PipelineGitHub,
+        command_runner: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Valid suites cannot remove application ambiguity for an unpinned check."""
+        adapter.repo = "repo"
+        head = "a" * 40
+        runs = [
+            self._check_run(head, status="queued", conclusion=None, completed_at=None),
+            self._check_run(head, check_run_id=2, app_id=2, check_suite_id=2),
+        ]
+        response = self._json_response({"total_count": 2, "check_runs": runs})
+        command_runner.side_effect = [response, response]
+        assert (
+            self._passes(
+                adapter,
+                head,
+                self._policy("required-ci", app_id=None),
+                suite_inventory=((1, 1), (2, 2)),
+            )
+            is False
+        )
+        assert "multiple application identities" in caplog.text
+
+    def test_queued_to_in_progress_returns_unstable(
+        self, adapter: PipelineGitHub, command_runner: MagicMock
+    ) -> None:
+        """A valid active lifecycle change requires a new bounded read."""
+        first = self._check_run("a" * 40, status="queued", conclusion=None, completed_at=None)
+        second = dict(first, status="IN_PROGRESS")
+        result = self._stable_run_result(adapter, command_runner, [first], second=[second])
+        assert result is RequiredChecksDeferred.UNSTABLE
+        assert command_runner.call_count == 2
 
     def test_equal_completion_instants_are_ambiguous(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
@@ -4856,9 +5082,20 @@ class TestExactHeadChecks:
                 }
             ),
         )
-        command_runner.side_effect = MagicMock(side_effect=[response, response])
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
 
-        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        result = self._passes(adapter, head, self._policy("required-ci"))
+        if returned_head == head and status in {"in_progress", "queued"}:
+            assert result is RequiredChecksDeferred.PENDING
+        else:
+            assert result is False
 
     def test_rejects_repeated_runs_that_change_between_evidence_reads(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
@@ -4892,7 +5129,10 @@ class TestExactHeadChecks:
         )
         command_runner.side_effect = MagicMock(side_effect=[first, second])
 
-        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        assert (
+            self._passes(adapter, head, self._policy("required-ci"))
+            is RequiredChecksDeferred.UNSTABLE
+        )
 
     def test_rejects_completion_time_change_between_evidence_reads(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
@@ -4914,7 +5154,10 @@ class TestExactHeadChecks:
         )
         command_runner.side_effect = MagicMock(side_effect=[first, second])
 
-        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        assert (
+            self._passes(adapter, head, self._policy("required-ci"))
+            is RequiredChecksDeferred.UNSTABLE
+        )
 
     @pytest.mark.parametrize(
         ("returned_head", "status", "conclusion"),
@@ -4951,9 +5194,20 @@ class TestExactHeadChecks:
                 }
             ),
         )
-        command_runner.side_effect = MagicMock(side_effect=[response, response])
+        command_runner.side_effect = MagicMock(
+            side_effect=[
+                response,
+                response,
+                self._empty_status_response(head),
+                self._empty_status_response(head),
+            ]
+        )
 
-        assert self._passes(adapter, head, self._policy("required-ci")) is False
+        result = self._passes(adapter, head, self._policy("required-ci"))
+        if returned_head == head and status in {"in_progress", "queued"}:
+            assert result is RequiredChecksDeferred.PENDING
+        else:
+            assert result is False
 
     def test_empty_check_run_response_fails_closed(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock

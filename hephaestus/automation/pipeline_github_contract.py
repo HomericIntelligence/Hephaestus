@@ -1,10 +1,19 @@
 """Static host contract shared by the GitHub adapter collaborators."""
 
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from .github_api.graphql import GraphQLSpec
 
 type _S = int | str
+
+
+class RequiredChecksDeferred(Enum):
+    """Required checks need another bounded read before admission."""
+
+    PENDING = "pending"
+    UNSTABLE = "unstable"
+
 
 if TYPE_CHECKING:
     import subprocess
@@ -95,7 +104,8 @@ if TYPE_CHECKING:
             *,
             deadline_s: float,
             cancellation: Any,
-        ) -> bool:
+        ) -> bool | RequiredChecksDeferred:
+            """Only literal True permits merge admission."""
             pass
 
         def pull_request_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
