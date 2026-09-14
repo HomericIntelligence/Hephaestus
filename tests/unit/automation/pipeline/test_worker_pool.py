@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -16,9 +17,10 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from concurrent.futures import Future
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import replace
@@ -113,6 +115,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _trusted_gh_executable,
     _trusted_git_executable,
     _unsafe_local_git_config_key,
+    _validate_git_exec_components,
     _validated_conflict_path,
     _validated_git_exec_path,
     _validated_signing_key,
@@ -1951,18 +1954,109 @@ def _git_exec_path_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
 
 
 @pytest.fixture
-def safe_git_exec_tmp_path(tmp_path: Path) -> Iterator[Path]:
-    """Put Git path fixtures below a private user-cache child."""
+def safe_git_exec_tmp_path(tmp_path: Path) -> Generator[Path]:
+    """Put Git path fixtures below checked private user-cache children."""
     cache_root = Path.home() / ".cache"
-    cache_root.mkdir(mode=0o700, exist_ok=True)
     fixture_root = cache_root / "hephaestus-test-git-exec-path"
-    fixture_root.mkdir(mode=0o700, exist_ok=True)
+    for path in (cache_root, fixture_root):
+        _validate_git_exec_components(path.parent)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            path.mkdir(mode=0o700)
+        _validate_git_exec_components(path)
     root = fixture_root / f"{os.getpid()}-{tmp_path.name}"
     root.mkdir(mode=0o700)
     try:
+        _validate_git_exec_components(root)
         yield root
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.parametrize("unsafe_component", ("cache", "fixture", "cache_symlink"))
+def test_safe_git_exec_tmp_path_rejects_unsafe_existing_ancestor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_component: str,
+) -> None:
+    """Reject an unsafe cache ancestor before the fixture creates a child."""
+    real_home = Path.home()
+    safe_home = Path(tempfile.mkdtemp(prefix="hephaestus-test-home-", dir=real_home))
+    safe_home.chmod(0o700)
+    cache_root = safe_home / ".cache"
+    fixture_root = cache_root / "hephaestus-test-git-exec-path"
+    child = fixture_root / f"{os.getpid()}-{tmp_path.name}"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: safe_home))
+    fixture_function = cast(
+        Callable[[Path], Generator[Path]],
+        inspect.unwrap(cast(Callable[..., Any], safe_git_exec_tmp_path)),
+    )
+
+    try:
+        baseline = fixture_function(tmp_path)
+        try:
+            baseline_root = next(baseline)
+            assert baseline_root.parent == fixture_root
+        finally:
+            baseline.close()
+
+        target: Path | None = None
+        if unsafe_component == "cache_symlink":
+            fixture_root.rmdir()
+            cache_root.rmdir()
+            target = safe_home / "cache-target"
+            target.mkdir(mode=0o700)
+            cache_root.symlink_to(target, target_is_directory=True)
+            unsafe_path = cache_root
+        elif unsafe_component == "cache":
+            cache_root.chmod(0o777)
+            unsafe_path = cache_root
+        else:
+            fixture_root.chmod(0o777)
+            unsafe_path = fixture_root
+        original_paths: list[Path] = [safe_home, cache_root]
+        if fixture_root.exists() and not fixture_root.is_symlink():
+            original_paths.append(fixture_root)
+        if target is not None:
+            original_paths.append(target)
+        original_modes = {path: stat.S_IMODE(path.lstat().st_mode) for path in original_paths}
+
+        mkdir_calls: list[Path] = []
+        original_mkdir = Path.mkdir
+
+        def mkdir_spy(self: Path, *args: Any, **kwargs: Any) -> None:
+            mkdir_calls.append(self)
+            original_mkdir(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", mkdir_spy)
+        generator = fixture_function(tmp_path)
+        try:
+            rejection: _HostVerificationBoundaryError | None = None
+            yielded_root: Path | None = None
+            try:
+                yielded_root = next(generator)
+            except _HostVerificationBoundaryError as exc:
+                rejection = exc
+            calls_before_close = tuple(mkdir_calls)
+
+            if yielded_root is not None:
+                assert not child.exists(), "fixture created a child before rejection"
+            assert rejection is not None
+            assert str(rejection) == "host_verification_git_exec_path_unsafe"
+            assert not any(
+                path == unsafe_path or unsafe_path in path.parents for path in calls_before_close
+            )
+            for path, mode in original_modes.items():
+                assert stat.S_IMODE(path.lstat().st_mode) == mode
+            assert not child.exists()
+            if target is not None:
+                assert cache_root.is_symlink()
+                assert not any(target.iterdir())
+        finally:
+            generator.close()
+    finally:
+        shutil.rmtree(safe_home, ignore_errors=True)
 
 
 _NATIVE_FALLBACK_RUNNER = (
