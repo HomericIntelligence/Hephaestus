@@ -60,6 +60,7 @@ from hephaestus.automation.pipeline.scope_retraction import normalize_scope_retr
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
+from hephaestus.automation.pipeline_github_contract import RequiredChecksDeferred
 from hephaestus.automation.pipeline_github_transport import rate_limit_remaining
 from hephaestus.automation.remediation_prepublication import (
     remove_prepublication_receipt,
@@ -1732,6 +1733,10 @@ class PipelineGitHubJobRunner:
             )
         except Exception:
             checks_green = False
+        if checks_green is RequiredChecksDeferred.PENDING:
+            return complete("required_checks_pending")
+        if checks_green is RequiredChecksDeferred.UNSTABLE:
+            return complete("required_checks_unstable")
         if checks_green is not True:
             return complete("required_checks_not_green")
 

@@ -291,7 +291,7 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome == "merge_conflicting":
             return self._post_review_rebase(item, outcome)
-        if outcome == "readiness_wait":
+        if outcome in {"readiness_wait", "required_checks_pending", "required_checks_unstable"}:
             if receipt.attempted and item.attempts["merge"] >= ctx.budget("merge"):
                 return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
             item.state = MERGE
