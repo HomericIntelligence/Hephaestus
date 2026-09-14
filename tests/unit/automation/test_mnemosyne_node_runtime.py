@@ -6,12 +6,26 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 import pytest
 
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError
-from hephaestus.automation.mnemosyne_node_runtime import node_runtime_files
+from hephaestus.automation.mnemosyne_node_runtime import NodePackageTree, node_runtime_files
+
+
+class _NpmCliFixtureKwargs(TypedDict, total=False):
+    """Optional keyword values for the npm fixture."""
+
+    layout: str
+    manifest_name: str
+    bin_target: str
+    manifest_present: bool
+    ambiguous_cli_root: bool
+    dangling_dependency: bool
+    external_dependency: bool
+    nonregular_cli_target: bool
+    special_entry: bool
 
 
 def _npm_cli_fixture(
@@ -85,7 +99,7 @@ def _npm_cli_fixture(
     return npm_root, cli_link, dependency_file
 
 
-def _node_package_tree(cli: Path) -> Any:
+def _node_package_tree(cli: Path) -> NodePackageTree:
     """Call the planned package-tree boundary without a collection error in RED."""
     from hephaestus.automation import mnemosyne_node_runtime as runtime
 
@@ -161,7 +175,7 @@ def test_node_package_tree_binds_flat_and_nested_dependencies(tmp_path: Path, la
     ],
 )
 def test_node_package_tree_rejects_unsafe_entries(
-    tmp_path: Path, fixture_kwargs: dict[str, object]
+    tmp_path: Path, fixture_kwargs: _NpmCliFixtureKwargs
 ) -> None:
     """The package boundary rejects mismatched metadata and unsafe entries."""
     _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path, **fixture_kwargs)
