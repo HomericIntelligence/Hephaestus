@@ -16,6 +16,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from hephaestus.automation.event_log_io import (
+    EventLogCandidate,
+    EventLogHandle,
+    event_log_io_supported,
+    open_event_log_handle,
+)
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 __all__ = ["LockUnavailableError", "event_log_lifecycle", "file_lock"]
@@ -56,32 +62,41 @@ def _parse_event_log(path: Path) -> _EventLog | None:
     return _EventLog(path=path, timestamp=timestamp.replace(tzinfo=UTC))
 
 
-def _scan_event_logs(directory: Path) -> list[_EventLog]:
+def _scan_event_logs(handle: EventLogHandle) -> list[_EventLog]:
     """Return recognized regular, non-symlink logs in ``directory``."""
     try:
-        entries = directory.iterdir()
         logs: list[_EventLog] = []
-        for entry in entries:
+        for name in handle.names():
+            entry = handle.path.parent / name
             parsed = _parse_event_log(entry)
             if parsed is None:
                 continue
             try:
-                mode = entry.lstat().st_mode
+                mode = handle.stat_name(name).st_mode
             except OSError as exc:
                 LOG.warning("pipeline event-log stat failed for %s: %s", entry, exc)
                 continue
             if stat.S_ISREG(mode):
                 logs.append(parsed)
     except OSError as exc:
-        LOG.warning("pipeline event-log cleanup scan failed for %s: %s", directory, exc)
+        LOG.warning(
+            "pipeline event-log cleanup scan failed for %s: %s",
+            handle.path.parent,
+            exc,
+        )
         return []
     return logs
 
 
-def _remove_event_log(log: _EventLog, *, dry_run: bool) -> bool:
+def _unlink_event_log(handle: EventLogHandle, log: _EventLog) -> None:
+    """Unlink one event log relative to the bound directory."""
+    handle.unlink_name(log.path.name)
+
+
+def _remove_event_log(handle: EventLogHandle, log: _EventLog, *, dry_run: bool) -> bool:
     """Remove one inactive log while holding its non-blocking lock."""
     try:
-        mode = log.path.lstat().st_mode
+        mode = handle.stat_name(log.path.name).st_mode
     except OSError as exc:
         LOG.warning("pipeline event-log stat failed for %s: %s", log.path, exc)
         return False
@@ -89,13 +104,9 @@ def _remove_event_log(log: _EventLog, *, dry_run: bool) -> bool:
         return False
 
     try:
-        with file_lock(
-            _event_log_lock_path(log.path),
-            blocking=False,
-            require_exclusive=True,
-        ):
+        with handle.lock(_event_log_lock_path(log.path).name, blocking=False):
             try:
-                mode = log.path.lstat().st_mode
+                mode = handle.stat_name(log.path.name).st_mode
             except OSError as exc:
                 LOG.warning("pipeline event-log stat failed for %s: %s", log.path, exc)
                 return False
@@ -104,7 +115,7 @@ def _remove_event_log(log: _EventLog, *, dry_run: bool) -> bool:
             if dry_run:
                 LOG.info("[dry-run] would remove pipeline event log %s", log.path)
                 return True
-            log.path.unlink()
+            _unlink_event_log(handle, log)
             LOG.info("removed pipeline event log %s", log.path)
             return True
     except LockUnavailableError:
@@ -140,7 +151,7 @@ def _count_candidates(
 
 
 def _cleanup_event_logs(
-    directory: Path,
+    handle: EventLogHandle,
     *,
     retention_days: int,
     retention_count: int,
@@ -153,12 +164,8 @@ def _cleanup_event_logs(
         return
 
     try:
-        with file_lock(
-            directory / _RETENTION_LOCK_NAME,
-            blocking=False,
-            require_exclusive=True,
-        ):
-            logs = sorted(_scan_event_logs(directory), key=lambda log: log.timestamp)
+        with handle.lock(_RETENTION_LOCK_NAME, blocking=False):
+            logs = sorted(_scan_event_logs(handle), key=lambda log: log.timestamp)
             current_name = current_path.name if current_path is not None else None
             removed: set[Path] = set()
             attempted: set[Path] = set()
@@ -166,7 +173,7 @@ def _cleanup_event_logs(
             cutoff = now - timedelta(days=retention_days) if retention_days > 0 else None
             for log in _age_candidates(logs, cutoff, current_name):
                 attempted.add(log.path)
-                if _remove_event_log(log, dry_run=dry_run):
+                if _remove_event_log(handle, log, dry_run=dry_run):
                     removed.add(log.path)
 
             if retention_count > 0:
@@ -180,7 +187,7 @@ def _cleanup_event_logs(
                     if needed == 0:
                         break
                     attempted.add(log.path)
-                    if _remove_event_log(log, dry_run=dry_run):
+                    if _remove_event_log(handle, log, dry_run=dry_run):
                         removed.add(log.path)
     except (LockUnavailableError, OSError, RuntimeError) as exc:
         LOG.warning("pipeline event-log cleanup skipped: %s", exc)
@@ -194,7 +201,8 @@ def event_log_lifecycle(
     retention_count: int,
     dry_run: bool,
     now: datetime | None = None,
-) -> Iterator[None]:
+    candidates: tuple[EventLogCandidate, ...] = (),
+) -> Iterator[EventLogHandle | None]:
     """Protect the active log and prune only locked, recognized inactive logs.
 
     Cleanup is deliberately best effort.  Lock, scan, stat, and unlink
@@ -202,20 +210,37 @@ def event_log_lifecycle(
     unchanged.
     """
     if path is None:
-        yield
+        yield None
+        return
+    if not event_log_io_supported():
+        LOG.warning("pipeline event logging is unavailable on this host")
+        yield None
         return
 
-    active_lock = ExitStack()
-    try:
-        active_lock.enter_context(
-            file_lock(
-                _event_log_lock_path(path),
-                require_exclusive=True,
+    options = candidates or (EventLogCandidate(path=path, private_root=path.parent),)
+    selected_stack: ExitStack | None = None
+    handle: EventLogHandle | None = None
+    for candidate in options:
+        candidate_stack = ExitStack()
+        try:
+            candidate_handle = candidate_stack.enter_context(open_event_log_handle(candidate))
+            candidate_handle.probe_write()
+            candidate_stack.enter_context(
+                candidate_handle.lock(
+                    _event_log_lock_path(candidate_handle.path).name,
+                    blocking=True,
+                )
             )
-        )
-    except (LockUnavailableError, OSError, RuntimeError) as exc:
-        LOG.warning("pipeline event-log cleanup skipped: %s", exc)
-        yield
+        except (LockUnavailableError, OSError, RuntimeError) as exc:
+            candidate_stack.close()
+            LOG.warning("pipeline event-log candidate is unavailable: %s", exc)
+            continue
+        selected_stack = candidate_stack
+        handle = candidate_handle
+        break
+
+    if selected_stack is None or handle is None:
+        yield None
         return
 
     try:
@@ -226,18 +251,18 @@ def event_log_lifecycle(
             else:
                 cleanup_now = cleanup_now.astimezone(UTC)
             _cleanup_event_logs(
-                path.parent,
+                handle,
                 retention_days=retention_days,
                 retention_count=retention_count,
                 dry_run=dry_run,
                 now=cleanup_now,
-                current_path=path,
+                current_path=handle.path,
             )
         except Exception as exc:  # pragma: no cover - defensive final boundary
             LOG.warning("pipeline event-log cleanup failed: %s", exc)
-        yield
+        yield handle
     finally:
         try:
-            active_lock.close()
+            selected_stack.close()
         except Exception as exc:  # pragma: no cover - defensive final boundary
             LOG.warning("pipeline event-log lock release failed: %s", exc)

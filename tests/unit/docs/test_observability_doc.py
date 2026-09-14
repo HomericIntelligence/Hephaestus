@@ -36,6 +36,15 @@ def test_required_sections_present() -> None:
         assert heading in text, f"docs/observability.md must contain {heading!r}"
 
 
+def test_event_log_default_path_is_outside_registered_worktrees() -> None:
+    """The documented event-log path is outside the projects directory."""
+    text = DOC.read_text(encoding="utf-8")
+
+    assert "~/.hephaestus-diagnostics/<projects-root-name>/pipeline-events-" in text
+    assert "`hephaestus-<effective-user-id>` namespace" in text
+    assert "`.hephaestus-diagnostics/<projects-root-name>`" in text
+
+
 def test_every_emitted_metric_is_documented() -> None:
     """Every emitted hephaestus_* metric is in the observability catalog."""
     doc = DOC.read_text(encoding="utf-8")

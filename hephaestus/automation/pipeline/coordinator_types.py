@@ -84,6 +84,7 @@ from uuid import uuid4 as uuid4
 from jinja2 import TemplateNotFound as TemplateNotFound
 
 import hephaestus.automation.pipeline.admission as _admission
+from hephaestus.automation.event_log_io import EventLogCandidate, EventLogHandle
 from hephaestus.automation.issue_waves import WaveLease as WaveLease
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE as DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
@@ -363,6 +364,15 @@ class PipelineConfig:
     run_identity: str = field(default_factory=lambda: uuid4().hex)
     # Passive ordinary Git-job waits do not reduce subprocess timeouts.
     git_lock_timeout: int = 7200
+    # The CLI retains all eligible locations so the lifecycle can recover if
+    # a selected location changes before dispatch.
+    event_log_candidates: tuple[EventLogCandidate, ...] = ()
+    # The CLI owns this handle for the complete coordinator invocation.
+    event_log_handle: EventLogHandle | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def enable_advise(self) -> bool:

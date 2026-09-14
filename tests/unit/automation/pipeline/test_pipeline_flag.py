@@ -9,6 +9,10 @@ The queue-based pipeline is the only automation-loop path (epic #1809, cutover
 
 from __future__ import annotations
 
+import logging
+import os
+import stat
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -16,14 +20,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import hephaestus.automation.event_log_io as event_log_io
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
 import hephaestus.automation.pipeline_cli as loop_runner
 from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.automation.event_log_retention import (
     DEFAULT_EVENT_LOG_RETENTION_COUNT,
     DEFAULT_EVENT_LOG_RETENTION_DAYS,
+    event_log_lifecycle,
 )
-from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.stages.base import StageContext, stage_model
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
@@ -39,7 +44,9 @@ def dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
         "submit": MagicMock(),
         "event_log_lifecycle": MagicMock(),
     }
-    mocks["event_log_lifecycle"].return_value.__enter__.return_value = None
+    mocks["event_log_lifecycle"].return_value.__enter__.side_effect = lambda: SimpleNamespace(
+        path=mocks["event_log_lifecycle"].call_args.args[0]
+    )
     mocks["event_log_lifecycle"].return_value.__exit__.return_value = False
     monkeypatch.setattr(coordinator_mod, "run_pipeline", mocks["run_pipeline"])
     monkeypatch.setattr(loop_runner, "_preflight_token_scopes", mocks["preflight"])
@@ -84,10 +91,22 @@ def test_dry_run_skips_preflight(dispatch: dict[str, MagicMock]) -> None:
     dispatch["preflight"].assert_not_called()
 
 
-def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -> None:
+def test_build_pipeline_config_maps_cli_fields(
+    dispatch: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """_build_pipeline_config carries the CLI scope into PipelineConfig."""
+    projects_dir = tmp_path / "projects"
+    user_home = tmp_path / "user-home"
+    host_temp = tmp_path / "host-temp"
+    user_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
     loop_runner.main(
         [
+            "--projects-dir",
+            str(projects_dir),
             "--loops",
             "3",
             "--max-workers",
@@ -118,14 +137,18 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.serialize_file_overlap is False
     assert config.nitpick is True
     assert config.scope is None
+    assert config.projects_dir == projects_dir.resolve()
     assert config.event_log_path is not None
     assert config.event_log_path.name.startswith("pipeline-events-")
-    assert config.event_log_path.parent == Path(DEFAULT_STATE_DIR)
+    assert config.event_log_path.parent == (
+        user_home / ".hephaestus-diagnostics" / config.projects_dir.name
+    )
     dispatch["event_log_lifecycle"].assert_called_once_with(
         config.event_log_path,
         retention_days=DEFAULT_EVENT_LOG_RETENTION_DAYS,
         retention_count=DEFAULT_EVENT_LOG_RETENTION_COUNT,
         dry_run=True,
+        candidates=config.event_log_candidates,
     )
 
 
@@ -178,6 +201,7 @@ def test_event_log_retention_flags_reach_lifecycle(
         retention_days=14,
         retention_count=25,
         dry_run=True,
+        candidates=config.event_log_candidates,
     )
 
 
@@ -197,13 +221,323 @@ def test_build_pipeline_config_maps_explicit_gh_root(
     assert config.gh_extra_path_root == gh_root
 
 
-def test_default_pipeline_event_log_path_does_not_create_repo_checkout() -> None:
+@pytest.mark.parametrize("repository", ("repo-a", "build"))
+def test_default_pipeline_event_log_path_does_not_create_repo_checkout(
+    repository: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The default event log path must not live under a repo clone directory."""
-    path = loop_runner._pipeline_event_log_path(DEFAULT_PROJECTS_DIR, ["repo-a"])
+    user_home = tmp_path / "user-home"
+    user_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+    path = loop_runner._pipeline_event_log_path(DEFAULT_PROJECTS_DIR, [repository])
 
     assert path is not None
-    assert path.parent == Path(DEFAULT_STATE_DIR)
-    assert DEFAULT_PROJECTS_DIR / "repo-a" not in path.parents
+    assert path.parent == user_home / ".hephaestus-diagnostics" / DEFAULT_PROJECTS_DIR.name
+    assert DEFAULT_PROJECTS_DIR / repository not in path.parents
+
+
+def test_default_pipeline_event_log_path_does_not_require_projects_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default event log uses user storage instead of the projects parent."""
+    user_home = tmp_path / "user-home"
+    projects_dir = tmp_path / "read-only-parent" / "projects"
+    user_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+
+    path = loop_runner._pipeline_event_log_path(projects_dir, ["repo-a"])
+
+    assert path is not None
+    assert path.parent == user_home / ".hephaestus-diagnostics" / projects_dir.name
+    assert projects_dir.parent not in path.parents
+
+
+def test_default_pipeline_event_log_path_uses_temp_when_home_is_projects_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repo named for diagnostics cannot collide with the home candidate."""
+    projects_dir = tmp_path / "projects"
+    host_temp = tmp_path / "host-temp"
+    host_temp.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: projects_dir))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+
+    path = loop_runner._pipeline_event_log_path(
+        projects_dir,
+        [".hephaestus-diagnostics"],
+    )
+
+    assert path is not None
+    assert path.parent == (
+        host_temp / f"hephaestus-{os.geteuid()}" / ".hephaestus-diagnostics" / projects_dir.name
+    )
+    assert projects_dir.resolve() not in path.resolve().parents
+
+
+def test_default_pipeline_event_log_path_canonicalizes_trusted_temp_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A symlinked provider prefix resolves before the private namespace."""
+    projects_dir = tmp_path / "projects"
+    canonical_temp = tmp_path / "canonical-temp"
+    provider_temp = tmp_path / "provider-temp"
+    attacker = tmp_path / "attacker"
+    canonical_temp.mkdir()
+    attacker.mkdir()
+    provider_temp.symlink_to(canonical_temp, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: projects_dir))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(provider_temp))
+
+    candidates = loop_runner._pipeline_event_log_candidates(projects_dir, ["repo-a"])
+    path = loop_runner._select_pipeline_event_log_path(candidates)
+
+    assert path is not None
+    namespace = canonical_temp / f"hephaestus-{os.geteuid()}"
+    assert path.parent == namespace / ".hephaestus-diagnostics" / projects_dir.name
+    with event_log_lifecycle(
+        path,
+        retention_days=0,
+        retention_count=0,
+        dry_run=False,
+        candidates=candidates,
+    ) as handle:
+        assert handle is not None
+        provider_temp.unlink()
+        provider_temp.symlink_to(attacker, target_is_directory=True)
+        handle.append_line('{"event":"probe"}\n')
+
+    assert path.is_file()
+    assert not (attacker / f"hephaestus-{os.geteuid()}").exists()
+
+
+def test_default_pipeline_event_log_path_disables_candidates_in_projects_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The optional event log stays off if each candidate can block intake."""
+    projects_dir = tmp_path / "projects"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: projects_dir))
+    monkeypatch.setattr(
+        tempfile,
+        "gettempdir",
+        lambda: str(projects_dir / "host-temp"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=loop_runner.LOG.name):
+        path = loop_runner._pipeline_event_log_path(
+            projects_dir,
+            [".hephaestus-diagnostics"],
+        )
+
+    assert path is None
+    assert any("event logging is disabled" in record.message for record in caplog.records)
+
+
+def test_default_pipeline_event_log_path_disables_unverified_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The optional event log stays off when all candidates are in a worktree."""
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: checkout))
+    monkeypatch.setattr(
+        tempfile,
+        "gettempdir",
+        lambda: str(checkout / "host-temp"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=loop_runner.LOG.name):
+        path = loop_runner._pipeline_event_log_path(tmp_path / "projects", ["repo-a"])
+
+    assert path is None
+    assert any("event logging is disabled" in record.message for record in caplog.records)
+
+
+def test_default_pipeline_event_log_path_uses_temp_when_home_lookup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed home lookup does not hide a safe temporary directory."""
+    host_temp = tmp_path / "host-temp"
+    host_temp.mkdir()
+
+    def unavailable_home(cls: type[Path]) -> Path:
+        del cls
+        raise OSError("home lookup failed")
+
+    monkeypatch.setattr(Path, "home", classmethod(unavailable_home))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+
+    with caplog.at_level(logging.WARNING, logger=loop_runner.LOG.name):
+        path = loop_runner._pipeline_event_log_path(tmp_path / "projects", ["repo-a"])
+
+    assert path is not None
+    assert path.parent == (
+        host_temp / f"hephaestus-{os.geteuid()}" / ".hephaestus-diagnostics" / "projects"
+    )
+    assert not caplog.records
+
+
+def test_default_pipeline_event_log_path_uses_temp_when_home_is_unusable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unusable home candidate does not hide writable temporary storage."""
+    user_home = tmp_path / "user-home"
+    host_temp = tmp_path / "host-temp"
+    user_home.mkdir()
+    host_temp.mkdir()
+    (user_home / ".hephaestus-diagnostics").write_text("occupied", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+
+    path = loop_runner._pipeline_event_log_path(tmp_path / "projects", ["repo-a"])
+
+    assert path is not None
+    assert path.parent == (
+        host_temp / f"hephaestus-{os.geteuid()}" / ".hephaestus-diagnostics" / "projects"
+    )
+
+
+def test_default_pipeline_event_log_path_uses_home_when_temp_lookup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed temporary lookup does not hide a safe home directory."""
+    user_home = tmp_path / "user-home"
+    user_home.mkdir()
+
+    def unavailable_temp() -> str:
+        raise OSError("temporary-directory lookup failed")
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+    monkeypatch.setattr(tempfile, "gettempdir", unavailable_temp)
+
+    with caplog.at_level(logging.WARNING, logger=loop_runner.LOG.name):
+        path = loop_runner._pipeline_event_log_path(tmp_path / "projects", ["repo-a"])
+
+    assert path is not None
+    assert path.parent == user_home / ".hephaestus-diagnostics" / "projects"
+    assert not caplog.records
+
+
+def test_default_pipeline_event_log_path_rejects_hostile_temp_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A public precreated user namespace cannot receive diagnostic files."""
+    projects_dir = tmp_path / "projects"
+    host_temp = tmp_path / "host-temp"
+    namespace = host_temp / f"hephaestus-{os.geteuid()}"
+    namespace.mkdir(parents=True, mode=0o755)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: projects_dir))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+
+    with caplog.at_level(logging.WARNING, logger=loop_runner.LOG.name):
+        path = loop_runner._pipeline_event_log_path(projects_dir, ["repo-a"])
+
+    assert path is None
+    assert stat.S_IMODE(namespace.lstat().st_mode) == 0o755
+    assert not (namespace / ".hephaestus-diagnostics").exists()
+    assert any("event logging is disabled" in record.message for record in caplog.records)
+
+
+def test_default_pipeline_event_log_path_rejects_symlinked_temp_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A planted user-namespace symlink cannot redirect diagnostics."""
+    projects_dir = tmp_path / "projects"
+    host_temp = tmp_path / "host-temp"
+    target = tmp_path / "foreign-target"
+    namespace = host_temp / f"hephaestus-{os.geteuid()}"
+    host_temp.mkdir()
+    target.mkdir(mode=0o700)
+    namespace.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: projects_dir))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+
+    path = loop_runner._pipeline_event_log_path(projects_dir, ["repo-a"])
+
+    assert path is None
+    assert namespace.is_symlink()
+    assert not (target / ".hephaestus-diagnostics").exists()
+
+
+def test_default_pipeline_event_log_path_rejects_wrong_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A namespace not owned by the effective user cannot hold diagnostics."""
+    projects_dir = tmp_path / "projects"
+    host_temp = tmp_path / "host-temp"
+    namespace = host_temp / f"hephaestus-{os.geteuid()}"
+    namespace.mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: projects_dir))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+    monkeypatch.setattr(event_log_io, "_effective_uid", lambda: os.geteuid() + 1)
+
+    path = loop_runner._pipeline_event_log_path(projects_dir, ["repo-a"])
+
+    assert path is None
+    assert namespace.lstat().st_uid == os.geteuid()
+    assert not (namespace / ".hephaestus-diagnostics").exists()
+
+
+def test_default_pipeline_event_log_path_creates_private_temp_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All event-log directories below shared temporary storage are private."""
+    projects_dir = tmp_path / "projects"
+    host_temp = tmp_path / "host-temp"
+    host_temp.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: projects_dir))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+
+    path = loop_runner._pipeline_event_log_path(projects_dir, ["repo-a"])
+
+    namespace = host_temp / f"hephaestus-{os.geteuid()}"
+    assert path is not None
+    assert path.parent == namespace / ".hephaestus-diagnostics" / "projects"
+    for directory in (namespace, namespace / ".hephaestus-diagnostics", path.parent):
+        status = directory.lstat()
+        assert stat.S_ISDIR(status.st_mode)
+        assert stat.S_IMODE(status.st_mode) == 0o700
+        assert status.st_uid == os.geteuid()
+
+
+def test_default_pipeline_event_log_path_rejects_before_directory_setup_without_nofollow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing descriptor support disables diagnostics before path creation."""
+    user_home = tmp_path / "user-home"
+    user_home.mkdir()
+
+    def unexpected_home_lookup(cls: type[Path]) -> Path:
+        del cls
+        raise AssertionError("capability admission must precede path lookup")
+
+    monkeypatch.setattr(Path, "home", classmethod(unexpected_home_lookup))
+    monkeypatch.delattr(os, "O_NOFOLLOW")
+
+    path = loop_runner._pipeline_event_log_path(tmp_path / "projects", ["repo-a"])
+
+    assert path is None
+    assert not (user_home / ".hephaestus-diagnostics").exists()
 
 
 def test_build_pipeline_config_maps_planning_stages_to_scope(
