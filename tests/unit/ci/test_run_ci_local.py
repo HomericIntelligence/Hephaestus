@@ -131,8 +131,8 @@ def _fake_engine(
             "      *:/workspace:Z)\n"
             '        workspace_root="${arg%:/workspace:Z}"\n'
             "        ;;\n"
-            "      *:/candidate:ro)\n"
-            '        candidate_root="${arg%:/candidate:ro}"\n'
+            "      *:/candidate:ro|*:/candidate:ro,Z)\n"
+            '        candidate_root="${arg%:/candidate:*}"\n'
             "        ;;\n"
             "      GIT_INDEX_FILE=/workspace/*)\n"
             '        candidate_index="${arg#GIT_INDEX_FILE=/workspace/}"\n'
@@ -644,17 +644,31 @@ def test_lint_candidate_index_includes_untracked_source(tmp_path: Path) -> None:
     assert not list((repo / "build").glob("ci-candidate.*"))
 
 
-def test_secrets_candidate_tree_includes_untracked_source(tmp_path: Path) -> None:
+@pytest.mark.parametrize("engine", ["podman", "docker"])
+@pytest.mark.parametrize("check_only", [False, True])
+def test_secrets_candidate_tree_includes_untracked_source(
+    tmp_path: Path, engine: str, check_only: bool
+) -> None:
     """The filesystem scanner receives the exact uncommitted candidate tree."""
     repo = _candidate_repo(tmp_path)
     fixture_content = "fixture-secret-value\n"
     (repo / "new_secret_source.txt").write_text(fixture_content, encoding="utf-8")
 
-    result, log = _run_runner(tmp_path, "secrets", repo_root=repo)
+    result, log = _run_runner(
+        tmp_path, "secrets", repo_root=repo, engine_name=engine, check_only=check_only
+    )
 
     assert result.returncode != 0
     assert f"CANDIDATE_SECRET_BYTES:{fixture_content}" in log
     assert "dir --verbose --exit-code=1 ." in log
+    calls = _engine_calls(tmp_path)
+    assert len(calls) == 3
+    history, candidate = calls[1:]
+    assert f"{repo}:/repo:Z" in history
+    assert candidate.count("--volume") == 1
+    candidate_mount = candidate[candidate.index("--volume") + 1]
+    assert candidate_mount.startswith(f"{repo}/build/ci-candidate.")
+    assert candidate_mount.endswith("/tree:/candidate:ro,Z")
     assert not list((repo / "build").glob("ci-candidate.*"))
 
 
