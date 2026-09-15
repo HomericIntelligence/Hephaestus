@@ -19980,6 +19980,73 @@ class TestGitLocking:
         assert observed == ["interrupted" if stop == "cancellation" else "bounded"]
         assert result.error == ("interrupted" if stop == "cancellation" else "timeout")
 
+    @pytest.mark.parametrize("stop", ["deadline", "cancellation"])
+    @pytest.mark.parametrize("deadline_s", [None, 105.0])
+    def test_lock_preparation_bounds_child_commands(
+        self,
+        pool: WorkerPool,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+        stop: str,
+        deadline_s: float | None,
+    ) -> None:
+        """Preparation bounds each child and stops before the next child starts."""
+        checkout = tmp_path / "checkout"
+        (checkout / ".git").mkdir(parents=True)
+        job = GitJob(
+            "repo",
+            "sync_checkout",
+            10,
+            expected_repository="owner/repo",
+            deadline_s=deadline_s,
+            kwargs={
+                "dest": str(checkout),
+                "repo": "owner/repo",
+            },
+        )
+        clock = [100.0]
+        preparation_end = deadline_s or 110.0
+        child_commands: list[list[str]] = []
+        child_timeouts: list[float] = []
+        child_shutdowns: list[threading.Event | None] = []
+
+        def run_child(
+            command: list[str],
+            *,
+            timeout: float,
+            shutdown: threading.Event | None = None,
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            child_commands.append(command)
+            child_timeouts.append(timeout)
+            child_shutdowns.append(shutdown)
+            if len(child_commands) == 1:
+                clock[0] += 2.0
+            elif stop == "deadline":
+                clock[0] = preparation_end
+            else:
+                shutdown_event.set()
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with (
+            patch(f"{_WP}.time.monotonic", side_effect=lambda: clock[0]),
+            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+            patch("hephaestus.automation.git_runtime._shared_run_git", side_effect=run_child),
+            patch.object(pool, "_repo_lock") as repo_lock,
+            patch.object(pool, "_dispatch_locked_git") as dispatch,
+        ):
+            result = pool._run_git(job)
+
+        assert [command[1] for command in child_commands] == ["config", "rev-parse"]
+        assert child_timeouts == [preparation_end - 100.0, preparation_end - 102.0]
+        assert child_shutdowns == [shutdown_event, shutdown_event]
+        assert result.ok is False
+        assert result.error == ("interrupted" if stop == "cancellation" else "timeout")
+        assert result.interrupted is (stop == "cancellation")
+        repo_lock.assert_not_called()
+        dispatch.assert_not_called()
+
     @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     @pytest.mark.parametrize("repo_path_kind", ["canonical", "parent-alias"])
     def test_remove_worktree_reuses_admitted_common_lock(

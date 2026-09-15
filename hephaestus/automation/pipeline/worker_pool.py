@@ -6645,10 +6645,14 @@ class WorkerPool:
         operation_deadline_s = time.monotonic() + job.timeout_s
         if job.deadline_s is not None:
             operation_deadline_s = min(operation_deadline_s, job.deadline_s)
+        admitted_kwargs = job.kwargs
+        if job.op == "create_worktree" and prepared.authoritative_checkout is not None:
+            admitted_kwargs = {**job.kwargs, "repo_root": str(prepared.authoritative_checkout)}
         timed_job = replace(
             job,
             deadline_s=operation_deadline_s,
             repository_lock_wait_timeout_s=None,
+            kwargs=admitted_kwargs,
         )
         common_lock_path = prepared.common_lock_path
         held_common_lock = (

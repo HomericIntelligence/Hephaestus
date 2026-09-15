@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -14,6 +15,7 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import source_worktree
+from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
@@ -22,6 +24,58 @@ from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.test_source_worktree import _repository
+
+
+@pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
+@pytest.mark.parametrize("receipt_present", [True, False])
+def test_source_cleanup_reuses_admitted_common_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    receipt_present: bool,
+) -> None:
+    """Source cleanup removes a real worktree under the admitted common lock."""
+    root, _, revision = _repository(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/example/project.git"],
+        cwd=root,
+        check=True,
+    )
+    manager = SourceWorkspaceManager(root, repository="project")
+    binding = manager.prepare(7, SourceLane.REVIEW, revision)
+    receipt_path = manager._receipt_path(7, SourceLane.REVIEW)
+    if not receipt_present:
+        receipt_path.unlink()
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _extra_root: "gh")
+    monkeypatch.setattr(worker_pool, "_trusted_remote_git_config", lambda *_args: ())
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=CompletionQueue(maxsize=1),
+        lock_dir=tmp_path / "locks",
+    )
+    job = GitJob(
+        "project",
+        "remove_worktree",
+        2,
+        expected_repository="example/project",
+        deadline_s=time.monotonic() + 2,
+        kwargs={
+            "worktree_path": str(binding.cwd),
+            "repo_root": str(root),
+            "issue_number": 7,
+            "expected_head": revision,
+            "expected_detached": True,
+            "source_lane": SourceLane.REVIEW.value,
+        },
+    )
+    try:
+        result = pool.run_cleanup_git(job)
+    finally:
+        pool.shutdown()
+
+    assert result.ok, result.error
+    assert not binding.cwd.exists()
+    assert not receipt_path.exists()
 
 
 @pytest.mark.parametrize("lock_kind", ["source", "metadata"])
