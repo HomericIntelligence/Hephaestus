@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -125,10 +126,23 @@ class Workspace:
         env.update(overrides)
         return env
 
-    def run(self, **overrides: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, *, catalog: dict[str, str] | None = None, **overrides: str
+    ) -> subprocess.CompletedProcess[str]:
         """Run the public command and distinguish an absent CLI from a failure."""
+        command = [sys.executable, "-B", "-m", "hephaestus.ci.check_only"]
+        if catalog is not None:
+            command = [
+                sys.executable,
+                "-B",
+                "-c",
+                "from hephaestus.cli.localization import using_localizer\n"
+                "from hephaestus.ci.check_only import main\n"
+                f"with using_localizer({catalog!r}):\n"
+                "    raise SystemExit(main())\n",
+            ]
         result = subprocess.run(
-            [sys.executable, "-B", "-m", "hephaestus.ci.check_only"],
+            command,
             cwd=self.root,
             env=self.environment(**overrides),
             capture_output=True,
@@ -559,3 +573,156 @@ def test_external_symlink_cannot_expose_original_source_to_a_mutating_tool(
     assert "symlink" in (result.stdout + result.stderr).lower()
     assert outside.read_bytes() == b"outside  \n"
     assert workspace.events() == []
+
+
+def test_git_children_keep_private_candidate_and_exclude_ambient_values(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """Use the supplied index/object store without forwarding unrelated input."""
+    workspace.write("selected.py", "BEFORE = 1\n")
+    workspace.config(
+        [
+            {
+                "repo": "local",
+                "hooks": [_local("ruff-check-python", "uv run ruff check --fix")],
+            }
+        ]
+    )
+    workspace.stage()
+    workspace.git(
+        "-c",
+        "user.name=Check-only fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "--quiet",
+        "-m",
+        "tracked selection baseline",
+    )
+    workspace.write(".gitignore", "build/\n.heph-private-denylist\nselected.py\n")
+    workspace.git("rm", "--cached", "--", "selected.py")
+    workspace.write("selected.py", "AFTER = 2\n")
+    workspace.stage()
+    assert b"selected.py" not in workspace.git(
+        "ls-files", "--cached", "--others", "--exclude-standard"
+    )
+
+    private = tmp_path / "candidate-git"
+    private.mkdir()
+    (private / "objects").mkdir()
+    admitted = {
+        "GIT_INDEX_FILE": str(private / "index"),
+        "GIT_OBJECT_DIRECTORY": str(private / "objects"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(workspace.root / ".git" / "objects"),
+    }
+    for arguments in (("read-tree", "HEAD"), ("add", "--all", "--", ".")):
+        subprocess.run(
+            ["git", *arguments],
+            cwd=workspace.root,
+            env=workspace.environment(**admitted),
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+    private_contents = subprocess.check_output(
+        ["git", "show", ":selected.py"],
+        cwd=workspace.root,
+        env=workspace.environment(**admitted),
+        timeout=10,
+    )
+    assert private_contents == b"AFTER = 2\n"
+
+    real_git = shutil.which("git", path=os.defpath)
+    assert real_git is not None
+    git_log = tmp_path / "git-children.jsonl"
+    git_log.write_text("")
+    wrapper = workspace.tools / "git"
+    wrapper.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        f"names = {tuple(admitted)!r}\n"
+        "if sys.argv[1:2] == ['-C']:\n"
+        f"    with open({str(git_log)!r}, 'a') as stream:\n"
+        "        stream.write(json.dumps({'root': sys.argv[2],\n"
+        "            'candidate': {name: os.environ.get(name) for name in names},\n"
+        "            'sentinel': 'CHECK_ONLY_AMBIENT_SENTINEL' in os.environ,\n"
+        "            'credential': 'GH_TOKEN' in os.environ}) + '\\n')\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n"
+    )
+    wrapper.chmod(0o755)
+    original = _source_state(workspace.root)
+    private_original = _source_state(private)
+    result = workspace.run(
+        GIT_INDEX_FILE=admitted["GIT_INDEX_FILE"],
+        GIT_OBJECT_DIRECTORY=admitted["GIT_OBJECT_DIRECTORY"],
+        GIT_ALTERNATE_OBJECT_DIRECTORIES=admitted["GIT_ALTERNATE_OBJECT_DIRECTORIES"],
+        CHECK_ONLY_AMBIENT_SENTINEL="fixture-only-unrelated-value",
+        GH_TOKEN=str(tmp_path / "credential-presence-sentinel"),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ruff-check-python: passed" in result.stdout
+    assert "selected.py" in workspace.events()[0]["args"]
+    events = [json.loads(line) for line in git_log.read_text().splitlines()]
+    source_calls = [event for event in events if event["root"] == str(workspace.root)]
+    candidate_calls = [event for event in events if event["root"] != str(workspace.root)]
+    assert source_calls and candidate_calls
+    assert all(event["candidate"] == admitted for event in source_calls)
+    assert all(
+        all(value is None for value in event["candidate"].values()) for event in candidate_calls
+    )
+    assert all(not event["sentinel"] and not event["credential"] for event in events)
+    assert _source_state(workspace.root) == original
+    assert _source_state(private) == private_original
+
+
+@pytest.mark.parametrize("outcome", ["passed", "failed", "changed", "preparation-error"])
+def test_public_output_localizes_templates_without_translating_runtime_values(
+    workspace: Workspace, outcome: str
+) -> None:
+    """Translate authored messages while retaining IDs, diagnostics, and exits."""
+    workspace.write("sample.py", "VALUE = 1\n")
+    hook_id = "ruff-check-python"
+    overrides = {}
+    if outcome == "changed":
+        hook_id = "trailing-whitespace"
+        workspace.write("sample.txt", "value  \n")
+        workspace.config([_cache_remote(workspace, hook_id, "trailing-whitespace-fixer")])
+    else:
+        workspace.config([{"repo": "local", "hooks": [_local(hook_id, "uv run ruff check --fix")]}])
+        if outcome == "failed":
+            overrides["CHECK_ONLY_TOOL_FAIL"] = "uv"
+        elif outcome == "preparation-error":
+            (workspace.tools / "uv").unlink()
+    workspace.stage()
+    original = _source_state(workspace.root)
+    error = "Hook executable is not prepared: ruff-check-python: uv"
+    catalog = {
+        "%(hook_id)s: %(status)s": "Kontrolle %(hook_id)s: %(status)s",
+        "passed": "bestanden",
+        "FAILED": "FEHLER",
+        "The hook changed its private candidate; original source is unchanged.": (
+            "Private Kopie geaendert; Original unveraendert."
+        ),
+        "Check-only preparation failed: %(error)s": "Vorbereitung fehlgeschlagen: %(error)s",
+        hook_id: "INCORRECTLY_TRANSLATED_HOOK_ID",
+        "fixture validator failure": "INCORRECTLY_TRANSLATED_TOOL_OUTPUT",
+        error: "INCORRECTLY_TRANSLATED_RUNTIME_ERROR",
+    }
+    result = workspace.run(catalog=catalog, **overrides)
+    expected_exit = {"passed": 0, "failed": 1, "changed": 1, "preparation-error": 2}
+    assert result.returncode == expected_exit[outcome], result.stdout + result.stderr
+    if outcome == "preparation-error":
+        assert f"Vorbereitung fehlgeschlagen: {error}" in result.stderr
+    else:
+        status = "bestanden" if outcome == "passed" else "FEHLER"
+        assert f"Kontrolle {hook_id}: {status}" in result.stdout
+        if outcome == "failed":
+            assert "fixture validator failure" in result.stdout
+        elif outcome == "changed":
+            assert "Private Kopie geaendert; Original unveraendert." in result.stdout
+    assert "INCORRECTLY_TRANSLATED" not in result.stdout + result.stderr
+    assert _source_state(workspace.root) == original

@@ -2233,6 +2233,12 @@ test-only agents. They use the same PR/static runner resources and the
 [`check_only`](../hephaestus/ci/check_only.py) adapter for lint. The adapter reads
 canonical pre-commit configuration and pinned cached manifests, preserves file
 selection, and runs hooks in a private candidate with its own Git metadata.
+Its Git subprocesses use the shared finite environment policy and preserve
+only the supplied candidate index, object directory, and alternate object
+directories in addition to the approved platform values. The private candidate
+clears those input overrides before its own Git operations and hook execution.
+Human-facing templates use the localization boundary; hook IDs, error values,
+and raw tool output keep their original content.
 It includes local private-denylist policy. It uses native check flags or detects
 changes to the private copy, and restores the input before each subsequent
 hook. Missing prepared tools and unknown execution contracts fail verification.
