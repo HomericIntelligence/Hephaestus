@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
+from hephaestus.automation.repo_intake import RepoIntakeManager
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -227,8 +229,20 @@ def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller(
     class RecordingWorkerPool(WorkerPool):
         """Record only a successful real intake preparation."""
 
-        def _git_prepare_intake(self, job: GitJob) -> JobResult:
-            result = super()._git_prepare_intake(job)
+        def _git_prepare_intake(
+            self,
+            job: GitJob,
+            *,
+            manager: RepoIntakeManager | None = None,
+            operational_state_paths: Collection[Path] = (),
+            admitted_metadata_lock: Path | None = None,
+        ) -> JobResult:
+            result = super()._git_prepare_intake(
+                job,
+                manager=manager,
+                operational_state_paths=operational_state_paths,
+                admitted_metadata_lock=admitted_metadata_lock,
+            )
             if result.ok:
                 events.append("intake-prepared")
             return result
