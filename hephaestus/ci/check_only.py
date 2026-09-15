@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import re
 import shlex
 import shutil
 import sqlite3
@@ -73,14 +74,33 @@ _LOCAL_ENTRIES = {
     "check-private-denylist": "python3 scripts/check_private_denylist.py --staged --tracked",
     "shellcheck": "shellcheck",
 }
-_PYGREP_IDS = frozenset(
-    {
-        "forbid-or-true",
-        "forbid-continue-on-error",
-        "forbid-advisory-warnings",
-        "forbid-unwhitelisted-add-to-bashrc",
-    }
-)
+_PYGREP_CONTRACTS = {
+    "forbid-or-true": (
+        r"\|\|\s*true(\s*$|\s+#)",
+        r"\.(sh|bash|yml|yaml|hcl)$|(^|/)Dockerfile[^/]*$|(^|/)[Jj]ustfile$",
+        "^$",
+        ("text",),
+    ),
+    "forbid-continue-on-error": (
+        r"^\s*continue-on-error:\s*true\s*$",
+        r"^\.github/workflows/.*\.ya?ml$",
+        "^$",
+        ("file",),
+    ),
+    "forbid-advisory-warnings": (
+        "::warning::",
+        r"^\.github/workflows/.*\.ya?ml$",
+        r"^\.github/workflows/_required\.yml$",
+        ("file",),
+    ),
+    "forbid-unwhitelisted-add-to-bashrc": (
+        r'add_to_bashrc\s+"(?!(?:eval \\"\\\$\(/[A-Za-z0-9._/\-]+ shellenv\)\\"|'
+        r'export PATH=\\\$PATH:[A-Za-z0-9._/\-$]+)")[^"]*"',
+        r"^scripts/shell/install\.sh$",
+        "^$",
+        ("file",),
+    ),
+}
 _REMOTE_ENTRIES = {
     "https://github.com/pre-commit/pre-commit-hooks": {
         "trailing-whitespace": "trailing-whitespace-fixer",
@@ -125,6 +145,10 @@ class PreparedStore(Store):
 
     def clone(self, repo: str, ref: str, deps: Sequence[str] = ()) -> str:
         """Resolve an existing pinned manifest; never clone a repository."""
+        if re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", ref) is None:
+            raise PreparationError(
+                f"Hook repository revision is not an immutable object ID: {repo} at {ref}"
+            )
         database = Path(self.db_path)
         if not database.is_file():
             raise PreparationError(f"Prepared hook cache is absent: {repo}")
@@ -243,7 +267,34 @@ def _tree_state(root: Path) -> dict[str, tuple[int, bytes] | None]:
 
 
 def _adapt(hook: Hook) -> Hook:
-    if hook.src == "local" and hook.id in _PYGREP_IDS and hook.language == "pygrep":
+    if hook.src == "local" and hook.id in _PYGREP_CONTRACTS:
+        expected_entry, expected_files, expected_exclude, expected_types = _PYGREP_CONTRACTS[
+            hook.id
+        ]
+        contract = (
+            hook.entry,
+            hook.files,
+            hook.exclude,
+            tuple(hook.types),
+            tuple(hook.types_or),
+            tuple(hook.exclude_types),
+            tuple(hook.args),
+            hook.always_run,
+            hook.pass_filenames,
+        )
+        expected = (
+            expected_entry,
+            expected_files,
+            expected_exclude,
+            expected_types,
+            (),
+            (),
+            (),
+            False,
+            True,
+        )
+        if hook.language != "pygrep" or contract != expected or "pre-commit" not in hook.stages:
+            raise PreparationError(f"Unsupported hook execution contract: {hook.id}")
         return hook
     entries = _LOCAL_ENTRIES if hook.src == "local" else _REMOTE_ENTRIES.get(hook.src, {})
     # Pinned pre-commit normalizes the configured `system` language to this name.
@@ -290,9 +341,14 @@ def _selected(
     classifier = Classifier.from_config(names, config["files"], config["exclude"])
     selected = []
     for configured in all_hooks(config, PreparedStore()):
-        if "pre-commit" not in configured.stages:
+        if configured.src == "local" and configured.id in _PYGREP_CONTRACTS:
+            hook = _adapt(configured)
+        else:
+            if "pre-commit" not in configured.stages:
+                continue
+            hook = _adapt(configured)
+        if "pre-commit" not in hook.stages:
             continue
-        hook = _adapt(configured)
         files = tuple(classifier.filenames_for_hook(hook))
         if files or hook.always_run:
             _ready(hook)

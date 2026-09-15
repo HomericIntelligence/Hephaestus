@@ -135,10 +135,11 @@ builder and runtime must use the same pinned Node/npm prefix for Markdown hooks.
 
 Use `just ci-lint-check-only` when only the lint subset is needed. These commands
 run the configured lint checks against a private candidate and fail if a hook
-changes it. They mount the original checkout read-only, disable Python
-dependency syncing, and disable Gitleaks image pulls. Do not combine this
-selection with `--rebuild`; image preparation is separate. They do not provide
-the queue's native fallback. They also do not
+changes it. They mount the original checkout read-only and disable Python
+dependency syncing. The full selection requires the pinned Gitleaks image and
+disables pulls for both scans. The lint selection does not run these scans. Do
+not combine this selection with `--rebuild`; image preparation is separate. They
+do not provide the queue's native fallback. They also do not
 replace the final complete normal-test command in [AGENTS](../../AGENTS.md).
 See [delegated local verification](../ci/required-checks.md#delegated-local-verification)
 for the separate PR/static, manual contribution, nightly, and optional lanes.

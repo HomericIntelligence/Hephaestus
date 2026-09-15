@@ -98,8 +98,9 @@ merge requirements. The local run is early failure feedback only; it does not gr
 Use `just ci-check-only` for the local PR/static checks, or
 `just ci-lint-check-only` for the lint subset. Prepare the CI image for the
 candidate separately before a test-only agent runs these commands. A missing
-image fails verification instead of starting an implicit build. The
-separate Gitleaks image must also be present; both scans disable image pulls.
+image fails verification instead of starting an implicit build. The full
+`ci-check-only` selection also requires the separate Gitleaks image and disables
+pulls for both scans. The lint selection does not run the Gitleaks scans.
 The CI builder and runtime use the same pinned Node/npm prefix so the prepared
 Markdown hook has the same environment name and executable in both stages.
 Rebuild the candidate image after a toolchain or hook-preparation change.

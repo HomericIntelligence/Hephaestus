@@ -195,6 +195,18 @@ def _local(hook_id: str, entry: str, **options: Any) -> dict[str, Any]:
     return {"id": hook_id, "name": hook_id, "entry": entry, "language": "system", **options}
 
 
+def _configured_local_hook(hook_id: str) -> dict[str, Any]:
+    """Return one local hook from the repository configuration."""
+    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text())
+    for repository in config["repos"]:
+        if repository["repo"] != "local":
+            continue
+        for hook in repository["hooks"]:
+            if hook["id"] == hook_id:
+                return dict(hook)
+    raise AssertionError(f"Local hook is absent: {hook_id}")
+
+
 def _source_state(root: Path) -> dict[str, tuple[int, str]]:
     """Bind every original file, symlink, mode, and Git metadata file."""
     result = {}
@@ -357,33 +369,89 @@ def test_hook_failure_is_not_reported_as_success(workspace: Workspace) -> None:
     assert "fixture validator failure" in result.stdout + result.stderr
 
 
-def test_pygrep_uses_configured_expression_and_exclusion(workspace: Workspace) -> None:
-    """Run the configured expression against only the selected files."""
-    workspace.write("scripts/allowed.sh", "echo acceptable\n")
-    workspace.write("scripts/excluded.sh", "echo forbidden-marker\n")
+def test_pygrep_uses_the_bound_expression(workspace: Workspace) -> None:
+    """Run the reviewed expression against its selected files."""
+    workspace.write("scripts/checked.sh", "echo acceptable\n")
     workspace.config(
         [
             {
                 "repo": "local",
-                "hooks": [
-                    {
-                        "id": "forbid-or-true",
-                        "name": "rule",
-                        "language": "pygrep",
-                        "entry": "forbidden-marker",
-                        "files": r"\.sh$",
-                        "exclude": "excluded",
-                    }
-                ],
+                "hooks": [_configured_local_hook("forbid-or-true")],
             }
         ]
     )
     workspace.stage()
     assert workspace.run().returncode == 0
-    workspace.write("scripts/allowed.sh", "echo forbidden-marker\n")
+    workspace.write("scripts/checked.sh", "command || true\n")
     result = workspace.run()
     assert result.returncode == 1
-    assert "scripts/allowed.sh" in result.stdout + result.stderr
+    assert "scripts/checked.sh" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "hook_id",
+    [
+        "forbid-or-true",
+        "forbid-continue-on-error",
+        "forbid-advisory-warnings",
+        "forbid-unwhitelisted-add-to-bashrc",
+    ],
+)
+def test_pygrep_accepts_the_bound_contract(workspace: Workspace, hook_id: str) -> None:
+    """Accept each reviewed policy hook without a contract change."""
+    workspace.config([{"repo": "local", "hooks": [_configured_local_hook(hook_id)]}])
+    workspace.stage()
+    result = workspace.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "hook_id",
+    [
+        "forbid-or-true",
+        "forbid-continue-on-error",
+        "forbid-advisory-warnings",
+        "forbid-unwhitelisted-add-to-bashrc",
+    ],
+)
+def test_pygrep_rejects_a_changed_expression(workspace: Workspace, hook_id: str) -> None:
+    """Reject a known policy ID with a different expression."""
+    hook = _configured_local_hook(hook_id)
+    hook["entry"] = "candidate-weakened-expression"
+    workspace.config([{"repo": "local", "hooks": [hook]}])
+    workspace.stage()
+    result = workspace.run()
+    assert result.returncode == 2
+    assert hook_id in result.stderr
+    assert workspace.events() == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("args", ["--multiline"]),
+        ("files", "^absent$"),
+        ("exclude", ".*"),
+        ("types", ["python"]),
+        ("types_or", ["python"]),
+        ("exclude_types", ["shell"]),
+        ("always_run", True),
+        ("pass_filenames", False),
+        ("stages", ["manual"]),
+    ],
+)
+def test_pygrep_rejects_changed_selection_or_arguments(
+    workspace: Workspace, field: str, value: object
+) -> None:
+    """Reject a policy hook whose execution selection changed."""
+    hook = _configured_local_hook("forbid-or-true")
+    hook[field] = value
+    workspace.config([{"repo": "local", "hooks": [hook]}])
+    workspace.stage()
+    result = workspace.run()
+    assert result.returncode == 2
+    assert "forbid-or-true" in result.stderr
+    assert workspace.events() == []
 
 
 def test_normalizer_detects_changes_without_changing_original_bytes_modes_or_index(
@@ -488,6 +556,25 @@ def test_missing_prepared_dependency_fails_without_setup(
     assert _source_state(workspace.cache) == cache_before
 
 
+@pytest.mark.parametrize("revision", ["main", "v6.0.0", "3e8a870"])
+def test_symbolic_remote_revision_fails_with_a_prepared_cache(
+    workspace: Workspace, revision: str
+) -> None:
+    """Reject a cached remote hook revision that is not a full object ID."""
+    workspace.write("sample.txt", "value\n")
+    repository = _cache_remote(workspace, "trailing-whitespace", "trailing-whitespace-fixer")
+    with sqlite3.connect(workspace.cache / "db.db") as connection:
+        connection.execute("UPDATE repos SET ref = ?", (revision,))
+    repository["rev"] = revision
+    workspace.config([repository])
+    workspace.stage()
+    result = workspace.run()
+    assert result.returncode == 2
+    assert "immutable" in result.stderr.lower()
+    assert revision in result.stderr
+    assert workspace.events() == []
+
+
 def test_unknown_hook_fails_before_any_hook_runs(workspace: Workspace) -> None:
     """Reject an unreviewed hook before executing the selected checks."""
     workspace.write("sample.py", "VALUE = 1\n")
@@ -529,25 +616,19 @@ def test_changed_formatter_execution_contract_fails_before_execution(workspace: 
     assert workspace.events() == []
 
 
-def test_later_hook_sees_original_candidate_after_normalizer_failure(workspace: Workspace) -> None:
+def test_later_hook_sees_original_candidate_after_normalizer_failure(
+    workspace: Workspace,
+) -> None:
     """Restore candidate input before the next configured check runs."""
-    workspace.write("sample.txt", "value  \n")
+    workspace.write("sample.sh", "command || true  \n")
     repo = _cache_remote(workspace, "trailing-whitespace", "trailing-whitespace-fixer")
-    repo["hooks"][0]["files"] = "^sample.txt$"
+    repo["hooks"][0]["files"] = "^sample.sh$"
     workspace.config(
         [
             repo,
             {
                 "repo": "local",
-                "hooks": [
-                    {
-                        "id": "forbid-or-true",
-                        "name": "candidate whitespace rule",
-                        "language": "pygrep",
-                        "entry": "value  ",
-                        "files": "^sample.txt$",
-                    }
-                ],
+                "hooks": [_configured_local_hook("forbid-or-true")],
             },
         ]
     )
@@ -555,7 +636,7 @@ def test_later_hook_sees_original_candidate_after_normalizer_failure(workspace: 
     result = workspace.run()
     assert result.returncode == 1
     assert "trailing-whitespace" in result.stdout + result.stderr
-    assert "sample.txt:1:value  " in result.stdout + result.stderr
+    assert "sample.sh:1:command || true  \n" in result.stdout + result.stderr
 
 
 def test_external_symlink_cannot_expose_original_source_to_a_mutating_tool(

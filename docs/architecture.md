@@ -2308,9 +2308,9 @@ the runtime. This keeps the Markdown hook's system Node environment consistent
 across image stages. Toolchain changes require a new candidate image build.
 These selections disable dependency syncing for every CI-image call and import
 the mounted candidate source. They mount the original checkout read-only for
-every CI-image call. Both Gitleaks scans require the pinned image to be present
-and disable pulls. A simultaneous `--rebuild` request is rejected before engine
-preparation.
+every CI-image call. The full selection runs both Gitleaks scans, requires the
+pinned image, and disables pulls. The lint selection does not run these scans. A
+simultaneous `--rebuild` request is rejected before engine preparation.
 On SELinux hosts, the history scan gives the read-only source tree its private
 label.
 The next scanner mounts only the candidate tree with `:ro,Z` to apply its own
