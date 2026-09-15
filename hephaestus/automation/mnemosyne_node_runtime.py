@@ -1135,7 +1135,7 @@ def _open_package_root(
 
 def _open_snapshot_base(available_descriptors: int) -> tuple[Path, _BoundPackageRoot]:
     """Select an available temporary root with trusted path components."""
-    candidates = (Path(tempfile.gettempdir()), Path("/tmp"))
+    candidates = (Path(tempfile.gettempdir()), Path(os.sep) / "tmp")
     for candidate in candidates:
         binding: _BoundPackageRoot | None = None
         try:
