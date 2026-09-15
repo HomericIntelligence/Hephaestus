@@ -155,15 +155,20 @@ _FACADE_MODULES = frozenset(
 def _absolute_import_modules(module_name: str, node: ast.ImportFrom) -> frozenset[str]:
     """Return possible module names for one absolute or relative import."""
     if node.level == 0:
-        return frozenset({node.module}) if node.module else frozenset()
-    package = module_name.split(".")[:-1]
-    parent_count = node.level - 1
-    if parent_count > len(package):
+        prefix = node.module.split(".") if node.module else []
+    else:
+        package = module_name.split(".")[:-1]
+        parent_count = node.level - 1
+        if parent_count > len(package):
+            return frozenset()
+        prefix = package[: len(package) - parent_count]
+        if node.module:
+            prefix.extend(node.module.split("."))
+    if not prefix:
         return frozenset()
-    prefix = package[: len(package) - parent_count]
-    if node.module:
-        return frozenset({".".join((*prefix, *node.module.split(".")))})
-    return frozenset(".".join((*prefix, alias.name)) for alias in node.names)
+    imported = {".".join(prefix)} if node.module else set()
+    imported.update(".".join((*prefix, alias.name)) for alias in node.names)
+    return frozenset(imported)
 
 
 def _facade_import_violations(module_name: str, source: str, source_name: str) -> tuple[str, ...]:
@@ -261,6 +266,45 @@ def test_absolute_facade_import_uses_the_violation_path() -> None:
     )
 
     assert violations == ("candidate.py: imports hephaestus.automation.pipeline_github",)
+
+
+def test_parent_imports_resolve_to_facade_modules() -> None:
+    """Dependency checks recognize façades imported from parent packages."""
+    cases = (
+        (
+            "hephaestus.automation.pipeline_github_check_run_validation",
+            "from hephaestus.automation import pipeline_github",
+            "hephaestus.automation.pipeline_github",
+        ),
+        (
+            "hephaestus.automation.pipeline_github_check_run_validation",
+            "from hephaestus.automation.pipeline import coordinator",
+            "hephaestus.automation.pipeline.coordinator",
+        ),
+        (
+            "hephaestus.automation.pipeline_github_check_run_validation",
+            "from hephaestus.automation.pipeline.stages import pr_review",
+            "hephaestus.automation.pipeline.stages.pr_review",
+        ),
+        (
+            "hephaestus.automation.pipeline_github_check_run_validation",
+            "from .pipeline import coordinator",
+            "hephaestus.automation.pipeline.coordinator",
+        ),
+        (
+            "hephaestus.automation.pipeline.coordinator_runtime",
+            "from .stages import pr_review",
+            "hephaestus.automation.pipeline.stages.pr_review",
+        ),
+    )
+    for module_name, source, expected in cases:
+        violations = _facade_import_violations(
+            module_name,
+            source,
+            "candidate.py",
+        )
+
+        assert violations == (f"candidate.py: imports {expected}",)
 
 
 def test_shared_namespaces_declare_static_exports() -> None:
