@@ -71,7 +71,15 @@ from hephaestus.automation.state_labels import STATE_SKIP
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..events import StageEvent
 from ..github_jobs import GitHubJob, ImplementationReplyProgress
-from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
+from ..jobs import (
+    AgentJob,
+    BuildTestJob,
+    CompactJob,
+    GitJob,
+    HostCapabilityJob,
+    JobHandle,
+    JobResult,
+)
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..stage_results import Continue, JobRequest
 from ..work_item import ItemKind, WorkItem
@@ -98,6 +106,7 @@ __all__ = [
     "Disposition",
     "GitHubJob",
     "GitJob",
+    "HostCapabilityJob",
     "ImplementationReplyProgress",
     "ImplementationThreadReplyResult",
     "ItemKind",

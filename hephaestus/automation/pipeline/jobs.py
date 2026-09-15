@@ -324,7 +324,8 @@ class HostCapabilityJob:
 
     def __post_init__(self) -> None:
         """Reject a target that names a different repository."""
-        if self.repo != self.target.repository or self.timeout_s <= 0:
+        target_repo = self.target.repository.rsplit("/", 1)[-1]
+        if self.repo.casefold() != target_repo.casefold() or self.timeout_s <= 0:
             raise ValueError("host capability job is invalid")
 
 

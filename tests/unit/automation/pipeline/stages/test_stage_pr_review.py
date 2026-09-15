@@ -44,7 +44,16 @@ from hephaestus.automation.pipeline.jobs import (
     BuildTestJob,
     CompactJob,
     GitJob,
+    HostCapabilityJob,
     JobResult,
+)
+from hephaestus.automation.pipeline.host_capabilities import (
+    CapabilityRequestTarget,
+    FakeQuotaBackend,
+    HostCapabilityReceipt,
+    QUOTA_CREATE_FAILED_TOKEN,
+    WorkerCapabilities,
+    bind_receipt_target,
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.reply_handoff import (
@@ -388,9 +397,44 @@ def _dispatch_review(stage: Any, item: Any, ctx: Any) -> JobRequest:
     )
     item.state = barrier.on_done_state
     review = stage.step(item, ctx)
+    if isinstance(review, JobRequest) and isinstance(review.job, HostCapabilityJob):
+        target = bind_receipt_target(
+            review.job.target,
+            execution_boundary_id="test-boundary",
+            source_head_sha=review.job.target.expected_head_sha,
+        )
+        receipt = HostCapabilityReceipt.available_receipt(target)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={"host_capability_receipt": receipt.to_dict()},
+            ),
+            ctx,
+        )
+        item.state = review.on_done_state
+        review = stage.step(item, ctx)
     assert isinstance(review, JobRequest)
     assert isinstance(review.job, AgentJob)
     return review
+
+
+def _complete_capability_job(stage: Any, item: Any, ctx: Any, request: JobRequest) -> Any:
+    """Complete one target-bound capability request with an available receipt."""
+    assert isinstance(request.job, HostCapabilityJob)
+    target = bind_receipt_target(
+        request.job.target,
+        execution_boundary_id="test-boundary",
+        source_head_sha=request.job.target.expected_head_sha,
+    )
+    receipt = HostCapabilityReceipt.available_receipt(target)
+    stage.on_job_done(
+        item,
+        JobResult(ok=True, value={"host_capability_receipt": receipt.to_dict()}),
+        ctx,
+    )
+    item.state = request.on_done_state
+    return stage.step(item, ctx)
 
 
 def _reconcile_then_enter(stage: Any, item: Any, ctx: Any) -> Any:
@@ -813,10 +857,10 @@ class TestPrReviewStageOnEnter:
         assert request.job.op == "create_worktree"
         assert request.job.kwargs["isolated"] is True
 
-    def test_on_enter_routes_unreplied_threads_to_implementation_before_review(
+    def test_on_enter_defers_unreplied_threads_until_after_capability_preflight(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Existing threads without current-head responses never trigger a new audit."""
+        """The stage does not route existing threads before the runner preflight."""
         stage = PrReviewStage()
         github = FakeStageGitHub(
             unresolved=[(1, 0)], pr_head_branch="1-auto-impl-direct-" + "b" * 32
@@ -828,25 +872,15 @@ class TestPrReviewStageOnEnter:
 
         outcome = _complete_github_job(stage, item, ctx)
 
-        assert outcome == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
-        assert item.branch == "1-auto-impl-direct-" + "b" * 32
-        assert item.payload["existing_pr"] is True
-        assert item.payload["implementation_remediation"] is True
-        assert item.payload["remediation_threads"] == [
-            {
-                "thread_id": "live-thread-1001-0",
-                "path": "a.py",
-                "line": 1,
-                "body": "<!-- hephaestus-severity: major -->\nfinding",
-            }
-        ]
-        assert item.payload["remediation_thread_snapshots"][0]["id"] == "live-thread-1001-0"
-        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        assert outcome == Continue(next_state="ENTER")
+        assert "existing_pr" not in item.payload
+        assert "implementation_remediation" not in item.payload
+        assert github.mutation_log == []
 
-    def test_on_enter_routes_fully_replied_threads_to_comment_validation(
+    def test_on_enter_defers_replied_threads_until_after_capability_preflight(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A current-head implementation reply proceeds to reviewer validation only."""
+        """A current-head reply goes to validation after the runner preflight."""
         stage = PrReviewStage()
         github = FakeStageGitHub(
             unresolved=[(1, 0)], pr_head_branch="1-auto-impl-direct-" + "b" * 32
@@ -865,25 +899,30 @@ class TestPrReviewStageOnEnter:
         outcome = _complete_github_job(stage, item, ctx)
 
         assert outcome == Continue(next_state="ENTER")
-        assert item.payload["existing_pr"] is True
-        assert item.payload["reviewer_comment_validation_only"] is True
+        assert "existing_pr" not in item.payload
+        assert "reviewer_comment_validation_only" not in item.payload
 
         item.state = REVIEW_CHECKOUT_WAIT
         item.payload["pr_node_id"] = "PR_exact"
         item.payload["review_checkout_ready"] = True
-        item.payload["review_changed_paths"] = []
+        item.payload["review_changed_paths"] = ["a.py"]
         item.payload["review_checkout_expected_head"] = "a" * 40
-        result = _complete_github_job(stage, item, ctx)
+        item.payload["pr_diff"] = (
+            "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+        )
+        capability = _complete_github_job(stage, item, ctx)
+        assert isinstance(capability, JobRequest)
+        result = _complete_capability_job(stage, item, ctx, capability)
 
         assert result == Continue(next_state="VALIDATE_WAIT")
         assert item.payload["reviewed_pr_node_id"] == "PR_exact"
         assert item.payload["reviewed_pr_head_sha"] == "a" * 40
         assert "review_audit" not in item.payload
 
-    def test_on_enter_fails_closed_when_existing_thread_read_fails(
+    def test_on_enter_does_not_read_threads_before_capability_preflight(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A failed thread read cannot be bypassed by starting a new review."""
+        """The stage does not read live threads before the runner preflight."""
 
         class ThreadReadFailsGitHub(FakeStageGitHub):
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
@@ -895,16 +934,16 @@ class TestPrReviewStageOnEnter:
         ctx = make_ctx(github=ThreadReadFailsGitHub())
 
         assert stage.on_enter(item, ctx) is None
-        assert _complete_github_job(stage, item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "review_threads_unavailable"
-        )
+        assert _complete_github_job(stage, item, ctx) == Continue(next_state="ENTER")
 
     def test_checkout_rechecks_new_unreplied_thread_before_submitting_a_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A thread appearing after entry goes to implementation, not a broad audit."""
         stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(1, 0)])
+        github = FakeStageGitHub(
+            unresolved=[(1, 0)], pr_head_branch="1-auto-impl-direct-" + "b" * 32
+        )
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
         item.worktree = "/tmp/detached-review"
         item.payload.update(
@@ -912,12 +951,17 @@ class TestPrReviewStageOnEnter:
                 "review_checkout_ready": True,
                 "review_checkout_expected_head": "a" * 40,
                 "review_worktree_expected_head": "a" * 40,
-                "pr_diff": "",
-                "review_changed_paths": [],
+                "pr_diff": (
+                    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+                ),
+                "review_changed_paths": ["a.py"],
             }
         )
 
-        result = stage.step(item, make_ctx(github=github))
+        ctx = make_ctx(github=github)
+        capability = stage.step(item, ctx)
+        assert isinstance(capability, JobRequest)
+        result = _complete_capability_job(stage, item, ctx, capability)
 
         assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert item.payload["remediation_threads"][0]["thread_id"] == "live-thread-1001-0"
@@ -975,7 +1019,9 @@ class TestPrReviewStageOnEnter:
     ) -> None:
         """A thread appearing during host checks cannot lead to a broad review batch."""
         stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(1, 0)])
+        github = FakeStageGitHub(
+            unresolved=[(1, 0)], pr_head_branch="1-auto-impl-direct-" + "b" * 32
+        )
         item = make_work_item(issue=1, pr=1001, state=HOST_VERIFICATION_WAIT)
         item.worktree = "/tmp/detached-review"
         item.payload.update(
@@ -1541,7 +1587,9 @@ class TestPrReviewStageStep:
             ctx,
         )
         item.state = barrier.on_done_state
-        review = stage.step(item, ctx)
+        capability = stage.step(item, ctx)
+        assert isinstance(capability, JobRequest)
+        review = _complete_capability_job(stage, item, ctx, capability)
 
         assert isinstance(review, JobRequest)
         assert isinstance(review.job, AgentJob)
@@ -2173,6 +2221,7 @@ class TestPrReviewStageStep:
         ctx = make_ctx(github=github, event_fn=events.append)
         item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
         item.worktree = "/tmp/wt"
+        item.payload["explicit_pr_review"] = True
         response = (
             "This must be fixed.\n\nReviewer prose is untrusted.\n\n```json\n"
             '{"comments":[{"path":"hephaestus/automation/pipeline/stages/pr_review.py",'
@@ -2426,7 +2475,9 @@ class TestPrReviewStageStep:
             }
         )
 
-        request = stage.step(item, ctx)
+        capability = stage.step(item, ctx)
+        assert isinstance(capability, JobRequest)
+        request = _complete_capability_job(stage, item, ctx, capability)
         expected = (
             (
                 "review_python_ruff_check",
@@ -2619,7 +2670,9 @@ class TestPrReviewStageStep:
     ) -> None:
         """Reply validation receives exact-head host evidence without a broad review."""
         stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(1, 0)])
+        github = FakeStageGitHub(
+            unresolved=[(1, 0)], pr_head_branch="1-auto-impl-direct-" + "b" * 32
+        )
         github._thread_replies["live-thread-1001-0"] = [
             {
                 "id": "implementation-reply-live-thread-1001-0",
@@ -2648,6 +2701,8 @@ class TestPrReviewStageStep:
         )
 
         result = stage.step(item, ctx)
+        assert isinstance(result, JobRequest)
+        result = _complete_capability_job(stage, item, ctx, result)
         while isinstance(result, JobRequest) and isinstance(result.job, BuildTestJob):
             receipt = {
                 "head_sha": "a" * 40,
@@ -2694,8 +2749,8 @@ class TestPrReviewStageStep:
         item = make_work_item(issue=1, pr=1001, state="ENTER")
 
         assert stage.on_enter(item, ctx) is None
-        assert _complete_github_job(stage, item, ctx) == Continue(next_state="ENTER")
-        assert item.payload["reviewer_comment_validation_only"] is True
+        assert _complete_github_job(stage, item, ctx) == Continue(next_state="REVIEW_WAIT")
+        assert "reviewer_comment_validation_only" not in item.payload
 
         item.state = REVIEW_CHECKOUT_WAIT
         item.worktree = "/tmp/detached-review"
@@ -2714,6 +2769,9 @@ class TestPrReviewStageStep:
         )
 
         result = stage.step(item, ctx)
+        assert isinstance(result, JobRequest)
+        result = _complete_capability_job(stage, item, ctx, result)
+        assert item.payload["reviewer_comment_validation_only"] is True
         while isinstance(result, JobRequest) and isinstance(result.job, BuildTestJob):
             receipt = {
                 "head_sha": "a" * 40,
@@ -3032,16 +3090,10 @@ class TestPrReviewStageStep:
             checkout_checks.append((checkout_path, head_sha))
             return None
 
-        def quota_backed_scratch(root: Path) -> object:
-            scratch = root / "scratch"
-            scratch.mkdir()
-            return nullcontext(scratch)
-
-        def quota_backed_pi_smoke_logs(root: Path, source: Path) -> object:
-            del root
-            logs = source / "pi-smoke-logs"
-            logs.mkdir()
-            return nullcontext(logs)
+        def quota_volume(_target: object, purpose: str) -> object:
+            volume = tmp_path / f"quota-{purpose}"
+            volume.mkdir(exist_ok=True)
+            return nullcontext(volume)
 
         def prepare_immutable_git_metadata(
             _checkout: Path,
@@ -3087,6 +3139,17 @@ class TestPrReviewStageStep:
             descr=spec.descr,
             expected_head_sha=expected_head,
             immutable_source=True,
+            capability_target=CapabilityRequestTarget(
+                repository="test/repo",
+                issue_number=2903,
+                pr_number=3239,
+                repository_root=tmp_path.resolve(),
+                checkout_path=checkout.resolve(),
+                expected_head_sha=expected_head,
+                phase="pr_review",
+                purpose="scratch",
+                request_id="1" * 32,
+            ),
         )
         shutdown = threading.Event()
         completion_q: CompletionQueue = queue.Queue()
@@ -3095,6 +3158,10 @@ class TestPrReviewStageStep:
             shutdown=shutdown,
             completion_q=completion_q,
             lock_dir=tmp_path / "locks",
+            host_capabilities=WorkerCapabilities(
+                quota_backend=FakeQuotaBackend(quota_volume),
+                execution_boundary_id="test-boundary",
+            ),
         )
         try:
             with (
@@ -3124,11 +3191,6 @@ class TestPrReviewStageStep:
                 patch(
                     f"{module}._prepare_immutable_git_metadata",
                     side_effect=prepare_immutable_git_metadata,
-                ),
-                patch(f"{module}._quota_backed_scratch", side_effect=quota_backed_scratch),
-                patch(
-                    f"{module}._quota_backed_pi_smoke_logs",
-                    side_effect=quota_backed_pi_smoke_logs,
                 ),
                 patch(
                     f"{module}._host_verification_command",
@@ -3215,6 +3277,8 @@ class TestPrReviewStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
+        result = _complete_capability_job(stage, item, ctx, result)
+        assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
         assert result.job.argv == ("uv", "run", "ruff", "check", "hephaestus/", "tests/")
         assert result.job.descr == "review_python_ruff_check"
@@ -3269,8 +3333,11 @@ class TestPrReviewStageStep:
         )
 
         ctx = make_ctx(paths=paths, now_fn=lambda: 100.0)
-        result = PrReviewStage().step(item, ctx)
+        stage = PrReviewStage()
+        result = stage.step(item, ctx)
 
+        assert isinstance(result, JobRequest)
+        result = _complete_capability_job(stage, item, ctx, result)
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
         assert source_workspaces.calls == [(1, SourceLane.REVIEW, head, None)]
@@ -3326,8 +3393,11 @@ class TestPrReviewStageStep:
             }
         )
 
-        result = stage.step(item, make_ctx())
+        ctx = make_ctx()
+        result = stage.step(item, ctx)
 
+        assert isinstance(result, JobRequest)
+        result = _complete_capability_job(stage, item, ctx, result)
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.descr == "review"
@@ -3359,6 +3429,8 @@ class TestPrReviewStageStep:
 
         result = stage.step(item, ctx)
 
+        assert isinstance(result, JobRequest)
+        result = _complete_capability_job(stage, item, ctx, result)
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
         assert result.job.descr == "review_python_ruff_check"
@@ -3399,6 +3471,8 @@ class TestPrReviewStageStep:
             "-q",
             "--tb=short",
         )
+        assert isinstance(request, JobRequest)
+        request = _complete_capability_job(stage, item, ctx, request)
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, BuildTestJob)
         assert request.job.argv == expected_argv
@@ -3450,6 +3524,8 @@ class TestPrReviewStageStep:
             }
         )
         request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        request = _complete_capability_job(stage, item, ctx, request)
         for _ in range(3):
             assert isinstance(request, JobRequest)
             item.state = request.on_done_state
@@ -3490,6 +3566,8 @@ class TestPrReviewStageStep:
             }
         )
         request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        request = _complete_capability_job(stage, item, ctx, request)
         assert isinstance(request, JobRequest)
         item.state = request.on_done_state
         stage.on_job_done(
@@ -3537,6 +3615,8 @@ class TestPrReviewStageStep:
         )
 
         request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        request = _complete_capability_job(stage, item, ctx, request)
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, BuildTestJob)
         for _ in range(3):
@@ -3631,6 +3711,8 @@ class TestPrReviewStageStep:
         )
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
+        request = _complete_capability_job(stage, item, ctx, request)
+        assert isinstance(request, JobRequest)
         for _ in range(3):
             item.state = request.on_done_state
             stage.on_job_done(
@@ -3692,6 +3774,8 @@ class TestPrReviewStageStep:
         )
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
+        request = _complete_capability_job(stage, item, ctx, request)
+        assert isinstance(request, JobRequest)
         item.state = request.on_done_state
         stage.on_job_done(
             item,
@@ -3723,6 +3807,65 @@ class TestPrReviewStageStep:
             "unsupported_host_verification_boundary"
         )
 
+    def test_quota_preflight_failure_blocks_without_a_review_verdict(
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A quota setup failure publishes a runner diagnostic only."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=2903, pr=3239, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
+        item.payload.update(
+            {
+                "review_worktree": item.worktree,
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "review_changed_paths": ["hephaestus/example.py"],
+                "pr_diff": "diff --git a/hephaestus/example.py b/hephaestus/example.py\n",
+            }
+        )
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, HostCapabilityJob)
+        target = bind_receipt_target(
+            request.job.target,
+            execution_boundary_id="test-boundary",
+            source_head_sha="a" * 40,
+        )
+        receipt = HostCapabilityReceipt(
+            target=target,
+            outcome="unavailable",
+            available=False,
+            token=QUOTA_CREATE_FAILED_TOKEN,
+            failed_step="create",
+            purpose="scratch",
+            receipt_id="2" * 32,
+            stderr_tail="disk image create failed",
+            return_code=1,
+        )
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=receipt.token,
+                value={"host_capability_receipt": receipt.to_dict()},
+            ),
+            ctx,
+        )
+        item.state = request.on_done_state
+
+        outcome = stage.step(item, ctx)
+
+        assert outcome == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        assert item.payload["host_verification_failure"]["token"] == receipt.token
+        assert "implementation_remediation" not in item.payload
+        assert not any(
+            mutation[0] in {"mark_pr_implementation_go", "mark_pr_implementation_no_go"}
+            for mutation in ctx.github.mutation_log
+        )
+        assert any(mutation[0] == "gh_issue_upsert_comment" for mutation in ctx.github.mutation_log)
+
     def test_unsupported_host_skip_with_mismatched_head_fails_closed(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -3743,6 +3886,8 @@ class TestPrReviewStageStep:
             }
         )
         request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        request = _complete_capability_job(stage, item, ctx, request)
         assert isinstance(request, JobRequest)
         item.state = request.on_done_state
         stage.on_job_done(
@@ -3791,6 +3936,8 @@ class TestPrReviewStageStep:
         )
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
+        request = _complete_capability_job(stage, item, ctx, request)
+        assert isinstance(request, JobRequest)
         item.state = request.on_done_state
         stage.on_job_done(
             item,
@@ -3830,6 +3977,8 @@ class TestPrReviewStageStep:
 
         result = stage.step(item, ctx)
 
+        assert isinstance(result, JobRequest)
+        result = _complete_capability_job(stage, item, ctx, result)
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.descr == "review"
@@ -7178,7 +7327,7 @@ class TestFullWalks:
 
         assert isinstance(outcome, StageOutcome)
         assert outcome == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
-        assert pool.submitted == []
+        assert [type(handle.job) for handle in pool.submitted] == [HostCapabilityJob]
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_unresolved_thread_walk_exhausts_without_terminal_handoff(
@@ -7195,23 +7344,12 @@ class TestFullWalks:
         item.worktree = "/tmp/wt22"
 
         pool = FakeWorkerPool()
-        round_jobs = [
-            JobResult(ok=True, value=_valid_audit()),  # review
-            JobResult(ok=True, value='{"unaddressed": []}'),  # validate
-            JobResult(ok=True, value="tier list"),  # difficulty
-            JobResult(ok=True, value="addressed"),  # address
-            JobResult(ok=True, value=False),  # first no-commit push
-            JobResult(ok=True, value="still unaddressed"),  # address retry
-            JobResult(ok=True, value=False),  # unchanged-head round
-            JobResult(ok=True, value=True),  # compact reviewer
-            JobResult(ok=True, value=True),  # compact writer
-        ]
-        pool.script(*(round_jobs * 3))
 
         outcome = _drive(stage, item, ctx, pool)
 
         assert isinstance(outcome, StageOutcome)
         assert outcome == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+        assert [type(handle.job) for handle in pool.submitted] == [HostCapabilityJob]
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_reviewer_error_walk_burns_nothing(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -7232,7 +7370,10 @@ class TestFullWalks:
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.RETRY
-        assert [h.job.descr for h in pool.submitted] == ["review"]  # dead round short-circuits
+        assert [h.job.descr for h in pool.submitted] == [
+            "host_capability_preflight",
+            "review",
+        ]
         assert item.attempts["pr_review_iter"] == 0
         assert github.mutation_log == []
 

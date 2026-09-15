@@ -64,3 +64,4 @@ numbered, and listed here.
 | [0049](0049-fast-pr-nightly-tests.md) | Fast PR tests and nightly full validation | Partly superseded by 0051 for manual final-rebase verification |
 | [0050](0050-queue-owned-automation-cutover.md) | Queue-owned automation cutover | Accepted |
 | [0051](0051-manual-final-rebase-verification.md) | Manual final-rebase verification | Accepted |
+| [0052](0052-explicit-host-capability-contract.md) | Explicit host capability contract | Accepted |

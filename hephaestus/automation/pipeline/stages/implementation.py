@@ -147,6 +147,7 @@ from ..github_jobs import (
     ReplyJournalAppended,
     bind_delivery_request,
 )
+from ..host_capabilities import CapabilityRequestTarget
 from ..jobs import (
     WORKTREE_MATERIALIZED_KEY,
     RemediationPretestInput,
@@ -2472,6 +2473,19 @@ class ImplementationStage(Stage):
                 workspace=workspace,
                 timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
                 expected_repository=f"{ctx.org}/{item.repo}",
+                capability_target=CapabilityRequestTarget(
+                    repository=f"{ctx.org}/{item.repo}",
+                    issue_number=_issue_number(item),
+                    pr_number=item.pr,
+                    repository_root=Path(str(ctx.paths.repo_root)).resolve(),
+                    checkout_path=_worktree_path(item, ctx).resolve(),
+                    expected_head_sha=expected_head,
+                    phase="rebase",
+                    purpose="scratch",
+                    request_id=hashlib.sha256(
+                        f"{item.repo}:{item.issue}:{item.pr}:{expected_head}:rebase".encode()
+                    ).hexdigest()[:32],
+                ),
                 kwargs=kwargs,
                 descr="rebase_implementation_writer",
             ),
@@ -2596,6 +2610,20 @@ class ImplementationStage(Stage):
             workspace=workspace,
             timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
             expected_repository=f"{ctx.org}/{item.repo}",
+            capability_target=CapabilityRequestTarget(
+                repository=f"{ctx.org}/{item.repo}",
+                issue_number=_issue_number(item),
+                pr_number=item.pr,
+                repository_root=Path(str(ctx.paths.repo_root)).resolve(),
+                checkout_path=_worktree_path(item, ctx).resolve(),
+                expected_head_sha=str(item.payload.get("rebase_expected_remote_sha") or ""),
+                phase="rebase",
+                purpose="scratch",
+                request_id=hashlib.sha256(
+                    f"{item.repo}:{item.issue}:{item.pr}:"
+                    f"{item.payload.get('rebase_expected_remote_sha')}:continue-rebase".encode()
+                ).hexdigest()[:32],
+            ),
             kwargs={
                 "cwd": _worktree_path(item, ctx),
                 "publish_rebased_head": item.pr is not None,

@@ -18,8 +18,21 @@ if TYPE_CHECKING:
     from .auxiliary_worker_pool import AuxiliaryWorkerPool
     from .coordinator import run_pipeline
     from .coordinator_types import PipelineConfig
+    from .host_capabilities import (
+        CapabilityReceiptTarget,
+        CapabilityRequestTarget,
+        HostCapabilityReceipt,
+        WorkerCapabilities,
+    )
     from .jobs import (
-        GIT_OPS, AgentJob, BuildTestJob, CompactJob, GitJob, HostCapabilityJob, JobHandle, JobResult,
+        GIT_OPS,
+        AgentJob,
+        BuildTestJob,
+        CompactJob,
+        GitJob,
+        HostCapabilityJob,
+        JobHandle,
+        JobResult,
     )
     from .queues import CompletionQueue, StageQueue
     from .routing import (
@@ -42,11 +55,14 @@ __all__ = [
     "AthenaSkillResult",
     "AuxiliaryWorkerPool",
     "BuildTestJob",
+    "CapabilityReceiptTarget",
+    "CapabilityRequestTarget",
     "CompactJob",
     "CompletionQueue",
     "Disposition",
     "GitJob",
     "HostCapabilityJob",
+    "HostCapabilityReceipt",
     "HistoryEvent",
     "ItemKind",
     "ItemResult",
@@ -61,6 +77,7 @@ __all__ = [
     "StageQueue",
     "WorkItem",
     "WorkerPool",
+    "WorkerCapabilities",
     "run_pipeline",
 ]
 
@@ -71,12 +88,15 @@ _LAZY_EXPORTS: dict[str, str] = {
     "AthenaSkillResult": "hephaestus.automation.pipeline.athena_skill_jobs",
     "AuxiliaryWorkerPool": "hephaestus.automation.pipeline.auxiliary_worker_pool",
     "BuildTestJob": "hephaestus.automation.pipeline.jobs",
+    "CapabilityReceiptTarget": "hephaestus.automation.pipeline.host_capabilities",
+    "CapabilityRequestTarget": "hephaestus.automation.pipeline.host_capabilities",
     "CompactJob": "hephaestus.automation.pipeline.jobs",
     "CompletionQueue": "hephaestus.automation.pipeline.queues",
     "Disposition": "hephaestus.automation.pipeline.routing",
     "GIT_OPS": "hephaestus.automation.pipeline.jobs",
     "GitJob": "hephaestus.automation.pipeline.jobs",
     "HostCapabilityJob": "hephaestus.automation.pipeline.jobs",
+    "HostCapabilityReceipt": "hephaestus.automation.pipeline.host_capabilities",
     "HistoryEvent": "hephaestus.automation.pipeline.work_item",
     "ItemKind": "hephaestus.automation.pipeline.work_item",
     "ItemResult": "hephaestus.automation.pipeline.work_item",
@@ -92,6 +112,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "StageQueue": "hephaestus.automation.pipeline.queues",
     "WorkItem": "hephaestus.automation.pipeline.work_item",
     "WorkerPool": "hephaestus.automation.pipeline.worker_pool",
+    "WorkerCapabilities": "hephaestus.automation.pipeline.host_capabilities",
     "run_pipeline": "hephaestus.automation.pipeline.coordinator",
 }
 

@@ -58,6 +58,17 @@ def host_verification_failure_comment(
     ]
     if path:
         sections.extend(["", "**Affected path**", "", _indented_diagnostic(path)])
+    fields = (
+        ("token", "Capability token"),
+        ("failed_step", "Failed capability step"),
+        ("operating_system_error", "Operating-system error"),
+        ("receipt_id", "Capability receipt"),
+        ("purpose", "Volume purpose"),
+        ("retained_root", "Retained inspection root"),
+    )
+    for key, heading in fields:
+        if diagnostic.get(key):
+            sections.extend(["", f"**{heading}**", "", _indented_diagnostic(diagnostic.get(key))])
     sections.extend(
         [
             "",

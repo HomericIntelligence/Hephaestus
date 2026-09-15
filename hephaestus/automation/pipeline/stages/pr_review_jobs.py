@@ -39,7 +39,10 @@ from ..github_jobs import (
     GitHubJob,
     ReconcilePrReviewRequest,
 )
-from ..host_capabilities import CapabilityRequestTarget
+from ..host_capabilities import (
+    CapabilityRequestTarget,
+    HostCapabilityReceipt,
+)
 from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
 from .pr_review_diagnostics import publish_host_verification_failure
@@ -337,6 +340,118 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
             source_workspace_binding(item, ctx, SourceLane.REVIEW, revision=expected_head)
         except (RuntimeError, SourceWorkspaceError):
             return StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
+        empty_diff = empty_diff_outcome(item)
+        if empty_diff:
+            return self._cleanup_review_worktree_then(item, empty_diff)
+        try:
+            has_history_capacity = _review_finding_history_has_capacity(item)
+        except ValueError:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
+            )
+        if not has_history_capacity:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_full"),
+            )
+        checkout = _worktree_path(item, ctx)
+        request_id = hashlib.sha256(
+            f"{item.repo}:{item.pr}:{expected_head}:quota-preflight".encode()
+        ).hexdigest()[:32]
+        request = CapabilityRequestTarget(
+            repository=f"{ctx.org}/{item.repo}",
+            issue_number=_issue_number(item),
+            pr_number=cast(int, item.pr),
+            repository_root=Path(str(ctx.paths.repo_root)).resolve(),
+            checkout_path=checkout.resolve(),
+            expected_head_sha=expected_head,
+            phase="pr_review",
+            purpose="scratch",
+            request_id=request_id,
+        )
+        item.payload["host_capability_request"] = request.to_dict()
+        item.payload[_HOST_CAPABILITY_PENDING] = True
+        return JobRequest(
+            HostCapabilityJob(
+                repo=item.repo,
+                target=request,
+                timeout_s=HOST_VERIFICATION_TIMEOUT_S,
+            ),
+            on_done_state=HOST_CAPABILITY_WAIT,
+        )
+
+    def _host_capability_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Route only after a durable target-bound quota receipt is available."""
+        raw = item.payload.pop("host_capability_result", None)
+        try:
+            result = raw if isinstance(raw, dict) else {}
+            receipt = HostCapabilityReceipt.from_dict(result.get("receipt"))
+            expected_request = CapabilityRequestTarget.from_dict(
+                item.payload.get("host_capability_request")
+            )
+            if receipt.target.request != expected_request:
+                raise ValueError("host capability receipt target changed")
+        except (TypeError, ValueError):
+            return self._finish_capability_block(
+                item,
+                ctx,
+                {
+                    "failure_kind": "runner",
+                    "error": "host_capability_receipt_invalid",
+                    "head_sha": item.payload.get("reviewed_pr_head_sha"),
+                    "verdict_labels_changed": False,
+                },
+            )
+        item.payload["host_capability_receipt"] = receipt.to_dict()
+        if not receipt.available or result.get("ok") is not True:
+            return self._finish_capability_block(
+                item,
+                ctx,
+                {
+                    "failure_kind": "runner",
+                    "error": receipt.token,
+                    "token": receipt.token,
+                    "failed_step": receipt.failed_step,
+                    "operating_system_error": receipt.operating_system_error,
+                    "stdout_tail": receipt.stdout_tail,
+                    "stderr_tail": receipt.stderr_tail,
+                    "receipt_id": receipt.receipt_id,
+                    "purpose": receipt.purpose,
+                    "retained_root": receipt.retained_root,
+                    "head_sha": receipt.target.source_head_sha,
+                    "verdict_labels_changed": False,
+                },
+            )
+        if not item.payload.get("explicit_pr_review"):
+            thread_outcome = self._route_existing_threads_before_audit(item, ctx)
+            if thread_outcome is not None:
+                return thread_outcome
+        return self._begin_host_verification_or_review(item, ctx)
+
+    def _finish_capability_block(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        diagnostic: dict[str, object],
+    ) -> StepResult:
+        """Publish one runner block and stop without a PR verdict mutation."""
+        item.payload["host_verification_failure"] = diagnostic
+        if item.pr is None or not publish_host_verification_failure(
+            ctx.github, item.pr, None, diagnostic, logger
+        ):
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "host_verification_comment_failed"),
+            )
+        return self._cleanup_review_worktree_then(
+            item,
+            StageOutcome(Disposition.FINISH_FAIL, "host_verification_runner_blocked"),
+        )
+
+    def _begin_host_verification_or_review(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Start fixed host checks or the structural review after preflight."""
+        expected_head = str(item.payload.get("reviewed_pr_head_sha") or "")
         verifications = _prepare_host_checks(item.payload, _worktree_path(item, ctx), expected_head)
         if verifications:
             logger.info(
@@ -356,9 +471,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
         # Callbacks run before ``on_done_state``; keep an ownership marker.
         item.payload[_HOST_VERIFICATION_PENDING] = verification.descr
         checkout = _worktree_path(item, ctx)
-        request_id = hashlib.sha256(
-            f"{item.repo}:{item.pr}:{item.payload.get('reviewed_pr_head_sha')}:{verification.descr}".encode()
-        ).hexdigest()[:32]
+        raw_request = item.payload.get("host_capability_request")
+        request = CapabilityRequestTarget.from_dict(raw_request)
         return JobRequest(
             BuildTestJob(
                 repo=item.repo,
@@ -367,17 +481,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
                 timeout_s=HOST_VERIFICATION_TIMEOUT_S,
                 expected_head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
                 immutable_source=True,
-                capability_target=CapabilityRequestTarget(
-                    repository=item.repo,
-                    issue_number=_issue_number(item),
-                    pr_number=cast(int, item.pr),
-                    repository_root=checkout,
-                    checkout_path=checkout,
-                    expected_head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
-                    phase="pr_review",
-                    purpose="scratch",
-                    request_id=request_id,
-                ),
+                capability_target=request,
                 descr=verification.descr,
             ),
             on_done_state=HOST_VERIFICATION_WAIT,
@@ -1112,6 +1216,8 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
             return
         if self._consume_review_checkout_result(item, result):
             return
+        if self._consume_host_capability_result(item, result):
+            return
         if self._consume_host_verification_result(item, result):
             self._store_host_verification_result(item, result)
             return
@@ -1183,6 +1289,19 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
             if is_full_commit_sha(review_base):
                 item.payload["reviewed_pr_base_sha"] = review_base
         item.payload["review_checkout_ready"] = ready
+        return True
+
+    @staticmethod
+    def _consume_host_capability_result(item: WorkItem, result: JobResult) -> bool:
+        """Store one preflight result without interpreting it as source evidence."""
+        if not item.payload.pop(_HOST_CAPABILITY_PENDING, None):
+            return False
+        value = result.value if isinstance(result.value, dict) else {}
+        item.payload["host_capability_result"] = {
+            "ok": result.ok,
+            "error": result.error or "",
+            "receipt": value.get("host_capability_receipt"),
+        }
         return True
 
     @staticmethod

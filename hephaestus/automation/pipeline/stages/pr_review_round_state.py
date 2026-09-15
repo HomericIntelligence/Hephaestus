@@ -31,6 +31,10 @@ _ROUND_PAYLOAD_KEYS = (
     "host_verification_repository_profile",
     "host_verification_failure",
     "host_verification_pending",
+    "host_capability_pending",
+    "host_capability_request",
+    "host_capability_result",
+    "host_capability_receipt",
 )
 
 

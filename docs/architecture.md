@@ -1291,7 +1291,12 @@ critical or major finding that has no publishable surface causes a verified
 `review_finding_not_publishable` result.
 
 For the registered host-verification plan, macOS uses `sandbox-exec` plus
-disposable, quota-backed disk images. Linux uses a local Pyxis/Enroot squashfs
+disposable, quota-backed disk images. Before source checks or review analysis,
+the worker proves create, attach, and detach operations. It writes a strict,
+target-bound receipt below
+`build/.issue_implementer/host-capability-receipts`. A runner failure writes a
+diagnostic and stops without a review verdict or implementation remediation.
+Linux uses a local Pyxis/Enroot squashfs
 image. A separate host-owned authority binds the expected digest, committed
 source revision, Containerfile digest, immutable OCI image ID, and local
 content-addressed reference. The image path must be visible at the same absolute
@@ -1309,6 +1314,11 @@ authority, bounded filesystem, Pyxis allocation, or Enroot runtime produces a
 failed receipt. It cannot become a passing skip. Other platforms remain
 fail-closed until a separately reviewed isolation backend exists. There is no
 unsandboxed fallback.
+
+The coordinator injects the quota backend, receipt store, process-local cache,
+execution-boundary identity, and Git signing provider into the worker pool.
+Rebase validation uses the same capability contract and validates the rebased
+commit before publication. See ADR-0052.
 
 Every PR uses the normal host-verification boundary. The completed PR #3006
 bootstrap is retired. There is no target-specific grant, comment selector, or

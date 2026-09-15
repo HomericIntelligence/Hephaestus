@@ -111,9 +111,13 @@ from hephaestus.automation.pipeline.github_jobs import (
     RebaseConflictInspected,
 )
 from hephaestus.automation.pipeline.host_capabilities import (
+    RECEIPT_FAILED_TOKEN,
     QUOTA_UNAVAILABLE_TOKEN,
+    CapabilityRequestTarget,
+    HostCapabilityError,
     HostCapabilityReceipt,
     WorkerCapabilities,
+    bind_receipt_target,
 )
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
@@ -4769,27 +4773,110 @@ class WorkerPool:
 
     def _run_host_capability(self, job: HostCapabilityJob) -> JobResult:
         """Probe one explicit capability without starting source verification."""
-        capabilities = self._host_capabilities
-        if capabilities is None or capabilities.quota_backend is None:
-            receipt = HostCapabilityReceipt(
-                available=False,
-                token=QUOTA_UNAVAILABLE_TOKEN,
-                failed_step="backend",
-                purpose=job.target.purpose,
-                receipt_id=uuid.uuid4().hex,
+        checkout_error = _checkout_matches_immutable_head(
+            job.target.checkout_path, job.target.expected_head_sha
+        )
+        if checkout_error is not None:
+            return JobResult(
+                ok=False,
+                error=checkout_error,
+                value={"failure_kind": "runner"},
             )
-        else:
-            receipt = capabilities.quota_backend.preflight(job.target)
+        receipt = self._capability_receipt(job.target, job.target.expected_head_sha)
+        if isinstance(receipt, JobResult):
+            return receipt
         return JobResult(
             ok=receipt.available,
             error=None if receipt.available else receipt.token,
             value={
-                "host_capability_receipt": asdict(receipt),
+                "host_capability_receipt": receipt.to_dict(),
                 "failure_kind": "none" if receipt.available else "runner",
             },
             stdout_tail=receipt.stdout_tail,
             stderr_tail=receipt.stderr_tail,
         )
+
+    def _controlled_signing_env(
+        self,
+        cwd: Path,
+        *,
+        timeout: int,
+        private_metadata: bool = False,
+    ) -> dict[str, str] | JobResult:
+        """Get signing authority only from the injected worker capability."""
+        provider = (
+            None if self._host_capabilities is None else self._host_capabilities.signing_provider
+        )
+        environment = None if provider is None else provider.environment(cwd, timeout=timeout)
+        if environment is None:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "signing_configuration"},
+                error="host signing configuration unavailable",
+            )
+        controlled = dict(environment)
+        if private_metadata:
+            controlled.pop("GIT_CONFIG", None)
+        return controlled
+
+    def _required_signing_env(self, cwd: Path, *, timeout: int) -> dict[str, str]:
+        """Return injected signing authority or stop the Git write."""
+        environment = self._controlled_signing_env(cwd, timeout=timeout)
+        if isinstance(environment, JobResult):
+            raise _RebaseSigningEnvironmentError(
+                environment.error or "host signing configuration unavailable"
+            )
+        return environment
+
+    def _capability_receipt(
+        self, request: CapabilityRequestTarget, source_head_sha: str
+    ) -> HostCapabilityReceipt | JobResult:
+        """Probe, persist, and read back one worker-bound capability receipt."""
+        capabilities = self._host_capabilities
+        try:
+            boundary = (
+                capabilities.execution_boundary_id
+                if capabilities is not None
+                else self._run_identity
+            )
+            target = bind_receipt_target(
+                request,
+                execution_boundary_id=boundary,
+                source_head_sha=source_head_sha,
+            )
+        except (OSError, ValueError) as error:
+            return JobResult(
+                ok=False,
+                error=f"capability_target_invalid: {error!s}"[:_ERR_MAX],
+                value={"failure_kind": "runner"},
+            )
+        if capabilities is None or capabilities.quota_backend is None:
+            receipt = HostCapabilityReceipt(
+                target=target,
+                outcome="unavailable",
+                available=False,
+                token=QUOTA_UNAVAILABLE_TOKEN,
+                failed_step="backend",
+                purpose=request.purpose,
+                receipt_id=uuid.uuid4().hex,
+            )
+        else:
+            receipt = capabilities.preflight_cache.preflight(capabilities.quota_backend, target)
+        try:
+            store_factory = capabilities.receipt_store_factory if capabilities is not None else None
+            if store_factory is None:
+                raise ValueError("host capability receipt store is unavailable")
+            stored = store_factory(target.canonical_repository_root).store(receipt)
+        except (OSError, ValueError) as error:
+            return JobResult(
+                ok=False,
+                error=RECEIPT_FAILED_TOKEN,
+                value={
+                    "failure_kind": "runner",
+                    "receipt_error": redact_diagnostic_text(str(error))[:_ERR_MAX],
+                },
+            )
+        return stored
 
     def discard_remediation_pretest_successes(self, claim_key: str, *, owner_id: int) -> None:
         """Release completion authority when its coordinator permit ends."""
@@ -5784,24 +5871,15 @@ class WorkerPool:
             if not _is_full_commit_sha(job.expected_head_sha):
                 return JobResult(ok=False, error="immutable_source_requires_full_head_sha")
             if job.capability_target is not None:
-                capabilities = self._host_capabilities
-                receipt = (
-                    capabilities.quota_backend.preflight(job.capability_target)
-                    if capabilities is not None and capabilities.quota_backend is not None
-                    else HostCapabilityReceipt(
-                        available=False,
-                        token=QUOTA_UNAVAILABLE_TOKEN,
-                        failed_step="backend",
-                        purpose=job.capability_target.purpose,
-                        receipt_id=uuid.uuid4().hex,
-                    )
-                )
+                receipt = self._capability_receipt(job.capability_target, job.expected_head_sha)
+                if isinstance(receipt, JobResult):
+                    return receipt
                 if not receipt.available:
                     return JobResult(
                         ok=False,
                         error=receipt.token,
                         value={
-                            **asdict(receipt),
+                            **receipt.to_dict(),
                             "head_sha": job.expected_head_sha,
                             "immutable_source": True,
                             "failure_kind": "runner",
@@ -5892,6 +5970,46 @@ class WorkerPool:
         except _HostVerificationBoundaryError as exc:
             return JobResult(ok=False, error=str(exc))
 
+        capabilities = self._host_capabilities
+        if (
+            job.capability_target is None
+            or capabilities is None
+            or capabilities.quota_backend is None
+        ):
+            return JobResult(
+                ok=False,
+                error=QUOTA_UNAVAILABLE_TOKEN,
+                value={
+                    "head_sha": job.expected_head_sha,
+                    "immutable_source": True,
+                    "failure_kind": "runner",
+                    "platform": sys.platform,
+                    "status": "failed",
+                },
+            )
+        try:
+            scratch_target = bind_receipt_target(
+                job.capability_target,
+                execution_boundary_id=capabilities.execution_boundary_id,
+                source_head_sha=job.expected_head_sha,
+            )
+            pi_request = replace(
+                job.capability_target,
+                purpose="pi_smoke_logs",
+                request_id=uuid.uuid4().hex,
+            )
+            pi_target = bind_receipt_target(
+                pi_request,
+                execution_boundary_id=capabilities.execution_boundary_id,
+                source_head_sha=job.expected_head_sha,
+            )
+        except (OSError, ValueError) as exc:
+            return JobResult(
+                ok=False,
+                error=f"capability_target_invalid: {exc!s}"[:_ERR_MAX],
+                value={"failure_kind": "runner"},
+            )
+
         try:
             with tempfile.TemporaryDirectory(prefix="hephaestus-host-verification-") as temp_dir:
                 root = Path(temp_dir)
@@ -5907,8 +6025,10 @@ class WorkerPool:
                 git_metadata = _prepare_immutable_git_metadata(
                     job.cwd, job.expected_head_sha, source, root, git_executable
                 )
-                with _quota_backed_scratch(root) as scratch:
-                    with _quota_backed_pi_smoke_logs(root, source) as pi_smoke_logs:
+                with capabilities.quota_backend.volume(scratch_target, "scratch") as scratch:
+                    with capabilities.quota_backend.volume(
+                        pi_target, "pi_smoke_logs"
+                    ) as pi_smoke_logs:
                         _prepare_host_output_aliases(source, scratch)
                         command = _host_verification_command(
                             argv=argv,
@@ -5958,6 +6078,32 @@ class WorkerPool:
                         "status": "passed" if result.ok else "failed",
                     },
                 )
+        except HostCapabilityError as exc:
+            receipt = exc.receipt
+            try:
+                capabilities.receipt_store_factory(receipt.target.canonical_repository_root).store(
+                    receipt
+                )
+            except (OSError, ValueError):
+                return JobResult(
+                    ok=False,
+                    error=RECEIPT_FAILED_TOKEN,
+                    value={"failure_kind": "runner"},
+                )
+            return JobResult(
+                ok=False,
+                error=receipt.token,
+                value={
+                    **receipt.to_dict(),
+                    "head_sha": job.expected_head_sha,
+                    "immutable_source": True,
+                    "failure_kind": "runner",
+                    "platform": sys.platform,
+                    "status": "failed",
+                },
+                stdout_tail=receipt.stdout_tail,
+                stderr_tail=receipt.stderr_tail,
+            )
         except _HostVerificationBoundaryError as exc:
             return JobResult(ok=False, error=str(exc))
         except subprocess.TimeoutExpired as exc:
@@ -7354,7 +7500,7 @@ class WorkerPool:
         expected = str(job.kwargs.get("expected_remote_sha" if publish else "expected_head_sha"))
         reason = job.kwargs.get("rebase_reason")
         resolve_conflicts = bool(job.kwargs.get("resolve_conflicts", False))
-        signing_env = _required_git_signing_env(cwd, timeout=job.timeout_s)
+        signing_env = self._required_signing_env(cwd, timeout=job.timeout_s)
         result = git_utils.rebase_worktree_onto(
             cwd=cwd,
             base_branch="main",
@@ -7370,6 +7516,23 @@ class WorkerPool:
         if isinstance(source_sha, JobResult):
             return source_sha
         record_source(source_sha)
+        policy = self._select_rebase_policy(job.repo)
+        structural = self._run_rebase_structural_validation(
+            cwd,
+            timeout=job.timeout_s,
+            policy=policy,
+            capability_target=job.capability_target,
+        )
+        if structural is not None:
+            return structural
+        semantic = self._validate_rebased_tree(cwd, policy=policy)
+        if semantic is not None:
+            return semantic
+        metadata = self._verify_rebased_commit_metadata(
+            cwd, base_sha=base_sha, timeout=job.timeout_s
+        )
+        if metadata is not None:
+            return metadata
         record = (
             self._prepare_rebase_review_publication(
                 job, base_sha=base_sha, source_head=expected, resulting_head=source_sha
@@ -8133,6 +8296,7 @@ class WorkerPool:
         *,
         timeout: int,
         policy: RebaseValidationPolicy | None = None,
+        capability_target: CapabilityRequestTarget | None = None,
     ) -> JobResult | None:
         """Run the selected structural test against the immutable rebased tree."""
         if policy is None:
@@ -8184,7 +8348,16 @@ class WorkerPool:
                 policy,
                 "structural validation",
             )
-        result = self._run_immutable_build_test(
+        request = (
+            replace(
+                capability_target,
+                checkout_path=cwd.resolve(),
+                request_id=uuid.uuid4().hex,
+            )
+            if capability_target is not None
+            else None
+        )
+        result = self._execute_build_test(
             BuildTestJob(
                 repo="rebase-structural-validation",
                 cwd=cwd,
@@ -8192,6 +8365,7 @@ class WorkerPool:
                 timeout_s=timeout,
                 expected_head_sha=source_sha,
                 immutable_source=True,
+                capability_target=request,
                 descr="rebase_structural_validation",
             )
         )
@@ -8322,6 +8496,7 @@ class WorkerPool:
             cwd,
             timeout=job.timeout_s,
             policy=policy,
+            capability_target=job.capability_target,
         )
         if structural is not None:
             return structural
@@ -8633,7 +8808,7 @@ class WorkerPool:
         timeout: int,
     ) -> JobResult | None:
         """Stage only validated conflicts and let Git continue the policy rebase."""
-        env = _controlled_git_signing_env(cwd, timeout=timeout)
+        env = self._controlled_signing_env(cwd, timeout=timeout)
         if isinstance(env, JobResult):
             return env
         env["GIT_EDITOR"] = "true"
@@ -9299,7 +9474,7 @@ class WorkerPool:
                 )
                 if not paths.add_paths and not paths.update_paths:
                     raise SourceWorkspaceError("dirty direct turn has no changes")
-                signing = _controlled_git_signing_env(binding.cwd, timeout=job.timeout_s)
+                signing = self._controlled_signing_env(binding.cwd, timeout=job.timeout_s)
                 if isinstance(signing, JobResult):
                     raise SourceWorkspaceError("dirty direct signing environment is unavailable")
                 if _dirty_worktree_content_snapshot(binding.cwd, timeout=job.timeout_s) != snapshot:
@@ -12437,7 +12612,7 @@ class WorkerPool:
             git_message_timeout = min(git_message_timeout, int(operation_timeout))
 
         def signing_env_factory() -> dict[str, str]:
-            signing_env = _controlled_git_signing_env(
+            signing_env = self._controlled_signing_env(
                 commit_args[1],
                 timeout=cast(int, operation_timeout),
                 private_metadata=isinstance(

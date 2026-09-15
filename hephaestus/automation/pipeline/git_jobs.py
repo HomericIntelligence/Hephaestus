@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.automation.worktree_snapshot import (
@@ -12,6 +12,9 @@ from hephaestus.automation.worktree_snapshot import (
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES as DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
     DIRTY_SNAPSHOT_GIT_MAX_BYTES as DIRTY_SNAPSHOT_GIT_MAX_BYTES,
 )
+
+if TYPE_CHECKING:
+    from .host_capabilities import CapabilityRequestTarget
 
 GIT_OPS: frozenset[str] = frozenset(
     {
@@ -67,6 +70,7 @@ class GitJob:
     deadline_s: float | None = None
     workspace: WorkspaceBinding | None = None
     repository_lock_wait_timeout_s: float | None = None
+    capability_target: CapabilityRequestTarget | None = None
 
     def __post_init__(self) -> None:
         """Reject an operation outside the closed Git vocabulary."""
