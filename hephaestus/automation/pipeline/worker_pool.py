@@ -27,7 +27,7 @@ import time
 import uuid
 from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PureWindowsPath
@@ -83,7 +83,11 @@ from hephaestus.agents.workspace import (
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
-from hephaestus.automation.git_runtime import current_operation_shutdown, operation_file_lock
+from hephaestus.automation.git_runtime import (
+    current_operation_shutdown,
+    operation_file_lock,
+    operation_file_lock_held,
+)
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.pipeline.athena_skill_jobs import (
@@ -3806,10 +3810,75 @@ def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
     return repo_lock_path(repo, lock_dir)
 
 
+def _git_job_checkout_candidate(job: GitJob) -> Path | None:
+    """Return one operation-supplied existing checkout candidate."""
+    candidates: list[object] = []
+    candidates.extend(
+        job.kwargs.get(name) for name in ("repo_root", "cwd", "worktree_path", "dest")
+    )
+    for value in candidates:
+        if not isinstance(value, (str, Path)) or not str(value):
+            continue
+        candidate = Path(value)
+        try:
+            if candidate.is_symlink():
+                continue
+            root = candidate.resolve(strict=True)
+        except (OSError, RuntimeError, UnicodeError):
+            continue
+        marker = root / ".git"
+        if marker.is_symlink() or not (marker.is_dir() or marker.is_file()):
+            continue
+        return root
+    return None
+
+
+def _git_common_lock_owner_identity(path: Path) -> str:
+    """Return a stable owner identity for one canonical Git common directory."""
+    common_dir = path.parent.resolve(strict=True)
+    digest = hashlib.sha256(os.fsencode(common_dir)).hexdigest()
+    return f"git-common:{digest}"
+
+
+def _git_common_parent_identity(path: Path) -> tuple[int, int]:
+    """Return the device and inode for one existing common directory."""
+    metadata = path.parent.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode) or path.parent.is_symlink():
+        raise RuntimeError("Git common directory is unavailable")
+    return metadata.st_dev, metadata.st_ino
+
+
+def _intake_common_lock_path(manager: RepoIntakeManager) -> Path:
+    """Resolve intake metadata after validation or raise one bounded failure."""
+    try:
+        lock_path = WorktreeManager.git_metadata_lock_path(manager.caller_root)
+        common_dir = lock_path.parent.resolve(strict=True)
+        expected_common_dir = manager.common_dir.resolve(strict=True)
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        raise RepoIntakeError("repository-intake Git metadata path is unavailable") from exc
+    if common_dir != expected_common_dir:
+        raise RepoIntakeError("Git common directory changed before lock admission")
+    return common_dir / lock_path.name
+
+
 def _repository_lock_operation(description: str, fallback: str) -> str:
     """Return one bounded operation name for repository-lock metadata."""
     selected = description if isinstance(description, str) and description else fallback
     return selected[:200]
+
+
+def _git_start_failure(
+    job: GitJob,
+    *,
+    shutdown: threading.Event,
+    started_s: float,
+) -> JobResult | None:
+    """Return a failure when one Git job cannot start admission."""
+    if shutdown.is_set():
+        return JobResult(ok=False, error="interrupted", interrupted=True)
+    if job.deadline_s is not None and job.deadline_s <= started_s:
+        return JobResult(ok=False, error="timeout")
+    return None
 
 
 class _GitLockTimeoutError(TimeoutError):
@@ -3828,6 +3897,23 @@ class _GitLockTimeoutError(TimeoutError):
 
 class _GitLockInterruptedError(RuntimeError):
     """Raised when shutdown interrupts a Git job while it waits for the repo lock."""
+
+
+class _GitCheckoutBindingError(RuntimeError):
+    """Reject one checkout before its Git common directory can change."""
+
+
+@dataclass(frozen=True)
+class _PreparedGitLocks:
+    """Hold validated paths needed for one Git lock admission."""
+
+    common_lock_path: Path | None
+    intake_manager: RepoIntakeManager | None = None
+    operational_state_paths: tuple[Path, ...] = ()
+    authoritative_checkout: Path | None = None
+    expected_common_lock_path: Path | None = None
+    common_parent_identity: tuple[int, int] | None = None
+    remediation_receipt: RemediationRecoveryReceipt | None = None
 
 
 def _ignore_local_agent_failure(error: BaseException) -> bool:
@@ -4582,6 +4668,42 @@ class WorkerPool:
                     yield
         finally:
             entry.release_reservation()
+
+    @contextmanager
+    def _git_common_lock(
+        self,
+        repo: str,
+        path: Path | None,
+        *,
+        operation: str,
+        timeout_s: float,
+        deadline_s: float | None,
+        wait_deadline_s: float,
+        existing_parent_identity: tuple[int, int] | None = None,
+    ) -> Iterator[None]:
+        """Acquire the stable Git common-directory lock when it is available."""
+        if path is None:
+            yield
+            return
+        try:
+            owner_identity = _git_common_lock_owner_identity(path)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise _GitCheckoutBindingError("Git common directory is unavailable") from exc
+        entry = RepositoryOperationLock(
+            repo,
+            lock_path=path,
+            owner_identity=owner_identity,
+            existing_parent_identity=existing_parent_identity,
+            shutdown=self._shutdown,
+            monotonic=time.monotonic,
+        )
+        with entry.acquire(
+            operation=operation,
+            timeout_s=timeout_s,
+            deadline_s=deadline_s,
+            wait_deadline_s=wait_deadline_s,
+        ):
+            yield
 
     def _evict_repo_lock(self, entry: RepositoryOperationLock) -> None:
         """Remove one idle repository lock from the pool cache."""
@@ -6178,39 +6300,42 @@ class WorkerPool:
         """Run one Git job under the complete repository-lock contract.
 
         Passive lock wait has a separate budget. The Git command receives a
-        fresh execution deadline only after all repository locks are held.
+        fresh execution deadline only after its repository locks are held.
+        Intake validates caller state before lock admission can create the
+        caller's state directory.
         """
-        if self._shutdown.is_set():
-            return JobResult(ok=False, error="interrupted", interrupted=True)
         lock_attempt_started_s = time.monotonic()
-        if job.deadline_s is not None and job.deadline_s <= lock_attempt_started_s:
-            return JobResult(ok=False, error="timeout")
+        start_failure = _git_start_failure(
+            job,
+            shutdown=self._shutdown,
+            started_s=lock_attempt_started_s,
+        )
+        if start_failure is not None:
+            return start_failure
         lock_wait_timeout_s = (
             job.repository_lock_wait_timeout_s
             if job.repository_lock_wait_timeout_s is not None
             else self._git_lock_timeout
         )
+        operation = _repository_lock_operation(job.descr, job.op)
         try:
-            with self._repo_lock(
-                job.repo,
-                operation=_repository_lock_operation(job.descr, job.op),
-                timeout_s=lock_wait_timeout_s,
-                deadline_s=job.deadline_s,
-                include_file_lock=True,
-            ):
-                operation_deadline_s = time.monotonic() + job.timeout_s
-                if job.deadline_s is not None:
-                    operation_deadline_s = min(operation_deadline_s, job.deadline_s)
-                timed_job = replace(
-                    job,
-                    deadline_s=operation_deadline_s,
-                    repository_lock_wait_timeout_s=None,
-                )
-                with git_utils.operation_deadline(
-                    operation_deadline_s,
-                    shutdown=self._shutdown,
-                ):
-                    return self._dispatch_locked_git(timed_job)
+            return self._run_git_with_locks(
+                job,
+                operation=operation,
+                lock_attempt_started_s=lock_attempt_started_s,
+                lock_wait_timeout_s=lock_wait_timeout_s,
+            )
+        except RepoIntakeError as exc:
+            message = str(exc)
+            error = f"repository intake failed: {message}" if message == "lock_timeout" else message
+            return JobResult(ok=False, error=error)
+        except (SourceWorkspaceError, WorkspaceBindingError) as exc:
+            return JobResult(
+                ok=False,
+                error=f"source_workspace_ownership_unavailable: {exc}",
+            )
+        except _GitCheckoutBindingError as exc:
+            return JobResult(ok=False, error=str(exc))
         except (RepositoryLockError, _GitLockTimeoutError, _GitLockInterruptedError) as exc:
             return _git_lock_failure_result(
                 exc,
@@ -6247,6 +6372,303 @@ class WorkerPool:
                 stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
                 stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
             )
+
+    def _run_git_with_locks(
+        self,
+        job: GitJob,
+        *,
+        operation: str,
+        lock_attempt_started_s: float,
+        lock_wait_timeout_s: float,
+    ) -> JobResult:
+        """Validate lock paths, take both lock pairs, and dispatch one job."""
+        prepared = self._prepare_git_locks(job, lock_attempt_started_s)
+        common_lock_path = prepared.common_lock_path
+        wait_deadline_s = lock_attempt_started_s + lock_wait_timeout_s
+        repo_lock_options: dict[str, Any] = {}
+        if common_lock_path is not None:
+            repo_lock_options["wait_deadline_s"] = wait_deadline_s
+        with self._repo_lock(
+            job.repo,
+            operation=operation,
+            timeout_s=lock_wait_timeout_s,
+            deadline_s=job.deadline_s,
+            include_file_lock=True,
+            **repo_lock_options,
+        ):
+            self._revalidate_prepared_common_lock(prepared)
+            with self._git_common_lock(
+                job.repo,
+                common_lock_path,
+                operation=operation,
+                timeout_s=lock_wait_timeout_s,
+                deadline_s=job.deadline_s,
+                wait_deadline_s=wait_deadline_s,
+                existing_parent_identity=prepared.common_parent_identity,
+            ):
+                self._revalidate_prepared_common_lock(prepared)
+                return self._dispatch_admitted_git(job, prepared)
+
+    def _prepare_git_locks(
+        self,
+        job: GitJob,
+        lock_attempt_started_s: float,
+    ) -> _PreparedGitLocks:
+        """Return operation-specific paths after read-only authority checks."""
+        if job.op == "prepare_intake":
+            return self._prepare_intake_git_locks(job, lock_attempt_started_s)
+        if job.op == "publish_remediation_recovery":
+            return self._prepare_remediation_recovery_locks(job)
+        if job.workspace is not None:
+            binding = self._source_git_binding(job)
+            try:
+                lock_path = WorktreeManager.git_metadata_lock_path(binding.cwd)
+                lock_path = lock_path.parent.resolve(strict=True) / lock_path.name
+                parent_identity = _git_common_parent_identity(lock_path)
+            except (OSError, RuntimeError, UnicodeError) as exc:
+                raise SourceWorkspaceError("Git source workspace path is unavailable") from exc
+            return _PreparedGitLocks(
+                lock_path,
+                authoritative_checkout=binding.cwd,
+                expected_common_lock_path=lock_path,
+                common_parent_identity=parent_identity,
+            )
+        if job.op == "sync_checkout":
+            candidate = Path(str(job.kwargs.get("dest") or ""))
+            if not (candidate / ".git").exists():
+                return _PreparedGitLocks(None)
+            checkout, _expected_repo = self._validated_sync_checkout(job)
+            try:
+                lock_path = WorktreeManager.git_metadata_lock_path(checkout)
+                lock_path = lock_path.parent.resolve(strict=True) / lock_path.name
+                parent_identity = _git_common_parent_identity(lock_path)
+            except (OSError, RuntimeError, UnicodeError) as exc:
+                raise _GitCheckoutBindingError("Git common directory is unavailable") from exc
+            return _PreparedGitLocks(
+                lock_path,
+                authoritative_checkout=checkout,
+                expected_common_lock_path=lock_path,
+                common_parent_identity=parent_identity,
+            )
+        if job.op == "fetch_main":
+            checkout, lock_path, parent_identity = self._validated_fetch_main_lock_path(job)
+            return _PreparedGitLocks(
+                lock_path,
+                authoritative_checkout=checkout,
+                expected_common_lock_path=lock_path,
+                common_parent_identity=parent_identity,
+            )
+        return self._validated_operation_git_locks(job)
+
+    def _validated_operation_git_locks(self, job: GitJob) -> _PreparedGitLocks:
+        """Bind an operation path to its authenticated repository before writes."""
+        checkout = _git_job_checkout_candidate(job)
+        if checkout is None:
+            return _PreparedGitLocks(None)
+        self._authenticated_remote_git_configuration(
+            cwd=checkout,
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        try:
+            lock_path = WorktreeManager.git_metadata_lock_path(checkout)
+            common_dir = lock_path.parent.resolve(strict=True)
+            parent_identity = _git_common_parent_identity(common_dir / lock_path.name)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise _RemoteGitAuthenticationError("Git common directory is unavailable") from exc
+        return _PreparedGitLocks(
+            common_dir / lock_path.name,
+            authoritative_checkout=checkout,
+            expected_common_lock_path=common_dir / lock_path.name,
+            common_parent_identity=parent_identity,
+        )
+
+    def _validated_fetch_main_lock_path(self, job: GitJob) -> tuple[Path, Path, tuple[int, int]]:
+        """Validate the reusable checkout before fetch lock creation."""
+        raw_checkout = job.kwargs.get("cwd")
+        if not isinstance(raw_checkout, (str, Path)):
+            raise _RemoteGitAuthenticationError("fetch checkout is unavailable")
+        checkout = Path(raw_checkout)
+        if checkout.is_symlink():
+            raise _RemoteGitAuthenticationError("fetch checkout is unavailable")
+        try:
+            checkout = checkout.resolve(strict=True)
+        except OSError as exc:
+            raise _RemoteGitAuthenticationError("fetch checkout is unavailable") from exc
+        self._authenticated_remote_git_configuration(
+            cwd=checkout,
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        try:
+            lock_path = WorktreeManager.git_metadata_lock_path(checkout)
+            lock_path = lock_path.parent.resolve(strict=True) / lock_path.name
+            parent_identity = _git_common_parent_identity(lock_path)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise _RemoteGitAuthenticationError("Git common directory is unavailable") from exc
+        return checkout, lock_path, parent_identity
+
+    def _prepare_remediation_recovery_locks(self, job: GitJob) -> _PreparedGitLocks:
+        """Bind a recovery receipt to its authenticated checkout before writes."""
+        try:
+            receipt = RemediationRecoveryReceipt.from_dict(job.kwargs.get("recovery_receipt"))
+            review_input = receipt.review_input
+            repo_root = Path(review_input.repo_root)
+            checkout = Path(review_input.worktree_path)
+            resolved_root = repo_root.resolve(strict=True)
+            resolved_checkout = checkout.resolve(strict=True)
+            if (
+                repo_root.is_symlink()
+                or checkout.is_symlink()
+                or resolved_root != repo_root
+                or resolved_checkout != checkout
+                or (
+                    resolved_checkout != resolved_root
+                    and resolved_root not in resolved_checkout.parents
+                )
+                or review_input.repository != job.transport_repository.casefold()
+            ):
+                raise ValueError("remediation recovery checkout identity changed")
+            root_lock = WorktreeManager.git_metadata_lock_path(resolved_root)
+            lock_path = WorktreeManager.git_metadata_lock_path(resolved_checkout)
+            if root_lock.parent.resolve(strict=True) != lock_path.parent.resolve(strict=True):
+                raise ValueError("remediation recovery checkout identity changed")
+            self._authenticated_remote_git_configuration(
+                cwd=resolved_checkout,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            canonical_lock = lock_path.parent.resolve(strict=True) / lock_path.name
+            parent_identity = _git_common_parent_identity(canonical_lock)
+        except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+            raise _GitCheckoutBindingError(
+                f"remediation publication receipt is invalid: {exc}"
+            ) from exc
+        return _PreparedGitLocks(
+            canonical_lock,
+            authoritative_checkout=resolved_checkout,
+            expected_common_lock_path=canonical_lock,
+            common_parent_identity=parent_identity,
+            remediation_receipt=receipt,
+        )
+
+    def _prepare_intake_git_locks(
+        self,
+        job: GitJob,
+        lock_attempt_started_s: float,
+    ) -> _PreparedGitLocks:
+        """Validate intake before the compatibility lock creates local state."""
+        manager = self._new_repo_intake_manager(job)
+        legacy_lock_path = repo_lock_path(job.repo, self._lock_dir)
+        operational_state_paths = (
+            legacy_lock_path,
+            Path(f"{legacy_lock_path}.owner.lock"),
+            Path(f"{legacy_lock_path}.owner.json"),
+        )
+        validation_deadline_s = lock_attempt_started_s + job.timeout_s
+        if job.deadline_s is not None:
+            validation_deadline_s = min(validation_deadline_s, job.deadline_s)
+        with git_utils.operation_deadline(
+            validation_deadline_s,
+            shutdown=self._shutdown,
+        ):
+            manager.validate(operational_state_paths=operational_state_paths)
+        try:
+            common_lock_path = _intake_common_lock_path(manager)
+            parent_identity = _git_common_parent_identity(common_lock_path)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise RepoIntakeError("repository-intake Git metadata path is unavailable") from exc
+        return _PreparedGitLocks(
+            common_lock_path,
+            intake_manager=manager,
+            operational_state_paths=operational_state_paths,
+            authoritative_checkout=manager.caller_root,
+            expected_common_lock_path=common_lock_path,
+            common_parent_identity=parent_identity,
+        )
+
+    @staticmethod
+    def _revalidate_prepared_common_lock(prepared: _PreparedGitLocks) -> None:
+        """Prove that the selected checkout still names the locked common directory."""
+        checkout = prepared.authoritative_checkout
+        expected = prepared.expected_common_lock_path
+        if checkout is None or expected is None:
+            return
+        try:
+            if checkout.is_symlink() or checkout.resolve(strict=True) != checkout:
+                raise RuntimeError("checkout path changed")
+            actual = WorktreeManager.git_metadata_lock_path(checkout)
+            actual = actual.parent.resolve(strict=True) / actual.name
+            actual_parent_identity = _git_common_parent_identity(actual)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            if prepared.intake_manager is not None:
+                raise RepoIntakeError("repository-intake Git metadata path is unavailable") from exc
+            raise _GitCheckoutBindingError(
+                "Git common directory changed before operation admission"
+            ) from exc
+        if actual != expected:
+            if prepared.intake_manager is not None:
+                raise RepoIntakeError("Git common directory changed before lock admission")
+            raise _GitCheckoutBindingError(
+                "Git common directory changed before operation admission"
+            )
+        if (
+            prepared.common_parent_identity is not None
+            and actual_parent_identity != prepared.common_parent_identity
+        ):
+            if prepared.intake_manager is not None:
+                raise RepoIntakeError("Git common directory changed before lock admission")
+            raise _GitCheckoutBindingError(
+                "Git common directory changed before operation admission"
+            )
+
+    def _dispatch_admitted_git(
+        self,
+        job: GitJob,
+        prepared: _PreparedGitLocks,
+    ) -> JobResult:
+        """Start the execution budget after admission and dispatch one Git job."""
+        operation_deadline_s = time.monotonic() + job.timeout_s
+        if job.deadline_s is not None:
+            operation_deadline_s = min(operation_deadline_s, job.deadline_s)
+        timed_job = replace(
+            job,
+            deadline_s=operation_deadline_s,
+            repository_lock_wait_timeout_s=None,
+        )
+        common_lock_path = prepared.common_lock_path
+        held_common_lock = (
+            operation_file_lock_held(common_lock_path)
+            if common_lock_path is not None
+            else nullcontext()
+        )
+        with (
+            git_utils.operation_deadline(
+                operation_deadline_s,
+                shutdown=self._shutdown,
+            ),
+            held_common_lock,
+        ):
+            if prepared.authoritative_checkout is not None and prepared.intake_manager is None:
+                self._authenticated_remote_git_configuration(
+                    cwd=prepared.authoritative_checkout,
+                    expected_repo=timed_job.transport_repository,
+                    timeout=timed_job.timeout_s,
+                )
+            if prepared.intake_manager is not None:
+                return self._git_prepare_intake(
+                    timed_job,
+                    manager=prepared.intake_manager,
+                    operational_state_paths=prepared.operational_state_paths,
+                    admitted_metadata_lock=common_lock_path,
+                )
+            if prepared.remediation_receipt is not None:
+                return self._git_publish_remediation_recovery(
+                    timed_job, receipt=prepared.remediation_receipt
+                )
+            if timed_job.op == "sync_checkout" and common_lock_path is not None:
+                return self._git_sync_checkout(timed_job, admitted_metadata_lock=common_lock_path)
+            return self._dispatch_locked_git(timed_job)
 
     def _dispatch_locked_git(self, job: GitJob) -> JobResult:
         """Dispatch one Git job while both repository locks are held."""
@@ -6359,8 +6781,8 @@ class WorkerPool:
         )
 
     @staticmethod
-    def _source_git_manager(job: GitJob) -> tuple[SourceWorkspaceManager, WorkspaceBinding]:
-        """Check the exact source identity supplied with one host Git job."""
+    def _source_git_binding(job: GitJob) -> WorkspaceBinding:
+        """Validate one source Git job without creating repository state."""
         binding = job.workspace
         if binding is None:
             raise SourceWorkspaceError("Git source operation requires a workspace binding")
@@ -6382,6 +6804,36 @@ class WorkerPool:
             or Path(path) != binding.cwd
         ):
             raise SourceWorkspaceError("Git source operation does not match its workspace")
+        try:
+            reusable_root = binding.reusable_root.resolve(strict=True)
+            cwd = binding.cwd.resolve(strict=True)
+            common_dir = WorktreeManager.git_metadata_lock_path(reusable_root).parent.resolve(
+                strict=True
+            )
+            cwd_common_dir = WorktreeManager.git_metadata_lock_path(cwd).parent.resolve(strict=True)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise SourceWorkspaceError("Git source workspace path is unavailable") from exc
+        repository_identity = (
+            f"{binding.repository}:{hashlib.sha256(str(common_dir).encode()).hexdigest()[:16]}"
+        )
+        expected_owner = (
+            f"{repository_identity}:{binding.item_number}:{SourceLane.IMPLEMENTATION.value}"
+        )
+        if (
+            binding.reusable_root.absolute() != reusable_root
+            or binding.cwd.absolute() != cwd
+            or cwd_common_dir != common_dir
+            or binding.ownership_key != expected_owner
+        ):
+            raise SourceWorkspaceError("Git source operation does not match its workspace")
+        return binding
+
+    @classmethod
+    def _source_git_manager(cls, job: GitJob) -> tuple[SourceWorkspaceManager, WorkspaceBinding]:
+        """Return a manager after read-only source identity validation."""
+        binding = cls._source_git_binding(job)
+        assert binding.reusable_root is not None  # noqa: S101 - validated above
+        assert binding.repository is not None  # noqa: S101 - validated above
         return (
             SourceWorkspaceManager(
                 binding.reusable_root,
@@ -6607,10 +7059,17 @@ class WorkerPool:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
 
-    def _git_publish_remediation_recovery(self, job: GitJob) -> JobResult:
+    def _git_publish_remediation_recovery(
+        self,
+        job: GitJob,
+        *,
+        receipt: RemediationRecoveryReceipt | None = None,
+    ) -> JobResult:
         """Validate and publish one already-prepared remediation commit."""
         try:
-            receipt = RemediationRecoveryReceipt.from_dict(job.kwargs.get("recovery_receipt"))
+            receipt = receipt or RemediationRecoveryReceipt.from_dict(
+                job.kwargs.get("recovery_receipt")
+            )
             reply_result = RemediationReplyResult.from_dict(job.kwargs.get("reply_result"))
         except ValueError as error:
             return JobResult(ok=False, error=f"remediation publication receipt is invalid: {error}")
@@ -6863,10 +7322,13 @@ class WorkerPool:
         root = Path(raw_root).resolve(strict=True)
         manager = SourceWorkspaceManager(root, repository=job.transport_repository)
         cwd = Path(str(job.kwargs.get("cwd") or "")).resolve(strict=True)
-        if (
-            WorktreeManager.git_metadata_lock_path(cwd).parent.resolve(strict=True)
-            != manager.common_dir
-        ):
+        try:
+            common_dir = WorktreeManager.git_metadata_lock_path(cwd).parent.resolve(strict=True)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise SourceWorkspaceError(
+                "initial implementation Git identity is unavailable"
+            ) from exc
+        if common_dir != manager.common_dir:
             raise SourceWorkspaceError("initial implementation Git identity does not match")
         directory = manager.state_dir
         if directory.is_symlink() or directory.resolve() != directory:
@@ -8873,30 +9335,25 @@ class WorkerPool:
                 return JobResult(ok=False, error="completed rebase commit metadata invalid")
         return None
 
-    def _git_sync_checkout(self, job: GitJob) -> JobResult:
+    def _git_sync_checkout(
+        self, job: GitJob, *, admitted_metadata_lock: Path | None = None
+    ) -> JobResult:
         """Validate and fast-forward a clean reusable checkout.
 
         Tracked staged or unstaged changes block synchronization. Untracked
         files are left in place because issue work runs in isolated worktrees.
         """
-        expected_repo = str(job.kwargs.get("repo") or "")
-        dest = str(job.kwargs.get("dest") or "")
-        if not expected_repo or not dest:
-            return JobResult(
-                ok=False,
-                error="sync_checkout requires non-empty 'repo' and 'dest' kwargs",
+        try:
+            checkout, expected_repo = self._validated_sync_checkout(job)
+        except _GitCheckoutBindingError as exc:
+            return JobResult(ok=False, error=str(exc))
+
+        try:
+            metadata_lock = admitted_metadata_lock or WorktreeManager.git_metadata_lock_path(
+                checkout
             )
-
-        checkout = Path(dest)
-        if not checkout.is_dir():
-            return JobResult(ok=False, error=f"checkout does not exist: {checkout}")
-        # This read-only security preflight must run before acquiring a lock
-        # below: creating a lock file can otherwise create ``.git`` in a
-        # malformed directory and change how the preflight probes it.
-        if preflight_error := _checkout_preflight_error(checkout, job.timeout_s):
-            return JobResult(ok=False, error=preflight_error)
-
-        metadata_lock = WorktreeManager.git_metadata_lock_path(checkout)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            return JobResult(ok=False, error=f"Git common directory is unavailable: {exc}")
         with operation_file_lock(metadata_lock):
             return self._sync_checkout_locked(
                 checkout=checkout,
@@ -8904,40 +9361,77 @@ class WorkerPool:
                 timeout_s=job.timeout_s,
             )
 
-    def _git_prepare_intake(self, job: GitJob) -> JobResult:
-        """Prepare an isolated intake worktree without touching the caller."""
+    @staticmethod
+    def _validated_sync_checkout(job: GitJob) -> tuple[Path, str]:
+        """Validate one checkout identity without changing its Git directory."""
+        expected_repo = str(job.kwargs.get("repo") or "")
+        dest = str(job.kwargs.get("dest") or "")
+        if not expected_repo or not dest:
+            raise _GitCheckoutBindingError(
+                "sync_checkout requires non-empty 'repo' and 'dest' kwargs"
+            )
+        checkout = Path(dest)
+        if not checkout.is_dir() or checkout.is_symlink():
+            raise _GitCheckoutBindingError(f"checkout does not exist: {checkout}")
+        if preflight_error := _checkout_preflight_error(checkout, job.timeout_s):
+            raise _GitCheckoutBindingError(preflight_error)
+        origin = git_utils.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=checkout,
+            timeout=job.timeout_s,
+            env=_controlled_git_env(),
+        ).stdout.strip()
+        normalized_origin = origin.rstrip("/").removesuffix(".git")
+        expected_origins = {
+            f"https://github.com/{expected_repo}",
+            f"ssh://git@github.com/{expected_repo}",
+            f"git@github.com:{expected_repo}",
+        }
+        if normalized_origin not in expected_origins:
+            raise _GitCheckoutBindingError(
+                f"checkout has unexpected origin; expected origin {expected_repo}"
+            )
+        return checkout.resolve(strict=True), expected_repo
+
+    def _new_repo_intake_manager(self, job: GitJob) -> RepoIntakeManager:
+        """Validate intake inputs and return their common-directory manager."""
         expected_repo = str(job.kwargs.get("repo") or "")
         caller_value = job.kwargs.get("caller_root")
         caller_root = Path(str(caller_value or ""))
         if not expected_repo or not caller_root.is_dir() or caller_root.is_symlink():
-            return JobResult(
-                ok=False,
-                error="prepare_intake requires a non-empty repo and valid caller_root",
-            )
+            raise RepoIntakeError("prepare_intake requires a non-empty repo and valid caller_root")
         if preflight_error := _checkout_preflight_error(caller_root, job.timeout_s):
-            return JobResult(ok=False, error=preflight_error)
+            raise RepoIntakeError(preflight_error)
         gh_command = _trusted_gh_executable(self._gh_extra_path_root)
         if gh_command is None:
-            return JobResult(
-                ok=False,
-                error=(
-                    "required GitHub executable is unavailable; pass "
-                    "--gh-extra-path-root ROOT when ROOT/bin/gh is the intended installation"
-                ),
+            raise RepoIntakeError(
+                "required GitHub executable is unavailable; pass "
+                "--gh-extra-path-root ROOT when ROOT/bin/gh is the intended installation"
             )
         remote_config = _trusted_remote_git_config(gh_command)
         if remote_config is None:
-            return JobResult(ok=False, error="required fetch executable is unavailable")
+            raise RepoIntakeError("required fetch executable is unavailable")
+        return RepoIntakeManager(
+            caller_root,
+            repository=expected_repo,
+            gh_command=gh_command,
+            timeout_s=job.timeout_s,
+            git_runner=git_utils.run,
+            git_env=_controlled_git_env(),
+            remote_config=remote_config,
+        )
+
+    def _git_prepare_intake(
+        self,
+        job: GitJob,
+        *,
+        manager: RepoIntakeManager | None = None,
+        operational_state_paths: Collection[Path] = (),
+        admitted_metadata_lock: Path | None = None,
+    ) -> JobResult:
+        """Prepare an isolated intake worktree without touching the caller."""
         try:
-            manager = RepoIntakeManager(
-                caller_root,
-                repository=expected_repo,
-                gh_command=gh_command,
-                timeout_s=job.timeout_s,
-                git_runner=git_utils.run,
-                git_env=_controlled_git_env(),
-                remote_config=remote_config,
-            )
+            manager = manager or self._new_repo_intake_manager(job)
             common_dir = manager.common_dir
             preparation_key = (
                 f"repository-intake:{hashlib.sha256(os.fsencode(common_dir)).hexdigest()}"
@@ -8955,7 +9449,13 @@ class WorkerPool:
                     lease.__enter__()
                 lease_retained = not acquired_lease
                 try:
-                    receipt = manager.prepare()
+                    if operational_state_paths:
+                        receipt = manager.prepare(
+                            operational_state_paths=operational_state_paths,
+                            admitted_metadata_lock=admitted_metadata_lock,
+                        )
+                    else:
+                        receipt = manager.prepare()
                     if acquired_lease:
                         with self._repo_intake_leases_guard:
                             self._repo_intake_leases[common_dir] = lease

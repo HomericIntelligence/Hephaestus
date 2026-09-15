@@ -56,6 +56,7 @@ from hephaestus.automation.agent_config import (
     AGENT_PR_REVIEWER,
 )
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
+from hephaestus.automation.git_runtime import operation_file_lock
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline import worker_pool as worker_pool_module
@@ -83,7 +84,10 @@ from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
 )
-from hephaestus.automation.pipeline.repository_lock import LockTimeoutError
+from hephaestus.automation.pipeline.repository_lock import (
+    LockTimeoutError,
+    RepositoryOperationLock,
+)
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.stages import pr_review_receipts
 from hephaestus.automation.pipeline.stages.pr_review_verification import (
@@ -165,7 +169,7 @@ from hephaestus.config.child_environments import (
 from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
-from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock, file_lock_at
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import source_worktree_name
 
@@ -20271,6 +20275,876 @@ class TestGitLocking:
         assert result.ok is True
         assert (tmp_path / "locks" / "git-test_repo.lock").exists()
 
+    def test_prepare_intake_does_not_create_caller_state_before_validation(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A first intake keeps the caller state-free until validation passes."""
+        caller = tmp_path / "caller"
+        caller.mkdir()
+        (caller / ".git").mkdir()
+        caller_state = caller / DEFAULT_STATE_DIR
+        events: list[str] = []
+
+        @contextmanager
+        def run_lease() -> Iterator[None]:
+            events.append("lease_enter")
+            try:
+                yield
+            finally:
+                events.append("lease_exit")
+
+        receipt = MagicMock()
+        receipt.to_dict.return_value = {"revision": "a" * 40}
+        manager = MagicMock()
+        manager.common_dir = caller / ".git"
+        manager.caller_root = caller
+        manager.run_lease.side_effect = run_lease
+
+        def validate(**_kwargs: object) -> None:
+            assert events == ["manager"]
+            assert not caller_state.exists()
+            events.append("validate")
+
+        manager.validate.side_effect = validate
+
+        def prepare(**_kwargs: object) -> MagicMock:
+            assert events == ["manager", "validate", "lease_enter"]
+            assert caller_state.is_dir()
+            events.append("prepare")
+            return receipt
+
+        manager.prepare.side_effect = prepare
+
+        def manager_factory(*_args: object, **_kwargs: object) -> MagicMock:
+            assert not caller_state.exists()
+            events.append("manager")
+            return manager
+
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+        )
+        job = GitJob(
+            repo="acme/repo",
+            op="prepare_intake",
+            timeout_s=30,
+            kwargs={"repo": "acme/repo", "caller_root": str(caller)},
+        )
+        try:
+            with (
+                patch(
+                    "hephaestus.automation.pipeline.repository_lock.get_repo_root",
+                    return_value=caller,
+                ),
+                patch(f"{_WP}._checkout_preflight_error", return_value=None),
+                patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+                patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+                patch(f"{_WP}.RepoIntakeManager", side_effect=manager_factory),
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.release_repo_intake_leases()
+            pool.shutdown()
+
+        assert result.ok is True
+        assert events == ["manager", "validate", "lease_enter", "prepare", "lease_exit"]
+        assert caller_state.is_dir()
+
+    def test_intake_and_fetch_share_the_git_common_directory_lock(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """Different pool keys serialize Git jobs for linked worktrees."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        linked = tmp_path / "linked"
+        _git(repo, "worktree", "add", "--detach", str(linked), "HEAD")
+        holder_pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "holder-locks",
+        )
+        intake_pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "intake-locks",
+        )
+        holder_entered = threading.Event()
+        release_holder = threading.Event()
+        intake_entered = threading.Event()
+        results: dict[str, JobResult] = {}
+
+        def hold_fetch(_job: GitJob) -> JobResult:
+            holder_entered.set()
+            release_holder.wait(timeout=5)
+            return JobResult(ok=release_holder.is_set())
+
+        receipt = MagicMock()
+        receipt.to_dict.return_value = {"revision": "a" * 40}
+
+        def enter_intake(**_kwargs: object) -> MagicMock:
+            with operation_file_lock(WorktreeManager.git_metadata_lock_path(linked)):
+                intake_entered.set()
+            return receipt
+
+        def run_holder() -> None:
+            results["holder"] = holder_pool._run_git(
+                GitJob("short-name", "fetch_main", 30, kwargs={"cwd": repo})
+            )
+
+        def run_intake() -> None:
+            results["intake"] = intake_pool._run_git(
+                GitJob(
+                    "owner/name",
+                    "prepare_intake",
+                    30,
+                    kwargs={"repo": "owner/name", "caller_root": str(linked)},
+                )
+            )
+
+        try:
+            with (
+                patch.object(holder_pool, "_dispatch_locked_git", side_effect=hold_fetch),
+                patch.object(
+                    holder_pool,
+                    "_authenticated_remote_git_configuration",
+                    return_value=({}, ()),
+                ),
+                patch(f"{_WP}._checkout_preflight_error", return_value=None),
+                patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+                patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+                patch(f"{_WP}.RepoIntakeManager") as manager_type,
+            ):
+                manager_type.return_value.common_dir = WorktreeManager.git_metadata_lock_path(
+                    linked
+                ).parent
+                manager_type.return_value.caller_root = linked
+                manager_type.return_value.run_lease.return_value = nullcontext()
+                manager_type.return_value.prepare.side_effect = enter_intake
+                holder = threading.Thread(target=run_holder)
+                intake = threading.Thread(target=run_intake)
+                holder.start()
+                assert holder_entered.wait(timeout=5)
+                intake.start()
+                assert not intake_entered.wait(timeout=0.1)
+                release_holder.set()
+                holder.join(timeout=5)
+                intake.join(timeout=5)
+        finally:
+            release_holder.set()
+            holder_pool.shutdown()
+            intake_pool.shutdown()
+
+        assert not holder.is_alive()
+        assert not intake.is_alive()
+        assert intake_entered.is_set()
+        assert results["holder"].ok is True
+        assert results["intake"].ok is True
+
+    def test_validated_intake_waits_for_a_legacy_primary_lock(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A current intake excludes an older ordinary Git worker."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        lock_dir = tmp_path / "legacy-locks"
+        holder = RepositoryOperationLock("test/repo", lock_dir=lock_dir)
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=lock_dir,
+        )
+        manager = MagicMock(common_dir=(repo / ".git").resolve(), caller_root=repo)
+        job = GitJob(
+            "test/repo",
+            "prepare_intake",
+            30,
+            repository_lock_wait_timeout_s=0.01,
+            kwargs={"repo": "owner/name", "caller_root": str(repo)},
+        )
+        try:
+            with (
+                holder.acquire(operation="fetch_main", timeout_s=1),
+                patch(f"{_WP}._checkout_preflight_error", return_value=None),
+                patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+                patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+                patch(f"{_WP}.RepoIntakeManager", return_value=manager),
+                patch.object(pool, "_dispatch_locked_git") as dispatch,
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+
+        manager.validate.assert_called_once_with(
+            operational_state_paths=(
+                lock_dir / "git-test_repo.lock",
+                lock_dir / "git-test_repo.lock.owner.lock",
+                lock_dir / "git-test_repo.lock.owner.json",
+            )
+        )
+        dispatch.assert_not_called()
+        assert result.error == "lock_timeout"
+
+    def test_intake_validation_failure_does_not_create_caller_state(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A rejected caller does not create the legacy lock directory."""
+        caller = tmp_path / "caller"
+        caller.mkdir()
+        (caller / ".git").mkdir()
+        manager = MagicMock(common_dir=caller / ".git", caller_root=caller)
+        manager.validate.side_effect = RepoIntakeError("legacy state requires reconciliation")
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+        )
+        job = GitJob(
+            "test/repo",
+            "prepare_intake",
+            30,
+            kwargs={"repo": "owner/name", "caller_root": str(caller)},
+        )
+        try:
+            with (
+                patch(
+                    "hephaestus.automation.pipeline.repository_lock.get_repo_root",
+                    return_value=caller,
+                ),
+                patch(f"{_WP}._checkout_preflight_error", return_value=None),
+                patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+                patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+                patch(f"{_WP}.RepoIntakeManager", return_value=manager),
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+
+        manager.prepare.assert_not_called()
+        assert result.error == "legacy state requires reconciliation"
+        assert not (caller / DEFAULT_STATE_DIR).exists()
+
+    def test_common_lock_without_owner_record_fails_closed(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """An older metadata-lock holder blocks a current ordinary Git job."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/owner/name.git")
+        common_lock = WorktreeManager.git_metadata_lock_path(repo)
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "legacy-locks",
+        )
+        job = GitJob(
+            "test/repo",
+            "sync_checkout",
+            30,
+            repository_lock_wait_timeout_s=0.01,
+            kwargs={"repo": "owner/name", "dest": str(repo)},
+        )
+        try:
+            with (
+                file_lock(common_lock, require_exclusive=True),
+                patch.object(pool, "_dispatch_locked_git") as dispatch,
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+
+        dispatch.assert_not_called()
+        assert result.error == "lock_metadata_error"
+
+    def test_common_lock_timeout_accepts_a_different_repository_alias(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """Common-directory owner data is independent of the requested alias."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        common_lock = WorktreeManager.git_metadata_lock_path(repo)
+        holder_pool = WorkerPool(1, shutdown_event, completion_q)
+        waiter_pool = WorkerPool(1, shutdown_event, completion_q)
+        holder_entered = threading.Event()
+        release_holder = threading.Event()
+
+        def hold() -> None:
+            with holder_pool._git_common_lock(
+                "short-name",
+                common_lock,
+                operation="fetch_main",
+                timeout_s=30,
+                deadline_s=None,
+                wait_deadline_s=time.monotonic() + 30,
+            ):
+                holder_entered.set()
+                release_holder.wait(timeout=5)
+
+        thread = threading.Thread(target=hold)
+        try:
+            thread.start()
+            assert holder_entered.wait(timeout=5)
+            with pytest.raises(LockTimeoutError) as caught:
+                with waiter_pool._git_common_lock(
+                    "owner/name",
+                    common_lock,
+                    operation="prepare_intake",
+                    timeout_s=0.01,
+                    deadline_s=None,
+                    wait_deadline_s=time.monotonic() + 0.01,
+                ):
+                    pytest.fail("a contending alias acquired the common lock")
+        finally:
+            release_holder.set()
+            thread.join(timeout=5)
+            holder_pool.shutdown()
+            waiter_pool.shutdown()
+
+        assert caught.value.details["repository"] == "owner/name"
+        assert caught.value.details["holder_operation"] == "fetch_main"
+
+    def test_invalid_source_binding_does_not_write_a_second_repository(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A foreign valid repository stays unchanged before binding rejection."""
+        expected_root = tmp_path / "expected"
+        foreign_root = tmp_path / "foreign"
+        expected_root.mkdir()
+        foreign_root.mkdir()
+        _worker_repository(expected_root)
+        foreign_repo, _predecessor, head = _worker_repository(foreign_root)
+        manager = SourceWorkspaceManager(foreign_repo, repository="foreign/repo")
+        binding = manager.prepare(
+            7,
+            SourceLane.IMPLEMENTATION,
+            head,
+            branch="7-auto-impl",
+        )
+        forged = replace(binding, repository="expected/repo")
+
+        def git_state() -> tuple[tuple[str, int, bytes], ...]:
+            return tuple(
+                (
+                    str(path.relative_to(manager.common_dir)),
+                    path.lstat().st_mode,
+                    path.read_bytes() if path.is_file() and not path.is_symlink() else b"",
+                )
+                for path in sorted(manager.common_dir.rglob("*"))
+            )
+
+        before = git_state()
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "expected/repo",
+            "inspect_implementation_worktree",
+            30,
+            workspace=forged,
+            kwargs={
+                "issue_number": 7,
+                "repo_root": str(foreign_repo),
+                "worktree_path": str(binding.cwd),
+                "branch": "7-auto-impl",
+            },
+        )
+        try:
+            result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+
+        assert result.error is not None
+        assert result.error.startswith("source_workspace_ownership_unavailable:")
+        assert git_state() == before
+
+    def test_sync_identity_rejection_does_not_write_a_second_repository(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A valid foreign checkout is rejected before common-lock creation."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/foreign/repo.git")
+        common_dir = WorktreeManager.git_metadata_lock_path(repo).parent
+
+        def git_state() -> tuple[tuple[str, int, bytes], ...]:
+            return tuple(
+                (
+                    str(path.relative_to(common_dir)),
+                    path.lstat().st_mode,
+                    path.read_bytes() if path.is_file() and not path.is_symlink() else b"",
+                )
+                for path in sorted(common_dir.rglob("*"))
+            )
+
+        before = git_state()
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "repo",
+            "sync_checkout",
+            30,
+            kwargs={"repo": "expected/repo", "dest": str(repo)},
+        )
+        try:
+            result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+
+        assert result.error == "checkout has unexpected origin; expected origin expected/repo"
+        assert git_state() == before
+
+    def test_intake_metadata_path_removal_is_a_controlled_failure(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """Intake path drift fails before a lease or Git dispatch."""
+        caller = tmp_path / "caller"
+        caller.mkdir()
+        git_dir = caller / ".git"
+        git_dir.mkdir()
+        manager = MagicMock(common_dir=git_dir.resolve(), caller_root=caller)
+
+        def remove_metadata(**_kwargs: object) -> None:
+            git_dir.rmdir()
+
+        manager.validate.side_effect = remove_metadata
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "repo",
+            "prepare_intake",
+            30,
+            kwargs={"repo": "owner/repo", "caller_root": str(caller)},
+        )
+        try:
+            with (
+                patch(f"{_WP}._checkout_preflight_error", return_value=None),
+                patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+                patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+                patch(f"{_WP}.RepoIntakeManager", return_value=manager),
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+
+        manager.run_lease.assert_not_called()
+        manager.prepare.assert_not_called()
+        assert result.error == "repository-intake Git metadata path is unavailable"
+
+    def test_remediation_recovery_waits_for_receipt_checkout_common_lock(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """Recovery publication uses the checkout named in its receipt."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/owner/name.git")
+        review_input = MagicMock(
+            repository="owner/name", repo_root=str(repo), worktree_path=str(repo)
+        )
+        receipt = MagicMock(review_input=review_input)
+        common_lock = WorktreeManager.git_metadata_lock_path(repo)
+        holder = WorkerPool(1, shutdown_event, completion_q)
+        waiter = WorkerPool(
+            1,
+            shutdown_event,
+            completion_q,
+            lock_dir=tmp_path / "locks",
+            git_lock_timeout=1,
+        )
+        job = GitJob(
+            "owner/name",
+            "publish_remediation_recovery",
+            1,
+            kwargs={
+                "recovery_receipt": {},
+                "reply_result": {},
+                "remediation_batch_nonce": "4" * 32,
+            },
+        )
+        try:
+            with (
+                holder._git_common_lock(
+                    "alias",
+                    common_lock,
+                    operation="fetch_main",
+                    timeout_s=30,
+                    deadline_s=None,
+                    wait_deadline_s=time.monotonic() + 30,
+                ),
+                patch(f"{_WP}.RemediationRecoveryReceipt.from_dict", return_value=receipt),
+                patch.object(
+                    waiter, "_git_publish_remediation_recovery", return_value=JobResult(ok=True)
+                ) as publish,
+            ):
+                result = waiter._run_git(job)
+        finally:
+            holder.shutdown()
+            waiter.shutdown()
+        publish.assert_not_called()
+        assert result.error == "lock_timeout"
+
+    def test_foreign_remediation_recovery_receipt_does_not_write_git_state(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A foreign receipt is rejected before common-lock artifacts exist."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/foreign/name.git")
+        common_dir = (repo / ".git").resolve()
+
+        def git_state() -> tuple[tuple[str, int, bytes], ...]:
+            return tuple(
+                (
+                    str(path.relative_to(common_dir)),
+                    path.lstat().st_mode,
+                    path.read_bytes() if path.is_file() and not path.is_symlink() else b"",
+                )
+                for path in sorted(common_dir.rglob("*"))
+            )
+
+        receipt = MagicMock(
+            review_input=MagicMock(
+                repository="expected/name", repo_root=str(repo), worktree_path=str(repo)
+            )
+        )
+        before = git_state()
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "expected/name",
+            "publish_remediation_recovery",
+            30,
+            kwargs={
+                "recovery_receipt": {},
+                "reply_result": {},
+                "remediation_batch_nonce": "4" * 32,
+            },
+        )
+        try:
+            with (
+                patch(f"{_WP}.RemediationRecoveryReceipt.from_dict", return_value=receipt),
+                patch.object(pool, "_git_publish_remediation_recovery") as publish,
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+        publish.assert_not_called()
+        assert result.error is not None
+        assert result.error.startswith("remediation publication receipt is invalid:")
+        assert git_state() == before
+
+    def test_fetch_common_directory_change_after_lock_admission_stops_dispatch(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A changed primary Git directory stops an admitted fetch."""
+        expected_root = tmp_path / "expected"
+        foreign_root = tmp_path / "foreign"
+        expected_root.mkdir()
+        foreign_root.mkdir()
+        repo, _predecessor, _head = _worker_repository(expected_root)
+        foreign, _foreign_predecessor, _foreign_head = _worker_repository(foreign_root)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/owner/name.git")
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob("owner/name", "fetch_main", 30, kwargs={"cwd": str(repo)})
+
+        @contextmanager
+        def move_after_admission(*_args: object, **_kwargs: object) -> Iterator[None]:
+            original = repo / ".git-original"
+            (repo / ".git").rename(original)
+            (repo / ".git").symlink_to(foreign / ".git", target_is_directory=True)
+            yield
+
+        try:
+            with (
+                patch.object(pool, "_git_common_lock", side_effect=move_after_admission),
+                patch.object(pool, "_dispatch_locked_git") as dispatch,
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+        dispatch.assert_not_called()
+        assert result.error == "Git common directory changed before operation admission"
+
+    def test_intake_linked_common_directory_change_stops_before_lease(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A changed linked-worktree common directory stops intake admission."""
+        expected_root = tmp_path / "expected"
+        foreign_root = tmp_path / "foreign"
+        expected_root.mkdir()
+        foreign_root.mkdir()
+        repo, _predecessor, _head = _worker_repository(expected_root)
+        foreign, _foreign_predecessor, _foreign_head = _worker_repository(foreign_root)
+        linked = tmp_path / "linked"
+        _git(repo, "worktree", "add", "--detach", str(linked), "HEAD")
+        gitdir = Path(
+            (linked / ".git").read_text(encoding="utf-8").removeprefix("gitdir: ").strip()
+        )
+        manager = MagicMock(
+            common_dir=WorktreeManager.git_metadata_lock_path(linked).parent.resolve(),
+            caller_root=linked.resolve(),
+        )
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "owner/name",
+            "prepare_intake",
+            30,
+            kwargs={"repo": "owner/name", "caller_root": str(linked)},
+        )
+
+        @contextmanager
+        def move_after_admission(*_args: object, **_kwargs: object) -> Iterator[None]:
+            (gitdir / "commondir").write_text(str(foreign / ".git"), encoding="utf-8")
+            yield
+
+        try:
+            with (
+                patch(f"{_WP}._checkout_preflight_error", return_value=None),
+                patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+                patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+                patch(f"{_WP}.RepoIntakeManager", return_value=manager),
+                patch.object(pool, "_git_common_lock", side_effect=move_after_admission),
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+        manager.run_lease.assert_not_called()
+        manager.prepare.assert_not_called()
+        assert result.error == "Git common directory changed before lock admission"
+
+    def test_generic_git_metadata_removal_after_preparation_stops_dispatch(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A removed primary Git directory is not recreated during admission."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/owner/name.git")
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "owner/name",
+            "verify_issue_wave_ancestry",
+            30,
+            kwargs={"repo_root": str(repo), "main_sha": "a" * 40, "ancestor_shas": ()},
+        )
+
+        @contextmanager
+        def remove_after_preparation(*_args: object, **_kwargs: object) -> Iterator[None]:
+            shutil.rmtree(repo / ".git")
+            yield
+
+        try:
+            with (
+                patch.object(pool, "_repo_lock", side_effect=remove_after_preparation),
+                patch.object(pool, "_dispatch_locked_git") as dispatch,
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+        dispatch.assert_not_called()
+        assert not (repo / ".git").exists()
+        assert result.error == "Git common directory changed before operation admission"
+
+    @pytest.mark.parametrize("change", ["remove", "replace"])
+    def test_common_directory_change_at_lock_open_does_not_write_new_parent(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+        change: str,
+    ) -> None:
+        """The common lock opens through its validated directory descriptor."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/owner/name.git")
+        common = repo / ".git"
+        retained = repo / ".git-retained"
+        opened = False
+
+        @contextmanager
+        def change_at_open(
+            parent_fd: int,
+            name: str,
+            *,
+            blocking: bool,
+            require_exclusive: bool,
+        ) -> Iterator[None]:
+            nonlocal opened
+            if not opened:
+                opened = True
+                if change == "remove":
+                    shutil.rmtree(common)
+                else:
+                    common.rename(retained)
+                    common.mkdir()
+            with file_lock_at(
+                parent_fd,
+                name,
+                blocking=blocking,
+                require_exclusive=require_exclusive,
+            ):
+                yield
+
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob("owner/name", "fetch_main", 30, kwargs={"cwd": str(repo)})
+        try:
+            with (
+                patch(
+                    "hephaestus.automation.pipeline.repository_lock.file_lock_at",
+                    side_effect=change_at_open,
+                ),
+                patch.object(pool, "_dispatch_locked_git") as dispatch,
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+        dispatch.assert_not_called()
+        assert result.ok is False
+        assert result.error in {
+            "lock_metadata_error",
+            "Git common directory is unavailable",
+            "Git common directory changed before operation admission",
+        }
+        if change == "remove":
+            assert not common.exists()
+        else:
+            assert tuple(common.iterdir()) == ()
+
+    @pytest.mark.parametrize("metadata_kind", ["gitfile", "commondir"])
+    @pytest.mark.parametrize("operation", ["fetch", "generic", "intake"])
+    def test_malformed_linked_metadata_is_a_controlled_git_failure(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+        metadata_kind: str,
+        operation: str,
+    ) -> None:
+        """Invalid UTF-8 in Git pointers does not escape the worker boundary."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        linked = tmp_path / "linked"
+        _git(repo, "worktree", "add", "--detach", str(linked), "HEAD")
+        manager = MagicMock(
+            common_dir=WorktreeManager.git_metadata_lock_path(linked).parent.resolve(),
+            caller_root=linked.resolve(),
+        )
+        if metadata_kind == "gitfile":
+            (linked / ".git").write_bytes(b"\xff")
+        else:
+            gitdir = Path(
+                (linked / ".git").read_text(encoding="utf-8").removeprefix("gitdir: ").strip()
+            )
+            (gitdir / "commondir").write_bytes(b"\xff")
+        if operation == "fetch":
+            job = GitJob("owner/name", "fetch_main", 30, kwargs={"cwd": str(linked)})
+        elif operation == "generic":
+            job = GitJob(
+                "owner/name",
+                "verify_issue_wave_ancestry",
+                30,
+                kwargs={
+                    "repo_root": str(linked),
+                    "main_sha": "a" * 40,
+                    "ancestor_shas": (),
+                },
+            )
+        else:
+            job = GitJob(
+                "owner/name",
+                "prepare_intake",
+                30,
+                kwargs={"repo": "owner/name", "caller_root": str(linked)},
+            )
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        try:
+            with (
+                patch.object(
+                    pool, "_authenticated_remote_git_configuration", return_value=({}, ())
+                ),
+                patch(f"{_WP}._checkout_preflight_error", return_value=None),
+                patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+                patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+                patch(f"{_WP}.RepoIntakeManager", return_value=manager),
+                patch.object(pool, "_dispatch_locked_git") as dispatch,
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+        dispatch.assert_not_called()
+        manager.run_lease.assert_not_called()
+        assert result.ok is False
+        assert result.error is not None
+
+    @pytest.mark.parametrize("metadata_kind", ["gitfile", "commondir"])
+    def test_malformed_source_workspace_metadata_is_controlled(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+        metadata_kind: str,
+    ) -> None:
+        """Invalid UTF-8 in a source binding returns an ownership failure."""
+        repo, _predecessor, head = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(repo, repository="owner/name")
+        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl")
+        marker = binding.cwd / ".git"
+        if metadata_kind == "gitfile":
+            marker.write_bytes(b"\xff")
+        else:
+            gitdir = Path(marker.read_text(encoding="utf-8").removeprefix("gitdir: ").strip())
+            (gitdir / "commondir").write_bytes(b"\xff")
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "owner/name",
+            "inspect_implementation_worktree",
+            30,
+            workspace=binding,
+            kwargs={
+                "issue_number": 7,
+                "repo_root": str(repo),
+                "worktree_path": str(binding.cwd),
+                "branch": "7-auto-impl",
+            },
+        )
+        try:
+            with patch.object(pool, "_dispatch_locked_git") as dispatch:
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+        dispatch.assert_not_called()
+        assert result.error is not None
+        assert result.error.startswith("source_workspace_ownership_unavailable:")
+
     def test_git_file_lock_timeout_returns_lock_timeout_and_releases_repo_lock(
         self,
         pool: WorkerPool,
@@ -20498,7 +21372,11 @@ class TestGitLocking:
         with (
             patch(f"{_WP}._checkout_preflight_error", return_value=None),
             patch.object(WorktreeManager, "git_metadata_lock_path", return_value=metadata_lock),
-            patch(f"{_WP}.operation_file_lock", side_effect=subprocess.TimeoutExpired("lock", 0)),
+            patch.object(
+                pool,
+                "_git_common_lock",
+                side_effect=subprocess.TimeoutExpired("lock", 0),
+            ),
         ):
             result = pool._run_git(job)
 
@@ -20510,9 +21388,12 @@ class TestGitLocking:
         """An intake metadata timeout remains an intake operation failure."""
         caller = tmp_path / "caller"
         caller.mkdir()
-        metadata_lock = caller / ".git-metadata.lock"
+        common_dir = caller / ".git"
+        common_dir.mkdir()
+        metadata_lock = common_dir / ".git-metadata.lock"
         manager = MagicMock()
-        manager.common_dir = tmp_path / "common"
+        manager.common_dir = common_dir
+        manager.caller_root = caller
         manager.run_lease.return_value = nullcontext()
         manager.prepare.side_effect = RepoIntakeError("lock_timeout")
         job = GitJob(
@@ -20547,14 +21428,13 @@ class TestGitLocking:
             kwargs={"repo": "test/repo", "dest": str(checkout)},
         )
 
-        def interrupt(path: Path) -> AbstractContextManager[None]:
-            del path
+        def interrupt(*_args: object, **_kwargs: object) -> AbstractContextManager[None]:
             shutdown_event.set()
             raise InterruptedError("stop")
 
         with (
             patch(f"{_WP}._checkout_preflight_error", return_value=None),
-            patch(f"{_WP}.operation_file_lock", side_effect=interrupt),
+            patch.object(pool, "_git_common_lock", side_effect=interrupt),
         ):
             result = pool._run_git(job)
 

@@ -2084,23 +2084,32 @@ internal failure is distinct from an OS signal and does not select exit code
 ### Per-repo lock layering
 
 [`_run_git`](../hephaestus/automation/pipeline/worker_pool.py) wraps each Git
-operation in three locks. `_run_github` uses the same in-process repository
-lock. It does not use the Git metadata locks:
+operation in these lock layers. `_run_github` uses only the in-process
+repository lock:
 
 1. **In-process**: One `threading.Lock` for each repository in
    [`RepositoryOperationLock`](../hephaestus/automation/pipeline/repository_lock.py).
    This lock prevents file-lock ambiguity between threads in one process.
-2. **Primary**: One cross-process
+2. **Compatibility primary**: One cross-process
    [`file_lock`](../hephaestus/utils/file_lock.py) at
    `<repo_root>/<DEFAULT_STATE_DIR>/locks/git-<repo>.lock`.
-3. **Owner sentinel**: One cross-process `file_lock` with `.owner.lock`
-   appended to the primary path. Its record has `.owner.json` appended to the
-   primary path.
+3. **Compatibility owner sentinel**: One cross-process `file_lock` with
+   `.owner.lock` appended to the compatibility primary path. Its record has
+   `.owner.json` appended to the primary path.
+4. **Git common-directory primary**: One cross-process `file_lock` at
+   `<git-common-dir>/.hephaestus-git-metadata.lock` when an existing checkout
+   supplies a verified Git common directory.
+5. **Git common-directory owner sentinel**: The owner sentinel and record for
+   the Git common-directory primary.
 
-Git operations hold all three locks for the complete operation because linked
-worktrees share `.git`. `--git-lock-timeout` controls only passive lock wait.
-The Git command timeout starts after all three locks are held. The three
-acquisition steps use one monotonic deadline and interruptible polling.
+Git operations hold the compatibility lock pair for the complete operation.
+An operation for an existing checkout then holds the Git common-directory
+lock pair. Thus, different repository aliases and linked worktrees use the
+same stable lock. A clone cannot use this lock until its Git common directory
+exists. It continues to use the compatibility lock pair.
+`--git-lock-timeout` controls only passive lock wait. The Git command timeout
+starts after the applicable locks are held. The acquisition steps use one
+monotonic deadline and interruptible polling.
 
 An explicit absolute Git deadline bounds both admission and execution. Before
 lock admission, a Git job whose deadline has expired returns `timeout`. A
@@ -2117,28 +2126,69 @@ holder operation and process, the holder acquisition time and source, and the
 measured wait duration. It does not contain lock paths, tokens, or raw record
 data.
 
+The compatibility record uses the requested repository identity. The Git
+common-directory record uses a digest of the canonical common-directory path.
+Thus, two valid repository aliases can verify the same holder. The failure
+diagnostic continues to identify the repository that the waiting job
+requested.
+
 Release removes the matching record, releases the owner sentinel, releases the
 primary lock, and then clears and releases the in-process lock. A cleanup
 failure produces a bounded warning. It does not replace a completed Git result.
 The next holder removes a stale regular record before it publishes a new one.
 
-An old worker uses only the primary lock. A new waiter returns
-`lock_metadata_error` when it cannot verify that old holder. This mixed-version
-behavior keeps shared Git metadata safe during rollback.
+An old ordinary worker uses only the compatibility primary lock. A current
+`prepare_intake` job also takes that lock after validation. Thus, the intake
+job cannot race an old `fetch_main` job. An old metadata-lock user uses the
+exact Git common-directory primary. A current waiter that cannot verify its
+owner data returns `lock_metadata_error`. These two compatibility paths keep
+shared Git metadata safe during rollback.
+
+Before common-lock creation, a source job validates its workspace shape,
+repository relation, canonical reusable root, canonical worktree common
+directory, and ownership key. A checkout job validates its Git configuration
+and expected origin without a write. The job repeats checkout validation after
+lock admission. Recovery publication parses its durable receipt before lock
+admission. It binds the receipt repository root and worktree to one canonical
+common directory and validates the expected origin. A foreign valid repository
+cannot receive a common-lock file from an invalid job binding.
+
+Each existing-checkout job carries its authoritative checkout and the exact
+canonical common-lock path and directory device/inode identity from validation.
+Common-lock admission opens this existing directory without following its final
+path component. It opens the lock and owner files relative to that bound
+directory descriptor and does not create a parent. A missing lock entry uses an
+exclusive no-follow create. An existing entry uses a separate no-follow open.
+Before locking, the worker requires one mode-`0600`, singly linked regular file
+that the effective user owns. It does not change an existing entry's mode. The
+exclusive path fails closed when the host does not supply no-follow,
+descriptor-relative open, effective-owner, or advisory-lock support. The worker
+resolves and checks the common-directory binding again after it takes the
+compatibility lock and while it holds the selected common lock. A changed,
+replaced, or unavailable Git directory stops the job before the operation
+context, intake lease, or dispatch. Intake passes the admitted lock path into
+preparation. Thus, preparation cannot take a nested lock from a new `commondir`
+value.
 
 A GitHub job holds only the in-process lock for its complete fresh-client
 operation. Its in-process holder record lets a Git waiter identify the GitHub
 operation. This contract does not imply cross-process GitHub serialization.
 Exact live-state guards remain authoritative across processes.
 
-`prepare_intake` first takes a nonblocking run-lifetime lease at
+`prepare_intake` constructs its manager and validates the caller before lock
+admission. Thus, the first validation does not create `DEFAULT_STATE_DIR` in
+the caller. After validation, intake takes the compatibility and Git
+common-directory lock pairs. The compatibility lock files are operational
+state. A second validation ignores only the exact primary, owner sentinel, and
+owner record for this lock. It continues to reject all other caller state.
+
+The intake job then takes a nonblocking run-lifetime lease at
 `<git-common-dir>/hephaestus-repository-intake.run.lock`. The main worker pool
 holds one lease for each Git common directory. A repeated preparation in the
-same pool uses that lease and does not take a nested file
-lock. If the first preparation fails, the pool releases the new lease. The
-coordinator releases retained leases after its final run report. A separate
-process that owns the lease causes an immediate `repository_intake_in_use`
-result.
+same pool uses that lease and does not take a nested file lock. If the first
+preparation fails, the pool releases the new lease. The coordinator releases
+retained leases after its final run report. A separate process that owns the
+lease causes an immediate `repository_intake_in_use` result.
 
 `prepare_intake` and `sync_checkout` also take the status-safe Git-metadata
 lock resolved by
@@ -2146,6 +2196,8 @@ lock resolved by
 For linked worktrees this resolves Git's common directory, so the primary
 checkout and every linked worktree serialize synchronization and worktree
 metadata mutations without leaving an untracked sentinel in the worktree.
+An inner metadata operation reuses the common-directory lock that `_run_git`
+already holds. It does not take a nested file lock on the same sentinel.
 Before inspecting the origin or worktree status, it also reads the effective
 repository and worktree Git configuration with global/system configuration
 disabled, rejecting executable, transport-routing, and TLS-affecting settings
