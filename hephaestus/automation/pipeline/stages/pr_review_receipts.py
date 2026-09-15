@@ -103,22 +103,24 @@ def store_host_verification_result(item: WorkItem, result: JobResult) -> None:
     status, platform = _host_verification_result_status(
         result.value, result.ok, result.error, reviewed_head
     )
-    receipts.append(
-        {
-            "argv": list(spec.argv),
-            "head_sha": reviewed_head,
-            "immutable_source": bool(
-                isinstance(result.value, dict)
-                and result.value.get("head_sha") == reviewed_head
-                and result.value.get("immutable_source") is True
-            ),
-            "failure_kind": _host_verification_failure_kind(result_value),
-            "ok": result.ok,
-            "error": redact_diagnostic_text(result.error or "")[:500],
-            "platform": platform,
-            "status": status,
-            "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
-            "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
-            **{key: value for key in HOST_KEYS if isinstance(value := result_value.get(key), str)},
-        }
-    )
+    receipt = {
+        "argv": list(spec.argv),
+        "head_sha": reviewed_head,
+        "immutable_source": bool(
+            isinstance(result.value, dict)
+            and result.value.get("head_sha") == reviewed_head
+            and result.value.get("immutable_source") is True
+        ),
+        "failure_kind": _host_verification_failure_kind(result_value),
+        "ok": result.ok,
+        "error": redact_diagnostic_text(result.error or "")[:500],
+        "platform": platform,
+        "status": status,
+        "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
+        "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
+        **{key: value for key in HOST_KEYS if isinstance(value := result_value.get(key), str)},
+    }
+    worker_head = result_value.get("head_sha")
+    if isinstance(worker_head, str) and worker_head != reviewed_head:
+        receipt["source_head_mismatch"] = True
+    receipts.append(receipt)

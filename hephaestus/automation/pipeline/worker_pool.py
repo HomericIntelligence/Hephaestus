@@ -113,6 +113,11 @@ from hephaestus.automation.pipeline.github_jobs import (
     InspectRebaseConflictRequest,
     RebaseConflictInspected,
 )
+from hephaestus.automation.pipeline.host_capabilities import (
+    QUOTA_UNAVAILABLE_TOKEN,
+    HostCapabilityReceipt,
+    WorkerCapabilities,
+)
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
     HOST_VERIFICATION_CPU_MAX_S as _HOST_VERIFICATION_CPU_MAX_S,
@@ -134,6 +139,7 @@ from hephaestus.automation.pipeline.jobs import (
     CompactJob,
     DirtyDirectPlanInput,
     GitJob,
+    HostCapabilityJob,
     JobHandle,
     JobResult,
     ProcessFailureMetadata,
@@ -1959,7 +1965,6 @@ def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
         f"{_HOST_VERIFICATION_SCRATCH_MAX_BYTES // (1024 * 1024)}m",
         "-fs",
         "HFS+",
-        "-quiet",
         str(image),
     )
 
@@ -1968,7 +1973,7 @@ def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
 def _quota_backed_volume(root: Path, image_name: str, mountpoint: Path) -> Iterator[Path]:
     """Mount a fixed-size disposable volume at an already-created mountpoint."""
     if sys.platform != "darwin":
-        raise _HostVerificationBoundaryError("unsupported_host_verification_boundary")
+        raise _HostVerificationBoundaryError("host_verification_quota_backend_not_applicable")
     hdiutil = Path("/usr/bin/hdiutil")
     if not hdiutil.is_file() or not os.access(hdiutil, os.X_OK):
         raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
@@ -1981,7 +1986,7 @@ def _quota_backed_volume(root: Path, image_name: str, mountpoint: Path) -> Itera
         env=read_approved_parent_env(),
     )
     if create.returncode != 0:
-        raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
+        raise _HostVerificationBoundaryError("host_verification_quota_create_failed")
     attached = False
     try:
         attach = subprocess.run(
@@ -1992,7 +1997,7 @@ def _quota_backed_volume(root: Path, image_name: str, mountpoint: Path) -> Itera
             env=read_approved_parent_env(),
         )
         if attach.returncode != 0:
-            raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
+            raise _HostVerificationBoundaryError("host_verification_quota_attach_failed")
         attached = True
         yield mountpoint
     finally:
@@ -2017,7 +2022,7 @@ def _quota_backed_volume(root: Path, image_name: str, mountpoint: Path) -> Itera
                 if detach.returncode == 0:
                     break
             else:
-                raise _HostVerificationBoundaryError("host_verification_quota_cleanup_failed")
+                raise _HostVerificationBoundaryError("host_verification_quota_detach_failed")
 
 
 @contextmanager
@@ -4463,6 +4468,7 @@ class WorkerPool:
         host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
         host_verification_pyxis_placement: PyxisExecutionPlacement | None = None,
+        host_capabilities: WorkerCapabilities | None = None,
         podman_machine: str | None = None,
         run_identity: str = "unknown",
         git_lock_timeout: int = 7200,
@@ -4493,6 +4499,7 @@ class WorkerPool:
             host_verification_pyxis_authority: Host-owned image provenance file.
             host_verification_pyxis_quota_root: Private capacity-bounded filesystem.
             host_verification_pyxis_placement: Optional host-selected allocation and node.
+            host_capabilities: Explicit quota capability contract for host probes.
             podman_machine: Selected connection for the verified local CI runner.
             run_identity: Bounded identity for holder diagnostics from this run.
             git_lock_timeout: Maximum passive wait for an ordinary Git job.
@@ -4534,6 +4541,7 @@ class WorkerPool:
         self._host_verification_pyxis_authority = host_verification_pyxis_authority
         self._host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
         self._host_verification_pyxis_placement = host_verification_pyxis_placement
+        self._host_capabilities = host_capabilities
 
     @contextmanager
     def _repo_lock(
@@ -4609,7 +4617,13 @@ class WorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | CompactJob
+        | AthenaSkillJob
+        | HostCapabilityJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -4735,7 +4749,13 @@ class WorkerPool:
 
     def _run(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | CompactJob
+        | AthenaSkillJob
+        | HostCapabilityJob,
         claim_key: str = "",
         claim_stage: str = "",
         remediation_owner_id: int | None = None,
@@ -4823,7 +4843,13 @@ class WorkerPool:
 
     def _execute_job(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | CompactJob
+        | AthenaSkillJob
+        | HostCapabilityJob,
         start: float,
         reserve_pretest: Callable[[], None],
     ) -> JobResult:
@@ -4837,6 +4863,8 @@ class WorkerPool:
             result = self._run_agent(job, deadline_s=deadline_s, reserve_pretest=reserve_pretest)
         elif isinstance(job, BuildTestJob):
             result = self._run_build_test(job)
+        elif isinstance(job, HostCapabilityJob):
+            result = self._run_host_capability(job)
         elif isinstance(job, GitJob):
             result = self._run_git(job)
         elif isinstance(job, GitHubJob):
@@ -4846,6 +4874,30 @@ class WorkerPool:
         else:
             raise TypeError(f"unknown job type {type(job)}")
         return result
+
+    def _run_host_capability(self, job: HostCapabilityJob) -> JobResult:
+        """Probe one explicit capability without starting source verification."""
+        capabilities = self._host_capabilities
+        if capabilities is None or capabilities.quota_backend is None:
+            receipt = HostCapabilityReceipt(
+                available=False,
+                token=QUOTA_UNAVAILABLE_TOKEN,
+                failed_step="backend",
+                purpose=job.target.purpose,
+                receipt_id=uuid.uuid4().hex,
+            )
+        else:
+            receipt = capabilities.quota_backend.preflight(job.target)
+        return JobResult(
+            ok=receipt.available,
+            error=None if receipt.available else receipt.token,
+            value={
+                "host_capability_receipt": asdict(receipt),
+                "failure_kind": "none" if receipt.available else "runner",
+            },
+            stdout_tail=receipt.stdout_tail,
+            stderr_tail=receipt.stderr_tail,
+        )
 
     def discard_remediation_pretest_successes(self, claim_key: str, *, owner_id: int) -> None:
         """Release completion authority when its coordinator permit ends."""
@@ -5263,7 +5315,13 @@ class WorkerPool:
 
     def _persist_evidence_receipt(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | CompactJob
+        | AthenaSkillJob
+        | HostCapabilityJob,
         result: JobResult,
         claim_key: str,
         claim_stage: str,
@@ -5343,6 +5401,8 @@ class WorkerPool:
                     ),
                 }
             )
+        elif isinstance(job, HostCapabilityJob):
+            payload.update({"job_type": "host_capability", "purpose": job.target.purpose})
         elif isinstance(job, GitJob):
             payload.update(_git_evidence_fields(job, result))
         elif isinstance(job, GitHubJob):
@@ -5837,6 +5897,34 @@ class WorkerPool:
         if job.immutable_source:
             if not _is_full_commit_sha(job.expected_head_sha):
                 return JobResult(ok=False, error="immutable_source_requires_full_head_sha")
+            if job.capability_target is not None:
+                capabilities = self._host_capabilities
+                receipt = (
+                    capabilities.quota_backend.preflight(job.capability_target)
+                    if capabilities is not None and capabilities.quota_backend is not None
+                    else HostCapabilityReceipt(
+                        available=False,
+                        token=QUOTA_UNAVAILABLE_TOKEN,
+                        failed_step="backend",
+                        purpose=job.capability_target.purpose,
+                        receipt_id=uuid.uuid4().hex,
+                    )
+                )
+                if not receipt.available:
+                    return JobResult(
+                        ok=False,
+                        error=receipt.token,
+                        value={
+                            **asdict(receipt),
+                            "head_sha": job.expected_head_sha,
+                            "immutable_source": True,
+                            "failure_kind": "runner",
+                            "platform": sys.platform,
+                            "status": "failed",
+                        },
+                        stdout_tail=receipt.stdout_tail,
+                        stderr_tail=receipt.stderr_tail,
+                    )
             return self._run_immutable_build_test(job)
         argv = job.argv
         environment = build_python_phase_env(job.cwd)

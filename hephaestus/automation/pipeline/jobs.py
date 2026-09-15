@@ -33,6 +33,8 @@ from .job_results import JobHandle, JobResult, ProcessFailureMetadata
 if TYPE_CHECKING:
     from hephaestus.agents.codex_isolation import CodexIsolationRequestV1
 
+    from .host_capabilities import CapabilityRequestTarget
+
 __all__ = [
     "GIT_OPS",
     "WORKTREE_MATERIALIZED_KEY",
@@ -40,6 +42,7 @@ __all__ = [
     "BuildTestJob",
     "CompactJob",
     "GitJob",
+    "HostCapabilityJob",
     "JobHandle",
     "JobResult",
     "JobWorkspaceError",
@@ -298,6 +301,7 @@ class BuildTestJob:
     # from the reviewer worktree.
     expected_head_sha: str = ""
     immutable_source: bool = False
+    capability_target: CapabilityRequestTarget | None = None
     # A non-None value tells the worker to run ``argv`` through the host-owned
     # descriptor snapshot launcher. An empty value keeps fallback untrusted.
     verified_runner_source_revision: str | None = None
@@ -308,6 +312,21 @@ class BuildTestJob:
         if not isinstance(self.argv, tuple):
             # frozen dataclass: bypass the frozen __setattr__ for normalization
             object.__setattr__(self, "argv", tuple(self.argv))
+
+
+@dataclass(frozen=True, slots=True)
+class HostCapabilityJob:
+    """Request a checked host capability before source verification starts."""
+
+    repo: str
+    target: CapabilityRequestTarget
+    timeout_s: int
+    descr: str = "host_capability_preflight"
+
+    def __post_init__(self) -> None:
+        """Reject a target that names a different repository."""
+        if self.repo != self.target.repository or self.timeout_s <= 0:
+            raise ValueError("host capability job is invalid")
 
 
 @dataclass(frozen=True)

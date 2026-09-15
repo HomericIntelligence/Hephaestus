@@ -1,5 +1,6 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
+import hashlib
 import json
 from pathlib import Path
 from typing import cast
@@ -38,6 +39,7 @@ from ..github_jobs import (
     GitHubJob,
     ReconcilePrReviewRequest,
 )
+from ..host_capabilities import CapabilityRequestTarget
 from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
 from .pr_review_diagnostics import publish_host_verification_failure
@@ -353,14 +355,29 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
         """Submit one fixed host command from the immutable review plan."""
         # Callbacks run before ``on_done_state``; keep an ownership marker.
         item.payload[_HOST_VERIFICATION_PENDING] = verification.descr
+        checkout = _worktree_path(item, ctx)
+        request_id = hashlib.sha256(
+            f"{item.repo}:{item.pr}:{item.payload.get('reviewed_pr_head_sha')}:{verification.descr}".encode()
+        ).hexdigest()[:32]
         return JobRequest(
             BuildTestJob(
                 repo=item.repo,
-                cwd=_worktree_path(item, ctx),
+                cwd=checkout,
                 argv=verification.argv,
                 timeout_s=HOST_VERIFICATION_TIMEOUT_S,
                 expected_head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
                 immutable_source=True,
+                capability_target=CapabilityRequestTarget(
+                    repository=item.repo,
+                    issue_number=_issue_number(item),
+                    pr_number=cast(int, item.pr),
+                    repository_root=checkout,
+                    checkout_path=checkout,
+                    expected_head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
+                    phase="pr_review",
+                    purpose="scratch",
+                    request_id=request_id,
+                ),
                 descr=verification.descr,
             ),
             on_done_state=HOST_VERIFICATION_WAIT,
@@ -897,6 +914,26 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
             ),
         }
         item.payload["host_verification_failure"] = diagnostic
+        failure_kind = receipt.get("failure_kind") if isinstance(receipt, dict) else None
+        # A runner fault is not evidence of a source defect. Keep PR verdict
+        # labels unchanged so a later run can retry the same reviewed head.
+        if failure_kind == "runner" and (
+            isinstance(receipt, dict)
+            and receipt.get("head_sha") == diagnostic["head_sha"]
+            and receipt.get("source_head_mismatch") is not True
+        ):
+            pr_number = cast(int, item.pr)
+            if not publish_host_verification_failure(
+                ctx.github, pr_number, verification, diagnostic, logger
+            ):
+                return self._cleanup_review_worktree_then(
+                    item,
+                    StageOutcome(Disposition.FINISH_FAIL, "host_verification_comment_failed"),
+                )
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "host_verification_runner_blocked"),
+            )
         no_go_outcome = PrReviewGate._write_no_go(item, ctx)
         if no_go_outcome is not None:
             if isinstance(no_go_outcome, StageOutcome):
@@ -918,7 +955,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
         # Only a confirmed fixed-tool validation failure may be repaired by
         # the implementation agent. UV/sandbox/bootstrap errors share a
         # nonzero process status but are operator remediation, not code work.
-        failure_kind = receipt.get("failure_kind") if isinstance(receipt, dict) else None
         if failure_kind in {"test", "validation"}:
             detail = (
                 "Host verification failed for "

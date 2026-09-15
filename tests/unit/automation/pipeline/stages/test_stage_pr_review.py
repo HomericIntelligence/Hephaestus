@@ -3758,7 +3758,7 @@ class TestPrReviewStageStep:
         assert item.payload["host_verification_failure"]["error"] == "timeout"
         assert "review_audit_failure" not in item.payload
 
-    def test_authenticated_unsupported_host_boundary_blocks_review_as_an_evidence_gap(
+    def test_authenticated_unsupported_host_boundary_blocks_without_a_verdict(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """An authentic unsupported-platform skip cannot satisfy a required check."""
@@ -3798,12 +3798,14 @@ class TestPrReviewStageStep:
 
         next_result = stage.step(item, ctx)
 
-        assert next_result == StageOutcome(Disposition.FINISH_FAIL, "host_verification_failed")
+        assert next_result == StageOutcome(
+            Disposition.FINISH_FAIL, "host_verification_runner_blocked"
+        )
         receipt = item.payload["host_verification_receipts"][0]
         assert receipt["error"] == "unsupported_host_verification_boundary"
         assert receipt["platform"] == "linux"
         assert receipt["status"] == "skipped"
-        assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
+        assert ("mark_pr_implementation_no_go", (1001,)) not in ctx.github.mutation_log
         assert item.payload["host_verification_failure"]["error"] == (
             "unsupported_host_verification_boundary"
         )
