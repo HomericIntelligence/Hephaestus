@@ -64,7 +64,7 @@ from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation.pipeline_github_contract import RequiredChecksDeferred
+from hephaestus.automation.pipeline.merge_wait_admission import RequiredChecksDeferred
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
 from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.automation.state_labels import STATE_SKIP

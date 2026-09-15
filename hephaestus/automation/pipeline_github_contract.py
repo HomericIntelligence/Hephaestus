@@ -1,19 +1,9 @@
 """Static host contract shared by the GitHub adapter collaborators."""
 
-from enum import Enum
 from typing import TYPE_CHECKING
 
 from .github_api.graphql import GraphQLSpec
-
-type _S = int | str
-
-
-class RequiredChecksDeferred(Enum):
-    """Required checks need another bounded read before admission."""
-
-    PENDING = "pending"
-    UNSTABLE = "unstable"
-
+from .pipeline.merge_wait_admission import RequiredChecksDeferred as RequiredChecksDeferred
 
 if TYPE_CHECKING:
     import subprocess
@@ -48,7 +38,9 @@ if TYPE_CHECKING:
         def _graphql[T](self, spec: GraphQLSpec[T], **fields: int | str) -> T:
             pass
 
-        def _graphql_with_timeout[T](self, spec: GraphQLSpec[T], timeout: float, **fields: _S) -> T:
+        def _graphql_with_timeout[T](
+            self, spec: GraphQLSpec[T], timeout: float, **fields: int | str
+        ) -> T:
             pass
 
         def _gh(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
