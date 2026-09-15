@@ -30,6 +30,14 @@ _operation_deadline_s: ContextVar[float | None] = ContextVar(
 _operation_shutdown: ContextVar[threading.Event | None] = ContextVar(
     "git_operation_shutdown", default=None
 )
+_operation_file_locks: ContextVar[frozenset[Path]] = ContextVar(
+    "git_operation_file_locks", default=frozenset()
+)
+
+
+def _canonical_lock_identity(path: Path) -> Path:
+    """Canonicalize a lock parent without resolving the lock entry."""
+    return path.parent.resolve(strict=False) / path.name
 
 
 @contextmanager
@@ -58,6 +66,17 @@ def current_operation_shutdown() -> threading.Event | None:
     return _operation_shutdown.get()
 
 
+@contextmanager
+def operation_file_lock_held(path: Path) -> Iterator[None]:
+    """Record a file lock that an outer operation scope already holds."""
+    normalized = _canonical_lock_identity(path)
+    token = _operation_file_locks.set(_operation_file_locks.get() | {normalized})
+    try:
+        yield
+    finally:
+        _operation_file_locks.reset(token)
+
+
 def remaining_operation_timeout(timeout: int | float | None) -> int | float | None:
     """Return the smaller per-child timeout or operation time that remains."""
     shutdown = current_operation_shutdown()
@@ -75,6 +94,12 @@ def remaining_operation_timeout(timeout: int | float | None) -> int | float | No
 @contextmanager
 def operation_file_lock(path: Path, *, require_exclusive: bool = False) -> Iterator[None]:
     """Hold a file lock within the active Git operation's time and stop limits."""
+    normalized = _canonical_lock_identity(path)
+    if normalized in _operation_file_locks.get():
+        remaining_operation_timeout(None)
+        yield
+        remaining_operation_timeout(None)
+        return
     shutdown = current_operation_shutdown()
     bounded = _operation_deadline_s.get() is not None or shutdown is not None
     with ExitStack() as stack:
@@ -101,7 +126,8 @@ def operation_file_lock(path: Path, *, require_exclusive: bool = False) -> Itera
                 continue
             break
         remaining_operation_timeout(None)
-        yield
+        with operation_file_lock_held(normalized):
+            yield
 
 
 def run(

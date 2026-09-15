@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
+from hephaestus.automation.repo_intake import RepoIntakeManager
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -91,7 +93,7 @@ def _facts(issue: int) -> IssueFacts:
     )
 
 
-def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller(
+def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A direct scope admits work only after a real isolated intake succeeds."""
@@ -227,8 +229,22 @@ def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller(
     class RecordingWorkerPool(WorkerPool):
         """Record only a successful real intake preparation."""
 
-        def _git_prepare_intake(self, job: GitJob) -> JobResult:
-            result = super()._git_prepare_intake(job)
+        def _git_prepare_intake(
+            self,
+            job: GitJob,
+            *,
+            manager: RepoIntakeManager | None = None,
+            operational_state_paths: Collection[Path] = (),
+            admitted_metadata_lock: Path | None = None,
+            expected_compatibility_lock_paths: Collection[Path] | None = None,
+        ) -> JobResult:
+            result = super()._git_prepare_intake(
+                job,
+                manager=manager,
+                operational_state_paths=operational_state_paths,
+                admitted_metadata_lock=admitted_metadata_lock,
+                expected_compatibility_lock_paths=expected_compatibility_lock_paths,
+            )
             if result.ok:
                 events.append("intake-prepared")
             return result
@@ -300,7 +316,14 @@ def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller(
     assert coordinator.config.repo_state_roots["repo-a"] == Path(str(receipt["state_root"]))
     assert intake_root == Path(str(receipt["path"]))
     assert auxiliary.submitted == []
-    assert caller_state() == before
+    after = caller_state()
+    assert after[:4] == before[:4]
+    expected_lock_root = checkout / DEFAULT_STATE_DIR / "locks"
+    expected_operational_state = {
+        f"?? {(expected_lock_root / 'git-repo-a.lock').relative_to(checkout)}",
+        f"?? {(expected_lock_root / 'git-repo-a.lock.owner.lock').relative_to(checkout)}",
+    }
+    assert set(after[4].splitlines()) == set(before[4].splitlines()) | expected_operational_state
     assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "unstaged\n"
     assert (checkout / "untracked.txt").read_text(encoding="utf-8") == "keep\n"
 

@@ -16,7 +16,7 @@ import re
 import stat
 import subprocess
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,7 +234,7 @@ class RepoIntakeManager:
             raise RepoIntakeError(f"caller checkout is symlinked: {caller_root}")
         try:
             self.caller_root = caller_root.resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, UnicodeError) as exc:
             raise RepoIntakeError(f"caller checkout cannot be resolved: {caller_root}") from exc
         if not self.caller_root.is_dir():
             raise RepoIntakeError(f"caller checkout does not exist: {self.caller_root}")
@@ -292,7 +292,13 @@ class RepoIntakeManager:
         finally:
             lease.__exit__(None, None, None)
 
-    def prepare(self) -> RepoIntakeReceipt:
+    def prepare(
+        self,
+        *,
+        operational_state_paths: Collection[Path] = (),
+        admitted_metadata_lock: Path | None = None,
+        expected_compatibility_lock_paths: Collection[Path] | None = None,
+    ) -> RepoIntakeReceipt:
         """Return a verified intake receipt, creating or rebinding as needed."""
         try:
             started_s = time.monotonic()
@@ -301,16 +307,25 @@ class RepoIntakeManager:
                 raise RepoIntakeError("repository-intake timeout is unavailable")
             deadline_s = started_s + float(remaining_s)
             metadata_lock = WorktreeManager.git_metadata_lock_path(self.caller_root)
+            metadata_lock = metadata_lock.parent.resolve(strict=True) / metadata_lock.name
+            if admitted_metadata_lock is not None and metadata_lock != admitted_metadata_lock:
+                raise RepoIntakeError("Git common directory changed before preparation")
+            metadata_lock = admitted_metadata_lock or metadata_lock
         except (subprocess.TimeoutExpired, InterruptedError):
             raise
-        except (OSError, RuntimeError) as exc:
+        except RepoIntakeError:
+            raise
+        except (OSError, RuntimeError, UnicodeError) as exc:
             raise RepoIntakeError("Git metadata lock is unavailable") from exc
         try:
             with (
                 operation_deadline(deadline_s, shutdown=current_operation_shutdown()),
                 operation_file_lock(metadata_lock, require_exclusive=True),
             ):
-                return self._prepare_locked()
+                return self._prepare_locked(
+                    operational_state_paths=operational_state_paths,
+                    expected_compatibility_lock_paths=expected_compatibility_lock_paths,
+                )
         except (subprocess.TimeoutExpired, InterruptedError):
             raise
         except ExclusiveLockUnavailableError as exc:
@@ -320,16 +335,60 @@ class RepoIntakeManager:
         except (OSError, RuntimeError) as exc:
             raise RepoIntakeError("repository-intake preparation failed safely") from exc
 
-    def _prepare_locked(self) -> RepoIntakeReceipt:
-        """Prepare the intake worktree while the common metadata lock is held."""
+    def validate(
+        self,
+        *,
+        operational_state_paths: Collection[Path] = (),
+    ) -> tuple[Path, ...]:
+        """Validate state and return registered primary compatibility locks."""
+        _records, _old, _record, allowed_paths = self._validated_state(
+            operational_state_paths=operational_state_paths
+        )
+        return self._primary_compatibility_lock_paths(allowed_paths)
+
+    def _validated_state(
+        self,
+        *,
+        operational_state_paths: Collection[Path] = (),
+    ) -> tuple[
+        tuple[_WorktreeRecord, ...],
+        RepoIntakeReceipt | None,
+        _WorktreeRecord | None,
+        frozenset[Path],
+    ]:
+        """Return validated preparation state without a Git mutation."""
         self._validate_origin()
         records = self._worktree_records()
         self._validate_state_paths(records)
-        self._validate_state_authority(records)
+        allowed_paths = self._validate_state_authority(
+            records,
+            operational_state_paths=operational_state_paths,
+        )
         old = self._read_receipt()
         record = self._validate_existing(old, records)
         if old is not None:
             self._validate_intake_checkout()
+        return records, old, record, allowed_paths
+
+    def _prepare_locked(
+        self,
+        *,
+        operational_state_paths: Collection[Path] = (),
+        expected_compatibility_lock_paths: Collection[Path] | None = None,
+    ) -> RepoIntakeReceipt:
+        """Prepare the intake worktree while the common metadata lock is held."""
+        records, old, record, allowed_paths = self._validated_state(
+            operational_state_paths=operational_state_paths
+        )
+        if expected_compatibility_lock_paths is not None:
+            expected_paths = self._canonical_compatibility_lock_paths(
+                expected_compatibility_lock_paths
+            )
+            actual_paths = self._primary_compatibility_lock_paths(allowed_paths)
+            if actual_paths != expected_paths:
+                raise RepoIntakeError(
+                    "repository-intake worktree registration changed before preparation"
+                )
         default_branch = self._read_default_branch()
         if old is None:
             if record is not None:
@@ -384,6 +443,31 @@ class RepoIntakeManager:
         )
         self._write_receipt(receipt)
         return receipt
+
+    @staticmethod
+    def _canonical_compatibility_lock_paths(
+        paths: Collection[Path],
+    ) -> tuple[Path, ...]:
+        """Canonicalize lock parents without following final lock entries."""
+        try:
+            canonical = {Path(path).absolute() for path in paths}
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise RepoIntakeError("repository-intake operational state paths are invalid") from exc
+        return tuple(sorted(canonical, key=os.fsencode))
+
+    @classmethod
+    def _primary_compatibility_lock_paths(
+        cls,
+        paths: Collection[Path],
+    ) -> tuple[Path, ...]:
+        """Return canonical primary paths from exact compatibility triplets."""
+        return cls._canonical_compatibility_lock_paths(
+            tuple(
+                path
+                for path in paths
+                if not Path(path).name.endswith((".owner.lock", ".owner.json"))
+            )
+        )
 
     def _resolve_common_dir(self) -> Path:
         """Resolve the Git common directory without changing the checkout."""
@@ -516,8 +600,17 @@ class RepoIntakeManager:
             raise RepoIntakeError("repository-intake receipt ownership does not match")
         return receipt
 
-    def _validate_state_authority(self, records: tuple[_WorktreeRecord, ...]) -> None:
+    def _validate_state_authority(
+        self,
+        records: tuple[_WorktreeRecord, ...],
+        *,
+        operational_state_paths: Collection[Path] = (),
+    ) -> frozenset[Path]:
         """Reject legacy or conflicting durable state before intake changes."""
+        allowed_operational_paths = self._allowed_operational_state_paths(
+            records,
+            operational_state_paths,
+        )
         destination_root = self.state_dir / "build"
         legacy_sources: list[Path] = []
         for legacy_root in self._legacy_worktree_roots(records):
@@ -529,6 +622,7 @@ class RepoIntakeManager:
                     source=source,
                     destination=destination_root,
                     label="legacy",
+                    operational_state_paths=allowed_operational_paths,
                 ):
                     legacy_sources.append(source)
         recovery_source = (
@@ -550,7 +644,7 @@ class RepoIntakeManager:
             source=recovery_source,
         )
         if not legacy_sources:
-            return
+            return allowed_operational_paths
         sources = ", ".join(str(path) for path in legacy_sources)
         if destination_has_state:
             raise RepoIntakeError(
@@ -586,6 +680,7 @@ class RepoIntakeManager:
         source: Path,
         destination: Path,
         label: str,
+        operational_state_paths: frozenset[Path] = frozenset(),
     ) -> bool:
         """Validate one state path and report whether it contains an entry."""
         self._validate_state_path_chain(
@@ -600,13 +695,145 @@ class RepoIntakeManager:
         if not path.is_dir():
             self._raise_unsafe_state_path(label, path, source, destination)
         try:
-            return next(path.iterdir(), None) is not None
+            entries = tuple(path.iterdir())
         except OSError as exc:
             raise RepoIntakeError(
                 "repository-intake state inspection failed; "
                 f"preserve source {source} and destination {destination}, "
                 "then reconcile them manually"
             ) from exc
+        if not operational_state_paths:
+            return bool(entries)
+        if not entries:
+            return False
+        return self._operational_state_has_entries(
+            path,
+            entries=entries,
+            source=source,
+            destination=destination,
+            label=label,
+            operational_state_paths=operational_state_paths,
+        )
+
+    def _operational_state_has_entries(
+        self,
+        path: Path,
+        *,
+        entries: tuple[Path, ...],
+        source: Path,
+        destination: Path,
+        label: str,
+        operational_state_paths: frozenset[Path],
+    ) -> bool:
+        """Report entries outside one exact safe compatibility-lock set."""
+        lock_directories = {item.parent for item in operational_state_paths}
+        matching_directories = tuple(
+            lock_directory for lock_directory in lock_directories if lock_directory.parent == path
+        )
+        if len(matching_directories) != 1:
+            return bool(entries)
+        lock_directory = matching_directories[0]
+        if any(entry != lock_directory for entry in entries):
+            return True
+        allowed_lock_paths = frozenset(
+            item for item in operational_state_paths if item.parent == lock_directory
+        )
+        return self._compatibility_lock_has_entries(
+            lock_directory,
+            source=source,
+            destination=destination,
+            label=label,
+            operational_state_paths=allowed_lock_paths,
+        )
+
+    def _compatibility_lock_has_entries(
+        self,
+        lock_directory: Path,
+        *,
+        source: Path,
+        destination: Path,
+        label: str,
+        operational_state_paths: frozenset[Path],
+    ) -> bool:
+        """Validate the compatibility-lock directory and its exact files."""
+        try:
+            lock_metadata = lock_directory.lstat()
+            if not stat.S_ISDIR(lock_metadata.st_mode):
+                self._raise_unsafe_state_path(
+                    label,
+                    lock_directory,
+                    source,
+                    destination,
+                )
+            lock_entries = tuple(lock_directory.iterdir())
+        except OSError as exc:
+            raise RepoIntakeError(
+                "repository-intake state inspection failed; "
+                f"preserve source {source} and destination {destination}, "
+                "then reconcile them manually"
+            ) from exc
+        for entry in lock_entries:
+            if entry not in operational_state_paths:
+                return True
+            try:
+                metadata = entry.lstat()
+            except OSError as exc:
+                raise RepoIntakeError(
+                    "repository-intake state inspection failed; "
+                    f"preserve source {source} and destination {destination}, "
+                    "then reconcile them manually"
+                ) from exc
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+                self._raise_unsafe_state_path(label, entry, source, destination)
+        return False
+
+    def _allowed_operational_state_paths(
+        self,
+        records: tuple[_WorktreeRecord, ...],
+        paths: Collection[Path],
+    ) -> frozenset[Path]:
+        """Return exact compatibility-lock files for registered worktrees."""
+        selected = frozenset(Path(path).absolute() for path in paths)
+        if not selected:
+            return frozenset()
+        primary_candidates = tuple(
+            path for path in selected if not path.name.endswith((".owner.lock", ".owner.json"))
+        )
+        if len(primary_candidates) != 1:
+            raise RepoIntakeError("repository-intake operational state paths are invalid")
+        primary = primary_candidates[0]
+        expected = frozenset(
+            {
+                primary,
+                Path(f"{primary}.owner.lock"),
+                Path(f"{primary}.owner.json"),
+            }
+        )
+        if selected != expected or not primary.name.startswith("git-"):
+            raise RepoIntakeError("repository-intake operational state paths are invalid")
+        if not primary.name.endswith(".lock"):
+            raise RepoIntakeError("repository-intake operational state paths are invalid")
+        legacy_roots = self._legacy_worktree_roots(records)
+        try:
+            canonical_roots = tuple(root.resolve(strict=True) for root in legacy_roots)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise RepoIntakeError("repository-intake worktree registration is unavailable") from exc
+        for root in canonical_roots:
+            if primary.parent == root / DEFAULT_STATE_DIR / "locks":
+                allowed: set[Path] = set()
+                for registered_root in canonical_roots:
+                    registered_primary = (
+                        registered_root / DEFAULT_STATE_DIR / "locks" / primary.name
+                    )
+                    allowed.update(
+                        {
+                            registered_primary,
+                            Path(f"{registered_primary}.owner.lock"),
+                            Path(f"{registered_primary}.owner.json"),
+                        }
+                    )
+                return frozenset(allowed)
+        return frozenset()
 
     def _validate_state_path_chain(
         self,

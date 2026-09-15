@@ -14,11 +14,102 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+from hephaestus.utils.file_lock import (
+    ExclusiveLockUnavailableError,
+    LockUnavailableError,
+    file_lock,
+    file_lock_at,
+)
 
 
 class TestFileLock:
     """Behaviour of the ``file_lock`` context manager."""
+
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
+    @pytest.mark.parametrize("name", ["metadata.lock", "metadata.lock.owner.lock"])
+    @pytest.mark.parametrize("unsafe_kind", ["symlink", "hardlink", "fifo", "mode", "owner"])
+    def test_file_lock_at_rejects_unsafe_existing_entry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        unsafe_kind: str,
+    ) -> None:
+        """Descriptor-relative exclusive locking verifies an existing entry."""
+        target = tmp_path / "unrelated"
+        target.write_bytes(b"unchanged")
+        target.chmod(0o600)
+        entry = tmp_path / name
+        if unsafe_kind == "symlink":
+            entry.symlink_to(target)
+        elif unsafe_kind == "hardlink":
+            os.link(target, entry)
+        elif unsafe_kind == "fifo":
+            os.mkfifo(entry, 0o600)
+        else:
+            entry.write_bytes(b"entry")
+            entry.chmod(0o644 if unsafe_kind == "mode" else 0o600)
+            if unsafe_kind == "owner":
+                monkeypatch.setattr(os, "geteuid", lambda: entry.stat().st_uid + 1)
+        parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            with pytest.raises(ExclusiveLockUnavailableError):
+                with file_lock_at(parent_fd, name, require_exclusive=True):
+                    pytest.fail("an unsafe existing entry was locked")
+        finally:
+            os.close(parent_fd)
+        assert target.read_bytes() == b"unchanged"
+        assert target.stat().st_nlink == (2 if unsafe_kind == "hardlink" else 1)
+        if unsafe_kind == "mode":
+            assert entry.stat().st_mode & 0o777 == 0o644
+
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
+    @pytest.mark.parametrize("name", ["metadata.lock", "metadata.lock.owner.lock"])
+    def test_file_lock_at_creates_one_safe_entry(self, tmp_path: Path, name: str) -> None:
+        """A missing descriptor-relative entry is created with exact safe metadata."""
+        parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            with file_lock_at(parent_fd, name, require_exclusive=True):
+                metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                assert metadata.st_mode & 0o777 == 0o600
+                assert metadata.st_nlink == 1
+                assert metadata.st_uid == os.geteuid()
+        finally:
+            os.close(parent_fd)
+
+    @pytest.mark.parametrize(
+        "capability",
+        ["nofollow", "dir_fd", "stat_dir_fd", "stat_follow_symlinks", "fcntl"],
+    )
+    def test_file_lock_at_requires_safe_open_capabilities(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capability: str
+    ) -> None:
+        """Exclusive descriptor locking fails closed without safe open support."""
+        if capability == "nofollow":
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        elif capability == "dir_fd":
+            monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {os.open})
+        elif capability == "stat_dir_fd":
+            monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {os.stat})
+        elif capability == "stat_follow_symlinks":
+            monkeypatch.setattr(
+                os,
+                "supports_follow_symlinks",
+                os.supports_follow_symlinks - {os.stat},
+            )
+        else:
+            real_import = builtins.__import__
+
+            def fake_import(name: str, *args: object, **kwargs: object) -> object:
+                if name == "fcntl":
+                    raise ImportError("simulated: no fcntl on this platform")
+                return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+            monkeypatch.setattr(builtins, "__import__", fake_import)
+        with pytest.raises(ExclusiveLockUnavailableError):
+            with file_lock_at(-1, "metadata.lock", require_exclusive=True):
+                pytest.fail("an unsupported exclusive lock was admitted")
+        assert not (tmp_path / "metadata.lock").exists()
 
     def test_acquire_release_round_trip_creates_file(self, tmp_path: Path) -> None:
         lock_path = tmp_path / "x.lock"

@@ -74,6 +74,36 @@ def _sidecar(repository: str = "owner/repo") -> dict[str, object]:
 class TestRepositoryOperationLock:
     """Verify the three-layer repository lock contract."""
 
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
+    @pytest.mark.parametrize("change", ["remove", "replace"])
+    def test_existing_parent_lock_does_not_create_through_a_changed_path(
+        self, tmp_path: Path, change: str
+    ) -> None:
+        """A common lock stays bound to its validated directory identity."""
+        common = tmp_path / "common"
+        common.mkdir()
+        metadata = common.stat()
+        lock_path = common / ".hephaestus-git-metadata.lock"
+        lock = RepositoryOperationLock(
+            "owner/repo",
+            lock_path=lock_path,
+            existing_parent_identity=(metadata.st_dev, metadata.st_ino),
+        )
+        retained = tmp_path / "retained"
+        common.rename(retained)
+        if change == "replace":
+            common.mkdir()
+
+        with pytest.raises(LockMetadataError):
+            with lock.acquire(operation="fetch_main", timeout_s=1):
+                pytest.fail("a changed common directory admitted the lock")
+
+        if change == "remove":
+            assert not common.exists()
+        else:
+            assert tuple(common.iterdir()) == ()
+        assert tuple(retained.iterdir()) == ()
+
     @pytest.mark.parametrize(
         ("timeout_s", "passive_expires_first"),
         [(4.0, True), (9.0, True), (14.0, False)],
@@ -430,7 +460,7 @@ class TestRepositoryOperationLock:
             monotonic=lambda: now[0],
         )
 
-        def late_record(_holder: object) -> None:
+        def late_record(_holder: object, _parent_fd: int) -> None:
             now[0] = 1.0
 
         with (
@@ -441,6 +471,8 @@ class TestRepositoryOperationLock:
         ):
             with lock.acquire(operation="commit_push", timeout_s=0.5):
                 pytest.fail("a late owner record dispatched")
+
+        assert now[0] == 1.0
 
     def test_shutdown_prevents_dispatch(self, tmp_path: Path) -> None:
         """Shutdown stops acquisition before the critical section."""
@@ -483,6 +515,24 @@ class TestRepositoryOperationLock:
                 pytest.fail("a linked owner record was accepted")
 
         assert owner_record.is_symlink()
+
+    def test_owner_record_hardlink_fails_without_unlink(self, tmp_path: Path) -> None:
+        """The lock does not unlink a multiply linked stale owner record."""
+        _primary, _owner_lock, owner_record = _owner_paths(tmp_path)
+        owner_record.parent.mkdir(parents=True, exist_ok=True)
+        target = tmp_path / "target.json"
+        target.write_text(json.dumps(_sidecar()) + "\n", encoding="utf-8")
+        target.chmod(0o600)
+        os.link(target, owner_record)
+        lock = RepositoryOperationLock("owner/repo", lock_dir=tmp_path)
+
+        with pytest.raises(LockMetadataError):
+            with lock.acquire(operation="create_worktree", timeout_s=1):
+                pytest.fail("a hard-linked owner record was accepted")
+
+        assert owner_record.exists()
+        assert target.stat().st_nlink == 2
+        assert target.read_text(encoding="utf-8") == json.dumps(_sidecar()) + "\n"
 
     def test_cleanup_failure_does_not_replace_completed_operation(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -528,7 +578,7 @@ class TestRepositoryOperationLock:
             finally:
                 events.append(f"{layer}_exit")
 
-        def remove(_token: str) -> None:
+        def remove(_token: str, _parent_fd: int | None = None) -> None:
             events.append("record_remove")
 
         with (

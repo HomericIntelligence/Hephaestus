@@ -394,6 +394,7 @@ class FinishedStage(Stage):
             repo=item.repo,
             op="remove_worktree",
             timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
             # Use the concrete worktree path: the cleanup worker constructs a
             # fresh WorktreeManager, so its in-memory issue map is empty.
             kwargs=kwargs,

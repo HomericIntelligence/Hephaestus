@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TextIO
+from typing import IO, TextIO
 
 
 class LockUnavailableError(RuntimeError):
@@ -57,6 +58,102 @@ def _open_secure_lock_file(path: Path) -> TextIO:
     fd = os.open(path, flags, 0o600)
     os.fchmod(fd, 0o600)
     return os.fdopen(fd, "r+")
+
+
+def _require_exclusive_at_capabilities(name: str) -> None:
+    """Require all primitives for safe descriptor-relative lock admission."""
+    if (
+        not hasattr(os, "O_NOFOLLOW")
+        or os.open not in os.supports_dir_fd
+        or os.stat not in os.supports_dir_fd
+        or os.stat not in os.supports_follow_symlinks
+        or not hasattr(os, "geteuid")
+    ):
+        raise ExclusiveLockUnavailableError(
+            f"Exclusive descriptor-relative locking is unavailable for: {name}"
+        )
+
+
+def _open_secure_lock_file_at(parent_fd: int, name: str, *, require_exclusive: bool) -> IO[str]:
+    """Create or verify one lock relative to an existing bound directory."""
+    if not name or Path(name).name != name:
+        raise ValueError("lock name must be one path component")
+    if require_exclusive:
+        _require_exclusive_at_capabilities(name)
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
+    except FileExistsError:
+        try:
+            fd = os.open(name, flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ExclusiveLockUnavailableError(
+                f"Descriptor-relative lock entry is unsafe: {name}"
+            ) from exc
+    except OSError as exc:
+        raise ExclusiveLockUnavailableError(
+            f"Descriptor-relative lock entry is unavailable: {name}"
+        ) from exc
+    try:
+        metadata = os.fstat(fd)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        expected_owner = os.geteuid() if hasattr(os, "geteuid") else metadata.st_uid
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != expected_owner
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise ExclusiveLockUnavailableError(f"Descriptor-relative lock entry is unsafe: {name}")
+        return os.fdopen(fd, "r+")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+@contextmanager
+def file_lock_at(
+    parent_fd: int,
+    name: str,
+    *,
+    blocking: bool = True,
+    require_exclusive: bool = False,
+) -> Iterator[None]:
+    """Hold a lock file relative to one existing bound directory."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows path
+        if require_exclusive:
+            raise ExclusiveLockUnavailableError(
+                f"Exclusive file locking is unavailable for: {name}"
+            ) from None
+        yield
+        return
+    fh = _open_secure_lock_file_at(
+        parent_fd,
+        name,
+        require_exclusive=require_exclusive,
+    )
+    try:
+        mode = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fh.fileno(), mode)
+        except OSError as exc:
+            if not blocking and exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise LockUnavailableError(f"Lock already held: {name}") from exc
+            unsupported = {errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP}
+            if require_exclusive and exc.errno in unsupported:
+                raise ExclusiveLockUnavailableError(
+                    f"Exclusive file locking is unavailable for: {name}"
+                ) from exc
+            raise
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        fh.close()
 
 
 @contextmanager

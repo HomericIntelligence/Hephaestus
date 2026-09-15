@@ -1021,6 +1021,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
                 repo=item.repo,
                 op="remove_worktree",
                 timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
                 kwargs={
                     "worktree_path": review_worktree,
                     "repo_root": str(ctx.paths.repo_root),

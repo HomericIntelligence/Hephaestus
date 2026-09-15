@@ -29,6 +29,7 @@ from hephaestus.utils.file_lock import (
     ExclusiveLockUnavailableError,
     LockUnavailableError,
     file_lock,
+    file_lock_at,
 )
 from hephaestus.utils.helpers import get_repo_root
 
@@ -155,6 +156,17 @@ def _identity(metadata: os.stat_result) -> _FileIdentity:
     return _FileIdentity(metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))
 
 
+def _is_safe_owned_regular(metadata: os.stat_result) -> bool:
+    """Return true for one private, singly linked file owned by this process user."""
+    get_euid = getattr(os, "geteuid", None)
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+        and (get_euid is None or metadata.st_uid == get_euid())
+    )
+
+
 def _failure_fields(
     *,
     failure_kind: str,
@@ -200,11 +212,7 @@ def _open_parent(path: Path) -> int:
 def _read_regular_at(parent_fd: int, name: str) -> tuple[bytes, _FileIdentity]:
     """Read one bounded owner-only regular file through a bound directory."""
     metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_size > _OWNER_RECORD_MAX_BYTES
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-    ):
+    if not _is_safe_owned_regular(metadata) or metadata.st_size > _OWNER_RECORD_MAX_BYTES:
         raise RuntimeError("repository-lock owner record is unsafe")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     if os.name == "posix":
@@ -212,11 +220,7 @@ def _read_regular_at(parent_fd: int, name: str) -> tuple[bytes, _FileIdentity]:
     descriptor = os.open(name, flags, dir_fd=parent_fd)
     try:
         opened = os.fstat(descriptor)
-        if (
-            _identity(opened) != _identity(metadata)
-            or not stat.S_ISREG(opened.st_mode)
-            or stat.S_IMODE(opened.st_mode) != 0o600
-        ):
+        if _identity(opened) != _identity(metadata) or not _is_safe_owned_regular(opened):
             raise RuntimeError("repository-lock owner record changed")
         payload = os.read(descriptor, _OWNER_RECORD_MAX_BYTES + 1)
         if len(payload) > _OWNER_RECORD_MAX_BYTES or os.read(descriptor, 1):
@@ -234,6 +238,9 @@ class RepositoryOperationLock:
         repository: str,
         *,
         lock_dir: Path | None = None,
+        lock_path: Path | None = None,
+        owner_identity: str | None = None,
+        existing_parent_identity: tuple[int, int] | None = None,
         shutdown: threading.Event | None = None,
         on_idle: Callable[[RepositoryOperationLock], None] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
@@ -242,12 +249,28 @@ class RepositoryOperationLock:
         """Initialize the lock and its bounded holder state."""
         if not isinstance(repository, str) or not repository or len(repository) > 256:
             raise ValueError("repository must contain between 1 and 256 characters")
+        if owner_identity is not None and (
+            not isinstance(owner_identity, str) or not owner_identity or len(owner_identity) > 256
+        ):
+            raise ValueError("owner_identity must contain between 1 and 256 characters")
+        if lock_dir is not None and lock_path is not None:
+            raise ValueError("lock_dir and lock_path cannot be supplied together")
+        if lock_path is not None and not lock_path.is_absolute():
+            raise ValueError("lock_path must be absolute")
+        if existing_parent_identity is not None and (
+            lock_path is None
+            or len(existing_parent_identity) != 2
+            or any(type(value) is not int or value < 0 for value in existing_parent_identity)
+        ):
+            raise ValueError("existing_parent_identity requires one absolute lock path identity")
         self.repository = repository
+        self._owner_identity = owner_identity or repository
+        self._existing_parent_identity = existing_parent_identity
         self.lock = threading.Lock()
         self._state_guard = threading.Lock()
         self._users = 0
         self._holder: _Holder | None = None
-        self._lock_path = repo_lock_path(repository, lock_dir)
+        self._lock_path = lock_path or repo_lock_path(repository, lock_dir)
         self._owner_lock_path = Path(f"{self._lock_path}.owner.lock")
         self._owner_record_path = Path(f"{self._lock_path}.owner.json")
         self._shutdown = shutdown or threading.Event()
@@ -352,6 +375,7 @@ class RepositoryOperationLock:
         in_process_acquired = False
         published = False
         locks = ExitStack()
+        parent_fd: int | None = None
         try:
             try:
                 self._acquire_thread_lock(
@@ -370,9 +394,11 @@ class RepositoryOperationLock:
                 with self._state_guard:
                     self._holder = holder
                 if include_file_lock:
+                    parent_fd = self._open_existing_parent()
                     locks.enter_context(
                         self._poll_file_lock(
                             self._lock_path,
+                            parent_fd=parent_fd,
                             deadline=deadline,
                             started=started,
                             operation=operation,
@@ -381,10 +407,11 @@ class RepositoryOperationLock:
                             contention_deadline_s=contention_deadline_s,
                         )
                     )
-                    self._prepare_owner_paths()
+                    self._prepare_owner_paths(parent_fd)
                     locks.enter_context(
                         self._poll_file_lock(
                             self._owner_lock_path,
+                            parent_fd=parent_fd,
                             deadline=deadline,
                             started=started,
                             operation=operation,
@@ -400,7 +427,7 @@ class RepositoryOperationLock:
                         source="lock_metadata",
                         operation_deadline_s=deadline_s,
                     )
-                    self._write_owner_record(holder)
+                    self._write_owner_record(holder, parent_fd)
                     published = True
                     self._raise_if_deadline_elapsed(
                         deadline,
@@ -424,10 +451,12 @@ class RepositoryOperationLock:
         finally:
             if published and holder is not None:
                 try:
-                    self._remove_matching_owner_record(holder.acquisition_token)
+                    self._remove_matching_owner_record(holder.acquisition_token, parent_fd)
                 except (OSError, RuntimeError):
                     logger.warning("repository-lock owner record cleanup failed")
             locks.close()
+            if parent_fd is not None:
+                os.close(parent_fd)
             if in_process_acquired:
                 with self._state_guard:
                     if self._holder == holder:
@@ -436,6 +465,20 @@ class RepositoryOperationLock:
             if not reserved:
                 self.release_reservation()
 
+    def _open_existing_parent(self) -> int | None:
+        """Open and verify the required existing lock parent."""
+        if self._existing_parent_identity is None:
+            return None
+        parent_fd = _open_parent(self._lock_path.parent)
+        try:
+            opened = os.fstat(parent_fd)
+            if (opened.st_dev, opened.st_ino) != self._existing_parent_identity:
+                raise RuntimeError("repository-lock directory changed")
+        except BaseException:
+            os.close(parent_fd)
+            raise
+        return parent_fd
+
     def _new_holder(self, operation: str) -> _Holder:
         """Create one bounded holder record."""
         wall_time = self._wall_time()
@@ -443,7 +486,7 @@ class RepositoryOperationLock:
             raise ValueError("wall time is not finite")
         acquired_at = datetime.fromtimestamp(wall_time, tz=UTC).isoformat().replace("+00:00", "Z")
         return _Holder(
-            repository=self.repository,
+            repository=self._owner_identity,
             operation=operation,
             process_id=os.getpid(),
             acquisition_token=secrets.token_hex(16),
@@ -480,6 +523,7 @@ class RepositoryOperationLock:
         self,
         path: Path,
         *,
+        parent_fd: int | None,
         deadline: float | None,
         started: float,
         operation: str,
@@ -493,7 +537,17 @@ class RepositoryOperationLock:
             self._raise_if_operation_expired(contention_deadline_s)
             stack = ExitStack()
             try:
-                stack.enter_context(file_lock(path, blocking=False, require_exclusive=True))
+                lock_context = (
+                    file_lock_at(
+                        parent_fd,
+                        path.name,
+                        blocking=False,
+                        require_exclusive=True,
+                    )
+                    if parent_fd is not None
+                    else file_lock(path, blocking=False, require_exclusive=True)
+                )
+                stack.enter_context(lock_context)
             except ExclusiveLockUnavailableError as exc:
                 stack.close()
                 raise self._metadata_failure(
@@ -511,7 +565,7 @@ class RepositoryOperationLock:
                         raise self._metadata_failure(
                             operation, started, None, "owner_sentinel"
                         ) from exc
-                    holder = self._probe_external_holder()
+                    holder = self._probe_external_holder(parent_fd)
                     if holder is None:
                         self._raise_if_operation_expired(operation_deadline_s)
                         raise self._metadata_failure(
@@ -540,10 +594,15 @@ class RepositoryOperationLock:
                     stack.close()
                 return
 
-    def _prepare_owner_paths(self) -> None:
+    def _prepare_owner_paths(self, bound_parent_fd: int | None = None) -> None:
         """Reject unsafe owner paths and remove one stale regular record."""
-        self._owner_record_path.parent.mkdir(parents=True, exist_ok=True)
-        parent_fd = _open_parent(self._owner_record_path.parent)
+        if bound_parent_fd is None:
+            self._owner_record_path.parent.mkdir(parents=True, exist_ok=True)
+        parent_fd = (
+            os.dup(bound_parent_fd)
+            if bound_parent_fd is not None
+            else _open_parent(self._owner_record_path.parent)
+        )
         try:
             for name, remove in (
                 (self._owner_lock_path.name, False),
@@ -553,7 +612,7 @@ class RepositoryOperationLock:
                     metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
                 except FileNotFoundError:
                     continue
-                if not stat.S_ISREG(metadata.st_mode):
+                if not _is_safe_owned_regular(metadata):
                     raise RuntimeError("repository-lock owner path is unsafe")
                 if remove:
                     os.unlink(name, dir_fd=parent_fd)
@@ -561,7 +620,7 @@ class RepositoryOperationLock:
         finally:
             os.close(parent_fd)
 
-    def _write_owner_record(self, holder: _Holder) -> None:
+    def _write_owner_record(self, holder: _Holder, bound_parent_fd: int | None = None) -> None:
         """Publish one complete mode-0600 record without replacing a path."""
         payload = json.dumps(
             {
@@ -577,7 +636,11 @@ class RepositoryOperationLock:
         ).encode("utf-8")
         if len(payload) > _OWNER_RECORD_MAX_BYTES:
             raise ValueError("repository-lock owner record is too large")
-        parent_fd = _open_parent(self._owner_record_path.parent)
+        parent_fd = (
+            os.dup(bound_parent_fd)
+            if bound_parent_fd is not None
+            else _open_parent(self._owner_record_path.parent)
+        )
         temporary = f".{self._owner_record_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
         if os.name == "posix":
@@ -615,26 +678,40 @@ class RepositoryOperationLock:
                     os.unlink(temporary, dir_fd=parent_fd)
             os.close(parent_fd)
 
-    def _probe_external_holder(self) -> _Holder | None:
+    def _probe_external_holder(self, parent_fd: int | None) -> _Holder | None:
         """Read holder data only while the owner sentinel is active."""
         try:
-            with file_lock(
-                self._owner_lock_path,
-                blocking=False,
-                require_exclusive=True,
-            ):
+            lock_context = (
+                file_lock_at(
+                    parent_fd,
+                    self._owner_lock_path.name,
+                    blocking=False,
+                    require_exclusive=True,
+                )
+                if parent_fd is not None
+                else file_lock(
+                    self._owner_lock_path,
+                    blocking=False,
+                    require_exclusive=True,
+                )
+            )
+            with lock_context:
                 return None
         except ExclusiveLockUnavailableError:
             return None
         except LockUnavailableError:
-            return self._read_owner_record()
+            return self._read_owner_record(parent_fd)
         except (OSError, RuntimeError):
             return None
 
-    def _read_owner_record(self) -> _Holder | None:
+    def _read_owner_record(self, bound_parent_fd: int | None) -> _Holder | None:
         """Read and strictly validate one bounded owner record."""
         try:
-            parent_fd = _open_parent(self._owner_record_path.parent)
+            parent_fd = (
+                os.dup(bound_parent_fd)
+                if bound_parent_fd is not None
+                else _open_parent(self._owner_record_path.parent)
+            )
         except (FileNotFoundError, OSError, RuntimeError):
             return None
         try:
@@ -667,7 +744,7 @@ class RepositoryOperationLock:
             or isinstance(process_id, bool)
             or not isinstance(process_id, int)
             or process_id <= 0
-            or repository != self.repository
+            or repository != self._owner_identity
             or not isinstance(operation, str)
             or not operation
             or len(operation) > 200
@@ -685,9 +762,13 @@ class RepositoryOperationLock:
             return None
         return _Holder(repository, operation, process_id, token, acquired_at)
 
-    def _remove_matching_owner_record(self, token: str) -> None:
+    def _remove_matching_owner_record(self, token: str, bound_parent_fd: int | None = None) -> None:
         """Remove the record only if it still belongs to this holder."""
-        parent_fd = _open_parent(self._owner_record_path.parent)
+        parent_fd = (
+            os.dup(bound_parent_fd)
+            if bound_parent_fd is not None
+            else _open_parent(self._owner_record_path.parent)
+        )
         try:
             payload_bytes, record_identity = _read_regular_at(
                 parent_fd, self._owner_record_path.name
