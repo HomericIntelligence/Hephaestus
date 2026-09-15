@@ -1269,6 +1269,12 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if target is ct.StageName.FINISHED:
             self._finish(item, passed=False, reason=outcome.note or "fail_back")
         else:
+            if (
+                item.stage is ct.StageName.PLAN_REVIEW
+                and target is ct.StageName.PLANNING
+                and outcome.note == "plan_changed"
+            ):
+                item.payload["update_plan_required"] = True
             self._handoff_item(item, target, enter=True)
 
     def _finish(self, item: ct.WorkItem, *, passed: bool, reason: str) -> None:

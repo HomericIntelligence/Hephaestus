@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     ReconcileScopeExpansionDependenciesRequest,
@@ -28,11 +30,22 @@ from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageNam
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
+from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
+from hephaestus.automation.pipeline.stages.planning import PlanningStage
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.review_journal import (
+    IssueComment,
+    render_current_plan,
+    render_pending_review,
+)
 from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
 from hephaestus.automation.state_labels import STATE_PLAN_GO
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.conftest import (
+    FakeWorkerPool,
+    claim_test_item,
+    fake_worker_factories,
+)
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 # Sanity anchors: the reasons this composition exercises are ROUTES rows.
@@ -47,6 +60,143 @@ _LABEL_MUTATIONS = {
     "mark_pr_implementation_no_go",
     "arm_auto_merge",
 }
+
+
+@pytest.mark.parametrize(
+    ("replacement_plan", "replacement_revision"),
+    [
+        ("## Files to Modify\n- `tests/unit/two.py`", 1),
+        ("## Exact file scope and ownership\n- `tests/unit/one.py`", 2),
+        (None, None),
+    ],
+)
+def test_changed_restart_plan_cannot_reuse_stale_plan_go(
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    replacement_plan: str | None,
+    replacement_revision: int | None,
+) -> None:
+    """Plan drift returns to planning without authority to advance."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+    original_plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+    github.comments[1] = [
+        render_current_plan(original_plan, revision=1),
+        render_pending_review(revision=1),
+    ]
+    original_comments = github.issue_comments(1)
+    replacement_comments = (
+        [
+            IssueComment(
+                body=body,
+                author_login="hephaestus[bot]",
+                viewer_did_author=True,
+            )
+            for body in (
+                render_current_plan(replacement_plan, revision=replacement_revision),
+                render_pending_review(revision=replacement_revision),
+            )
+        ]
+        if replacement_plan is not None and replacement_revision is not None
+        else []
+    )
+    reads = iter([original_comments, replacement_comments])
+
+    def sequenced_comments(_issue_number: int) -> list[IssueComment]:
+        return next(reads, replacement_comments)
+
+    monkeypatch.setattr(github, "issue_comments", sequenced_comments)
+    ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+    item = make_work_item(issue=1, stage=StageName.PLAN_REVIEW, state="ENTER")
+    original_payload = dict(item.payload)
+    original_attempts = dict(item.attempts)
+
+    review_outcome = PlanReviewStage().on_enter(item, ctx)
+
+    assert review_outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+    assert ROUTES[StageName.PLAN_REVIEW].fail_routes["*"] is StageName.PLANNING
+    assert github.labels[1] == {STATE_PLAN_GO}
+    assert github.mutation_log == []
+    assert item.payload == original_payload
+    assert item.attempts == original_attempts
+
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="test-org",
+            repos=["test-repo"],
+            projects_dir=tmp_path,
+            rate_guard_enabled=False,
+        ),
+        github=github,
+        **fake_worker_factories(FakeWorkerPool(), None),
+        install_signals=False,
+    )
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=False)
+    coordinator._route(claim_test_item(coordinator, item), review_outcome)
+
+    assert item.stage is StageName.PLANNING
+    assert item.payload["update_plan_required"] is True
+    assert PlanningStage().on_enter(item, ctx) is None
+    assert item.stage is StageName.PLANNING
+    assert STATE_PLAN_GO not in github.labels[1]
+    assert item.payload["planning_main_refresh_pending"] is True
+    assert "update_plan_required" not in item.payload
+    assert PlanningStage().step(item, ctx) == Continue(next_state="FETCH_MAIN_WAIT")
+
+
+def test_missing_restart_plan_cannot_reuse_stale_plan_go(
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An absent admission plan forces a new planning epoch before work."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+    ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+    item = make_work_item(
+        issue=1,
+        stage=StageName.PLAN_REVIEW,
+        state="ENTER",
+        payload={
+            "_synced_default_branch_sha": "a" * 40,
+            "plan_text": "cached stale plan",
+            "plan_revision": 1,
+        },
+    )
+    original_payload = dict(item.payload)
+    original_attempts = dict(item.attempts)
+
+    review_outcome = PlanReviewStage().on_enter(item, ctx)
+
+    assert review_outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+    assert github.labels[1] == {STATE_PLAN_GO}
+    assert github.mutation_log == []
+    assert item.payload == original_payload
+    assert item.attempts == original_attempts
+
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="test-org",
+            repos=["test-repo"],
+            projects_dir=tmp_path,
+            rate_guard_enabled=False,
+        ),
+        github=github,
+        **fake_worker_factories(FakeWorkerPool(), None),
+        install_signals=False,
+    )
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=False)
+    coordinator._route(claim_test_item(coordinator, item), review_outcome)
+
+    assert item.stage is StageName.PLANNING
+    assert item.payload["update_plan_required"] is True
+    assert PlanningStage().on_enter(item, ctx) is None
+    assert item.stage is StageName.PLANNING
+    assert STATE_PLAN_GO not in github.labels[1]
+    assert item.payload["planning_main_refresh_pending"] is True
+    assert "update_plan_required" not in item.payload
+    assert PlanningStage().step(item, ctx) == Continue(next_state="FETCH_MAIN_WAIT")
 
 
 def _adopted_writer_result(item: Any) -> dict[str, object]:

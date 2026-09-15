@@ -67,7 +67,7 @@ def _upsert_pending_review(
 
 def _confirm_publication(
     issue_number: int,
-    expected_plan: str,
+    expected_plan_body: str,
     expected_revision: int,
     github: PlanJournalGitHub,
     *,
@@ -78,7 +78,7 @@ def _confirm_publication(
     snapshot = journal_snapshot(github.issue_comments(issue_number))
     if (
         snapshot.revision != expected_revision
-        or plan_fingerprint(snapshot.current_plan) != plan_fingerprint(expected_plan)
+        or snapshot.current_plan_body != expected_plan_body
         or snapshot.current_review_revision != expected_revision
         or not is_pending_review(snapshot.current_review, revision=expected_revision)
         or snapshot.forced_planning_epoch is not forced_planning_epoch
@@ -98,6 +98,7 @@ class PlanPublication:
     plan: str
     changed: bool
     no_progress_reason: str = ""
+    canonical_body: str = ""
 
     @property
     def is_stuck(self) -> bool:
@@ -220,19 +221,20 @@ def publish_plan_revision(
         )
 
     if not snapshot.current_plan:
+        canonical_body = render_current_plan(
+            candidate_plan,
+            revision=snapshot.revision,
+            forced_planning_epoch=forced_planning_epoch,
+            recovery_source_digest=recovery_source_digest,
+        )
         github.upsert_plan_comment(
             issue_number,
-            render_current_plan(
-                candidate_plan,
-                revision=snapshot.revision,
-                forced_planning_epoch=forced_planning_epoch,
-                recovery_source_digest=recovery_source_digest,
-            ),
+            canonical_body,
         )
         _upsert_pending_review(issue_number, snapshot.revision, github)
         _confirm_publication(
             issue_number,
-            candidate_plan,
+            canonical_body,
             snapshot.revision,
             github,
             forced_planning_epoch=forced_planning_epoch,
@@ -242,6 +244,7 @@ def publish_plan_revision(
             revision=snapshot.revision,
             plan=candidate_plan,
             changed=True,
+            canonical_body=canonical_body,
         )
 
     issue_data = github.gh_issue_json(issue_number)
@@ -264,23 +267,29 @@ def publish_plan_revision(
         *snapshot.prior_plan_fingerprints,
         current_fingerprint,
     )
+    canonical_body = render_current_plan(
+        candidate_plan,
+        revision=next_revision,
+        prior_fingerprints=prior_fingerprints,
+        forced_planning_epoch=forced_planning_epoch,
+        recovery_source_digest=recovery_source_digest,
+    )
     github.upsert_plan_comment(
         issue_number,
-        render_current_plan(
-            candidate_plan,
-            revision=next_revision,
-            prior_fingerprints=prior_fingerprints,
-            forced_planning_epoch=forced_planning_epoch,
-            recovery_source_digest=recovery_source_digest,
-        ),
+        canonical_body,
     )
     _upsert_pending_review(issue_number, next_revision, github)
     _confirm_publication(
         issue_number,
-        candidate_plan,
+        canonical_body,
         next_revision,
         github,
         forced_planning_epoch=forced_planning_epoch,
         recovery_source_digest=recovery_source_digest,
     )
-    return PlanPublication(revision=next_revision, plan=candidate_plan, changed=True)
+    return PlanPublication(
+        revision=next_revision,
+        plan=candidate_plan,
+        changed=True,
+        canonical_body=canonical_body,
+    )
