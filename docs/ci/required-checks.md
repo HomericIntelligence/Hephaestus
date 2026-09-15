@@ -105,8 +105,9 @@ Markdown hook has the same environment name and executable in both stages.
 Rebuild the candidate image after a toolchain or hook-preparation change.
 Combining `--check-only` with `--rebuild` fails before engine preparation.
 Every CI-image call in these selections uses the prepared Python environment
-without syncing dependencies and imports source from the mounted candidate. The
-selected mode uses the existing container runner and substitutes
+without syncing dependencies, imports source from the mounted candidate, and
+mounts the original checkout read-only. The selected mode uses the existing
+container runner and substitutes
 [`hephaestus.ci.check_only`](../../hephaestus/ci/check_only.py) for the mutating
 pre-commit command. It cannot request the queue's native fallback. The queue
 continues to use its existing fixed `all --rebuild` command.
@@ -124,7 +125,8 @@ are used where available. A formatter without a reliable check mode operates
 only on that private copy. A source, mode, or index change fails the check, and
 the private candidate is restored before the next hook. Markdown configuration
 that enables fixes cannot cause a passing result after a source change. Hook
-cache paths remain inputs; temporary tool caches belong to the private run.
+cache paths remain inputs; temporary tool caches belong to the private run. The
+Gitleaks history scan also mounts the original checkout read-only.
 
 A pass supplies the current PR/static selection, including the fast pytest
 hook. It does not supply the manual contribution's complete normal-test

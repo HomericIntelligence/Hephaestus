@@ -473,7 +473,7 @@ resolve_git_metadata_mount() {
 # Run a command inside the CI container
 # ============================================================================
 # Volume mounts:
-#   /workspace  — the full repo (rw, :Z for SELinux/Podman)
+#   /workspace  — the full repo (:Z; read-only in check-only mode)
 # --userns=keep-id:uid=1000,gid=1000 — run as the image's non-root 'ci' user
 # while mapping it to the invoking host UID, so mounted-file ownership works on
 # both dev hosts (uid 1000) and GitHub runners (uid 1001).
@@ -488,6 +488,7 @@ _run_in_container() {
     local engine_flags=()
     local candidate_mount=()
     local codex_fixture_mount=()
+    local workspace_mount="${PROJECT_ROOT}:/workspace:Z"
 
     if [ "${CONTAINER_ENGINE}" = "podman" ]; then
         engine_flags+=("--userns=keep-id:uid=1000,gid=1000")
@@ -499,6 +500,9 @@ _run_in_container() {
     fi
     if [ "${CHECK_ONLY}" -eq 1 ] || [ "${CONTAINER_ENGINE}" = "docker" ]; then
         engine_flags+=(--env UV_NO_SYNC=1 --env PYTHONPATH=/workspace)
+    fi
+    if [ "${CHECK_ONLY}" -eq 1 ]; then
+        workspace_mount="${PROJECT_ROOT}:/workspace:ro,Z"
     fi
 
     if [ -n "${CANDIDATE_TREE}" ]; then
@@ -523,7 +527,7 @@ _run_in_container() {
         ${GIT_METADATA_MOUNT[@]+"${GIT_METADATA_MOUNT[@]}"} \
         ${candidate_mount[@]+"${candidate_mount[@]}"} \
         --tmpfs /tmp:rw,size=4g,mode=1777 \
-        --volume "${PROJECT_ROOT}:/workspace:Z" \
+        --volume "${workspace_mount}" \
         ${codex_fixture_mount[@]+"${codex_fixture_mount[@]}"} \
         --workdir /workspace \
         "${CI_IMAGE}" \
@@ -695,8 +699,10 @@ run_secrets() {
     local history_args=(detect --source=. --verbose --exit-code=1)
     local candidate_args=(dir --verbose --exit-code=1 .)
     local pull_flags=()
+    local repository_mount="${PROJECT_ROOT}:/repo:Z"
     if [ "${CHECK_ONLY}" -eq 1 ]; then
         pull_flags+=(--pull=never)
+        repository_mount="${PROJECT_ROOT}:/repo:ro,Z"
     fi
     prepare_candidate_snapshot || return 1
     if [ -f .gitleaks.toml ]; then
@@ -706,7 +712,7 @@ run_secrets() {
     "${CONTAINER_ENGINE}" run --rm \
         ${pull_flags[@]+"${pull_flags[@]}"} \
         ${GIT_METADATA_MOUNT[@]+"${GIT_METADATA_MOUNT[@]}"} \
-        --volume "${PROJECT_ROOT}:/repo:Z" \
+        --volume "${repository_mount}" \
         --workdir /repo \
         "${GITLEAKS_IMAGE}" \
         "${history_args[@]}" || return 1

@@ -69,8 +69,13 @@ def _fake_engine(
         else ""
     )
     lint_mutation_clause = (
-        '  if [[ "$*" == *"pre-commit run"* ]]; then\n'
-        '    printf "FORMATTED = True\\n" > "$workspace_root/tracked.py"\n'
+        '  if [[ "$*" == *"pre-commit run"* || '
+        '"$*" == *"hephaestus.ci.check_only"* ]]; then\n'
+        '    if [[ "$workspace_read_only" == "1" ]]; then\n'
+        '      printf "SOURCE_WRITE_BLOCKED\\n" >> "$FAKE_ENGINE_LOG"\n'
+        "    else\n"
+        '      printf "FORMATTED = True\\n" > "$workspace_root/tracked.py"\n'
+        "    fi\n"
         "  fi\n"
         if mutate_lint_source
         else ""
@@ -122,12 +127,17 @@ def _fake_engine(
             '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
             '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
             '  workspace_root=""\n'
+            '  workspace_read_only="0"\n'
             '  candidate_root=""\n'
             '  candidate_index=""\n'
             '  candidate_objects=""\n'
             '  candidate_object_directory=""\n'
             '  for arg in "$@"; do\n'
             '    case "$arg" in\n'
+            "      *:/workspace:ro,Z)\n"
+            '        workspace_root="${arg%:/workspace:ro,Z}"\n'
+            '        workspace_read_only="1"\n'
+            "        ;;\n"
             "      *:/workspace:Z)\n"
             '        workspace_root="${arg%:/workspace:Z}"\n'
             "        ;;\n"
@@ -664,7 +674,8 @@ def test_secrets_candidate_tree_includes_untracked_source(
     calls = _engine_calls(tmp_path)
     assert len(calls) == 3
     history, candidate = calls[1:]
-    assert f"{repo}:/repo:Z" in history
+    history_mode = "ro,Z" if check_only else "Z"
+    assert f"{repo}:/repo:{history_mode}" in history
     assert candidate.count("--volume") == 1
     candidate_mount = candidate[candidate.index("--volume") + 1]
     assert candidate_mount.startswith(f"{repo}/build/ci-candidate.")
@@ -775,6 +786,7 @@ def test_check_only_lint_preserves_candidate_source(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert source.read_bytes() == before
+    assert "SOURCE_WRITE_BLOCKED" in log
     assert "pre-commit run" not in log
     assert "uv run python -m hephaestus.ci.check_only" in log
     assert "uv run hephaestus-validate-links docs --repo-root ." in log
@@ -872,6 +884,12 @@ def test_preparation_boundary_applies_to_every_check_only_ci_call(
     assert calls
     for call in calls:
         boundary = call[: call.index(FAKE_IMAGE_ID)]
+        workspace_mounts = [
+            boundary[index + 1]
+            for index, argument in enumerate(boundary[:-1])
+            if argument == "--volume" and boundary[index + 1].endswith(":/workspace:ro,Z")
+        ]
+        assert workspace_mounts == [f"{repo}:/workspace:ro,Z"]
         environment = [
             boundary[index + 1]
             for index, argument in enumerate(boundary[:-1])
