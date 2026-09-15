@@ -1331,46 +1331,123 @@ def test_node_package_tree_bounds_open_directories_on_wide_tree(
 def test_node_package_tree_keeps_nested_directory_binding_during_aba(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A nested replacement cannot redirect the descriptor-bound tree read."""
+    """Read the original directory, then reject its changed revision."""
     from hephaestus.automation import mnemosyne_node_runtime as runtime
 
     _npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
     dependency = dependency_file.parent
     initial = dependency.stat()
     real_children = runtime._bounded_package_children
-    changed = False
+    real_create = PackageSnapshot.create
+    real_open = os.open
+    real_dup = os.dup
+    real_close = os.close
+    active: set[int] = set()
+    snapshots: list[PackageSnapshot] = []
+    attacks = 0
+    original_read = False
+    revision_changed = False
+
+    def track_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        descriptor = real_open(path, flags, *args, **kwargs)
+        active.add(descriptor)
+        return descriptor
+
+    def track_dup(descriptor: int) -> int:
+        duplicate = real_dup(descriptor)
+        active.add(duplicate)
+        return duplicate
+
+    def track_close(descriptor: int) -> None:
+        real_close(descriptor)
+        active.discard(descriptor)
+
+    def record_create(*args: Any, **kwargs: Any) -> PackageSnapshot:
+        snapshot = real_create(*args, **kwargs)
+        snapshots.append(snapshot)
+        return snapshot
 
     def replace_and_restore(
         directory_descriptor: int,
         allocation_budget: Any,
         deadline: float | None = None,
     ) -> list[Any]:
-        nonlocal changed
+        nonlocal attacks, original_read, revision_changed
         opened = os.fstat(directory_descriptor)
-        if not changed and (opened.st_dev, opened.st_ino) == (initial.st_dev, initial.st_ino):
+        if attacks == 0 and (opened.st_dev, opened.st_ino) == (initial.st_dev, initial.st_ino):
+            attacks += 1
             detached = dependency.with_name("globby-detached")
-            dependency.rename(detached)
-            dependency.mkdir()
             replacement = dependency / "replacement.js"
-            replacement.write_text("export const replacement = true;\n", encoding="utf-8")
-            children = real_children(directory_descriptor, allocation_budget, deadline)
-            replacement.unlink()
-            dependency.rmdir()
-            detached.rename(dependency)
-            changed = True
+            replacement_created = False
+            dependency.rename(detached)
+            try:
+                dependency.mkdir()
+                replacement_created = True
+                replacement.write_text("export const replacement = true;\n", encoding="utf-8")
+                named = dependency.stat()
+                retained = os.fstat(directory_descriptor)
+                assert (named.st_dev, named.st_ino) != (initial.st_dev, initial.st_ino)
+                assert (retained.st_dev, retained.st_ino) == (initial.st_dev, initial.st_ino)
+                assert {entry.name for entry in dependency.iterdir()} == {"replacement.js"}
+                children = real_children(directory_descriptor, allocation_budget, deadline)
+                assert [entry.name for entry in children] == ["index.js"]
+                descriptor = os.open(
+                    "index.js", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_descriptor
+                )
+                try:
+                    assert os.read(descriptor, 1024) == b"export const globby = [];\n"
+                finally:
+                    os.close(descriptor)
+                original_read = True
+            finally:
+                try:
+                    if replacement_created:
+                        replacement.unlink(missing_ok=True)
+                        dependency.rmdir()
+                finally:
+                    detached.rename(dependency)
+
+            # Use whole seconds so rejection does not depend on rename clock resolution.
+            changed_mtime_ns = (initial.st_mtime_ns // 1_000_000_000 + 2) * 1_000_000_000
+            os.utime(dependency, ns=(initial.st_atime_ns, changed_mtime_ns))
+            restored = dependency.stat()
+            retained = os.fstat(directory_descriptor)
+            assert (restored.st_dev, restored.st_ino) == (initial.st_dev, initial.st_ino)
+            assert restored.st_mtime_ns == retained.st_mtime_ns == changed_mtime_ns
+            assert retained.st_mtime_ns != initial.st_mtime_ns
+            revision_changed = True
             return children
         return real_children(directory_descriptor, allocation_budget, deadline)
 
-    monkeypatch.setattr(runtime, "_bounded_package_children", replace_and_restore)
-
-    scope = _node_package_tree(cli_link)
     try:
-        snapshot_dependency = scope.snapshot_root / dependency_file.relative_to(scope.root)
-        assert snapshot_dependency.read_text(encoding="utf-8") == "export const globby = [];\n"
-        assert not (scope.snapshot_root / "globby" / "replacement.js").exists()
+        with monkeypatch.context() as scoped:
+            scoped.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+            scoped.setattr(PackageSnapshot, "create", record_create)
+            scoped.setattr(os, "open", track_open)
+            scoped.setattr(os, "dup", track_dup)
+            scoped.setattr(os, "close", track_close)
+            scoped.setattr(runtime, "_bounded_package_children", replace_and_restore)
+            with pytest.raises(
+                LearnDeliveryError, match=r"^Node package dependency tree is unavailable$"
+            ):
+                _node_package_tree(cli_link)
+            assert attacks == 1
+            assert original_read
+            assert revision_changed
+            assert dependency_file.read_bytes() == b"export const globby = [];\n"
+            assert not dependency.with_name("globby-detached").exists()
+            assert not (dependency / "replacement.js").exists()
+            assert len(snapshots) == 1
+            assert snapshots[0]._closed
+            assert not snapshots[0].parent.exists()
+            assert active == set()
     finally:
-        scope.close()
-    assert changed
+        # Observe production cleanup above before recovering only test-owned leftovers.
+        for descriptor in tuple(active):
+            with suppress(OSError):
+                real_close(descriptor)
+        for snapshot in snapshots:
+            _remove_test_tree(snapshot.parent)
 
 
 @pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
