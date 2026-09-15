@@ -2427,6 +2427,13 @@ class TestPrReviewStageStep:
         )
 
         request = stage.step(item, ctx)
+        publication_diagnostics_argv = next(
+            spec.argv
+            for spec in _host_verification_specs(
+                ["tests/unit/automation/pipeline/test_worker_pool.py"]
+            )
+            if spec.descr == "review_worker_pool_publication_diagnostics"
+        )
         expected = (
             (
                 "review_python_ruff_check",
@@ -2524,6 +2531,10 @@ class TestPrReviewStageStep:
                     "-q",
                     "--tb=short",
                 ),
+            ),
+            (
+                "review_worker_pool_publication_diagnostics",
+                publication_diagnostics_argv,
             ),
             (
                 "review_fleet_podman_unix_socket",
@@ -2858,6 +2869,82 @@ class TestPrReviewStageStep:
             (
                 f"{path}::TestWorkerPoolSubmitComplete::"
                 "test_host_verification_profile_keeps_source_outside_writable_root"
+            ),
+            "-q",
+            "--tb=short",
+        )
+
+    def test_changed_worker_pool_runs_publication_diagnostics(self) -> None:
+        """A worker-pool change runs each publication diagnostic regression."""
+        path = "tests/unit/automation/pipeline/test_worker_pool.py"
+        specs = _host_verification_specs([path])
+        source_specs = _host_verification_specs(["hephaestus/automation/pipeline/worker_pool.py"])
+
+        spec = next(
+            spec for spec in specs if spec.descr == "review_worker_pool_publication_diagnostics"
+        )
+        source_spec = next(
+            spec
+            for spec in source_specs
+            if spec.descr == "review_worker_pool_publication_diagnostics"
+        )
+
+        assert spec.changed_path == path
+        assert spec.additional_changed_paths == ("hephaestus/automation/pipeline/worker_pool.py",)
+        assert source_spec == spec
+        assert spec.argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            (
+                f"{path}::TestGitOps::"
+                "test_continue_rebase_command_failure_preserves_redacted_bounded_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_continue_rebase_timeout_preserves_redacted_bounded_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_continue_rebase_additional_conflict_returns_conflict_receipt"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_remote_unchanged_preserves_hook_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_remote_probe_failure_preserves_push_and_probe_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_revalidation_timeout_preserves_push_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_revalidation_failure_preserves_push_diagnostics"
+            ),
+            (f"{path}::test_ordinary_publication_probe_failure_keeps_push_timeout_metadata"),
+            f"{path}::TestGitOps::test_publication_diagnostic_cycle_is_bounded",
+            (
+                f"{path}::TestGitOps::"
+                "test_commit_push_hook_failure_preserves_local_head_and_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_direct_reservation_hook_failure_preserves_head_and_diagnostics"
+            ),
+            (f"{path}::TestGitOps::test_direct_reservation_probe_failure_uses_probe_metadata"),
+            f"{path}::TestGitOps::test_run_git_redacts_generic_subprocess_tails",
+            f"{path}::TestGitOps::test_run_git_timeout_redacts_before_tail_truncation",
+            f"{path}::TestGitOps::test_source_git_timeout_redacts_before_tail_truncation",
+            (f"{path}::TestGitOps::test_source_git_command_failure_redacts_before_tail_truncation"),
+            (f"{path}::TestGitOps::test_initial_reservation_failure_keeps_publication_diagnostics"),
+            (
+                f"{path}::TestGitOps::"
+                "test_commit_push_probe_failure_orders_push_and_probe_diagnostics"
             ),
             "-q",
             "--tb=short",

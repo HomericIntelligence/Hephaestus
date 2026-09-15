@@ -47,6 +47,18 @@ def test_bounded_git_diagnostic_redacts_credentials_before_truncation() -> None:
     assert "<redacted-git-url>" in result
 
 
+def test_bounded_git_diagnostic_redacts_url_after_word_prefix() -> None:
+    """The helper redacts a URL after earlier output and before the tail bound."""
+    credential_url = "https://operator:credential-value@example.invalid/repository.git"
+    diagnostic = ("x" * 4000) + credential_url
+
+    result = bounded_git_diagnostic(diagnostic, limit=4000)
+
+    assert credential_url not in result
+    assert "credential-value" not in result
+    assert "<redacted-git-url>" in result
+
+
 def test_run_git_routes_through_standard_subprocess_helper() -> None:
     """run_git normalizes git commands and uses the shared subprocess adapter."""
     completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")

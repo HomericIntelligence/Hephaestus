@@ -13,6 +13,7 @@ import re
 import selectors
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -57,6 +58,7 @@ from hephaestus.automation.agent_config import (
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline import worker_pool as worker_pool_module
 from hephaestus.automation.pipeline.codex_worktree_boundary import (
     CodexWorktreeBoundaryError,
     _open_no_follow_path,
@@ -75,6 +77,7 @@ from hephaestus.automation.pipeline.jobs import (
     GitJob,
     JobHandle,
     JobResult,
+    ProcessFailureMetadata,
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.reply_handoff import (
@@ -82,6 +85,11 @@ from hephaestus.automation.pipeline.reply_handoff import (
 )
 from hephaestus.automation.pipeline.repository_lock import LockTimeoutError
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.stages import pr_review_receipts
+from hephaestus.automation.pipeline.stages.pr_review_verification import (
+    _PYTHON_HOST_VERIFICATION_SPECS,
+)
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
     _bounded_candidate_commit_paths,
@@ -112,6 +120,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _repo_lock_path,
     _run_bounded_git_output,
     _run_bounded_host_command,
+    _tail_file,
     _trusted_gh_executable,
     _trusted_git_executable,
     _unsafe_local_git_config_key,
@@ -242,6 +251,11 @@ _EMPTY_DIFF_OUTPUT = _BoundedGitOutput(
     sha256=hashlib.sha256(b"").hexdigest(),
     byte_count=0,
 )
+
+
+def _pem_marker(action: str, key_type: str) -> str:
+    """Build a synthetic PEM marker without a source-level secret signature."""
+    return "-----" + action + " " + key_type + "-----"
 
 
 def _run_controlled_long_commit_waiter(
@@ -3904,6 +3918,465 @@ class TestWorkerPoolSubmitComplete:
         }
         assert host_command.call_args.kwargs["git_system_config"] == (tmp_path / "gitconfig")
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
+
+    @pytest.mark.parametrize("selector_supported", [True, False])
+    def test_immutable_archive_failure_redacts_pem_in_durable_receipt(
+        self, tmp_path: Path, selector_supported: bool
+    ) -> None:
+        """Both archive readers mask a PEM assignment before durable storage."""
+        receipt_dir = tmp_path / f"pipeline-receipts-{'a' * 32}"
+        worker = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+            evidence_receipt_dir=receipt_dir,
+        )
+        begin = _pem_marker("BEGIN", "PRIVATE KEY")
+        end = _pem_marker("END", "PRIVATE KEY")
+        key_material = "OPAQUE REDACTION FIXTURE"
+        archive_stderr = f"client_secret={begin}\n{key_material}\n{end}"
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=(sys.executable, "-c", "raise SystemExit(0)"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+            descr="host verification",
+        )
+
+        def fail_archive_reader(
+            _argv: tuple[str, ...],
+            *,
+            cwd: Path,
+            timeout: int | float,
+            max_bytes: int,
+            retain_text: bool,
+            env: dict[str, str] | None = None,
+            shutdown: threading.Event | None = None,
+        ) -> _BoundedGitOutput:
+            del env
+            return _run_bounded_git_output(
+                (
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stderr.write(sys.argv[1]); raise SystemExit(9)",
+                    archive_stderr,
+                ),
+                cwd=cwd,
+                timeout=timeout,
+                max_bytes=max_bytes,
+                retain_text=retain_text,
+                env=dict(os.environ),
+                shutdown=shutdown,
+            )
+
+        try:
+            with (
+                patch(f"{_WP}.sys.platform", "darwin"),
+                patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+                patch(f"{_WP}._trusted_executable", return_value=sys.executable),
+                patch(
+                    f"{_WP}._validated_git_exec_path",
+                    return_value=(
+                        "/usr/bin/git",
+                        tmp_path / "git-core",
+                        tmp_path / "gitconfig",
+                    ),
+                ),
+                patch(f"{_WP}._trusted_git_executable", return_value="/usr/bin/git"),
+                patch(
+                    f"{_WP}._verifier_owned_runtime_environment",
+                    return_value=Path(sys.prefix),
+                ),
+                patch(
+                    "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
+                    return_value=selector_supported,
+                ),
+                patch(f"{_WP}._run_bounded_git_output", side_effect=fail_archive_reader),
+            ):
+                result = worker._run(
+                    job,
+                    claim_key="test/repo#3120",
+                    claim_stage="pr_review",
+                )
+        finally:
+            worker.shutdown()
+
+        worker_diagnostic = "\n".join((result.error or "", result.stdout_tail, result.stderr_tail))
+        receipt_paths = list(receipt_dir.glob("*.json"))
+        assert len(receipt_paths) == 1
+        evidence_receipt_text = receipt_paths[0].read_text(encoding="utf-8")
+        item = WorkItem(
+            repo="test/repo",
+            kind=ItemKind.PR,
+            issue=2797,
+            pr=3120,
+            payload={
+                "reviewed_pr_head_sha": "a" * 40,
+                "host_verification_receipts": [],
+            },
+        )
+        with patch.object(
+            pr_review_receipts,
+            "_payload_host_verification_specs",
+            return_value=(_PYTHON_HOST_VERIFICATION_SPECS[0],),
+        ):
+            pr_review_receipts.store_host_verification_result(item, result)
+        host_receipt_text = json.dumps(item.payload["host_verification_receipts"])
+
+        assert "<redacted>" in worker_diagnostic
+        assert key_material not in worker_diagnostic
+        assert begin not in worker_diagnostic
+        assert end not in worker_diagnostic
+        assert key_material not in evidence_receipt_text
+        assert key_material not in host_receipt_text
+        assert begin not in host_receipt_text
+        assert end not in host_receipt_text
+
+    @pytest.mark.skipif(os.name != "posix", reason="The deadline uses POSIX interval timers")
+    def test_host_log_tail_bounds_repeated_unmatched_pem_markers(self, tmp_path: Path) -> None:
+        """A 64 MiB marker log must produce its bounded tail before the host deadline."""
+        marker = _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n"
+        log_path = tmp_path / "stdout.log"
+        target_size = 64 * 1024 * 1024
+        chunk = marker * 2048
+        with log_path.open("wb") as output:
+            remaining = target_size
+            while remaining:
+                written = chunk[:remaining]
+                output.write(written)
+                remaining -= len(written)
+
+        def deadline_expired(_signum: int, _frame: object) -> None:
+            raise AssertionError("host diagnostic processing exceeded its fixed deadline")
+
+        previous_handler = signal.signal(signal.SIGALRM, deadline_expired)
+        signal.setitimer(signal.ITIMER_REAL, 2.0)
+        try:
+            result = _tail_file(log_path)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+        assert len(result) <= 4000
+
+    def test_host_log_tail_redacts_pem_across_processing_bound(self, tmp_path: Path) -> None:
+        """A PEM block that starts before the read window stays fully masked."""
+        begin = _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n"
+        end = _pem_marker("END", "PRIVATE KEY").encode() + b"\n"
+        key_line = b"OPAQUE REDACTION FIXTURE\n"
+        log_path = tmp_path / "stderr.log"
+        log_path.write_bytes(begin + (key_line * 3000) + end + b"after\n")
+
+        result = _tail_file(log_path)
+
+        assert result == "<redacted>\nafter\n"
+        assert key_line.decode().strip() not in result
+
+    @pytest.mark.parametrize(
+        "line_wrapper",
+        (b"", b"  ", b'"', b"\\"),
+        ids=("plain", "indented", "quoted", "backslash-escaped"),
+    )
+    def test_host_log_tail_masks_wrapped_incomplete_pem_body_without_end_marker(
+        self, tmp_path: Path, line_wrapper: bytes
+    ) -> None:
+        """A wrapped PEM continuation cannot expose its later body lines."""
+        begin = _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n"
+        key_line = line_wrapper + (b"A" * 64) + b"\n"
+        window = (key_line * ((64 * 1024 // len(key_line)) + 1))[: 64 * 1024]
+        log_path = tmp_path / "stderr.log"
+        log_path.write_bytes(begin + window)
+
+        result = _tail_file(log_path)
+
+        assert result == "<redacted-value>"
+        assert "A" not in result
+
+    @pytest.mark.parametrize(
+        ("discarded_prefix", "retained", "expected_suffix"),
+        (
+            (
+                b"-----BE",
+                b"GIN PRIVATE KEY-----\n" + (b"A" * (64 * 1024 - 21)),
+                "<redacted-value>",
+            ),
+            (
+                _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n",
+                b"AAAA\n" + (b"A" * (64 * 1024 - 10)) + b"\nAAAA",
+                "<redacted-value>",
+            ),
+            (
+                _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n",
+                b"AAAA\\n" + (b"A" * (64 * 1024 - 12)) + b"\\nAAAA",
+                "<redacted-value>",
+            ),
+            (
+                _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n",
+                b'"AAAA\\n' + (b"A" * (64 * 1024 - 21)) + b'\\nAAAA",after\n',
+                '<redacted-value>",after\n',
+            ),
+        ),
+        ids=(
+            "partial-begin-marker",
+            "short-full-short",
+            "literal-newlines",
+            "quoted-comma-terminator",
+        ),
+    )
+    def test_host_log_tail_masks_ambiguous_incomplete_pem_prefix(
+        self,
+        tmp_path: Path,
+        discarded_prefix: bytes,
+        retained: bytes,
+        expected_suffix: str,
+    ) -> None:
+        """An ambiguous PEM continuation stays masked until a safe terminator."""
+        assert len(retained) == 64 * 1024
+        log_path = tmp_path / "stderr.log"
+        log_path.write_bytes(discarded_prefix + retained)
+
+        result = _tail_file(log_path)
+
+        assert result == expected_suffix
+        assert "AAAA" not in result
+
+    @pytest.mark.parametrize(
+        "marker",
+        tuple(
+            _pem_marker("BEGIN", key_type).encode()
+            for key_type in (
+                "PRIVATE KEY",
+                "ENCRYPTED PRIVATE KEY",
+                "RSA PRIVATE KEY",
+                "DSA PRIVATE KEY",
+                "EC PRIVATE KEY",
+                "OPENSSH PRIVATE KEY",
+            )
+        ),
+        ids=("pkcs8", "encrypted-pkcs8", "rsa", "dsa", "ec", "openssh"),
+    )
+    @pytest.mark.parametrize(
+        "line_wrapper",
+        (b"", b" ", b"\t", b"\r", b'"', b"'", b"\\"),
+        ids=(
+            "plain",
+            "space",
+            "tab",
+            "carriage-return",
+            "double-quote",
+            "single-quote",
+            "backslash",
+        ),
+    )
+    def test_host_log_tail_masks_every_retained_begin_marker_suffix(
+        self,
+        tmp_path: Path,
+        marker: bytes,
+        line_wrapper: bytes,
+    ) -> None:
+        """Each retained PEM marker suffix keeps the following body masked."""
+        log_path = tmp_path / "stderr.log"
+        for cut in range(len(marker)):
+            marker_suffix = line_wrapper + marker[cut:] + b"\n"
+            body = b"A" * (64 * 1024 - len(marker_suffix))
+            log_path.write_bytes(marker[:cut] + marker_suffix + body)
+
+            result = _tail_file(log_path)
+
+            assert "A" * 16 not in result, (cut, marker_suffix)
+            if cut:
+                assert result == "<redacted-value>", (cut, marker_suffix)
+
+    @pytest.mark.parametrize("separator", (b"\n", b"\\n"), ids=("physical", "escaped"))
+    @pytest.mark.parametrize(
+        "line_wrapper",
+        (b"", b" ", b"\t", b"\r", b'"', b"'", b"\\"),
+        ids=(
+            "plain",
+            "space",
+            "tab",
+            "carriage-return",
+            "double-quote",
+            "single-quote",
+            "backslash",
+        ),
+    )
+    @pytest.mark.parametrize(
+        "terminator",
+        (b" ", b"\t", b"\r", b",", b";", b"}", b'"', b"'", b"\\"),
+        ids=(
+            "space",
+            "tab",
+            "carriage-return",
+            "comma",
+            "semicolon",
+            "brace",
+            "double-quote",
+            "single-quote",
+            "backslash",
+        ),
+    )
+    def test_host_log_tail_masks_final_pem_fragment_before_safe_terminator(
+        self,
+        tmp_path: Path,
+        separator: bytes,
+        line_wrapper: bytes,
+        terminator: bytes,
+    ) -> None:
+        """A PEM fragment cannot survive before a proven safe terminator."""
+        first_line = line_wrapper + b"AAAA" + separator
+        final_line = separator + line_wrapper + b"AAAA" + terminator + b"after\n"
+        middle_line = b"A" * (64 * 1024 - len(first_line) - len(final_line))
+        retained = first_line + middle_line + final_line
+        log_path = tmp_path / "stderr.log"
+        begin = _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n"
+        log_path.write_bytes(begin + retained)
+
+        result = _tail_file(log_path)
+
+        assert result == "<redacted-value>" + terminator.decode() + "after\n"
+        assert "AAAA" not in result
+
+    def test_host_log_tail_masks_markerless_completed_line_and_final_fragment(
+        self, tmp_path: Path
+    ) -> None:
+        """One full PEM line makes a following terminated fragment ambiguous."""
+        final_fragment = b'"AAAA",after\n'
+        retained = (b"A" * (64 * 1024 - len(final_fragment) - 1)) + b"\n" + final_fragment
+        log_path = tmp_path / "stderr.log"
+        log_path.write_bytes(b"discarded private-key prefix" + retained)
+
+        result = _tail_file(log_path)
+
+        assert result == '<redacted-value>",after\n'
+        assert "AAAA" not in result
+
+    @pytest.mark.parametrize(
+        "separator",
+        (b"\r\n", b"\\n", b"\\r\\n"),
+        ids=("physical-crlf", "escaped-lf", "escaped-crlf"),
+    )
+    @pytest.mark.parametrize(
+        ("line_wrapper", "terminator"),
+        ((b"", b","), (b'"', b'"')),
+        ids=("unwrapped", "wrapped"),
+    )
+    def test_host_log_tail_masks_pem_after_separator_boundary_cut(
+        self,
+        tmp_path: Path,
+        separator: bytes,
+        line_wrapper: bytes,
+        terminator: bytes,
+    ) -> None:
+        """Each interior separator cut keeps the following PEM body masked."""
+        log_path = tmp_path / "stderr.log"
+        completed_line = line_wrapper + (b"A" * 64) + b"\n"
+        safe_suffix = terminator + b",after\n"
+        for cut in range(1, len(separator)):
+            retained_prefix = separator[cut:] + completed_line
+            final_size = 64 * 1024 - len(retained_prefix) - len(line_wrapper) - len(safe_suffix)
+            final_payload = line_wrapper + (b"A" * final_size)
+            retained = retained_prefix + final_payload + safe_suffix
+            log_path.write_bytes(b"discarded" + separator[:cut] + retained)
+
+            result = _tail_file(log_path)
+
+            assert result == "<redacted-value>" + safe_suffix.decode(), (separator, cut)
+            assert "A" * 4000 not in result
+
+    def test_host_log_tail_preserves_ordinary_pytest_failure_summary(self, tmp_path: Path) -> None:
+        """A truncated ordinary log keeps the summary used for classification."""
+        summary = b"1 failed in 0.42s\n"
+        line = b"ordinary diagnostic output\n"
+        separator = b"\n"
+        retained = (
+            line
+            + (b"." * (64 * 1024 - len(line) - len(separator) - len(summary)))
+            + separator
+            + summary
+        )
+        log_path = tmp_path / "stdout.log"
+        log_path.write_bytes(b"discarded ordinary prefix" + retained)
+
+        result = _tail_file(log_path)
+
+        assert result.endswith(summary.decode())
+        assert _host_validation_failure_kind(("uv", "run", "pytest"), 1, result, "") == (
+            "validation"
+        )
+
+    @pytest.mark.parametrize(
+        "candidate_line",
+        (b"a" * 64, b"c" * 40, b"QUFB" * 16),
+        ids=("sha256", "git-sha", "base64-like"),
+    )
+    def test_host_log_tail_preserves_summary_after_ordinary_digest_lines(
+        self, tmp_path: Path, candidate_line: bytes
+    ) -> None:
+        """A safe line after digest-like text keeps the final failure summary."""
+        safe_tail = b"! diagnostic boundary\n1 failed in 0.42s\n"
+        candidates = candidate_line + b"\n" + candidate_line + b"\n"
+        final_candidate = b"A" * (64 * 1024 - len(candidates) - 1 - len(safe_tail))
+        retained = candidates + final_candidate + b"\n" + safe_tail
+        log_path = tmp_path / "stdout.log"
+        log_path.write_bytes(b"discarded ordinary prefix" + retained)
+
+        result = _tail_file(log_path)
+
+        assert result.startswith("<redacted-value>")
+        assert candidate_line.decode() not in result
+        assert result.endswith(safe_tail.decode())
+        assert _host_validation_failure_kind(("uv", "run", "pytest"), 1, result, "") == (
+            "validation"
+        )
+
+    @pytest.mark.parametrize(
+        ("discarded_prefix", "window_prefix", "terminator", "expected"),
+        (
+            (
+                b"Authorization: Bearer",
+                b" ",
+                b"\n",
+                "<redacted-value>\nafter\n",
+            ),
+            (
+                b"password=",
+                b'"',
+                b'"\n',
+                '<redacted-value>"\nafter\n',
+            ),
+            (
+                b"password=",
+                b"\r",
+                b",\n",
+                "<redacted-value>,\nafter\n",
+            ),
+        ),
+        ids=("space-after-authorization", "quote-after-password", "cr-after-password"),
+    )
+    def test_host_log_tail_masks_secret_when_window_starts_on_boundary(
+        self,
+        tmp_path: Path,
+        discarded_prefix: bytes,
+        window_prefix: bytes,
+        terminator: bytes,
+        expected: str,
+    ) -> None:
+        """A read window boundary must not expose the suffix of a secret value."""
+        log_path = tmp_path / "stdout.log"
+        after = b"after\n"
+        secret_tail = b"OPAQUE_SUFFIX_FIXTURE"
+        secret_size = 64 * 1024 - len(window_prefix) - len(terminator) - len(after)
+        secret = (b"x" * (secret_size - len(secret_tail))) + secret_tail
+        log_path.write_bytes(discarded_prefix + window_prefix + secret + terminator + after)
+
+        result = _tail_file(log_path)
+
+        assert result == expected
+        assert secret_tail.decode() not in result
 
     def test_immutable_build_test_rejects_missing_linux_pyxis_image_before_execution(
         self, pool: WorkerPool, tmp_path: Path
@@ -14152,10 +14625,713 @@ class TestGitOps:
             "failure_kind": "signing",
             "phase": "rebase_continue",
             "returncode": 128,
+            "exception_class": "CalledProcessError",
             "receipt_error": "paused rebase conflict paths invalid",
         }
         assert result.stdout_tail == "rebase output"
         assert "cannot run gpg" in result.stderr_tail
+
+    def test_continue_rebase_command_failure_preserves_redacted_bounded_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A failed continuation keeps safe command evidence in its receipt."""
+        secret = "https://" + "writer:private-token@example.invalid/repository.git"
+        failure = subprocess.CalledProcessError(
+            23,
+            ["git", "rebase", "--continue"],
+            output=("x" * 5000) + secret,
+            stderr="hook rejected token=private-token",
+        )
+        with (
+            patch(f"{_WP}._controlled_git_signing_env", return_value={"GIT_EDITOR": "true"}),
+            patch(f"{_WP}.git_utils.run", side_effect=[MagicMock(), MagicMock(), failure]),
+            patch.object(
+                pool,
+                "_conflict_receipt",
+                return_value=JobResult(ok=False, error="paused conflict receipt invalid"),
+            ),
+        ):
+            result = pool._continue_rebase_process(
+                tmp_path,
+                remote="origin",
+                expected_repo="test/repo",
+                base_sha="b" * 40,
+                expected_remote_sha="a" * 40,
+                paths=("x.py",),
+                timeout=60,
+            )
+
+        assert result is not None and result.ok is False
+        assert result.value == {
+            "failure_kind": "continuation",
+            "phase": "rebase_continue",
+            "returncode": 23,
+            "exception_class": "CalledProcessError",
+            "receipt_error": "paused conflict receipt invalid",
+        }
+        assert len(result.stdout_tail) <= 4000
+        assert secret not in result.stdout_tail
+        assert "<redacted-git-url>" in result.stdout_tail
+        assert "private-token" not in result.stderr_tail
+
+    def test_continue_rebase_timeout_preserves_redacted_bounded_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A continuation timeout becomes a structured failure result."""
+        failure = subprocess.TimeoutExpired(
+            ["git", "rebase", "--continue"],
+            60,
+            output=b"push output",
+            stderr=b"Authorization: Bearer secret-value",
+        )
+        with (
+            patch(f"{_WP}._controlled_git_signing_env", return_value={"GIT_EDITOR": "true"}),
+            patch(f"{_WP}.git_utils.run", side_effect=[MagicMock(), MagicMock(), failure]),
+        ):
+            result = pool._continue_rebase_process(
+                tmp_path,
+                remote="origin",
+                expected_repo="test/repo",
+                base_sha="b" * 40,
+                expected_remote_sha="a" * 40,
+                paths=("x.py",),
+                timeout=60,
+            )
+
+        assert result is not None and result.ok is False
+        assert result.error == "host rebase rebase_continue timed out"
+        assert result.value == {
+            "failure_kind": "continuation",
+            "phase": "rebase_continue",
+            "exception_class": "TimeoutExpired",
+            "receipt_error": "",
+        }
+        assert result.stdout_tail == "push output"
+        assert "secret-value" not in result.stderr_tail
+
+    def test_continue_rebase_additional_conflict_returns_conflict_receipt(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A renewed conflict remains distinct from a continuation failure."""
+        failure = subprocess.CalledProcessError(
+            1,
+            ["git", "rebase", "--continue"],
+            output="renewed conflict",
+            stderr="CONFLICT",
+        )
+        receipt = {"conflict_paths": ("second.py",), "base_sha": "b" * 40}
+        with (
+            patch(f"{_WP}._controlled_git_signing_env", return_value={"GIT_EDITOR": "true"}),
+            patch(f"{_WP}.git_utils.run", side_effect=[MagicMock(), MagicMock(), failure]),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+        ):
+            result = pool._continue_rebase_process(
+                tmp_path,
+                remote="origin",
+                expected_repo="test/repo",
+                base_sha="b" * 40,
+                expected_remote_sha="a" * 40,
+                paths=("x.py",),
+                timeout=60,
+            )
+
+        assert result is not None and result.ok is False
+        assert result.error is not None
+        assert result.error.startswith("rebase conflict resolution required")
+        assert result.value == receipt
+
+    def test_rebase_publish_remote_unchanged_preserves_hook_diagnostics(
+        self, pool: WorkerPool
+    ) -> None:
+        """A rejected exact publication keeps the rejected push output."""
+        secret = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789AB"
+        push = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="pre-push output",
+            stderr=f"hook rejected token={secret}",
+        )
+        failure = git_utils.BranchPublicationRemoteHeadUnchangedError(failure_kind="unknown")
+        failure.__cause__ = push
+
+        result = pool._branch_publication_error(failure)
+
+        assert result.ok is False
+        diagnostic = result.value["publication_failure_diagnostic"]
+        assert diagnostic == {
+            "failure_kind": "publication",
+            "phase": "push",
+            "head_sha": None,
+            "returncode": 1,
+            "exception_class": "CalledProcessError",
+            "remote_state": "unchanged",
+        }
+        assert result.stdout_tail == "pre-push output"
+        assert secret not in result.stderr_tail
+
+    def test_rebase_publish_remote_probe_failure_preserves_push_and_probe_diagnostics(
+        self, pool: WorkerPool
+    ) -> None:
+        """An unverified exact publication orders push evidence before probe evidence."""
+        push = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="push stdout",
+            stderr="push stderr",
+        )
+        probe = subprocess.TimeoutExpired(
+            ["git", "ls-remote"],
+            60,
+            output="probe stdout",
+            stderr="probe stderr",
+        )
+        probe.__context__ = push
+        failure = git_utils.BranchPublicationRemoteProbeError(failure_kind="timeout")
+        failure.__cause__ = probe
+
+        result = pool._branch_publication_error(failure)
+
+        diagnostic = result.value["publication_failure_diagnostic"]
+        assert diagnostic["phase"] == "remote_probe"
+        assert diagnostic["remote_state"] == "unverified"
+        assert diagnostic["exception_class"] == "TimeoutExpired"
+        assert result.stdout_tail.index("push stdout") < result.stdout_tail.index("probe stdout")
+        assert result.stderr_tail.index("push stderr") < result.stderr_tail.index("probe stderr")
+
+    def test_rebase_publish_revalidation_timeout_preserves_push_diagnostics(
+        self, pool: WorkerPool, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """The rebased-head path keeps a timed-out push as terminal evidence."""
+        from hephaestus.automation.pipeline.routing import Disposition
+        from hephaestus.automation.pipeline.stages import StageOutcome
+        from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+
+        opaque_value = "OPAQUE_PASSWORD_FIXTURE"
+        source_sha = "c" * 40
+        push = subprocess.TimeoutExpired(
+            ["git", "push"],
+            42,
+            output="push timeout stdout",
+            stderr=f"password={opaque_value}",
+        )
+
+        def fail_push(*_args: object, **_kwargs: object) -> None:
+            git_utils.remaining_operation_timeout(42)
+            raise push
+
+        def revalidate_remote() -> tuple[dict[str, str], tuple[str, ...]]:
+            git_utils.remaining_operation_timeout(42)
+            return {}, ()
+
+        git_utils_mocks.run.side_effect = fail_push
+        with (
+            patch(
+                "hephaestus.automation.git_runtime.time.monotonic",
+                side_effect=(100.0, 102.0),
+            ),
+            git_utils.operation_deadline(101.0),
+        ):
+            result = pool._publish_rebased_head(
+                GitJob("test/repo", "continue_rebase", 42),
+                branch="123-auto-impl",
+                expected_remote_sha="a" * 40,
+                cwd=tmp_path,
+                source_sha=source_sha,
+                remote_env={},
+                remote_config=(),
+                revalidate_remote=revalidate_remote,
+            )
+
+        assert result is not None
+        assert result.ok is False
+        assert result.error == "publish failed: remote probe timeout"
+        assert result.value == {
+            "failure_kind": "publish_timeout",
+            "publication_failure_diagnostic": {
+                "failure_kind": "publication",
+                "phase": "remote_probe",
+                "head_sha": source_sha,
+                "exception_class": "TimeoutExpired",
+                "remote_state": "unverified",
+            },
+        }
+        assert result.stdout_tail == "push timeout stdout"
+        assert opaque_value not in result.stderr_tail
+        assert "<redacted-value>" in result.stderr_tail
+        assert "publication_state" not in result.value
+
+        item = WorkItem(
+            repo="test/repo",
+            kind=ItemKind.PR,
+            issue=3141,
+            pr=3120,
+            stage=StageName.IMPLEMENTATION,
+            state="REBASE_CONTINUE_WAIT",
+        )
+        stage = ImplementationStage()
+        stage.on_job_done(item, result, MagicMock())
+        durable = item.payload["publication_failure_diagnostic"]
+        assert durable["head_sha"] == source_sha
+        assert durable["phase"] == "remote_probe"
+        assert durable["remote_state"] == "unverified"
+        assert durable["stdout_tail"] == "push timeout stdout"
+        assert opaque_value not in durable["stderr_tail"]
+        assert "<redacted>" in durable["stderr_tail"]
+        outcome = stage.step(item, MagicMock())
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert outcome.note.startswith("implementation_rebase_failed:")
+        assert "phase=remote_probe" in outcome.note
+        assert "remote_state=unverified" in outcome.note
+
+    @pytest.mark.parametrize("revalidation_kind", ("command", "authentication"))
+    def test_rebase_publish_revalidation_failure_preserves_push_diagnostics(
+        self,
+        pool: WorkerPool,
+        git_utils_mocks: Any,
+        tmp_path: Path,
+        revalidation_kind: str,
+    ) -> None:
+        """A failed remote revalidation keeps the rejected push evidence."""
+        source_sha = "c" * 40
+        push = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="push stdout",
+            stderr="push stderr",
+        )
+        git_utils_mocks.run.side_effect = push
+
+        def revalidate_remote() -> tuple[dict[str, str], tuple[str, ...]]:
+            if revalidation_kind == "command":
+                raise subprocess.CalledProcessError(
+                    128,
+                    ["git", "remote", "get-url", "origin"],
+                    output="probe stdout",
+                    stderr="probe stderr",
+                )
+            raise worker_pool_module._RemoteGitAuthenticationError(
+                "remote authentication unavailable"
+            )
+
+        result = pool._publish_rebased_head(
+            GitJob("test/repo", "continue_rebase", 42),
+            branch="123-auto-impl",
+            expected_remote_sha="a" * 40,
+            cwd=tmp_path,
+            source_sha=source_sha,
+            remote_env={},
+            remote_config=(),
+            revalidate_remote=revalidate_remote,
+        )
+
+        assert result is not None
+        assert result.ok is False
+        assert result.error == "publish failed: remote probe transport failure"
+        assert result.value["publication_failure_diagnostic"]["remote_state"] == "unverified"
+        assert "push stdout" in result.stdout_tail
+        assert "push stderr" in result.stderr_tail
+        if revalidation_kind == "command":
+            assert result.stdout_tail.index("push stdout") < result.stdout_tail.index(
+                "probe stdout"
+            )
+            assert result.stderr_tail.index("push stderr") < result.stderr_tail.index(
+                "probe stderr"
+            )
+
+    def test_publication_diagnostic_cycle_is_bounded(self, pool: WorkerPool) -> None:
+        """A cyclic wrapped exception cannot block or expose an unbounded stream."""
+        push = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            stderr=("x" * 5000) + " password=private",
+        )
+        failure = git_utils.BranchPublicationRemoteHeadUnchangedError()
+        failure.__cause__ = push
+        push.__context__ = failure
+
+        result = pool._branch_publication_error(failure)
+
+        assert len(result.stderr_tail) <= 4000
+        assert "private" not in result.stderr_tail
+
+    def test_commit_push_hook_failure_preserves_local_head_and_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An ordinary rejected push keeps its immutable head and safe output."""
+        source = "b" * 40
+        baseline = "a" * 40
+        command_failure = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="hook stdout",
+            stderr="password=private hook stderr",
+        )
+        wrapper = RuntimeError("Failed to push writer branch")
+        wrapper.__cause__ = command_failure
+        with (
+            patch.object(pool, "_writer_tracking_head", return_value=baseline),
+            patch.object(pool, "_read_remote_branch_head", return_value=baseline),
+            patch(f"{_WP}.git_utils.push_branch", side_effect=wrapper),
+        ):
+            result = pool._publish_ordinary_writer(
+                GitJob("test/repo", "commit_push", 60),
+                "writer",
+                tmp_path,
+                source,
+                {},
+                (),
+            )
+
+        assert result.ok is False
+        assert result.value == {
+            "publication_state": "remote_unchanged",
+            "head_sha": source,
+            "baseline_remote_sha": baseline,
+            "observed_remote_sha": baseline,
+            "pushed": False,
+            "refresh_phase": None,
+        }
+        assert result.stdout_tail == "hook stdout"
+        assert "private" not in result.stderr_tail
+
+    def test_direct_reservation_hook_failure_preserves_head_and_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A rejected direct push keeps its exact head and safe hook output."""
+        source = "b" * 40
+        baseline = "a" * 40
+        command_failure = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="direct hook stdout",
+            stderr="password=private direct hook stderr",
+        )
+        wrapper = RuntimeError("Failed to publish direct-scope branch")
+        wrapper.__cause__ = command_failure
+        with (
+            patch.object(pool, "_read_publish_head", return_value=source),
+            patch.object(pool, "_read_remote_branch_head", return_value=baseline),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=Mock(return_value=({}, ())),
+            ),
+            patch(
+                f"{_WP}.git_utils.push_branch_if_remote_matches",
+                side_effect=wrapper,
+            ),
+        ):
+            result = pool._publish_commit_push(
+                GitJob(
+                    "test/repo",
+                    "commit_push",
+                    60,
+                    kwargs={"expected_remote_sha": baseline},
+                ),
+                "writer",
+                tmp_path,
+            )
+
+        assert result.ok is False
+        assert result.value == {
+            "failure_kind": "publish_remote_head_unchanged",
+            "publication_failure_diagnostic": {
+                "failure_kind": "publication",
+                "phase": "push",
+                "head_sha": source,
+                "returncode": 1,
+                "exception_class": "CalledProcessError",
+                "remote_state": "unchanged",
+            },
+        }
+        assert result.stdout_tail == "direct hook stdout"
+        assert "private" not in result.stderr_tail
+
+    def test_direct_reservation_probe_failure_uses_probe_metadata(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An unverified direct push reports the failed probe as decisive."""
+        source = "b" * 40
+        baseline = "a" * 40
+        command_failure = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="direct push stdout",
+            stderr="password=private push stderr",
+        )
+        wrapper = RuntimeError("Failed to publish direct-scope branch")
+        wrapper.__cause__ = command_failure
+        probe = JobResult(
+            ok=False,
+            value={"exception_class": "CalledProcessError", "returncode": 9},
+            error="cannot verify remote writer head",
+            stdout_tail="direct probe stdout",
+            stderr_tail="token=private probe stderr",
+        )
+        with (
+            patch.object(pool, "_read_publish_head", return_value=source),
+            patch.object(pool, "_read_remote_branch_head", return_value=probe),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=Mock(return_value=({}, ())),
+            ),
+            patch(
+                f"{_WP}.git_utils.push_branch_if_remote_matches",
+                side_effect=wrapper,
+            ),
+        ):
+            result = pool._publish_commit_push(
+                GitJob(
+                    "test/repo",
+                    "commit_push",
+                    60,
+                    kwargs={"expected_remote_sha": baseline},
+                ),
+                "writer",
+                tmp_path,
+            )
+
+        assert result.ok is False
+        assert result.value == {
+            "failure_kind": "publish_remote_probe_failed",
+            "publication_failure_diagnostic": {
+                "failure_kind": "publication",
+                "phase": "remote_probe",
+                "head_sha": source,
+                "returncode": 9,
+                "exception_class": "CalledProcessError",
+                "remote_state": "unverified",
+            },
+        }
+        assert result.stdout_tail.index("direct push stdout") < result.stdout_tail.index(
+            "direct probe stdout"
+        )
+        assert "private" not in result.stderr_tail
+        assert "publication_state" not in result.value
+        assert "refresh_phase" not in result.value
+
+    def test_run_git_redacts_generic_subprocess_tails(self, pool: WorkerPool) -> None:
+        """The generic Git boundary applies the same redaction and tail bound."""
+        secret = "https://" + "writer:private@example.invalid/repository.git"
+        failure = subprocess.CalledProcessError(
+            7,
+            ["git", "status"],
+            output=("x" * 5000) + secret,
+            stderr="password={}".format("private"),
+        )
+        with patch.object(pool, "_dispatch_locked_git", side_effect=failure):
+            result = pool._run_git(GitJob("test/repo", "commit_push", 60))
+
+        assert result.error == "rc=7"
+        assert len(result.stdout_tail) <= 4000
+        assert secret not in result.stdout_tail
+        assert "private" not in result.stderr_tail
+
+    def test_run_git_timeout_redacts_before_tail_truncation(self, pool: WorkerPool) -> None:
+        """The outer timeout boundary redacts a token before it keeps the tail."""
+        secret_fragment = "private-fragment-" + ("q" * 64)
+        stream = "token=" + ("x" * 180) + secret_fragment + ("z" * 3900)
+        failure = subprocess.TimeoutExpired(
+            ["git", "status"],
+            60,
+            output=stream,
+            stderr=stream,
+        )
+        with patch.object(pool, "_dispatch_locked_git", side_effect=failure):
+            result = pool._run_git(GitJob("test/repo", "commit_push", 60))
+
+        assert result.error == "timeout"
+        assert secret_fragment not in result.stdout_tail
+        assert secret_fragment not in result.stderr_tail
+        assert "<redacted-value>" in result.stdout_tail
+        assert "<redacted-value>" in result.stderr_tail
+
+    def test_source_git_timeout_redacts_before_tail_truncation(self, pool: WorkerPool) -> None:
+        """The source timeout boundary redacts a token before it keeps the tail."""
+        secret_fragment = "private-fragment-" + ("q" * 64)
+        stream = "token=" + ("x" * 180) + secret_fragment + ("z" * 3900)
+        failure = subprocess.TimeoutExpired(
+            ["git", "rebase"],
+            60,
+            output=stream,
+            stderr=stream,
+        )
+        with patch.object(pool, "_git_rebase", side_effect=failure):
+            result = pool._dispatch_source_git_operation(GitJob("test/repo", "rebase", 60), Mock())
+
+        assert result.error == "timeout"
+        assert secret_fragment not in result.stdout_tail
+        assert secret_fragment not in result.stderr_tail
+        assert "<redacted-value>" in result.stdout_tail
+        assert "<redacted-value>" in result.stderr_tail
+
+    def test_source_git_command_failure_redacts_before_tail_truncation(
+        self, pool: WorkerPool
+    ) -> None:
+        """The source command boundary redacts a token before it keeps the tail."""
+        secret_fragment = "private-fragment-" + ("q" * 64)
+        stream = "token=" + ("x" * 180) + secret_fragment + ("z" * 3900)
+        failure = subprocess.CalledProcessError(
+            9,
+            ["git", "rebase"],
+            output=stream,
+            stderr=stream,
+        )
+        with patch.object(pool, "_git_rebase", side_effect=failure):
+            result = pool._dispatch_source_git_operation(GitJob("test/repo", "rebase", 60), Mock())
+
+        assert result.error == "rc=9"
+        assert secret_fragment not in result.stdout_tail
+        assert secret_fragment not in result.stderr_tail
+        assert "<redacted-value>" in result.stdout_tail
+        assert "<redacted-value>" in result.stderr_tail
+
+    @pytest.mark.parametrize(
+        ("operation", "needs_receipt_refresh"),
+        (("rebase", False), ("continue_rebase", True)),
+    )
+    def test_initial_reservation_failure_keeps_publication_diagnostics(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        operation: str,
+        needs_receipt_refresh: bool,
+    ) -> None:
+        """Each initial reservation route keeps safe rejected-push evidence."""
+        original = "a" * 40
+        target = "b" * 40
+        branch = "7-auto-impl"
+        cwd = tmp_path / "writer"
+        cwd.mkdir()
+        state_path = tmp_path / "state" / "7-implementation-start.json"
+        state_path.parent.mkdir()
+        identity: dict[str, object] = {
+            "format": 1,
+            "repository": "test/repo",
+            "repository_identity": "identity",
+            "issue_number": 7,
+            "branch": branch,
+        }
+        job = GitJob(
+            "test/repo",
+            operation,
+            60,
+            kwargs={
+                "cwd": str(cwd),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "branch": branch,
+                "rebase_reason": "implementation_start",
+                "direct_scope_reservation": {"branch": branch, "base_sha": original},
+            },
+        )
+        command_failure = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="hook stdout",
+            stderr="password=private hook stderr",
+        )
+        publication_failure = git_utils.BranchPublicationRemoteHeadUnchangedError(
+            failure_kind="unknown"
+        )
+        publication_failure.__cause__ = command_failure
+        manager = MagicMock()
+        manager._require_receipt.return_value = MagicMock(
+            revision=target,
+            branch=branch,
+            path=cwd,
+        )
+        manager._physical_matches_receipt.return_value = True
+        with (
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=manager),
+            patch.object(pool, "_read_remote_branch_head", return_value=original),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=Mock(return_value=({}, ())),
+            ),
+            patch(
+                f"{_WP}.git_utils.push_head_to_branch",
+                side_effect=publication_failure,
+            ),
+        ):
+            result = pool._record_initial_start(
+                job,
+                JobResult(
+                    ok=True,
+                    value={"rebased": True, "published": False, "head_sha": target},
+                ),
+                state_path,
+                identity,
+            )
+
+        expected_value: dict[str, object] = {
+            "initial_reservation_pending": True,
+            "head_sha": target,
+            "publication_failure_diagnostic": {
+                "failure_kind": "publication",
+                "phase": "push",
+                "head_sha": target,
+                "returncode": 1,
+                "exception_class": "CalledProcessError",
+                "remote_state": "unchanged",
+            },
+        }
+        if needs_receipt_refresh:
+            expected_value["source_receipt_refresh_required"] = True
+        assert result.ok is False
+        assert result.value == expected_value
+        assert result.stdout_tail == "hook stdout"
+        assert "private" not in result.stderr_tail
+        assert not state_path.exists()
+
+    def test_commit_push_probe_failure_orders_push_and_probe_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An ordinary failed probe keeps both command failures in order."""
+        source = "b" * 40
+        baseline = "a" * 40
+        push = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="push stdout",
+            stderr="push stderr",
+        )
+        wrapper = RuntimeError("Failed to push writer branch")
+        wrapper.__cause__ = push
+        probe = JobResult(
+            ok=False,
+            error="cannot verify remote writer head",
+            stdout_tail="probe stdout",
+            stderr_tail="probe stderr",
+        )
+        with (
+            patch.object(pool, "_writer_tracking_head", return_value=baseline),
+            patch.object(pool, "_read_remote_branch_head", return_value=probe),
+            patch(f"{_WP}.git_utils.push_branch", side_effect=wrapper),
+        ):
+            result = pool._publish_ordinary_writer(
+                GitJob("test/repo", "commit_push", 60),
+                "writer",
+                tmp_path,
+                source,
+                {},
+                (),
+            )
+
+        assert result.value == {
+            "publication_state": "probe_failed",
+            "head_sha": source,
+            "baseline_remote_sha": baseline,
+            "observed_remote_sha": None,
+            "pushed": False,
+            "refresh_phase": None,
+        }
+        assert result.stdout_tail.index("push stdout") < result.stdout_tail.index("probe stdout")
+        assert result.stderr_tail.index("push stderr") < result.stderr_tail.index("probe stderr")
 
     def test_continue_rebase_rejects_missing_captured_base_ancestry(
         self, pool: WorkerPool, tmp_path: Path
@@ -20083,6 +21259,43 @@ def test_ordinary_publication_uses_remote_facts(
         "pushed": state == "remote_at_source",
         "refresh_phase": None,
     }
+
+
+def test_ordinary_publication_probe_failure_keeps_push_timeout_metadata(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """An empty probe failure keeps the push timeout classification."""
+    source = "b" * 40
+    baseline = "a" * 40
+    timeout = subprocess.TimeoutExpired(["git", "push"], 60, output="", stderr="")
+    probe = JobResult(ok=False, error="probe failed")
+    with (
+        patch.object(pool, "_read_publish_head", return_value=source),
+        patch.object(pool, "_read_remote_branch_head", return_value=probe),
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+        patch(f"{_WP}.git_utils.run", return_value=subprocess.CompletedProcess([], 0, baseline)),
+        patch(f"{_WP}.git_utils.push_branch", side_effect=timeout),
+    ):
+        result = pool._publish_commit_push(
+            GitJob(repo="example/project", op="commit_push", timeout_s=60),
+            "writer",
+            tmp_path,
+        )
+
+    assert result.value == {
+        "publication_state": "probe_failed",
+        "head_sha": source,
+        "baseline_remote_sha": baseline,
+        "observed_remote_sha": None,
+        "pushed": False,
+        "refresh_phase": None,
+    }
+    assert result.stdout_tail == ""
+    assert result.stderr_tail == ""
+    assert result.process_failure == ProcessFailureMetadata(
+        exception_class="TimeoutExpired",
+        returncode=None,
+    )
 
 
 @pytest.mark.parametrize("case", ["independent", "conflict"])

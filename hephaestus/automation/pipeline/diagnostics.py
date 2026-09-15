@@ -13,12 +13,28 @@ import re
 from collections.abc import Callable
 
 from hephaestus.automation.source_worktree import SourceWorkspaceRecoveryKind
-from hephaestus.diagnostics import bounded_git_diagnostic
+from hephaestus.diagnostics import (
+    redact_git_diagnostic,
+    redact_private_key_blocks,
+    redact_truncated_diagnostic_prefix,
+)
 
 _REDACTION = "<redacted>"
 _REBASE_CONFLICT_OUTCOMES = frozenset(
     {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
 )
+
+
+def _diagnostic_text(value: object) -> str:
+    """Return diagnostic data as decoded text for pipeline redaction."""
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, memoryview):
+        return value.tobytes().decode("utf-8", errors="replace")
+    return str(value)
+
 
 # Whole-value token patterns: the entire match is replaced.
 _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -30,11 +46,6 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     # Stripe-style secret keys
     re.compile(r"\bsk_(?:live|test)_[0-9A-Za-z]{16,}\b"),
-    # Private key blocks (PEM)
-    re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
-        flags=re.DOTALL,
-    ),
 )
 
 
@@ -88,7 +99,7 @@ def redact_diagnostic_text(text: str) -> str:
     conservative: over-redaction is preferable to leaking a token into an
     append-only event log.
     """
-    redacted = text
+    redacted = redact_private_key_blocks(text)
     for pattern in _TOKEN_PATTERNS:
         redacted = pattern.sub(_REDACTION, redacted)
     for pattern, prefix_group, _value_group in _PREFIX_PATTERNS:
@@ -96,12 +107,25 @@ def redact_diagnostic_text(text: str) -> str:
     return redacted
 
 
+def bounded_pipeline_diagnostic(
+    value: object, *, limit: int, prefix_truncated: bool = False
+) -> str:
+    """Return fully redacted pipeline diagnostic text within one size limit."""
+    if limit <= 0:
+        raise ValueError("Pipeline diagnostic limit must be positive")
+    redacted = redact_diagnostic_text(_diagnostic_text(value))
+    redacted = redact_git_diagnostic(redacted)
+    if prefix_truncated:
+        redacted = redact_truncated_diagnostic_prefix(redacted)
+    return redacted[-limit:]
+
+
 def redact_bounded_diagnostic_tails(
     stdout_tail: str, stderr_tail: str, *, limit: int
 ) -> dict[str, str]:
     """Return non-empty diagnostic tails redacted and bounded for persistence."""
     return {
-        key: redact_diagnostic_text(bounded_git_diagnostic(tail, limit=limit))
+        key: bounded_pipeline_diagnostic(tail, limit=limit)
         for key, tail in (("stdout_tail", stdout_tail), ("stderr_tail", stderr_tail))
         if tail
     }

@@ -654,7 +654,16 @@ def push_head_to_branch(
         # contain repository data.  A fresh authoritative ref read classifies
         # only the safe ownership distinction needed by the pipeline.
         if revalidate_remote is not None:
-            env, remote_config = revalidate_remote()
+            try:
+                env, remote_config = revalidate_remote()
+            except subprocess.TimeoutExpired as revalidation_exc:
+                raise BranchPublicationRemoteProbeError(
+                    failure_kind="timeout"
+                ) from revalidation_exc
+            except (OSError, RuntimeError, subprocess.SubprocessError) as revalidation_exc:
+                raise BranchPublicationRemoteProbeError(
+                    failure_kind="transport"
+                ) from revalidation_exc
             run_kwargs = _timeout_kw(timeout)
             run_kwargs["env"] = env
         try:
