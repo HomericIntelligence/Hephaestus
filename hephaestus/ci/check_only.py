@@ -21,6 +21,7 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from pre_commit.all_languages import languages
 from pre_commit.clientlib import load_config
@@ -380,18 +381,15 @@ def _restore(candidate: Path, baseline: Path, names: tuple[str, ...]) -> bool:
     return changed
 
 
-def _finite_environment_patches(
-    additions: Sequence[tuple[str, Any]],
-) -> tuple[tuple[str, Any], ...]:
-    """Replace the parent environment with approved and explicit values."""
+def _hook_environment(additions: Sequence[tuple[str, Any]]) -> dict[str, str]:
+    """Build the approved environment for one candidate hook."""
     environment = read_approved_parent_env()
     for name, value in additions:
         if value is UNSET:
             environment.pop(name, None)
         else:
             environment[name] = value
-    removed = tuple((name, UNSET) for name in os.environ if name not in environment)
-    return (*removed, *environment.items())
+    return environment
 
 
 def _run(source: Path, temporary: Path) -> int:
@@ -415,14 +413,17 @@ def _run(source: Path, temporary: Path) -> int:
         ("PYTHONDONTWRITEBYTECODE", "1"),
         ("PRE_COMMIT_NO_CONCURRENCY", "1"),
     )
-    hook_environment = _finite_environment_patches(patches)
+    hook_environment = _hook_environment(patches)
     failed = False
     with contextlib.chdir(candidate), envcontext(patches):
         config = load_config(".pre-commit-config.yaml")
         selected = _selected(config, names)
         for hook, filenames in selected:
             language = languages[hook.language]
-            with envcontext(hook_environment), language.in_env(hook.prefix, hook.language_version):
+            with (
+                patch.dict("os.environ", hook_environment, clear=True),
+                language.in_env(hook.prefix, hook.language_version),
+            ):
                 status, output = language.run_hook(
                     hook.prefix,
                     hook.entry,
