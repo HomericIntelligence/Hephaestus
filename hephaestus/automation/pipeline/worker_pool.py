@@ -27,7 +27,13 @@ import time
 import uuid
 from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
+from contextlib import (
+    AbstractContextManager,
+    ExitStack,
+    contextmanager,
+    nullcontext,
+    suppress,
+)
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PureWindowsPath
@@ -3904,17 +3910,77 @@ class _GitCheckoutBindingError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class _PreparedCompatibilityLock:
+    """Bind one compatibility-lock path to its open parent identity."""
+
+    path: Path
+    parent_identity: tuple[int, int]
+
+
+@dataclass(frozen=True)
 class _PreparedGitLocks:
     """Hold validated paths needed for one Git lock admission."""
 
     common_lock_path: Path | None
     intake_manager: RepoIntakeManager | None = None
     operational_state_paths: tuple[Path, ...] = ()
+    compatibility_locks: tuple[_PreparedCompatibilityLock, ...] = ()
+    validated_compatibility_paths: tuple[Path, ...] = ()
     authoritative_checkout: Path | None = None
     expected_common_lock_path: Path | None = None
     common_parent_identity: tuple[int, int] | None = None
     validated_repository: str | None = None
     remediation_receipt: RemediationRecoveryReceipt | None = None
+
+
+def _prepare_compatibility_lock_specs(
+    paths: Collection[Path],
+) -> tuple[_PreparedCompatibilityLock, ...]:
+    """Create and bind canonical compatibility-lock parent directories."""
+    if not _secure_dir_fd_supported():
+        raise RuntimeError("secure compatibility-lock directory access is unavailable")
+    canonical_paths = {Path(path).absolute() for path in paths}
+    prepared: list[_PreparedCompatibilityLock] = []
+    for path in sorted(canonical_paths, key=os.fsencode):
+        parent = path.parent
+        descriptor, _identity = _open_directory_no_follow(Path(parent.anchor))
+        try:
+            for component in parent.parts[1:]:
+                try:
+                    child, _identity = _open_directory_at_no_follow(descriptor, component)
+                except FileNotFoundError:
+                    with suppress(FileExistsError):
+                        os.mkdir(component, 0o700, dir_fd=descriptor)
+                    child, _identity = _open_directory_at_no_follow(descriptor, component)
+                os.close(descriptor)
+                descriptor = child
+            metadata = os.fstat(descriptor)
+            prepared.append(
+                _PreparedCompatibilityLock(
+                    path=path,
+                    parent_identity=(metadata.st_dev, metadata.st_ino),
+                )
+            )
+        finally:
+            os.close(descriptor)
+    return tuple(prepared)
+
+
+def _revalidate_compatibility_lock_specs(
+    specifications: Collection[_PreparedCompatibilityLock],
+) -> None:
+    """Require every prepared lock parent to retain its admitted identity."""
+    try:
+        for specification in specifications:
+            descriptor, _identity = _open_directory_no_follow(specification.path.parent)
+            try:
+                metadata = os.fstat(descriptor)
+                if (metadata.st_dev, metadata.st_ino) != specification.parent_identity:
+                    raise RuntimeError("compatibility-lock directory changed")
+            finally:
+                os.close(descriptor)
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        raise RepoIntakeError("repository-intake lock path is unavailable") from exc
 
 
 def _ignore_local_agent_failure(error: BaseException) -> bool:
@@ -6393,6 +6459,14 @@ class WorkerPool:
             prepared = self._prepare_git_locks(job, lock_attempt_started_s)
         common_lock_path = prepared.common_lock_path
         wait_deadline_s = lock_attempt_started_s + lock_wait_timeout_s
+        if prepared.intake_manager is not None:
+            return self._run_intake_git_with_locks(
+                job,
+                prepared=prepared,
+                operation=operation,
+                lock_wait_timeout_s=lock_wait_timeout_s,
+                wait_deadline_s=wait_deadline_s,
+            )
         repo_lock_options: dict[str, Any] = {}
         if common_lock_path is not None:
             repo_lock_options["wait_deadline_s"] = wait_deadline_s
@@ -6416,6 +6490,56 @@ class WorkerPool:
             ):
                 self._revalidate_prepared_common_lock(prepared)
                 return self._dispatch_admitted_git(job, prepared)
+
+    def _run_intake_git_with_locks(
+        self,
+        job: GitJob,
+        *,
+        prepared: _PreparedGitLocks,
+        operation: str,
+        lock_wait_timeout_s: float,
+        wait_deadline_s: float,
+    ) -> JobResult:
+        """Hold every registered compatibility lock for one intake operation."""
+        with self._repo_lock(
+            job.repo,
+            operation=operation,
+            timeout_s=lock_wait_timeout_s,
+            deadline_s=job.deadline_s,
+            wait_deadline_s=wait_deadline_s,
+            include_file_lock=False,
+        ):
+            with ExitStack() as compatibility_locks:
+                for specification in prepared.compatibility_locks:
+                    entry = RepositoryOperationLock(
+                        job.repo,
+                        lock_path=specification.path,
+                        existing_parent_identity=specification.parent_identity,
+                        shutdown=self._shutdown,
+                        monotonic=time.monotonic,
+                    )
+                    compatibility_locks.enter_context(
+                        entry.acquire(
+                            operation=operation,
+                            timeout_s=lock_wait_timeout_s,
+                            deadline_s=job.deadline_s,
+                            wait_deadline_s=wait_deadline_s,
+                        )
+                    )
+                _revalidate_compatibility_lock_specs(prepared.compatibility_locks)
+                self._revalidate_prepared_common_lock(prepared)
+                with self._git_common_lock(
+                    job.repo,
+                    prepared.common_lock_path,
+                    operation=operation,
+                    timeout_s=lock_wait_timeout_s,
+                    deadline_s=job.deadline_s,
+                    wait_deadline_s=wait_deadline_s,
+                    existing_parent_identity=prepared.common_parent_identity,
+                ):
+                    self._revalidate_prepared_common_lock(prepared)
+                    _revalidate_compatibility_lock_specs(prepared.compatibility_locks)
+                    return self._dispatch_admitted_git(job, prepared)
 
     def _prepare_git_locks(
         self,
@@ -6585,7 +6709,20 @@ class WorkerPool:
             validation_deadline_s,
             shutdown=self._shutdown,
         ):
-            manager.validate(operational_state_paths=operational_state_paths)
+            registered_lock_paths = manager.validate(
+                operational_state_paths=operational_state_paths
+            )
+        compatibility_lock_paths = (
+            (legacy_lock_path,) if self._lock_dir is not None else registered_lock_paths
+        )
+        if not compatibility_lock_paths:
+            raise RepoIntakeError(
+                "repository-intake compatibility-lock registration is unavailable"
+            )
+        try:
+            compatibility_locks = _prepare_compatibility_lock_specs(compatibility_lock_paths)
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise RepoIntakeError("repository-intake lock path is unavailable") from exc
         try:
             common_lock_path = _intake_common_lock_path(manager)
             parent_identity = _git_common_parent_identity(common_lock_path)
@@ -6595,6 +6732,8 @@ class WorkerPool:
             common_lock_path,
             intake_manager=manager,
             operational_state_paths=operational_state_paths,
+            compatibility_locks=compatibility_locks,
+            validated_compatibility_paths=registered_lock_paths,
             authoritative_checkout=manager.caller_root,
             expected_common_lock_path=common_lock_path,
             common_parent_identity=parent_identity,
@@ -6679,6 +6818,7 @@ class WorkerPool:
                     manager=prepared.intake_manager,
                     operational_state_paths=prepared.operational_state_paths,
                     admitted_metadata_lock=common_lock_path,
+                    expected_compatibility_lock_paths=(prepared.validated_compatibility_paths),
                 )
             if prepared.remediation_receipt is not None:
                 return self._git_publish_remediation_recovery(
@@ -9476,6 +9616,7 @@ class WorkerPool:
         manager: RepoIntakeManager | None = None,
         operational_state_paths: Collection[Path] = (),
         admitted_metadata_lock: Path | None = None,
+        expected_compatibility_lock_paths: Collection[Path] | None = None,
     ) -> JobResult:
         """Prepare an isolated intake worktree without touching the caller."""
         try:
@@ -9501,6 +9642,7 @@ class WorkerPool:
                         receipt = manager.prepare(
                             operational_state_paths=operational_state_paths,
                             admitted_metadata_lock=admitted_metadata_lock,
+                            expected_compatibility_lock_paths=(expected_compatibility_lock_paths),
                         )
                     else:
                         receipt = manager.prepare()

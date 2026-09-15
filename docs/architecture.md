@@ -2137,12 +2137,15 @@ primary lock, and then clears and releases the in-process lock. A cleanup
 failure produces a bounded warning. It does not replace a completed Git result.
 The next holder removes a stale regular record before it publishes a new one.
 
-An old ordinary worker uses only the compatibility primary lock. A current
-`prepare_intake` job also takes that lock after validation. Thus, the intake
-job cannot race an old `fetch_main` job. An old metadata-lock user uses the
-exact Git common-directory primary. A current waiter that cannot verify its
-owner data returns `lock_metadata_error`. These two compatibility paths keep
-shared Git metadata safe during rollback.
+An old ordinary worker uses only the compatibility primary lock in its current
+worktree. A current `prepare_intake` job gets the compatibility primary path
+for each registered worktree root. It removes duplicate paths, sorts the paths
+by path bytes, and acquires each path before the Git common-directory lock.
+Thus, the intake job cannot race an old `fetch_main` job in the primary
+worktree or a linked worktree. An old metadata-lock user uses the exact Git
+common-directory primary. A current waiter that cannot verify its owner data
+returns `lock_metadata_error`. These compatibility paths keep shared Git
+metadata safe during rollback.
 
 Before common-lock creation, a source job validates its workspace shape,
 repository relation, canonical reusable root, canonical worktree common
@@ -2177,10 +2180,15 @@ Exact live-state guards remain authoritative across processes.
 
 `prepare_intake` constructs its manager and validates the caller before lock
 admission. Thus, the first validation does not create `DEFAULT_STATE_DIR` in
-the caller. After validation, intake takes the compatibility and Git
-common-directory lock pairs. The compatibility lock files are operational
-state. A second validation ignores only the exact primary, owner sentinel, and
-owner record for this lock. It continues to reject all other caller state.
+the caller. The first validation returns the compatibility primary path for
+each registered worktree root. After this validation, the worker creates or
+opens each compatibility lock directory securely and binds its device and inode
+identity. It then acquires each compatibility lock before the Git
+common-directory lock. The compatibility lock files are operational state. A
+second validation permits only the exact primary, owner sentinel, and owner
+record in each registered worktree root. It continues to reject all other
+caller state. It recomputes the registered lock set and stops before mutation
+if the set changed.
 
 The intake job then takes a nonblocking run-lifetime lease at
 `<git-common-dir>/hephaestus-repository-intake.run.lock`. The main worker pool

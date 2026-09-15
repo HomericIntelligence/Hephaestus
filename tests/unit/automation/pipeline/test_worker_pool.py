@@ -21,7 +21,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Collection, Generator, Iterator
 from concurrent.futures import Future
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import replace
@@ -20579,10 +20579,11 @@ class TestGitLocking:
         manager.caller_root = caller
         manager.run_lease.side_effect = run_lease
 
-        def validate(**_kwargs: object) -> None:
+        def validate(**_kwargs: object) -> tuple[Path, ...]:
             assert events == ["manager"]
             assert not caller_state.exists()
             events.append("validate")
+            return (caller_state / "locks" / "git-acme_repo.lock",)
 
         manager.validate.side_effect = validate
 
@@ -24506,6 +24507,279 @@ def _intake_job(repo: Path) -> GitJob:
         timeout_s=30,
         kwargs={"repo": "acme/repo", "caller_root": str(repo)},
     )
+
+
+def test_linked_intake_reuses_primary_receipt_after_compatibility_lock_remains(
+    completion_q: CompletionQueue,
+    shutdown_event: threading.Event,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A linked caller accepts the primary compatibility lock after lease release."""
+    primary, _predecessor, _head = _worker_repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    linked = tmp_path / "linked"
+    _git(primary, "worktree", "add", "--detach", str(linked), "HEAD")
+    _git(primary, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+    )
+
+    try:
+        with (
+            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+            patch(
+                f"{_WP}.RepoIntakeManager",
+                side_effect=_local_intake_manager_factory(remote),
+            ),
+        ):
+            monkeypatch.chdir(primary)
+            first = pool._run_git(_intake_job(primary))
+            assert first.ok is True, first.error
+            assert isinstance(first.value, dict)
+
+            primary_lock = _repo_lock_path("acme/repo")
+            pool.release_repo_intake_leases()
+            assert primary_lock.is_file()
+
+            monkeypatch.chdir(linked)
+            second = pool._run_git(_intake_job(linked))
+
+        assert second.ok is True, second.error
+        assert isinstance(second.value, dict)
+        assert second.value == first.value
+        assert second.value["revision"] == first.value["revision"]
+        assert second.value["generation"] == first.value["generation"]
+    finally:
+        pool.release_repo_intake_leases()
+        pool.shutdown()
+
+
+def test_linked_intake_waits_for_primary_default_compatibility_lock(
+    completion_q: CompletionQueue,
+    shutdown_event: threading.Event,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A linked caller cannot bypass the primary compatibility lock."""
+    primary, _predecessor, _head = _worker_repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    linked = tmp_path / "linked"
+    _git(primary, "worktree", "add", "--detach", str(linked), "HEAD")
+    _git(primary, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+    )
+    job = replace(
+        _intake_job(linked),
+        repository_lock_wait_timeout_s=1.0,
+    )
+
+    try:
+        monkeypatch.chdir(primary)
+        holder = RepositoryOperationLock("acme/repo")
+        with (
+            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+            patch(
+                f"{_WP}.RepoIntakeManager",
+                side_effect=_local_intake_manager_factory(remote),
+            ),
+            patch.object(
+                pool,
+                "_git_prepare_intake",
+                return_value=JobResult(ok=True),
+            ) as dispatch,
+            holder.acquire(operation="fetch_main", timeout_s=1),
+        ):
+            monkeypatch.chdir(linked)
+            result = pool._run_git(job)
+
+        assert result.ok is False
+        assert result.error == "lock_timeout"
+        dispatch.assert_not_called()
+    finally:
+        pool.release_repo_intake_leases()
+        pool.shutdown()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hard-link lock validation requires POSIX")
+def test_linked_intake_rejects_hard_linked_primary_compatibility_lock(
+    completion_q: CompletionQueue,
+    shutdown_event: threading.Event,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A linked caller rejects an unsafe lock in the non-selected primary root."""
+    primary, _predecessor, _head = _worker_repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    linked = tmp_path / "linked"
+    _git(primary, "worktree", "add", "--detach", str(linked), "HEAD")
+    _git(primary, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+    )
+    job = replace(
+        _intake_job(linked),
+        repository_lock_wait_timeout_s=1.0,
+    )
+
+    try:
+        monkeypatch.chdir(primary)
+        primary_lock = _repo_lock_path("acme/repo")
+        primary_lock.parent.mkdir(parents=True)
+        unrelated = tmp_path / "unrelated-lock"
+        unrelated.write_bytes(b"unchanged")
+        unrelated.chmod(0o600)
+        os.link(unrelated, primary_lock)
+
+        with (
+            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+            patch(
+                f"{_WP}.RepoIntakeManager",
+                side_effect=_local_intake_manager_factory(remote),
+            ),
+            patch.object(
+                pool,
+                "_git_prepare_intake",
+                return_value=JobResult(ok=True),
+            ) as dispatch,
+        ):
+            monkeypatch.chdir(linked)
+            result = pool._run_git(job)
+
+        assert result.ok is False
+        assert result.error == "lock_metadata_error"
+        dispatch.assert_not_called()
+        assert unrelated.read_bytes() == b"unchanged"
+        assert unrelated.stat().st_nlink == 2
+    finally:
+        pool.release_repo_intake_leases()
+        pool.shutdown()
+
+
+def test_intake_rejects_registered_lock_directory_replacement_after_admission(
+    completion_q: CompletionQueue,
+    shutdown_event: threading.Event,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intake rejects a registered lock directory replaced during common-lock entry."""
+    primary, _predecessor, _head = _worker_repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    linked = tmp_path / "linked"
+    _git(primary, "worktree", "add", "--detach", str(linked), "HEAD")
+    _git(primary, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    linked_lock_directory = linked / DEFAULT_STATE_DIR / "locks"
+    moved_lock_directory = tmp_path / "moved-linked-locks"
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+    )
+
+    @contextmanager
+    def replace_lock_directory(*_args: object, **_kwargs: object) -> Iterator[None]:
+        assert linked_lock_directory.is_dir()
+        linked_lock_directory.rename(moved_lock_directory)
+        linked_lock_directory.mkdir(mode=0o700)
+        yield
+
+    try:
+        monkeypatch.chdir(primary)
+        with (
+            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+            patch(
+                f"{_WP}.RepoIntakeManager",
+                side_effect=_local_intake_manager_factory(remote),
+            ),
+            patch.object(pool, "_git_common_lock", side_effect=replace_lock_directory),
+            patch.object(
+                pool,
+                "_git_prepare_intake",
+                return_value=JobResult(ok=True),
+            ) as dispatch,
+        ):
+            result = pool._run_git(_intake_job(primary))
+
+        assert result.ok is False
+        assert result.error == "repository-intake lock path is unavailable"
+        dispatch.assert_not_called()
+    finally:
+        pool.release_repo_intake_leases()
+        pool.shutdown()
+
+
+def test_intake_rejects_worktree_registration_drift_before_prepare(
+    completion_q: CompletionQueue,
+    shutdown_event: threading.Event,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intake stops before mutation when its registered lock set changes."""
+    primary, _predecessor, _head = _worker_repository(tmp_path)
+    remote = tmp_path / "remote.git"
+    linked = tmp_path / "linked"
+    added = tmp_path / "added"
+    _git(primary, "worktree", "add", "--detach", str(linked), "HEAD")
+    _git(primary, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+    )
+    managers: list[RepoIntakeManager] = []
+    manager_factory = _local_intake_manager_factory(remote)
+    prepare_specs = worker_pool_module._prepare_compatibility_lock_specs
+
+    def record_manager(caller_root: Path, **kwargs: Any) -> RepoIntakeManager:
+        manager = manager_factory(caller_root, **kwargs)
+        managers.append(manager)
+        return manager
+
+    def add_registered_worktree(paths: Collection[Path]) -> Any:
+        specifications = prepare_specs(paths)
+        _git(primary, "worktree", "add", "--detach", str(added), "HEAD")
+        return specifications
+
+    try:
+        monkeypatch.chdir(primary)
+        with (
+            patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+            patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+            patch(f"{_WP}.RepoIntakeManager", side_effect=record_manager),
+            patch(
+                f"{_WP}._prepare_compatibility_lock_specs",
+                side_effect=add_registered_worktree,
+            ),
+            patch.object(RepoIntakeManager, "_fetch", autospec=True) as fetch,
+            patch.object(RepoIntakeManager, "_add_worktree", autospec=True) as add_worktree,
+            patch.object(RepoIntakeManager, "_write_receipt", autospec=True) as write_receipt,
+        ):
+            result = pool._run_git(_intake_job(primary))
+
+        assert result.ok is False
+        assert result.error == (
+            "repository-intake worktree registration changed before preparation"
+        )
+        fetch.assert_not_called()
+        add_worktree.assert_not_called()
+        write_receipt.assert_not_called()
+        assert len(managers) == 1
+        assert not managers[0].receipt_path.exists()
+        assert not managers[0].worktree_path.exists()
+    finally:
+        pool.release_repo_intake_leases()
+        pool.shutdown()
 
 
 def test_prepare_intake_rejects_unexpected_origin_at_worker_entry(
