@@ -1040,6 +1040,7 @@ _HOST_VERIFICATION_SCRATCH_MAX_BYTES = 512 * 1024 * 1024
 _HOST_VERIFICATION_POLL_S = 0.05
 _HOST_VERIFICATION_SETUP_TIMEOUT_S = 30
 _HOST_VERIFICATION_GIT_EXEC_OUTPUT_MAX_BYTES = 4096
+_HOST_VERIFICATION_DIAGNOSTIC_PROCESSING_MAX_BYTES = 64 * 1024
 _LINUX_RESOURCE_LIMIT_BOOTSTRAP = (
     "import os, resource, sys\n"
     "limits = ((resource.RLIMIT_CPU, int(sys.argv[1])), "
@@ -2276,7 +2277,15 @@ def _tail_file(path: Path) -> str:
     """Read a bounded diagnostic tail from a resource-limited child log."""
     try:
         with path.open("rb") as output:
-            return bounded_pipeline_diagnostic(output.read(), limit=_TAIL)
+            output.seek(0, os.SEEK_END)
+            size = output.tell()
+            start = max(size - _HOST_VERIFICATION_DIAGNOSTIC_PROCESSING_MAX_BYTES, 0)
+            output.seek(start)
+            return bounded_pipeline_diagnostic(
+                output.read(_HOST_VERIFICATION_DIAGNOSTIC_PROCESSING_MAX_BYTES),
+                limit=_TAIL,
+                prefix_truncated=start > 0,
+            )
     except OSError:
         return ""
 
@@ -13034,7 +13043,9 @@ class WorkerPool:
                 push_stderr, observed.stderr_tail if isinstance(observed, JobResult) else ""
             ),
             process_failure=(
-                observed.process_failure if isinstance(observed, JobResult) else push_failure
+                observed.process_failure or push_failure
+                if isinstance(observed, JobResult)
+                else push_failure
             ),
         )
         if not direct_reservation:

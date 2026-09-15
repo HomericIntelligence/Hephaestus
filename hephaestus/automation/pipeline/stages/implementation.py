@@ -4125,7 +4125,10 @@ class ImplementationStage(Stage):
             isinstance(item.payload.get("remediation_pretest_input"), RemediationPretestInput)
             and not result.ok
         ):
-            item.payload[_COMMIT_PUSH_TERMINAL] = "remediation_pretest_publication_failed"
+            summary = _store_publication_failure_diagnostic(item, result)
+            item.payload[_COMMIT_PUSH_TERMINAL] = (
+                f"remediation_pretest_publication_failed: {summary}"
+            )
             return
         result = _consume_writer_publication(item, result)
         if _COMMIT_PUSH_TERMINAL in item.payload:
@@ -4176,13 +4179,7 @@ class ImplementationStage(Stage):
         recovery_commit = receipt.get("recovery_commit_sha")
         if is_full_commit_sha(recovery_commit):
             item.payload["remediation_recovery_commit_sha"] = recovery_commit
-        diagnostic = _publication_failure_diagnostic(result)
-        if diagnostic is not None:
-            item.payload["publication_failure_diagnostic"] = diagnostic
-            item.payload["git_failure_summary"] = _git_failure_summary(diagnostic)
-        else:
-            item.payload.pop("publication_failure_diagnostic", None)
-            item.payload["git_failure_summary"] = _git_failure_fallback(result)
+        _store_publication_failure_diagnostic(item, result)
         item.payload["git_error"] = True
 
     @staticmethod
@@ -5533,11 +5530,25 @@ def _git_failure_summary(diagnostic: dict[str, object]) -> str:
         ("phase", diagnostic.get("phase")),
         ("remote_state", diagnostic.get("remote_state")),
         ("returncode", diagnostic.get("returncode")),
+        ("exception_class", diagnostic.get("exception_class")),
         ("stderr", diagnostic.get("stderr_tail")),
         ("stdout", diagnostic.get("stdout_tail")),
     )
     summary = "; ".join(f"{key}={value}" for key, value in ordered if value not in {None, ""})
     return redact_diagnostic_text(summary)[:500]
+
+
+def _store_publication_failure_diagnostic(item: WorkItem, result: JobResult) -> str:
+    """Store one validated publication diagnostic and return its summary."""
+    diagnostic = _publication_failure_diagnostic(result)
+    if diagnostic is not None:
+        item.payload["publication_failure_diagnostic"] = diagnostic
+        summary = _git_failure_summary(diagnostic)
+    else:
+        item.payload.pop("publication_failure_diagnostic", None)
+        summary = _git_failure_fallback(result)
+    item.payload["git_failure_summary"] = summary
+    return summary
 
 
 def _git_failure_fallback(result: JobResult) -> str:

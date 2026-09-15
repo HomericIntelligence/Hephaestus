@@ -53,6 +53,19 @@ def test_redacts_private_key_blocks() -> None:
     assert result.endswith("after")
 
 
+def test_combined_diagnostic_redacts_pem_before_git_assignments() -> None:
+    """The combined helper masks a PEM block before Git assignment rules."""
+    begin = "-----BEGIN " + "PRIVATE KEY" + "-----"
+    end = "-----END " + "PRIVATE KEY" + "-----"
+    key_material = "TEST ONLY PRIVATE KEY BODY"
+    diagnostic = f"before\nclient_secret={begin}\n{key_material}\n{end}\nafter"
+
+    result = bounded_pipeline_diagnostic(diagnostic, limit=200)
+
+    assert result == "before\nclient_secret=<redacted>\nafter"
+    assert key_material not in result
+
+
 def test_leaves_plain_diagnostics_unchanged() -> None:
     """Non-secret diagnostic text passes through byte-for-byte unchanged."""
     text = "pytest output duplicate ADR number 0027\n1 failed in 0.3s"

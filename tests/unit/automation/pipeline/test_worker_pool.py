@@ -13,6 +13,7 @@ import re
 import selectors
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -75,6 +76,7 @@ from hephaestus.automation.pipeline.jobs import (
     GitJob,
     JobHandle,
     JobResult,
+    ProcessFailureMetadata,
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.reply_handoff import (
@@ -82,6 +84,11 @@ from hephaestus.automation.pipeline.reply_handoff import (
 )
 from hephaestus.automation.pipeline.repository_lock import LockTimeoutError
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.stages import pr_review_receipts
+from hephaestus.automation.pipeline.stages.pr_review_verification import (
+    _PYTHON_HOST_VERIFICATION_SPECS,
+)
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
     _bounded_candidate_commit_paths,
@@ -112,6 +119,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _repo_lock_path,
     _run_bounded_git_output,
     _run_bounded_host_command,
+    _tail_file,
     _trusted_gh_executable,
     _trusted_git_executable,
     _unsafe_local_git_config_key,
@@ -3905,10 +3913,11 @@ class TestWorkerPoolSubmitComplete:
         assert host_command.call_args.kwargs["git_system_config"] == (tmp_path / "gitconfig")
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
 
-    def test_immutable_archive_failure_redacts_before_source_reader_bound(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("selector_supported", [True, False])
+    def test_immutable_archive_failure_redacts_pem_in_durable_receipt(
+        self, tmp_path: Path, selector_supported: bool
     ) -> None:
-        """An archive failure redacts credentials before the source reader bound."""
+        """Both archive readers mask a PEM assignment before durable storage."""
         receipt_dir = tmp_path / f"pipeline-receipts-{'a' * 32}"
         worker = WorkerPool(
             size=1,
@@ -3917,10 +3926,10 @@ class TestWorkerPoolSubmitComplete:
             lock_dir=tmp_path / "locks",
             evidence_receipt_dir=receipt_dir,
         )
-        credential_tail = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEF"
-        credential_value = ("q" * 4100) + credential_tail
-        archive_stderr = f"api_key={credential_value}"
-        surviving_suffixes = tuple(credential_tail[index:] for index in range(len(credential_tail)))
+        begin = "-----BEGIN " + "PRIVATE KEY" + "-----"
+        end = "-----END " + "PRIVATE KEY" + "-----"
+        key_material = "OPAQUE REDACTION FIXTURE"
+        archive_stderr = f"client_secret={begin}\n{key_material}\n{end}"
         job = BuildTestJob(
             repo="test/repo",
             cwd=tmp_path,
@@ -3975,6 +3984,10 @@ class TestWorkerPoolSubmitComplete:
                     f"{_WP}._verifier_owned_runtime_environment",
                     return_value=Path(sys.prefix),
                 ),
+                patch(
+                    "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
+                    return_value=selector_supported,
+                ),
                 patch(f"{_WP}._run_bounded_git_output", side_effect=fail_archive_reader),
             ):
                 result = worker._run(
@@ -3988,11 +4001,112 @@ class TestWorkerPoolSubmitComplete:
         worker_diagnostic = "\n".join((result.error or "", result.stdout_tail, result.stderr_tail))
         receipt_paths = list(receipt_dir.glob("*.json"))
         assert len(receipt_paths) == 1
-        receipt_text = receipt_paths[0].read_text(encoding="utf-8")
-        assert credential_value not in worker_diagnostic
-        assert all(suffix not in worker_diagnostic for suffix in surviving_suffixes)
-        assert credential_value not in receipt_text
-        assert all(suffix not in receipt_text for suffix in surviving_suffixes)
+        evidence_receipt_text = receipt_paths[0].read_text(encoding="utf-8")
+        item = WorkItem(
+            repo="test/repo",
+            kind=ItemKind.PR,
+            issue=2797,
+            pr=3120,
+            payload={
+                "reviewed_pr_head_sha": "a" * 40,
+                "host_verification_receipts": [],
+            },
+        )
+        with patch.object(
+            pr_review_receipts,
+            "_payload_host_verification_specs",
+            return_value=(_PYTHON_HOST_VERIFICATION_SPECS[0],),
+        ):
+            pr_review_receipts.store_host_verification_result(item, result)
+        host_receipt_text = json.dumps(item.payload["host_verification_receipts"])
+
+        assert "<redacted>" in worker_diagnostic
+        assert key_material not in worker_diagnostic
+        assert begin not in worker_diagnostic
+        assert end not in worker_diagnostic
+        assert key_material not in evidence_receipt_text
+        assert key_material not in host_receipt_text
+        assert begin not in host_receipt_text
+        assert end not in host_receipt_text
+
+    @pytest.mark.skipif(os.name != "posix", reason="The deadline uses POSIX interval timers")
+    def test_host_log_tail_bounds_repeated_unmatched_pem_markers(self, tmp_path: Path) -> None:
+        """A 64 MiB marker log must produce its bounded tail before the host deadline."""
+        marker = b"-----BEGIN " + b"PRIVATE KEY" + b"-----\n"
+        log_path = tmp_path / "stdout.log"
+        target_size = 64 * 1024 * 1024
+        chunk = marker * 2048
+        with log_path.open("wb") as output:
+            remaining = target_size
+            while remaining:
+                written = chunk[:remaining]
+                output.write(written)
+                remaining -= len(written)
+
+        def deadline_expired(_signum: int, _frame: object) -> None:
+            raise AssertionError("host diagnostic processing exceeded its fixed deadline")
+
+        previous_handler = signal.signal(signal.SIGALRM, deadline_expired)
+        signal.setitimer(signal.ITIMER_REAL, 2.0)
+        try:
+            result = _tail_file(log_path)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+        assert len(result) <= 4000
+
+    def test_host_log_tail_redacts_pem_across_processing_bound(self, tmp_path: Path) -> None:
+        """A PEM block that starts before the read window stays fully masked."""
+        begin = b"-----BEGIN " + b"PRIVATE KEY" + b"-----\n"
+        end = b"-----END " + b"PRIVATE KEY" + b"-----\n"
+        key_line = b"OPAQUE REDACTION FIXTURE\n"
+        log_path = tmp_path / "stderr.log"
+        log_path.write_bytes(begin + (key_line * 3000) + end + b"after\n")
+
+        result = _tail_file(log_path)
+
+        assert result == "<redacted>\nafter\n"
+        assert key_line.decode().strip() not in result
+
+    @pytest.mark.parametrize(
+        ("discarded_prefix", "window_prefix", "terminator", "expected"),
+        (
+            (
+                b"Authorization: Bearer",
+                b" ",
+                b"\n",
+                "<redacted-value>\nafter\n",
+            ),
+            (
+                b"password=",
+                b'"',
+                b'"\n',
+                '<redacted-value>"\nafter\n',
+            ),
+        ),
+        ids=("space-after-authorization", "quote-after-password"),
+    )
+    def test_host_log_tail_masks_secret_when_window_starts_on_boundary(
+        self,
+        tmp_path: Path,
+        discarded_prefix: bytes,
+        window_prefix: bytes,
+        terminator: bytes,
+        expected: str,
+    ) -> None:
+        """A read window boundary must not expose the suffix of a secret value."""
+        log_path = tmp_path / "stdout.log"
+        after = b"after\n"
+        secret_tail = b"OPAQUE_SUFFIX_FIXTURE"
+        secret_size = 64 * 1024 - len(window_prefix) - len(terminator) - len(after)
+        secret = (b"x" * (secret_size - len(secret_tail))) + secret_tail
+        log_path.write_bytes(discarded_prefix + window_prefix + secret + terminator + after)
+
+        result = _tail_file(log_path)
+
+        assert result == expected
+        assert secret_tail.decode() not in result
 
     def test_immutable_build_test_rejects_missing_linux_pyxis_image_before_execution(
         self, pool: WorkerPool, tmp_path: Path
@@ -20733,6 +20847,43 @@ def test_ordinary_publication_uses_remote_facts(
         "pushed": state == "remote_at_source",
         "refresh_phase": None,
     }
+
+
+def test_ordinary_publication_probe_failure_keeps_push_timeout_metadata(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """An empty probe failure keeps the push timeout classification."""
+    source = "b" * 40
+    baseline = "a" * 40
+    timeout = subprocess.TimeoutExpired(["git", "push"], 60, output="", stderr="")
+    probe = JobResult(ok=False, error="probe failed")
+    with (
+        patch.object(pool, "_read_publish_head", return_value=source),
+        patch.object(pool, "_read_remote_branch_head", return_value=probe),
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+        patch(f"{_WP}.git_utils.run", return_value=subprocess.CompletedProcess([], 0, baseline)),
+        patch(f"{_WP}.git_utils.push_branch", side_effect=timeout),
+    ):
+        result = pool._publish_commit_push(
+            GitJob(repo="example/project", op="commit_push", timeout_s=60),
+            "writer",
+            tmp_path,
+        )
+
+    assert result.value == {
+        "publication_state": "probe_failed",
+        "head_sha": source,
+        "baseline_remote_sha": baseline,
+        "observed_remote_sha": None,
+        "pushed": False,
+        "refresh_phase": None,
+    }
+    assert result.stdout_tail == ""
+    assert result.stderr_tail == ""
+    assert result.process_failure == ProcessFailureMetadata(
+        exception_class="TimeoutExpired",
+        returncode=None,
+    )
 
 
 @pytest.mark.parametrize("case", ["independent", "conflict"])

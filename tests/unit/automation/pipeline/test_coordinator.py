@@ -4665,6 +4665,59 @@ class TestDurableEventLog:
         assert all(suffix not in durable_diagnostic for suffix in surviving_suffixes)
         assert "api_key=<redacted>" in durable_diagnostic
 
+    def test_event_log_redacts_worker_pem_before_git_assignments(self, tmp_path: Path) -> None:
+        """A worker and its durable event mask a complete assigned PEM block."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        begin = "-----BEGIN " + "PRIVATE KEY" + "-----"
+        end = "-----END " + "PRIVATE KEY" + "-----"
+        key_material = "TEST ONLY PRIVATE KEY BODY"
+        stream = f"before\nclient_secret={begin}\n{key_material}\n{end}\nafter"
+        job = BuildTestJob("repo-a", tmp_path, ("test-command",), 10)
+        worker = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            with patch.object(
+                worker,
+                "_execute_job",
+                return_value=JobResult(ok=False, error="rc=1", stderr_tail=stream),
+            ):
+                result = worker._run(job)
+        finally:
+            worker.shutdown()
+
+        assert key_material not in result.stderr_tail
+        assert result.stderr_tail == "before\nclient_secret=<redacted>\nafter"
+
+        pool = FakeWorkerPool()
+        pool.queue_result(result)
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                loops=1,
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(pool, None),
+            stages={StageName.PLANNING: StubStage()},
+            install_signals=False,
+        )
+        coordinator._submit(
+            claim_test_item(coordinator, _issue_item(49, StageName.PLANNING)),
+            JobRequest(job, "REVIEWED"),
+        )
+        coordinator._drain_completions()
+
+        event_text = event_log_path.read_text()
+        assert key_material not in event_text
+        assert "client_secret=<redacted>" in event_text
+
     def test_submit_forwards_claim_context_to_worker_pool(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

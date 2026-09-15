@@ -53,6 +53,7 @@ from hephaestus.automation.pipeline.jobs import (
     BuildTestJob,
     GitJob,
     JobResult,
+    ProcessFailureMetadata,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
@@ -1596,7 +1597,38 @@ class TestGate:
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL,
             "implementation_rebase_failed: failure_kind=signing; "
-            "phase=rebase_continue; returncode=128; stderr=safe stderr; stdout=safe stdout",
+            "phase=rebase_continue; returncode=128; exception_class=CalledProcessError; "
+            "stderr=safe stderr; stdout=safe stdout",
+        )
+
+    def test_rebase_timeout_classification_reaches_terminal_reason(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An empty rebase timeout stays classified in the terminal reason."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="host rebase rebase_continue timed out",
+                value={
+                    "failure_kind": "continuation",
+                    "phase": "rebase_continue",
+                    "exception_class": "TimeoutExpired",
+                    "receipt_error": "",
+                },
+            ),
+            ctx,
+        )
+
+        item.state = "REBASE_CONTINUE_WAIT"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "implementation_rebase_failed: failure_kind=continuation; "
+            "phase=rebase_continue; exception_class=TimeoutExpired",
         )
 
     def test_rebase_continuation_failure_redacts_all_durable_diagnostics(
@@ -1672,7 +1704,8 @@ class TestGate:
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL,
             "implementation_rebase_failed: failure_kind=publication; phase=push; "
-            "remote_state=unchanged; returncode=1; stderr=hook rejected",
+            "remote_state=unchanged; returncode=1; exception_class=CalledProcessError; "
+            "stderr=hook rejected",
         )
 
     @pytest.mark.parametrize("queue_state", ["REBASE_WAIT", "REBASE_CONTINUE_WAIT"])
@@ -1722,7 +1755,8 @@ class TestGate:
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL,
             "implementation_rebase_failed: failure_kind=publication; phase=push; "
-            "remote_state=changed; returncode=1; stderr=remote moved",
+            "remote_state=changed; returncode=1; exception_class=CalledProcessError; "
+            "stderr=remote moved",
         )
 
     def test_successful_conflict_agent_requires_host_completion_before_flags_clear(
@@ -8639,7 +8673,8 @@ def test_pretest_recovery_routes_only_exact_worker_evidence_to_tests(
 def test_pretest_publication_failure_does_not_refresh_writer(
     tmp_path: Path, make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A possibly consumed candidate stops after publication failure."""
+    """A pretest publication failure keeps its safe terminal diagnostic."""
+    credential = "".join(("private-", "hook-value-0123456789"))
     item = _pretest_stage_item(tmp_path, make_work_item)
     item.state = "COMMIT_PUSH_WAIT"
     stage = ImplementationStage()
@@ -8654,13 +8689,31 @@ def test_pretest_publication_failure_does_not_refresh_writer(
                 "head_sha": "b" * 40,
                 "observed_remote_sha": "c" * 40,
             },
+            stderr_tail=f"hook client_secret={credential}",
+            process_failure=ProcessFailureMetadata(
+                exception_class="CalledProcessError",
+                returncode=1,
+            ),
         ),
         ctx,
     )
+    assert item.payload["publication_failure_diagnostic"] == {
+        "failure_kind": "publication",
+        "phase": "push",
+        "head_sha": "b" * 40,
+        "returncode": 1,
+        "exception_class": "CalledProcessError",
+        "remote_state": "changed",
+        "stderr_tail": "hook client_secret=<redacted>",
+    }
+    assert credential not in item.payload["git_failure_summary"]
     item.state = "PR_CREATE"
     outcome = stage.step(item, ctx)
     assert outcome == StageOutcome(
-        Disposition.FINISH_FAIL, "remediation_pretest_publication_failed"
+        Disposition.FINISH_FAIL,
+        "remediation_pretest_publication_failed: failure_kind=publication; phase=push; "
+        "remote_state=changed; returncode=1; exception_class=CalledProcessError; "
+        "stderr=hook client_secret=<redacted>",
     )
     assert not item.payload.get("_commit_push_writer_refresh")
     assert ctx.github.mutation_log == []
