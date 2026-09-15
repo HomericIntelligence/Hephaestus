@@ -239,6 +239,30 @@ def _reviewer_failure(item: WorkItem, reason: str) -> StageOutcome:
     return StageOutcome(Disposition.RETRY, reason)
 
 
+def _missing_plan_admission_outcome(
+    item: WorkItem,
+    labels: Sequence[str],
+) -> StageOutcome:
+    """Route a missing canonical plan without changing stale GO authority."""
+    assert item.issue is not None  # noqa: S101 - admission validates the issue
+    if is_exclusive_plan_state(labels, STATE_PLAN_GO):
+        logger.warning(
+            "plan_review:%d: approved canonical plan missing at admission; "
+            "forcing a new planning epoch",
+            item.issue,
+        )
+        return StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+    item.payload.pop("plan_text", None)
+    item.payload.pop("plan_revision", None)
+    item.payload.pop(_REVIEWED_PLAN_COMMENT_BODY, None)
+    item.payload.pop("prior_review", None)
+    logger.warning(
+        "plan_review:%d: canonical plan missing at admission; replanning",
+        item.issue,
+    )
+    return StageOutcome(Disposition.FAIL_BACK, "plan_missing")
+
+
 _PLAN_REVIEW_LABELS = {
     STATE_PLAN_GO: "GO",
     STATE_PLAN_NO_GO: "NOGO",
@@ -716,21 +740,17 @@ class PlanReviewStage(Stage):
                 )
             snapshot = journal_snapshot(comments)
             if not snapshot.current_plan:
-                item.payload.pop("plan_text", None)
-                item.payload.pop("plan_revision", None)
-                item.payload.pop(_REVIEWED_PLAN_COMMENT_BODY, None)
-                item.payload.pop("prior_review", None)
-                logger.warning(
-                    "plan_review:%d: canonical plan missing at admission; replanning",
-                    item.issue,
-                )
-                return StageOutcome(Disposition.FAIL_BACK, "plan_missing")
+                return _missing_plan_admission_outcome(item, labels)
 
-            item.payload["plan_text"] = snapshot.current_plan
-            item.payload["plan_revision"] = snapshot.revision
-            item.payload[_REVIEWED_PLAN_COMMENT_BODY] = snapshot.current_plan_body
             if is_exclusive_plan_state(labels, STATE_PLAN_GO):
                 if reason := _plan_scope_admission_failure(snapshot.current_plan_body, ctx):
+                    admission_snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
+                    if (
+                        not admission_snapshot.current_plan
+                        or admission_snapshot.revision != snapshot.revision
+                        or admission_snapshot.current_plan_body != snapshot.current_plan_body
+                    ):
+                        return StageOutcome(Disposition.FAIL_BACK, "plan_changed")
                     expected_review = _AcceptedPlanReview(
                         verdict=_plan_scope_blocked_verdict(),
                         revision=snapshot.revision,
@@ -741,12 +761,22 @@ class PlanReviewStage(Stage):
                         label_proposed=True,
                         scope_rejection_reason=reason,
                     )
+                    item.payload["plan_text"] = snapshot.current_plan
+                    item.payload["plan_revision"] = snapshot.revision
+                    item.payload[_REVIEWED_PLAN_COMMENT_BODY] = snapshot.current_plan_body
                     item.payload["accepted_plan_review"] = expected_review
                     item.payload.pop("review_publication_retries", None)
                     item.state = EVAL
                     return None
+                item.payload["plan_text"] = snapshot.current_plan
+                item.payload["plan_revision"] = snapshot.revision
+                item.payload[_REVIEWED_PLAN_COMMENT_BODY] = snapshot.current_plan_body
                 logger.info("plan_review:%d: already plan-go; advancing", item.issue)
                 return StageOutcome(Disposition.ADVANCE, "plan already approved")
+
+            item.payload["plan_text"] = snapshot.current_plan
+            item.payload["plan_revision"] = snapshot.revision
+            item.payload[_REVIEWED_PLAN_COMMENT_BODY] = snapshot.current_plan_body
             if snapshot.current_review and snapshot.current_review_revision == snapshot.revision:
                 item.payload["prior_review"] = snapshot.current_review
 

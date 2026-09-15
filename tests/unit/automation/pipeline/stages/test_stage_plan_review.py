@@ -234,8 +234,15 @@ class TestPlanReviewStageOnEnter:
     @pytest.mark.parametrize(
         ("replacement_plan", "replacement_revision"),
         [
-            ("## Exact file scope and ownership\n- `tests/unit/two.py`", 1),
-            ("## Exact file scope and ownership\n- `tests/unit/one.py`", 2),
+            (
+                "## Exact file scope and ownership\n- `tests/unit/two.py`",
+                1,
+            ),
+            (
+                "## Exact file scope and ownership\n- `tests/unit/one.py`",
+                2,
+            ),
+            (None, None),
         ],
     )
     def test_on_enter_revalidates_scope_plan_identity_before_blocking(
@@ -243,26 +250,30 @@ class TestPlanReviewStageOnEnter:
         make_ctx: Any,
         make_work_item: Any,
         monkeypatch: pytest.MonkeyPatch,
-        replacement_plan: str,
-        replacement_revision: int,
+        replacement_plan: str | None,
+        replacement_revision: int | None,
     ) -> None:
-        """A restart scope decision cannot block a plan that changes before its write."""
+        """A restart scope decision cannot block a plan that changes or disappears."""
         stage = PlanReviewStage()
         github = FakeStageGitHub(labels=[STATE_PLAN_GO])
         plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
         _seed_canonical_plan(github, 1, plan)
         matching_comments = github.issue_comments(1)
-        replacement_comments = [
-            IssueComment(
-                body=body,
-                author_login="hephaestus[bot]",
-                viewer_did_author=True,
-            )
-            for body in (
-                render_current_plan(replacement_plan, revision=replacement_revision),
-                render_pending_review(revision=replacement_revision),
-            )
-        ]
+        replacement_comments = (
+            [
+                IssueComment(
+                    body=body,
+                    author_login="hephaestus[bot]",
+                    viewer_did_author=True,
+                )
+                for body in (
+                    render_current_plan(replacement_plan, revision=replacement_revision),
+                    render_pending_review(revision=replacement_revision),
+                )
+            ]
+            if replacement_plan is not None and replacement_revision is not None
+            else []
+        )
         reads = iter([matching_comments, replacement_comments])
 
         def sequenced_comments(_issue_number: int) -> list[IssueComment]:
@@ -270,23 +281,19 @@ class TestPlanReviewStageOnEnter:
 
         monkeypatch.setattr(github, "issue_comments", sequenced_comments)
         item = make_work_item(issue=1, state="ENTER")
+        original_payload = dict(item.payload)
+        original_attempts = dict(item.attempts)
 
         outcome = stage.on_enter(
             item,
             make_ctx(github=github, config_overrides={"agent": "codex"}),
         )
 
-        assert outcome is None
-        assert item.state == "EVAL"
-
-        result = stage.step(
-            item,
-            make_ctx(github=github, config_overrides={"agent": "codex"}),
-        )
-
-        assert result == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
-        assert github.labels[1] == {STATE_NEEDS_PLAN}
-        assert [entry[0] for entry in github.mutation_log] == ["edit_labels"]
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+        assert github.labels[1] == {STATE_PLAN_GO}
+        assert github.mutation_log == []
+        assert item.payload == original_payload
+        assert item.attempts == original_attempts
 
     def test_restart_scope_rejection_retries_failed_audit_without_worker(
         self, make_ctx: Any, make_work_item: Any
