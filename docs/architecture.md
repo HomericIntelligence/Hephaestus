@@ -2281,9 +2281,44 @@ path so hatch-vcs, tests, and scanners resolve the candidate commit without
 granting container write access to repository metadata.
 
 This automation-loop gate is separate from developer pre-commit. Developer
-pre-commit does not run pytest. Required GitHub CI/CD remains the full-suite
-authority. Before PR creation, a contributor must also run each new or changed
-test and verify that pytest collects it and reports success.
+hooks and required PR lint run the shared fast pytest selection. Nightly CI
+owns full unit coverage and the remaining functional lanes under ADR-0049.
+Before PR creation, a contributor must also run each new or changed test and
+verify that pytest collects it and reports success. Manual contributions also
+require the exact final normal-test command and clean-head evidence in AGENTS
+and ADR-0051.
+
+The selected `just ci-check-only` and `just ci-lint-check-only` commands support
+test-only agents. They use the same PR/static runner resources and the
+[`check_only`](../hephaestus/ci/check_only.py) adapter for lint. The adapter reads
+canonical pre-commit configuration and pinned cached manifests, preserves file
+selection, and runs hooks in a private candidate with its own Git metadata.
+Its Git subprocesses use the shared finite environment policy and preserve
+only the supplied candidate index, object directory, and alternate object
+directories in addition to the approved platform values. The private candidate
+clears those input overrides before its own Git operations and hook execution.
+Human-facing templates use the localization boundary; hook IDs, error values,
+and raw tool output keep their original content.
+It includes local private-denylist policy. It uses native check flags or detects
+changes to the private copy, and restores the input before each subsequent
+hook. Missing prepared tools and unknown execution contracts fail verification.
+It does not install hook dependencies or request the queue's native fallback.
+The CI builder prepares hooks with the same pinned Node/npm prefix copied into
+the runtime. This keeps the Markdown hook's system Node environment consistent
+across image stages. Toolchain changes require a new candidate image build.
+These selections disable dependency syncing for every CI-image call and import
+the mounted candidate source. They mount the original checkout read-only for
+every CI-image call. The full selection runs both Gitleaks scans, requires the
+pinned image, and disables pulls. The lint selection does not run these scans. A
+simultaneous `--rebuild` request is rejected before engine preparation.
+On SELinux hosts, the history scan gives the read-only source tree its private
+label.
+The next scanner mounts only the candidate tree with `:ro,Z` to apply its own
+private label and keep the files read-only. The history scan completes before
+the candidate scan starts.
+The queue's fixed command and source admission remain unchanged. See
+[required checks](ci/required-checks.md#delegated-local-verification) for the
+separate manual normal-test and nightly requirements.
 
 The implementation stage submits only the fixed command and the source
 revision in a `BuildTestJob`. The closed worker resolves the system
@@ -2389,8 +2424,9 @@ not establish that replay is safe. See the
 Developer validation uses the relevant new and changed tests on a supported
 native host. Container reproduction is optional for this local development
 workflow. This does not alter the product's fixed `BuildTestJob` commands,
-source verification, or macOS and Linux isolation requirements. Required CI
-runs the full suites and coverage gate.
+source verification, or macOS and Linux isolation requirements. PR CI runs the
+fast selection and static checks. Nightly CI runs the full suites and coverage
+gate; manual contributions also require AGENTS' final normal-test evidence.
 
 ---
 

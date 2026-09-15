@@ -36,6 +36,9 @@ def _fake_engine(
     git_failing_command: str = "",
     external_git_common_dir: Path | None = None,
     zstd_available: bool = True,
+    mutate_lint_source: bool = False,
+    mutate_sync_source: bool = False,
+    scanner_image_exists: bool = True,
 ) -> tuple[Path, Path]:
     """Create a controlled container-engine boundary that records invocations."""
     engine_path = tmp_path / "podman"
@@ -63,6 +66,34 @@ def _fake_engine(
         '"env GITHUB_EVENT_NAME=pull_request uv run python '
         'scripts/check_license_compatibility.py"* ]] && exit 1\n'
         if license_violation
+        else ""
+    )
+    lint_mutation_clause = (
+        '  if [[ "$*" == *"pre-commit run"* || '
+        '"$*" == *"hephaestus.ci.check_only"* ]]; then\n'
+        '    if [[ "$workspace_read_only" == "1" ]]; then\n'
+        '      printf "SOURCE_WRITE_BLOCKED\\n" >> "$FAKE_ENGINE_LOG"\n'
+        "    else\n"
+        '      printf "FORMATTED = True\\n" > "$workspace_root/tracked.py"\n'
+        "    fi\n"
+        "  fi\n"
+        if mutate_lint_source
+        else ""
+    )
+    sync_mutation_clause = (
+        '  if [[ "$*" == *"uv run"* && "$*" != *"UV_NO_SYNC=1"* ]]; then\n'
+        '    printf "SYNCHRONIZED = True\\n" > "$workspace_root/tracked.py"\n'
+        '    printf "IMPLICIT_UV_SYNC\\n" >> "$FAKE_ENGINE_LOG"\n'
+        "  fi\n"
+        if mutate_sync_source
+        else ""
+    )
+    scanner_acquisition_clause = (
+        '  if [[ "$*" == *"ghcr.io/gitleaks/gitleaks:"* ]]; then\n'
+        '    [[ "$*" == *"--pull=never"* ]] && exit 125\n'
+        '    printf "IMPLICIT_SCANNER_PULL\\n" >> "$FAKE_ENGINE_LOG"\n'
+        "  fi\n"
+        if not scanner_image_exists
         else ""
     )
     engine_path.write_text(
@@ -96,17 +127,22 @@ def _fake_engine(
             '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
             '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
             '  workspace_root=""\n'
+            '  workspace_read_only="0"\n'
             '  candidate_root=""\n'
             '  candidate_index=""\n'
             '  candidate_objects=""\n'
             '  candidate_object_directory=""\n'
             '  for arg in "$@"; do\n'
             '    case "$arg" in\n'
+            "      *:/workspace:ro,Z)\n"
+            '        workspace_root="${arg%:/workspace:ro,Z}"\n'
+            '        workspace_read_only="1"\n'
+            "        ;;\n"
             "      *:/workspace:Z)\n"
             '        workspace_root="${arg%:/workspace:Z}"\n'
             "        ;;\n"
-            "      *:/candidate:ro)\n"
-            '        candidate_root="${arg%:/candidate:ro}"\n'
+            "      *:/candidate:ro|*:/candidate:ro,Z)\n"
+            '        candidate_root="${arg%:/candidate:*}"\n'
             "        ;;\n"
             "      GIT_INDEX_FILE=/workspace/*)\n"
             '        candidate_index="${arg#GIT_INDEX_FILE=/workspace/}"\n'
@@ -142,6 +178,9 @@ def _fake_engine(
             + validator_marker_clause
             + failure_clause
             + license_violation_clause
+            + lint_mutation_clause
+            + sync_mutation_clause
+            + scanner_acquisition_clause
             + "fi\n"
             + "exit 0\n"
         ),
@@ -219,6 +258,10 @@ def _run_runner(
     execution_path: str | None = None,
     zstd_available: bool = True,
     shell: str | None = None,
+    check_only: bool = False,
+    mutate_lint_source: bool = False,
+    mutate_sync_source: bool = False,
+    scanner_image_exists: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
@@ -235,6 +278,9 @@ def _run_runner(
         git_failing_command=git_failing_command,
         external_git_common_dir=external_git_common_dir,
         zstd_available=zstd_available,
+        mutate_lint_source=mutate_lint_source,
+        mutate_sync_source=mutate_sync_source,
+        scanner_image_exists=scanner_image_exists,
     )
     bash = shell or shutil.which("bash")
     assert bash is not None
@@ -304,6 +350,8 @@ def _run_runner(
     command = [bash, str(repo_root / "scripts" / "run_ci_local.sh"), subset]
     if rebuild_image:
         command.append("--rebuild")
+    if check_only:
+        command.append("--check-only")
     result = subprocess.run(
         command,
         cwd=repo_root,
@@ -606,17 +654,32 @@ def test_lint_candidate_index_includes_untracked_source(tmp_path: Path) -> None:
     assert not list((repo / "build").glob("ci-candidate.*"))
 
 
-def test_secrets_candidate_tree_includes_untracked_source(tmp_path: Path) -> None:
+@pytest.mark.parametrize("engine", ["podman", "docker"])
+@pytest.mark.parametrize("check_only", [False, True])
+def test_secrets_candidate_tree_includes_untracked_source(
+    tmp_path: Path, engine: str, check_only: bool
+) -> None:
     """The filesystem scanner receives the exact uncommitted candidate tree."""
     repo = _candidate_repo(tmp_path)
     fixture_content = "fixture-secret-value\n"
     (repo / "new_secret_source.txt").write_text(fixture_content, encoding="utf-8")
 
-    result, log = _run_runner(tmp_path, "secrets", repo_root=repo)
+    result, log = _run_runner(
+        tmp_path, "secrets", repo_root=repo, engine_name=engine, check_only=check_only
+    )
 
     assert result.returncode != 0
     assert f"CANDIDATE_SECRET_BYTES:{fixture_content}" in log
     assert "dir --verbose --exit-code=1 ." in log
+    calls = _engine_calls(tmp_path)
+    assert len(calls) == 3
+    history, candidate = calls[1:]
+    history_mode = "ro,Z" if check_only else "Z"
+    assert f"{repo}:/repo:{history_mode}" in history
+    assert candidate.count("--volume") == 1
+    candidate_mount = candidate[candidate.index("--volume") + 1]
+    assert candidate_mount.startswith(f"{repo}/build/ci-candidate.")
+    assert candidate_mount.endswith("/tree:/candidate:ro,Z")
     assert not list((repo / "build").glob("ci-candidate.*"))
 
 
@@ -709,6 +772,193 @@ def test_all_leaves_nightly_tests_out_of_pull_request_ci(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
     assert "uv run pytest tests/unit" not in log
     assert "bats --recursive tests/shell" not in log
+
+
+def test_check_only_lint_preserves_candidate_source(tmp_path: Path) -> None:
+    """Delegated lint must not send source to the mutating hook runner."""
+    repo = _candidate_repo(tmp_path)
+    source = repo / "tracked.py"
+    before = source.read_bytes()
+
+    result, log = _run_runner(
+        tmp_path, "lint", repo_root=repo, check_only=True, mutate_lint_source=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert source.read_bytes() == before
+    assert "SOURCE_WRITE_BLOCKED" in log
+    assert "pre-commit run" not in log
+    assert "uv run python -m hephaestus.ci.check_only" in log
+    assert "uv run hephaestus-validate-links docs --repo-root ." in log
+
+
+def test_check_only_all_keeps_every_pr_gate(tmp_path: Path) -> None:
+    """Check-only selection keeps PR gates and their existing nightly boundary."""
+    result, log = _run_runner(tmp_path, "all", check_only=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "pre-commit run" not in log
+    assert "uv run python -m hephaestus.ci.check_only" in log
+    for command in (
+        "uv run hephaestus-validate-links docs --repo-root .",
+        "uv run pip-audit",
+        "uv run bandit",
+        "uv run zizmor",
+        "uv run check-jsonschema",
+        "hephaestus.scripts_lib.check_version_single_source",
+        "uv lock --check",
+        "bash scripts/check-symlinks.sh",
+        "just --evaluate",
+        "shellcheck --severity=error",
+        "detect --source=. --verbose --exit-code=1",
+        "dir --verbose --exit-code=1 .",
+        "env GITHUB_EVENT_NAME=pull_request uv run python scripts/check_license_compatibility.py",
+    ):
+        assert command in log
+    for command in (
+        "uv run pytest tests/unit",
+        "uv run pytest tests/integration",
+        "uv build --wheel",
+        "bats --recursive tests/shell",
+    ):
+        assert command not in log
+
+
+@pytest.mark.parametrize("subset", ["lint", "all"])
+def test_check_only_lint_failure_is_blocking(tmp_path: Path, subset: str) -> None:
+    """A failed check-only validator cannot produce a passing local result."""
+    result, log = _run_runner(
+        tmp_path,
+        subset,
+        check_only=True,
+        failing_command="uv run python -m hephaestus.ci.check_only",
+    )
+
+    assert result.returncode == 1
+    assert "uv run python -m hephaestus.ci.check_only" in log
+    assert "Failed: lint" in result.stderr
+    assert "CI checks passed" not in result.stdout
+
+
+def test_check_only_all_cannot_request_native_fallback(tmp_path: Path) -> None:
+    """A delegated check-only run cannot fall back to the queue's fast tests."""
+    result, _ = _run_runner(
+        tmp_path, "all", check_only=True, info_fails=True, machine_system="Darwin"
+    )
+
+    assert result.returncode == 1
+    assert RUNNER_FAILURE_MARKER not in result.stderr
+
+
+def test_check_only_requires_a_prepared_image(tmp_path: Path) -> None:
+    """A delegated check must not install tools through an implicit image build."""
+    result, log = _run_runner(tmp_path, "lint", check_only=True, image_exists=False)
+
+    assert result.returncode == 1
+    assert "build " not in log
+    assert "uv run python -m hephaestus.ci.check_only" not in log
+
+
+@pytest.mark.parametrize("engine", ["podman", "docker"])
+@pytest.mark.parametrize("subset", ["lint", "all"])
+def test_preparation_boundary_applies_to_every_check_only_ci_call(
+    tmp_path: Path, engine: str, subset: str
+) -> None:
+    """Keep the prepared environment and candidate source in every CI call."""
+    repo = _candidate_repo(tmp_path)
+    source = repo / "tracked.py"
+    before = source.read_bytes()
+    result, log = _run_runner(
+        tmp_path,
+        subset,
+        repo_root=repo,
+        engine_name=engine,
+        check_only=True,
+        mutate_sync_source=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert source.read_bytes() == before
+    assert "IMPLICIT_UV_SYNC" not in log
+    calls = [call for call in _engine_calls(tmp_path) if FAKE_IMAGE_ID in call]
+    assert calls
+    for call in calls:
+        boundary = call[: call.index(FAKE_IMAGE_ID)]
+        workspace_mounts = [
+            boundary[index + 1]
+            for index, argument in enumerate(boundary[:-1])
+            if argument == "--volume" and boundary[index + 1].endswith(":/workspace:ro,Z")
+        ]
+        assert workspace_mounts == [f"{repo}:/workspace:ro,Z"]
+        environment = [
+            boundary[index + 1]
+            for index, argument in enumerate(boundary[:-1])
+            if argument == "--env"
+        ]
+        assert "UV_NO_SYNC=1" in environment
+        assert "PYTHONPATH=/workspace" in environment
+
+
+def test_preparation_boundary_sync_fixture_preserves_ordinary_podman_behavior(
+    tmp_path: Path,
+) -> None:
+    """Prove the sync fixture can change source in the ordinary queue mode."""
+    repo = _candidate_repo(tmp_path)
+    source = repo / "tracked.py"
+    before = source.read_bytes()
+    result, log = _run_runner(tmp_path, "lint", repo_root=repo, mutate_sync_source=True)
+
+    assert result.returncode == 0, result.stderr
+    assert source.read_bytes() != before
+    assert "IMPLICIT_UV_SYNC" in log
+
+
+@pytest.mark.parametrize("subset", ["lint", "all"])
+@pytest.mark.parametrize("engine", ["podman", None])
+def test_preparation_boundary_rejects_check_only_rebuild(
+    tmp_path: Path, subset: str, engine: str | None
+) -> None:
+    """Reject conflicting modes before an engine can prepare an image."""
+    result, log = _run_runner(
+        tmp_path, subset, engine_name=engine, check_only=True, rebuild_image=True
+    )
+
+    assert result.returncode == 1
+    assert "--check-only" in result.stderr
+    assert "--rebuild" in result.stderr
+    assert "build " not in log
+    assert _engine_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("engine", ["podman", "docker"])
+@pytest.mark.parametrize("scanner_image_exists", [True, False])
+def test_preparation_boundary_never_acquires_the_scanner_image(
+    tmp_path: Path, engine: str, scanner_image_exists: bool
+) -> None:
+    """Use prepared scanner images and fail without pulling an absent image."""
+    result, log = _run_runner(
+        tmp_path,
+        "all",
+        engine_name=engine,
+        check_only=True,
+        scanner_image_exists=scanner_image_exists,
+    )
+
+    assert result.returncode == (0 if scanner_image_exists else 1), result.stderr
+    assert "IMPLICIT_SCANNER_PULL" not in log
+    calls = [
+        call
+        for call in _engine_calls(tmp_path)
+        if any(argument.startswith("ghcr.io/gitleaks/gitleaks:") for argument in call)
+    ]
+    assert len(calls) == (2 if scanner_image_exists else 1)
+    for call in calls:
+        image_position = next(
+            index
+            for index, argument in enumerate(call)
+            if argument.startswith("ghcr.io/gitleaks/gitleaks:")
+        )
+        assert "--pull=never" in call[:image_position]
 
 
 @pytest.mark.usefixtures("require_git_path_format")

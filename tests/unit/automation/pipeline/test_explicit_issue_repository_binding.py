@@ -66,7 +66,7 @@ def _run_selected_repository(
     monkeypatch.setattr(github_api, "_issue_state_cache", {})
     monkeypatch.setattr(github_api, "get_repo_info", lambda: ambient)
     monkeypatch.setattr(pipeline_cli, "_detect_cwd_repo", lambda **kwargs: ambient)
-
+    # Keep diagnostics outside repo intake without using an ambient user directory.
     monkeypatch.setattr(
         pipeline_cli,
         "_pipeline_diagnostics_roots",

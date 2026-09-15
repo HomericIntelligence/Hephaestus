@@ -132,6 +132,14 @@ host-verification-pyxis-e2e:
 ci-lint:
     ./scripts/run_ci_local.sh lint
 
+# Run the PR/static checks with source-preserving lint verification.
+ci-check-only:
+    ./scripts/run_ci_local.sh all --check-only
+
+# Run configured lint checks without changing candidate source files.
+ci-lint-check-only:
+    ./scripts/run_ci_local.sh lint --check-only
+
 # Run CI unit tests in container
 ci-unit:
     ./scripts/run_ci_local.sh unit
