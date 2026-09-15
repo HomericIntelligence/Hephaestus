@@ -216,7 +216,13 @@ class TestPlanReviewStageOnEnter:
 
         outcome = stage.on_enter(item, ctx)
 
-        assert outcome == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert outcome is None
+        assert item.state == "EVAL"
+        assert github.mutation_log == []
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
         assert github.labels[1] == {STATE_PLAN_BLOCKED}
         assert [entry[0] for entry in github.mutation_log] == [
             "edit_labels",
@@ -270,9 +276,59 @@ class TestPlanReviewStageOnEnter:
             make_ctx(github=github, config_overrides={"agent": "codex"}),
         )
 
-        assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+        assert outcome is None
+        assert item.state == "EVAL"
+
+        result = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert result == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
         assert github.labels[1] == {STATE_NEEDS_PLAN}
         assert [entry[0] for entry in github.mutation_log] == ["edit_labels"]
+
+    def test_restart_scope_rejection_retries_failed_audit_without_worker(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart retries the accepted scope audit after one write failure."""
+
+        class FailOnceAuditGitHub(FakeStageGitHub):
+            fail_once = True
+
+            def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+                if self.fail_once:
+                    self.fail_once = False
+                    raise OSError("audit write failed")
+                super().upsert_issue_comment(*args, **kwargs)
+
+        stage = PlanReviewStage()
+        github = FailOnceAuditGitHub(labels=[STATE_PLAN_GO])
+        _seed_canonical_plan(
+            github,
+            1,
+            "## Exact file scope and ownership\n- `tests/unit/one.py`",
+        )
+        ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+        item = make_work_item(issue=1, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        assert item.state == "EVAL"
+
+        first = stage.step(item, ctx)
+
+        assert first == StageOutcome(Disposition.RETRY, "review publication failed")
+        assert not isinstance(first, JobRequest)
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+        assert item.attempts.get("plan_review_iter", 0) == 0
+
+        second = stage.step(item, ctx)
+
+        assert second == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert not isinstance(second, JobRequest)
+        assert github.comments[1][-1].endswith(STATE_PLAN_BLOCKED)
+        assert "plan_scope_invalid" in github.comments[1][-1]
+        assert item.attempts.get("plan_review_iter", 0) == 0
 
     def test_on_enter_advances_codex_go_with_accepted_scope_heading(
         self, make_ctx: Any, make_work_item: Any
