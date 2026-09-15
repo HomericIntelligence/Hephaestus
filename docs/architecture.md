@@ -2310,6 +2310,10 @@ These selections disable dependency syncing for every CI-image call and import
 the mounted candidate source. Both Gitleaks scans require the pinned image to
 be present and disable pulls. A simultaneous `--rebuild` request is rejected
 before engine preparation.
+On SELinux hosts, the history scan gives the source tree its private label.
+The next scanner mounts only the candidate tree with `:ro,Z` to apply its own
+private label and keep the files read-only. The history scan completes before
+the candidate scan starts.
 The queue's fixed command and source admission remain unchanged. See
 [required checks](ci/required-checks.md#delegated-local-verification) for the
 separate manual normal-test and nightly requirements.

@@ -712,7 +712,7 @@ run_secrets() {
         "${history_args[@]}" || return 1
     "${CONTAINER_ENGINE}" run --rm \
         ${pull_flags[@]+"${pull_flags[@]}"} \
-        --volume "${CANDIDATE_TREE}:/candidate:ro" \
+        --volume "${CANDIDATE_TREE}:/candidate:ro,Z" \
         --workdir /candidate \
         "${GITLEAKS_IMAGE}" \
         "${candidate_args[@]}"
