@@ -143,6 +143,43 @@ _CONTRACT_MODULES = (
     "hephaestus/automation/pipeline_github_contract.py",
 )
 
+_FACADE_MODULES = frozenset(
+    {
+        "hephaestus.automation.pipeline.coordinator",
+        "hephaestus.automation.pipeline.stages.pr_review",
+        "hephaestus.automation.pipeline_github",
+    }
+)
+
+
+def _absolute_import_modules(module_name: str, node: ast.ImportFrom) -> frozenset[str]:
+    """Return possible module names for one absolute or relative import."""
+    if node.level == 0:
+        return frozenset({node.module}) if node.module else frozenset()
+    package = module_name.split(".")[:-1]
+    parent_count = node.level - 1
+    if parent_count > len(package):
+        return frozenset()
+    prefix = package[: len(package) - parent_count]
+    if node.module:
+        return frozenset({".".join((*prefix, *node.module.split(".")))})
+    return frozenset(".".join((*prefix, alias.name)) for alias in node.names)
+
+
+def _facade_import_violations(module_name: str, source: str, source_name: str) -> tuple[str, ...]:
+    """Return prohibited façade imports from one collaborator source."""
+    violations: list[str] = []
+    for node in ast.walk(ast.parse(source, filename=source_name)):
+        if isinstance(node, ast.Import):
+            imported = frozenset(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported = _absolute_import_modules(module_name, node)
+        else:
+            continue
+        prohibited = imported & _FACADE_MODULES
+        violations.extend(f"{source_name}: imports {facade}" for facade in sorted(prohibited))
+    return tuple(violations)
+
 
 def test_hotspot_file_budgets_are_non_increasing() -> None:
     """Keep each façade and collaborator below its architecture budget."""
@@ -168,17 +205,62 @@ def test_collaborators_do_not_import_their_facades() -> None:
     for path in (_ROOT / "hephaestus/automation").rglob("*.py"):
         if path.stem not in _COLLABORATOR_MODULES:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom) or not node.module:
-                continue
-            if node.module in {
-                "hephaestus.automation.pipeline.coordinator",
-                "hephaestus.automation.pipeline_github",
-                "hephaestus.automation.pipeline.stages.pr_review",
-            }:
-                violations.append(f"{path}: imports {node.module}")
+        module_name = ".".join(path.relative_to(_ROOT).with_suffix("").parts)
+        violations.extend(
+            _facade_import_violations(
+                module_name,
+                path.read_text(encoding="utf-8"),
+                str(path),
+            )
+        )
     assert violations == []
+
+
+def test_relative_facade_imports_resolve_to_absolute_modules() -> None:
+    """Dependency checks recognize normal relative façade imports."""
+    cases = (
+        (
+            "hephaestus.automation.pipeline_github_check_run_validation",
+            "from .pipeline_github import PipelineGitHub",
+            "hephaestus.automation.pipeline_github",
+        ),
+        (
+            "hephaestus.automation.pipeline.merge_wait_admission",
+            "from ..pipeline_github import PipelineGitHub",
+            "hephaestus.automation.pipeline_github",
+        ),
+        (
+            "hephaestus.automation.pipeline.coordinator_runtime",
+            "from .coordinator import PipelineCoordinator",
+            "hephaestus.automation.pipeline.coordinator",
+        ),
+        (
+            "hephaestus.automation.pipeline.stages.pr_review_gate",
+            "from .pr_review import PrReviewStage",
+            "hephaestus.automation.pipeline.stages.pr_review",
+        ),
+        (
+            "hephaestus.automation.pipeline_github_check_run_validation",
+            "from . import pipeline_github",
+            "hephaestus.automation.pipeline_github",
+        ),
+    )
+    for module_name, source, expected in cases:
+        node = ast.parse(source).body[0]
+        assert isinstance(node, ast.ImportFrom)
+        assert expected in _absolute_import_modules(module_name, node)
+        assert _facade_import_violations(module_name, source, "candidate.py")
+
+
+def test_absolute_facade_import_uses_the_violation_path() -> None:
+    """Dependency checks recognize a direct absolute façade import."""
+    violations = _facade_import_violations(
+        "hephaestus.automation.pipeline_github_check_run_validation",
+        "import hephaestus.automation.pipeline_github as github_facade",
+        "candidate.py",
+    )
+
+    assert violations == ("candidate.py: imports hephaestus.automation.pipeline_github",)
 
 
 def test_shared_namespaces_declare_static_exports() -> None:
