@@ -30,7 +30,7 @@ def test_initial_rebase_reuses_the_source_lease_and_keeps_its_recorded_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, publication_failed: bool
 ) -> None:
     """A later publication failure must retain the single lease's local successor."""
-    root, _, head = _repository(tmp_path)
+    root, _, head = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, head, branch="writer")
     pool = WorkerPool(
@@ -193,7 +193,7 @@ def test_initial_journal_lock_keeps_the_existing_job_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool
 ) -> None:
     """A held initial-start journal must not stall the queue worker."""
-    root, _, head = _repository(tmp_path)
+    root, _, head = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, head, branch="writer")
     shutdown = threading.Event()

@@ -39,7 +39,7 @@ def test_dirty_publication_stops_while_its_source_lane_is_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool, operation: str
 ) -> None:
     """A consumed writer claim must retain the same lock budget as its job."""
-    root, _, revision = _repository(tmp_path)
+    root, _, revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     claim = replace(_claim(), reservation_base_sha=revision)
     original = manager.prepare(12, SourceLane.IMPLEMENTATION, revision, branch=claim.branch)
@@ -105,8 +105,13 @@ def test_dirty_publication_stops_while_its_source_lane_is_held(
         thread.join(timeout=2)
         assert stopped_while_locked
         assert len(results) == 1 and not results[0].ok
+        assert attempted.is_set()
         if cancel:
             assert results[0].interrupted
+            assert results[0].error == "interrupted"
+            assert results[0].value is None
+        else:
+            assert results[0].error == "timeout"
         verify_plan.assert_not_called()
         assert manager._require_receipt(12, SourceLane.IMPLEMENTATION) == consumed
     finally:

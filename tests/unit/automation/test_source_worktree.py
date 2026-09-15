@@ -107,7 +107,7 @@ def _git(path: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _repository(tmp_path: Path) -> tuple[Path, str, str]:
+def _repository(tmp_path: Path, *, origin_repository: str | None = None) -> tuple[Path, str, str]:
     repo = tmp_path / "repository"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
@@ -119,6 +119,8 @@ def _repository(tmp_path: Path) -> tuple[Path, str, str]:
     first = _git(repo, "rev-parse", "HEAD")
     (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
     _git(repo, "commit", "-am", "second")
+    if origin_repository is not None:
+        _git(repo, "remote", "add", "origin", f"https://github.com/{origin_repository}.git")
     return repo, first, _git(repo, "rev-parse", "HEAD")
 
 

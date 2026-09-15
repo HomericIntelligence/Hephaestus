@@ -39,9 +39,7 @@ def test_source_rebase_metadata_does_not_reach_the_git_helper(
     rebase = create_autospec(git_utils.rebase_worktree_onto, return_value=False)
     monkeypatch.setattr(git_utils, "rebase_worktree_onto", rebase)
     monkeypatch.setattr(worker_pool, "_required_git_signing_env", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        pool, "_authenticated_remote_revalidator", lambda **kwargs: lambda: ({}, ())
-    )
+    monkeypatch.setattr(pool, "_authenticated_remote_git_configuration", lambda **kwargs: ({}, ()))
     monkeypatch.setattr(
         git_utils,
         "run",
@@ -81,7 +79,7 @@ def test_writer_creation_stops_while_its_handoff_lock_is_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool
 ) -> None:
     """A contended writer lock must not extend the job budget or delay shutdown."""
-    root, _, _ = _repository(tmp_path)
+    root, _, _ = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     shutdown = threading.Event()
     pool = _pool(tmp_path, shutdown)
@@ -140,9 +138,7 @@ def test_publication_timeout_keeps_the_recorded_local_head(
     pool = _pool(tmp_path, threading.Event())
     monkeypatch.setattr(pool, "_verify_implementation_edit_scope", lambda *args, **kwargs: None)
     monkeypatch.setattr(pool, "_verify_scope_retraction", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        pool, "_authenticated_remote_revalidator", lambda **kwargs: lambda: ({}, ())
-    )
+    monkeypatch.setattr(pool, "_authenticated_remote_git_configuration", lambda **kwargs: ({}, ()))
     monkeypatch.setattr(pool, "_writer_tracking_head", lambda *args, **kwargs: revision)
     local_heads: list[str] = []
     observed_receipts: list[str] = []

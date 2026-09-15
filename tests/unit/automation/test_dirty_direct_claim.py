@@ -195,7 +195,7 @@ def test_claim_git_operation_keeps_original_direct_branch(tmp_path: Path, starte
         render_current_review,
     )
 
-    repo, _, head = _repository(tmp_path)
+    repo, _, head = _repository(tmp_path, origin_repository="example/project")
     manager = SourceWorkspaceManager(repo, repository="project")
     branch = _claim().branch
     original = manager.prepare(12, SourceLane.IMPLEMENTATION, head, branch=branch)
@@ -336,7 +336,7 @@ def test_dirty_publication_missing_runner_preserves_before_stage(tmp_path: Path)
     from hephaestus.automation.pipeline.jobs import GitJob
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
-    repo, _, head = _repository(tmp_path)
+    repo, _, head = _repository(tmp_path, origin_repository="example/project")
     manager = SourceWorkspaceManager(repo, repository="project")
     claim = replace(_claim(), reservation_base_sha=head)
     original = manager.prepare(12, SourceLane.IMPLEMENTATION, head, branch=claim.branch)
@@ -389,7 +389,7 @@ def test_failed_commit_helper_cannot_advance_dirty_receipt(tmp_path: Path) -> No
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
     from tests.unit.automation.test_source_worktree import _git
 
-    repo, _, head = _repository(tmp_path)
+    repo, _, head = _repository(tmp_path, origin_repository="example/project")
     manager = SourceWorkspaceManager(repo, repository="project")
     claim = replace(_claim(), reservation_base_sha=head)
     original = manager.prepare(12, SourceLane.IMPLEMENTATION, head, branch=claim.branch)
@@ -466,7 +466,7 @@ def test_dirty_publication_preserves_exact_scope_and_lease(tmp_path: Path, outco
     from hephaestus.automation.pipeline.worker_pool import WorkerPool
     from tests.unit.automation.test_source_worktree import _git
 
-    repo, _, head = _repository(tmp_path)
+    repo, _, head = _repository(tmp_path, origin_repository="example/project")
     manager = SourceWorkspaceManager(repo, repository="project")
     claim = replace(_claim(), reservation_base_sha=head)
     original = manager.prepare(12, SourceLane.IMPLEMENTATION, head, branch=claim.branch)
