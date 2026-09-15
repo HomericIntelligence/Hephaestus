@@ -21217,6 +21217,69 @@ class TestGitLocking:
         dispatch.assert_not_called()
         assert result.error == "Git common directory changed before operation admission"
 
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
+    def test_fetch_uses_admitted_checkout_after_parent_alias_moves(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """A fetch cannot move to a second checkout after lock admission."""
+        original_parent = tmp_path / "original"
+        replacement_parent = tmp_path / "replacement"
+        original_parent.mkdir()
+        replacement_parent.mkdir()
+        original, _predecessor, expected_head = _worker_repository(original_parent)
+        replacement = replacement_parent / original.name
+        _git(
+            tmp_path,
+            "clone",
+            str(original_parent / "remote.git"),
+            str(replacement),
+        )
+        alias = tmp_path / "selected"
+        alias.symlink_to(original_parent, target_is_directory=True)
+        original_fetch_head = original / ".git" / "FETCH_HEAD"
+        replacement_fetch_head = replacement / ".git" / "FETCH_HEAD"
+        original_fetch_head.write_text("original-before\n", encoding="utf-8")
+        replacement_fetch_head.write_text("replacement-before\n", encoding="utf-8")
+
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "owner/name",
+            "fetch_main",
+            30,
+            kwargs={"cwd": str(alias / original.name)},
+        )
+        dispatch = pool._dispatch_locked_git
+
+        def move_alias_and_dispatch(admitted_job: GitJob) -> JobResult:
+            alias.unlink()
+            alias.symlink_to(replacement_parent, target_is_directory=True)
+            return dispatch(admitted_job)
+
+        try:
+            with (
+                operation_file_lock(WorktreeManager.git_metadata_lock_path(replacement)),
+                patch.object(
+                    pool,
+                    "_authenticated_remote_git_configuration",
+                    return_value=({}, ()),
+                ),
+                patch.object(
+                    pool,
+                    "_dispatch_locked_git",
+                    side_effect=move_alias_and_dispatch,
+                ),
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+
+        assert result == JobResult(ok=True, value={"head_sha": expected_head})
+        assert expected_head in original_fetch_head.read_text(encoding="utf-8")
+        assert replacement_fetch_head.read_text(encoding="utf-8") == "replacement-before\n"
+
     def test_intake_linked_common_directory_change_stops_before_lease(
         self,
         completion_q: CompletionQueue,

@@ -6793,6 +6793,8 @@ class WorkerPool:
         admitted_kwargs = job.kwargs
         if job.op == "create_worktree" and prepared.authoritative_checkout is not None:
             admitted_kwargs = {**job.kwargs, "repo_root": str(prepared.authoritative_checkout)}
+        elif job.op == "fetch_main" and prepared.authoritative_checkout is not None:
+            admitted_kwargs = {**job.kwargs, "cwd": str(prepared.authoritative_checkout)}
         timed_job = replace(
             job,
             deadline_s=operation_deadline_s,
