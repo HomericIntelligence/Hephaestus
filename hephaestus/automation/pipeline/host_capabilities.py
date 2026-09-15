@@ -306,7 +306,13 @@ class QuotaBackend(Protocol):
     def preflight(self, target: CapabilityReceiptTarget) -> HostCapabilityReceipt:
         """Return quota availability for one worker-validated target."""
 
-    def volume(self, target: CapabilityReceiptTarget, purpose: str) -> AbstractContextManager[Path]:
+    def volume(
+        self,
+        target: CapabilityReceiptTarget,
+        purpose: str,
+        *,
+        mountpoint: Path | None = None,
+    ) -> AbstractContextManager[Path]:
         """Open one disposable quota volume for the selected purpose."""
 
 
@@ -552,14 +558,25 @@ class HdiutilQuotaBackend:
         return HostCapabilityReceipt.available_receipt(target)
 
     @contextmanager
-    def volume(self, target: CapabilityReceiptTarget, purpose: str) -> Iterator[Path]:
+    def volume(
+        self,
+        target: CapabilityReceiptTarget,
+        purpose: str,
+        *,
+        mountpoint: Path | None = None,
+    ) -> Iterator[Path]:
         """Yield one bounded volume and preserve a failed-detach root."""
-        with self._open_volume(target, purpose, probe=False) as mounted:
+        with self._open_volume(target, purpose, probe=False, mountpoint=mountpoint) as mounted:
             yield mounted
 
     @contextmanager
     def _open_volume(
-        self, target: CapabilityReceiptTarget, purpose: str, *, probe: bool
+        self,
+        target: CapabilityReceiptTarget,
+        purpose: str,
+        *,
+        probe: bool,
+        mountpoint: Path | None = None,
     ) -> Iterator[Path]:
         if purpose not in _PURPOSES or target.request.purpose != purpose:
             raise ValueError("quota volume purpose does not match target")
@@ -611,15 +628,32 @@ class HdiutilQuotaBackend:
         os.fchmod(request_fd, 0o700)
         image_name, mount_name = ("preflight.dmg", "preflight") if probe else _VOLUME_PATHS[purpose]
         image = request_root / image_name
-        mount = request_root / mount_name
+        mount = request_root / mount_name if mountpoint is None else mountpoint
+        mount_parent_fd = request_fd
+        mount_leaf = mount_name
+        external_mount = mountpoint is not None
         attached = False
         retain = False
         try:
             try:
-                os.mkdir(mount_name, 0o700, dir_fd=request_fd)
-                self._assert_leaf(request_fd, mount_name, directory=True)
+                if external_mount:
+                    if (
+                        not mount.is_absolute()
+                        or mount.name != mount_name
+                        or mount.exists()
+                        or mount.is_symlink()
+                    ):
+                        raise ValueError("quota volume mountpoint is unsafe")
+                    parent = mount.parent.resolve(strict=True)
+                    if parent != mount.parent:
+                        raise ValueError("quota volume mountpoint parent is unsafe")
+                    mount_parent_fd = os.open(parent, _directory_flags())
+                    mount_leaf = mount.name
+                os.mkdir(mount_leaf, 0o700, dir_fd=mount_parent_fd)
+                self._assert_leaf(mount_parent_fd, mount_leaf, directory=True)
                 self._assert_abs_path(request_root, image)
-                self._assert_abs_path(request_root, mount)
+                if not external_mount:
+                    self._assert_abs_path(request_root, mount)
             except (OSError, ValueError) as error:
                 raise HostCapabilityError(
                     self._failure(
@@ -662,7 +696,7 @@ class HdiutilQuotaBackend:
             )
             attached = True
             yield mount
-            self._assert_leaf(request_fd, mount_name, directory=True)
+            self._assert_leaf(mount_parent_fd, mount_leaf, directory=True)
             self._run(
                 (str(binary), "detach", "-force", str(mount)),
                 target,
@@ -676,10 +710,14 @@ class HdiutilQuotaBackend:
             retain = error.receipt.failed_step == "detach"
             raise
         finally:
+            if mount_parent_fd != request_fd:
+                os.close(mount_parent_fd)
             os.close(request_fd)
             if attached:
                 retain = True
             if not retain:
+                if external_mount:
+                    shutil.rmtree(mount, ignore_errors=True)
                 shutil.rmtree(request_root, ignore_errors=True)
 
     def _run(
@@ -816,11 +854,32 @@ class FakeQuotaBackend:
             probe_receipt_id=None,
         )
 
-    def volume(self, target: CapabilityReceiptTarget, purpose: str) -> AbstractContextManager[Path]:
+    def volume(
+        self,
+        target: CapabilityReceiptTarget,
+        purpose: str,
+        *,
+        mountpoint: Path | None = None,
+    ) -> AbstractContextManager[Path]:
         """Return the injected volume context manager."""
         if target.request.purpose != purpose:
             raise ValueError("fake quota volume purpose does not match target")
+        if mountpoint is not None:
+            return self._external_volume(mountpoint, self._volume_factory(target, purpose))
         return self._volume_factory(target, purpose)
+
+    @staticmethod
+    @contextmanager
+    def _external_volume(mountpoint: Path, backing: AbstractContextManager[Path]) -> Iterator[Path]:
+        """Create one private fake mount at the requested test path."""
+        if mountpoint.exists() or mountpoint.is_symlink():
+            raise ValueError("fake quota volume mountpoint is unsafe")
+        with backing:
+            mountpoint.mkdir(mode=0o700)
+            try:
+                yield mountpoint
+            finally:
+                shutil.rmtree(mountpoint)
 
 
 class ProductionGitSigningProvider:

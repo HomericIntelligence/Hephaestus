@@ -6027,7 +6027,9 @@ class WorkerPool:
                 )
                 with capabilities.quota_backend.volume(scratch_target, "scratch") as scratch:
                     with capabilities.quota_backend.volume(
-                        pi_target, "pi_smoke_logs"
+                        pi_target,
+                        "pi_smoke_logs",
+                        mountpoint=source / "pi-smoke-logs",
                     ) as pi_smoke_logs:
                         _prepare_host_output_aliases(source, scratch)
                         command = _host_verification_command(
