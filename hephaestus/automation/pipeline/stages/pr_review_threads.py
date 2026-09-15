@@ -57,6 +57,7 @@ from .base import (
     Continue,
     Disposition,
     GitJob,
+    HostCapabilityJob,
     JobRequest,
     JobResult,
     Stage,
@@ -137,6 +138,7 @@ SCOPE_DEPENDENCY_WAIT = "SCOPE_DEPENDENCY_WAIT"
 ADOPT_WORKTREE_WAIT = "ADOPT_WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
 REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
+HOST_CAPABILITY_WAIT = "HOST_CAPABILITY_WAIT"
 HOST_VERIFICATION_WAIT = "HOST_VERIFICATION_WAIT"
 HOST_CAPABILITY_WAIT = "HOST_CAPABILITY_WAIT"
 REPOSITORY_VALIDATION_CI_WAIT = "REPOSITORY_VALIDATION_CI_WAIT"
@@ -164,6 +166,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
     REVIEW_WAIT: "_review_wait",
     REVIEW_CHECKOUT_WAIT: "_review_checkout_wait",
+    HOST_CAPABILITY_WAIT: "_host_capability_wait",
     HOST_VERIFICATION_WAIT: "_host_verification_wait",
     HOST_CAPABILITY_WAIT: "_host_capability_wait",
     REPOSITORY_VALIDATION_CI_WAIT: "_repository_validation_ci_wait",
@@ -203,6 +206,7 @@ REVIEW_ERROR_RETRY_CAP = 2
 REVIEW_CHECKOUT_RETRY_CAP = 2
 
 _HOST_VERIFICATION_PENDING = "host_verification_pending"
+_HOST_CAPABILITY_PENDING = "host_capability_pending"
 _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
 _ANCHOR_CORRECTION_RETRY = "review_anchor_correction_retry"
 
@@ -666,6 +670,7 @@ __all__ = [
     "HOST_CAPABILITY_WAIT",
     "HOST_VERIFICATION_DIAGNOSTIC_MAX",
     "HOST_VERIFICATION_TIMEOUT_S",
+    "HOST_CAPABILITY_WAIT",
     "HOST_VERIFICATION_WAIT",
     "IMPLEMENTATION_GO_AUDIT_RETRY_CAP",
     "POST",
@@ -685,6 +690,7 @@ __all__ = [
     "_ANCHOR_CORRECTION_RETRY",
     "_COMMENT_VALIDATION_ONLY",
     "_HOST_VERIFICATION_PENDING",
+    "_HOST_CAPABILITY_PENDING",
     "_JSON_RESPONSE_BLOCK_RE",
     "_ROUND_PAYLOAD_KEYS",
     "_STEP_HANDLER_NAMES",
@@ -696,6 +702,7 @@ __all__ = [
     "Continue",
     "Disposition",
     "GitJob",
+    "HostCapabilityJob",
     "ItemKind",
     "JobRequest",
     "JobResult",

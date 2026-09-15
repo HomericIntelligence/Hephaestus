@@ -26,6 +26,7 @@ from hephaestus.automation.pipeline.jobs import (
     BuildTestJob,
     CompactJob,
     GitJob,
+    HostCapabilityJob,
     JobHandle,
     JobResult,
 )
@@ -132,7 +133,16 @@ class FakeWorkerPool:
 
         """
         if not isinstance(
-            job, (AgentJob, BuildTestJob, GitJob, GitHubJob, CompactJob, AthenaSkillJob)
+            job,
+            (
+                AgentJob,
+                BuildTestJob,
+                GitJob,
+                GitHubJob,
+                CompactJob,
+                AthenaSkillJob,
+                HostCapabilityJob,
+            ),
         ):
             raise TypeError("test worker received an unsupported job")
         if self._auxiliary and not (
@@ -146,8 +156,15 @@ class FakeWorkerPool:
         handle = JobHandle(job=job, on_done_state=on_done_state)
         self.submitted.append(handle)
         self.submitted_claims.append((claim_key, claim_stage))
-        if self._scripted:
-            outcome: JobResult | Exception = self._scripted.popleft()
+        if isinstance(job, HostCapabilityJob) and self._scripted:
+            candidate = self._scripted[0]
+            value = candidate.value if isinstance(candidate, JobResult) else None
+            if not isinstance(value, dict) or "host_capability_receipt" not in value:
+                outcome = self._default_result(job)
+            else:
+                outcome = self._scripted.popleft()
+        elif self._scripted:
+            outcome = self._scripted.popleft()
         elif isinstance(job, GitHubJob):
             if self.github_job_runner is None:
                 raise AssertionError("GitHubJob requires a scripted runner")
@@ -209,7 +226,7 @@ class FakeWorkerPool:
 
     @staticmethod
     def _default_result(
-        job: AgentJob | BuildTestJob | GitJob | CompactJob | AthenaSkillJob,
+        job: AgentJob | BuildTestJob | GitJob | CompactJob | AthenaSkillJob | HostCapabilityJob,
     ) -> JobResult:
         """Synthesize a per-job-type ok result when nothing is scripted."""
         if isinstance(job, AthenaSkillJob):
@@ -240,6 +257,25 @@ class FakeWorkerPool:
             return JobResult(ok=True, value="fake agent output")
         if isinstance(job, BuildTestJob):
             return JobResult(ok=True, value=0)
+        if isinstance(job, HostCapabilityJob):
+            from hephaestus.automation.pipeline.host_capabilities import (
+                HostCapabilityReceipt,
+                bind_receipt_target,
+            )
+
+            target = bind_receipt_target(
+                job.target,
+                execution_boundary_id="fake-worker",
+                source_head_sha=job.target.expected_head_sha,
+            )
+            receipt = HostCapabilityReceipt.available_receipt(target)
+            return JobResult(
+                ok=True,
+                value={
+                    "host_capability_receipt": receipt.to_dict(),
+                    "failure_kind": "none",
+                },
+            )
         if isinstance(job, CompactJob):
             return JobResult(ok=True, value=True)
         # GitJob: mirror the real _dispatch_git_op value semantics so
