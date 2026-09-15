@@ -24,6 +24,7 @@ _NESTED_READER = "hephaestus.config.child_environments.build_nested_host_verific
 _PARENT_READER = "hephaestus.config.child_environments.read_approved_parent_env"
 _GH_READER = "hephaestus.config.child_environments.build_gh_child_env"
 _SIGNING_READER = "hephaestus.config.child_environments.build_git_signing_env"
+_CHECK_ONLY_GIT_READER = "hephaestus.config.child_environments.build_check_only_git_env"
 _COLOR_READER = "hephaestus.cli.colors._automatic_colors_enabled"
 _CODEX_IMPLEMENTATION_WRITER = (
     "hephaestus.config.child_environments.build_codex_implementation_child_env"
@@ -339,13 +340,28 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
     _child(
         "GIT_INDEX_FILE",
         "Bound implementation Git index",
-        "hephaestus.config.child_environments.build_codex_implementation_child_env",
+        (_CODEX_IMPLEMENTATION_WRITER, _CHECK_ONLY_GIT_READER),
         "path",
+        readers=(_CHECK_ONLY_GIT_READER,),
+    ),
+    _child(
+        "GIT_OBJECT_DIRECTORY",
+        "Check-only candidate Git object directory",
+        _CHECK_ONLY_GIT_READER,
+        "path",
+        readers=(_CHECK_ONLY_GIT_READER,),
+    ),
+    _child(
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "Check-only candidate Git alternate object directories",
+        _CHECK_ONLY_GIT_READER,
+        "non-empty-no-nul",
+        readers=(_CHECK_ONLY_GIT_READER,),
     ),
     _child(
         "GIT_OPTIONAL_LOCKS",
         "Disable optional child Git locks",
-        "hephaestus.config.child_environments.build_codex_implementation_child_env",
+        (_CODEX_IMPLEMENTATION_WRITER, _CHECK_ONLY_GIT_READER),
         "literal-0",
     ),
     _child(

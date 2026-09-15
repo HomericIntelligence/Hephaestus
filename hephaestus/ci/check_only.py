@@ -29,6 +29,9 @@ from pre_commit.hook import Hook
 from pre_commit.repository import _hook_installed, all_hooks
 from pre_commit.store import Store
 
+from hephaestus.cli.localization import text
+from hephaestus.config.child_environments import build_check_only_git_env
+
 
 class PreparationError(RuntimeError):
     """The selected checks cannot run with the prepared inputs."""
@@ -145,7 +148,12 @@ class PreparedStore(Store):
 
 
 def _git(root: Path, *args: str) -> bytes:
-    result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=False)
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        env=build_check_only_git_env(),
+        capture_output=True,
+        check=False,
+    )
     if result.returncode:
         raise PreparationError("Cannot prepare or inspect candidate Git state")
     return result.stdout
@@ -353,13 +361,20 @@ def _run(source: Path, temporary: Path) -> int:
             changed = _restore(candidate, baseline, names)
             rejected = status != 0 or changed
             failed |= rejected
-            print(f"{hook.id}: {'FAILED' if rejected else 'passed'}", flush=True)
+            print(
+                text(
+                    "%(hook_id)s: %(status)s",
+                    hook_id=hook.id,
+                    status=text("FAILED") if rejected else text("passed"),
+                ),
+                flush=True,
+            )
             if output:
                 sys.stdout.buffer.write(output)
                 sys.stdout.buffer.flush()
             if changed:
                 print(
-                    "The hook changed its private candidate; original source is unchanged.",
+                    text("The hook changed its private candidate; original source is unchanged."),
                     flush=True,
                 )
             if rejected and (hook.fail_fast or config["fail_fast"]):
@@ -374,7 +389,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="hephaestus-check-only-") as temporary:
             return _run(source, Path(temporary))
     except (PreparationError, OSError, ValueError) as error:
-        print(f"Check-only preparation failed: {error}", file=sys.stderr)
+        print(text("Check-only preparation failed: %(error)s", error=error), file=sys.stderr)
         return 2
 
 
