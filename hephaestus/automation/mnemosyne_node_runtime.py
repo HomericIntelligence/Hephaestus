@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -37,6 +39,7 @@ _MAX_PACKAGE_METADATA_BYTES = 16 * 1024 * 1024
 _MAX_PACKAGE_ACTIVE_DESCRIPTORS = 128
 _PACKAGE_WALK_TIMEOUT_S = 10.0
 _PACKAGE_TIMEOUT_MESSAGE = "Node package dependency tree timed out"
+_PACKAGE_LINK_CLOSE_POLICY = "always-close-preserve-primary-error"
 
 
 @dataclass
@@ -256,13 +259,38 @@ _PACKAGE_FILE_FLAGS = (
 )
 
 
+@dataclass(frozen=True)
+class _PackageLinkCapability:
+    """Bind one native no-follow link reader for the current platform."""
+
+    abi: str
+    open_flags: int
+    reader: Callable[..., int]
+    maximum_target_bytes: int
+    close_policy: str
+
+
+_PACKAGE_LINK_CAPABILITY: _PackageLinkCapability | None = None
+_PACKAGE_LINK_CAPABILITY_INITIALIZED = False
+
+
+@dataclass(frozen=True)
+class _PackageChild:
+    """Keep one no-follow child record captured during directory enumeration."""
+
+    name: str
+    metadata: os.stat_result
+    kind: int
+    link_target: str | None = None
+
+
 @dataclass
 class _PackageDirectoryFrame:
     """Keep the state for one active package directory."""
 
     descriptor: int
     relative_parent: Path
-    children: list[os.DirEntry[str]]
+    children: list[_PackageChild]
     initial: os.stat_result
     name: str | None = None
     index: int = 0
@@ -439,6 +467,168 @@ def _close_package_descriptors(
         raise LearnDeliveryError(unavailable_message)
 
 
+def _resolve_package_link_capability() -> _PackageLinkCapability | None:
+    """Resolve one complete native no-follow link capability for this host."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "linux":
+            values = tuple(getattr(os, name) for name in ("O_PATH", "O_NOFOLLOW", "O_CLOEXEC"))
+            if not all(type(value) is int for value in values):
+                return None
+            reader = libc.readlinkat
+            reader.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.POINTER(ctypes.c_char),
+                ctypes.c_size_t,
+            ]
+            reader.restype = ctypes.c_ssize_t
+            return _PackageLinkCapability(
+                "linux",
+                values[0] | values[2] | values[1],
+                reader,
+                _MAX_PACKAGE_LINK_TARGET_BYTES,
+                _PACKAGE_LINK_CLOSE_POLICY,
+            )
+        if sys.platform == "darwin":
+            values = tuple(getattr(os, name) for name in ("O_SYMLINK", "O_CLOEXEC"))
+            if not all(type(value) is int for value in values):
+                return None
+            reader = libc.freadlink
+            reader.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+            reader.restype = ctypes.c_ssize_t
+            return _PackageLinkCapability(
+                "darwin",
+                values[0] | values[1],
+                reader,
+                _MAX_PACKAGE_LINK_TARGET_BYTES,
+                _PACKAGE_LINK_CLOSE_POLICY,
+            )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _package_link_capability() -> _PackageLinkCapability | None:
+    """Return the cached native no-follow link capability for this host."""
+    global _PACKAGE_LINK_CAPABILITY_INITIALIZED, _PACKAGE_LINK_CAPABILITY
+    if not _PACKAGE_LINK_CAPABILITY_INITIALIZED:
+        _PACKAGE_LINK_CAPABILITY = _resolve_package_link_capability()
+        _PACKAGE_LINK_CAPABILITY_INITIALIZED = True
+    return _PACKAGE_LINK_CAPABILITY
+
+
+def _complete_package_link_capability(
+    capability: object,
+) -> _PackageLinkCapability | None:
+    """Return one complete cached link capability or reject it before I/O."""
+    if not isinstance(capability, _PackageLinkCapability):
+        return None
+    expected_abi = {"linux": "linux", "darwin": "darwin"}.get(sys.platform)
+    if (
+        capability.abi != expected_abi
+        or type(capability.open_flags) is not int
+        or not callable(capability.reader)
+        or type(capability.maximum_target_bytes) is not int
+        or capability.maximum_target_bytes != _MAX_PACKAGE_LINK_TARGET_BYTES
+        or capability.close_policy != _PACKAGE_LINK_CLOSE_POLICY
+    ):
+        return None
+    return capability
+
+
+def _package_link_native_call(
+    capability: _PackageLinkCapability,
+    descriptor: int,
+    buffer: ctypes.Array[ctypes.c_char],
+    capacity: int,
+) -> int:
+    """Read one link target through the selected platform ABI."""
+    if capability.abi == "linux":
+        return capability.reader(
+            descriptor,
+            b"",
+            ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)),
+            capacity,
+        )
+    return capability.reader(
+        descriptor,
+        ctypes.cast(buffer, ctypes.c_void_p),
+        capacity,
+    )
+
+
+def _read_package_link_bytes(
+    capability: _PackageLinkCapability,
+    descriptor: int,
+    deadline: float,
+) -> str:
+    """Read one bounded UTF-8 target from one open link descriptor."""
+    capacity = min(256, capability.maximum_target_bytes + 1)
+    while True:
+        _check_package_deadline(deadline)
+        buffer = ctypes.create_string_buffer(capacity)
+        result = _package_link_native_call(capability, descriptor, buffer, capacity)
+        _check_package_deadline(deadline)
+        if not isinstance(result, int) or result < 0 or result > capacity:
+            raise LearnDeliveryError("Node package dependency tree is unavailable")
+        if result == capacity:
+            if capacity >= capability.maximum_target_bytes + 1:
+                raise _too_large()
+            capacity = min(capacity * 2, capability.maximum_target_bytes + 1)
+            continue
+        try:
+            return ctypes.string_at(buffer, result).decode("utf-8")
+        except UnicodeDecodeError:
+            raise LearnDeliveryError("Node package dependency tree is unavailable") from None
+
+
+def _read_package_link_target(
+    parent_descriptor: int,
+    name: str,
+    expected: os.stat_result,
+    deadline: float,
+) -> str:
+    """Read one link target from a bound descriptor within one byte limit."""
+    _check_package_deadline(deadline)
+    capability = _complete_package_link_capability(_package_link_capability())
+    if capability is None:
+        raise LearnDeliveryError("Node package dependency tree is unavailable")
+    try:
+        descriptor = os.open(name, capability.open_flags, dir_fd=parent_descriptor)
+    except OSError:
+        raise LearnDeliveryError("Node package dependency tree is unavailable") from None
+    primary_error = False
+    try:
+        opened = os.fstat(descriptor)
+        if _package_entry_identity(expected) != _package_entry_identity(opened):
+            raise LearnDeliveryError("Node package dependency tree is unavailable")
+        target = _read_package_link_bytes(capability, descriptor, deadline)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        _check_package_deadline(deadline)
+        if _package_entry_identity(expected) != _package_entry_identity(
+            after
+        ) or _package_entry_identity(expected) != _package_entry_identity(current):
+            raise LearnDeliveryError("Node package dependency tree is unavailable")
+        return target
+    except LearnDeliveryError:
+        primary_error = True
+        raise
+    except OSError:
+        primary_error = True
+        raise LearnDeliveryError("Node package dependency tree is unavailable") from None
+    except BaseException:
+        primary_error = True
+        raise
+    finally:
+        _close_package_descriptors(
+            (descriptor,),
+            unavailable_message="Node package dependency tree is unavailable",
+            preserve_error=primary_error,
+        )
+
+
 def _read_package_regular_file(
     parent_descriptor: int,
     name: str,
@@ -481,9 +671,8 @@ def _read_bounded_regular_file(
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or (
-            metadata.st_dev,
-            metadata.st_ino,
-        ) != (opened.st_dev, opened.st_ino):
+            _package_entry_identity(metadata) != _package_entry_identity(opened)
+        ):
             raise LearnDeliveryError(unavailable_message)
         if opened.st_size > remaining_bytes:
             raise LearnDeliveryError(too_large_message)
@@ -562,7 +751,7 @@ def _open_package_directory(parent_descriptor: int, name: str, metadata: os.stat
                 preserve_error=True,
             )
         raise LearnDeliveryError("Node package dependency tree is unavailable") from None
-    if _package_entry_identity(metadata) != _package_entry_identity(opened):
+    if _package_node_identity(metadata) != _package_node_identity(opened):
         _close_package_descriptors(
             (descriptor,),
             unavailable_message="Node package dependency tree is unavailable",
@@ -809,12 +998,10 @@ def _expanded_package_link(
     metadata: os.stat_result,
     prefix: tuple[str, ...],
     remainder: tuple[str, ...],
+    deadline: float,
 ) -> tuple[str, ...]:
     """Read one stable link hop and return its bounded complete path."""
-    nested_target = os.readlink(component, dir_fd=parent_descriptor)
-    current = os.stat(component, dir_fd=parent_descriptor, follow_symlinks=False)
-    if _package_entry_identity(metadata) != _package_entry_identity(current):
-        raise LearnDeliveryError("Node package dependency tree is unavailable")
+    nested_target = _read_package_link_target(parent_descriptor, component, metadata, deadline)
     pending = (*_bounded_link_components(prefix, nested_target), *remainder)
     if len(pending[:-1]) > _MAX_PACKAGE_DEPTH:
         raise _too_large()
@@ -904,6 +1091,7 @@ def _resolve_package_link(
                         metadata,
                         tuple(prefix),
                         pending[index + 1 :],
+                        deadline,
                     )
                     restart = True
                     break
@@ -943,6 +1131,7 @@ def _link_package_entry(
     parent_descriptor: int,
     name: str,
     metadata: os.stat_result,
+    enumerated_target: str,
     relative_path: Path,
     relative: bytes,
     mode: int,
@@ -952,7 +1141,9 @@ def _link_package_entry(
     deadline: float,
 ) -> _PackageEntryResult:
     """Validate, record, and optionally copy one internal package link."""
-    target_text = os.readlink(name, dir_fd=parent_descriptor)
+    target_text = _read_package_link_target(parent_descriptor, name, metadata, deadline)
+    if target_text != enumerated_target:
+        raise LearnDeliveryError("Node package dependency tree is unavailable")
     target = _resolve_package_link(
         root_descriptor,
         tuple(relative_path.parent.parts),
@@ -977,7 +1168,7 @@ def _package_tree_entry_record(
     root_descriptor: int,
     parent_descriptor: int,
     relative_parent: Path,
-    child: os.DirEntry[str],
+    child: _PackageChild,
     remaining_bytes: int,
     remaining_metadata_bytes: int,
     snapshot_root: PackageSnapshot | None,
@@ -990,15 +1181,14 @@ def _package_tree_entry_record(
     relative_path, relative = _bounded_relative_path(relative_parent, child.name)
     try:
         _check_package_deadline(deadline)
-        metadata = os.stat(child.name, dir_fd=parent_descriptor, follow_symlinks=False)
-        _check_package_deadline(deadline)
+        metadata = child.metadata
         expected = expected_identities.get(relative_path.as_posix())
         if expected is not None and (
             _package_entry_identity(expected) != _package_entry_identity(metadata)
         ):
             raise LearnDeliveryError("Node package dependency tree is unavailable")
         mode = stat.S_IMODE(metadata.st_mode)
-        if stat.S_ISREG(metadata.st_mode):
+        if child.kind == stat.S_IFREG:
             return _regular_package_entry(
                 parent_descriptor,
                 child.name,
@@ -1013,7 +1203,7 @@ def _package_tree_entry_record(
                 captured_payloads,
                 deadline,
             )
-        if stat.S_ISDIR(metadata.st_mode):
+        if child.kind == stat.S_IFDIR:
             return _directory_package_entry(
                 parent_descriptor,
                 child.name,
@@ -1025,12 +1215,15 @@ def _package_tree_entry_record(
                 snapshot_root,
                 deadline,
             )
-        if stat.S_ISLNK(metadata.st_mode):
+        if child.kind == stat.S_IFLNK:
+            if child.link_target is None:
+                raise LearnDeliveryError("Node package dependency tree is unavailable")
             return _link_package_entry(
                 root_descriptor,
                 parent_descriptor,
                 child.name,
                 metadata,
+                child.link_target,
                 relative_path,
                 relative,
                 mode,
@@ -1050,11 +1243,11 @@ def _bounded_package_children(
     directory_descriptor: int,
     entry_budget: _PackageEntryBudget,
     deadline: float | None = None,
-) -> list[os.DirEntry[str]]:
+) -> list[_PackageChild]:
     """Return sorted children reserved against one traversal-wide limit."""
     effective_deadline = _package_deadline(deadline)
     _check_package_deadline(effective_deadline)
-    children: list[os.DirEntry[str]] = []
+    children: list[_PackageChild] = []
     reserved = 0
     complete = False
     try:
@@ -1065,7 +1258,27 @@ def _bounded_package_children(
                 _check_package_deadline(effective_deadline)
                 entry_budget.reserve_pending()
                 try:
-                    children.append(child)
+                    metadata = os.stat(
+                        child.name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                    link_target = None
+                    if stat.S_ISLNK(metadata.st_mode):
+                        link_target = _read_package_link_target(
+                            directory_descriptor,
+                            child.name,
+                            metadata,
+                            effective_deadline,
+                        )
+                    children.append(
+                        _PackageChild(
+                            child.name,
+                            metadata,
+                            stat.S_IFMT(metadata.st_mode),
+                            link_target,
+                        )
+                    )
                 except BaseException:
                     entry_budget.release_pending(1)
                     raise
@@ -1156,12 +1369,12 @@ def _finish_package_directory_frame(
     primary_error = False
     try:
         opened = os.fstat(frame.descriptor)
-        identities = [_package_entry_identity(frame.initial), _package_entry_identity(opened)]
+        identities = [_package_node_identity(frame.initial), _package_node_identity(opened)]
         if frame.name is not None:
             if parent_descriptor is None:
                 raise LearnDeliveryError("Node package dependency tree is unavailable")
             named = os.stat(frame.name, dir_fd=parent_descriptor, follow_symlinks=False)
-            identities.append(_package_entry_identity(named))
+            identities.append(_package_node_identity(named))
         if len(set(identities)) != 1:
             raise LearnDeliveryError("Node package dependency tree is unavailable")
     except LearnDeliveryError:
