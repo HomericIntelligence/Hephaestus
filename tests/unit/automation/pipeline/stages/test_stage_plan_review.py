@@ -100,6 +100,7 @@ def _review_item(make_work_item: Any, github: FakeStageGitHub, **kwargs: Any) ->
         snapshot = journal_snapshot(github.issue_comments(item.issue))
     item.payload.setdefault("plan_text", snapshot.current_plan)
     item.payload.setdefault("plan_revision", snapshot.revision)
+    item.payload.setdefault("reviewed_plan_comment_body", snapshot.current_plan_body)
     return item
 
 
@@ -1098,6 +1099,7 @@ class TestPlanReviewStageStep:
         item.payload["plan_text"] = "# Approved plan\n\nImplement the queue."
         item.payload["plan_revision"] = 8
         github.comments[item.issue] = [render_current_plan(item.payload["plan_text"], revision=8)]
+        item.payload["reviewed_plan_comment_body"] = github.comments[item.issue][0]
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
@@ -1157,6 +1159,47 @@ class TestPlanReviewStageStep:
                 (44, ("state:plan-blocked",), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
             ),
             ("gh_issue_upsert_comment", (44, PLAN_REVIEW_CANONICAL_MARKER)),
+        ]
+
+    def test_eval_blocked_retries_the_exact_audit_after_comment_failure(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A confirmed BLOCKED latch keeps its exact pending audit for retry."""
+
+        class FailFirstAuditGitHub(FakeStageGitHub):
+            failed = False
+
+            def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+                if not self.failed:
+                    self.failed = True
+                    raise OSError("transient comment failure")
+                super().upsert_issue_comment(*args, **kwargs)
+
+        stage = PlanReviewStage()
+        github = FailFirstAuditGitHub()
+        ctx = make_ctx(github=github)
+        item = _review_item(make_work_item, github, issue=144, state="EVAL")
+        raw = "Waiting for the exact API decision in #41.\n\nstate:plan-blocked"
+        item.payload["review_verdict"] = ReviewVerdict(
+            grade=None,
+            verdict="BLOCKED",
+            raw=raw,
+        )
+
+        first = stage.step(item, ctx)
+        second = stage.step(item, ctx)
+
+        assert first == StageOutcome(Disposition.RETRY, "review publication failed")
+        assert second == StageOutcome(
+            Disposition.BLOCKED,
+            "plan requires external intervention",
+        )
+        assert github.labels[144] == {STATE_PLAN_BLOCKED}
+        snapshot = journal_snapshot(github.issue_comments(144))
+        assert snapshot.current_review == raw
+        assert [entry[0] for entry in github.mutation_log] == [
+            "edit_labels",
+            "gh_issue_upsert_comment",
         ]
 
     def test_eval_blocked_rejects_cross_role_marker_before_label_mutation(
@@ -1386,6 +1429,7 @@ class TestPlanReviewStageStep:
         item = _review_item(make_work_item, ctx.github, issue=11, state="EVAL")
         item.payload["plan_text"] = "# My Plan\n..."
         ctx.github.comments[item.issue] = [render_current_plan(item.payload["plan_text"])]
+        item.payload["reviewed_plan_comment_body"] = ctx.github.comments[item.issue][0]
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
@@ -1501,6 +1545,7 @@ class TestPlanReviewStageOnJobDone:
             f"{PLAN_REVIEW_CANONICAL_MARKER}\n## 🔍 Plan Review\n"
             "<!-- revision: 1 -->\n\nReview pending for implementation plan revision 1.",
         ]
+        assert item.payload["reviewed_plan_comment_body"] == github.comments[2][0]
         assert github.mutation_log == [
             ("gh_issue_upsert_comment", (2, PLAN_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (2, PLAN_REVIEW_CANONICAL_MARKER)),
@@ -1892,6 +1937,123 @@ class TestPlanScopeAdmission:
             "gh_issue_upsert_comment",
         ]
 
+    def test_fresh_codex_go_parses_the_exact_indented_canonical_plan(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Scope admission does not remove indentation from the plan heading."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        body = render_current_plan("## Files to Modify\n- `tests/unit/one.py`").replace(
+            "## Files to Modify",
+            "  ## Files to Modify",
+        )
+        github.comments[1] = [body, render_pending_review(revision=1)]
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        outcome = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+
+    def test_fresh_codex_go_rejects_a_line_ending_change_after_validation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A byte change to the reviewed canonical plan invalidates the verdict."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        plan = "## Files to Modify\n- `tests/unit/one.py`"
+        _seed_canonical_plan(github, 1, plan)
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+        github.comments[1][0] = str(github.comments[1][0]).replace("\n", "\r\n")
+
+        outcome = stage.step(
+            item,
+            make_ctx(github=github, config_overrides={"agent": "codex"}),
+        )
+
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+        assert github.labels[1] == {STATE_NEEDS_PLAN}
+        assert github.mutation_log == []
+
+    def test_scope_block_retries_the_exact_audit_after_comment_failure(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A scope rejection keeps its exact host audit for publication retry."""
+
+        class FailFirstAuditGitHub(FakeStageGitHub):
+            failed = False
+
+            def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+                if not self.failed:
+                    self.failed = True
+                    raise OSError("transient comment failure")
+                super().upsert_issue_comment(*args, **kwargs)
+
+        stage = PlanReviewStage()
+        github = FailFirstAuditGitHub(labels=[STATE_NEEDS_PLAN])
+        plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+        _seed_canonical_plan(github, 1, plan)
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+        ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+
+        first = stage.step(item, ctx)
+        second = stage.step(item, ctx)
+
+        assert first == StageOutcome(Disposition.RETRY, "review publication failed")
+        assert second == StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
+        assert github.labels[1] == {STATE_PLAN_BLOCKED}
+        snapshot = journal_snapshot(github.issue_comments(1))
+        assert "Diagnostic: plan_scope_invalid." in snapshot.current_review
+        assert snapshot.current_review.endswith(STATE_PLAN_BLOCKED)
+        assert [entry[0] for entry in github.mutation_log] == [
+            "edit_labels",
+            "gh_issue_upsert_comment",
+        ]
+
+    def test_blocked_audit_retry_preserves_a_concurrent_operator_audit(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A new operator audit has priority over a pending host audit retry."""
+
+        class FailFirstAuditGitHub(FakeStageGitHub):
+            failed = False
+
+            def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+                if not self.failed:
+                    self.failed = True
+                    raise OSError("transient comment failure")
+                super().upsert_issue_comment(*args, **kwargs)
+
+        stage = PlanReviewStage()
+        github = FailFirstAuditGitHub(labels=[STATE_NEEDS_PLAN])
+        plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+        _seed_canonical_plan(github, 1, plan)
+        item = _review_item(make_work_item, github, issue=1, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+        ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+
+        first = stage.step(item, ctx)
+        operator_audit = render_current_review(
+            "Wait for the operator decision.\n\nstate:plan-blocked",
+            revision=1,
+        )
+        github.comments[1][1] = operator_audit
+        second = stage.step(item, ctx)
+
+        assert first == StageOutcome(Disposition.RETRY, "review publication failed")
+        assert second == StageOutcome(
+            Disposition.BLOCKED,
+            "plan was blocked externally while review was in flight",
+        )
+        assert github.comments[1][1] == operator_audit
+        assert [entry[0] for entry in github.mutation_log] == ["edit_labels"]
+
     def test_fresh_codex_go_returns_to_planning_when_the_canonical_plan_changes(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -2228,6 +2390,7 @@ class TestDurableWriteOrdering:
             }
         )
         github.comments[item.issue] = [render_current_plan(item.payload["plan_text"], revision=4)]
+        item.payload["reviewed_plan_comment_body"] = github.comments[item.issue][0]
 
         result = PlanReviewStage().step(item, ctx)
 

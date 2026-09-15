@@ -133,7 +133,9 @@ class JournalSnapshot:
 
     revision: int
     current_plan: str
+    current_plan_body: str
     current_review: str
+    current_review_body: str
     current_review_revision: int | None
     prior_plan_fingerprints: tuple[str, ...] = ()
     forced_planning_epoch: bool = False
@@ -502,7 +504,9 @@ def journal_snapshot(comments: Sequence[IssueComment]) -> JournalSnapshot:
     return JournalSnapshot(
         revision=revision or 1,
         current_plan=current_plan if current_plan_body else "",
+        current_plan_body=current_plan_body,
         current_review=(extract_current_review(current_review_body) if current_review_body else ""),
+        current_review_body=current_review_body,
         current_review_revision=review_revision,
         prior_plan_fingerprints=prior_fingerprints,
         forced_planning_epoch=forced_epoch,

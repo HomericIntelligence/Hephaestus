@@ -292,3 +292,17 @@ def test_publication_rejects_concurrent_canonical_pointer_overwrite() -> None:
 
     with pytest.raises(RuntimeError, match=r"concurrent plan journal write.*another pipeline item"):
         publish_plan_revision(9, "Expected plan", github, require_change=False)
+
+
+def test_publication_rejects_normalized_equivalent_canonical_overwrite() -> None:
+    """Confirmation rejects a byte-different plan with the same fingerprint."""
+
+    class CompetingWriterGitHub(FakeStageGitHub):
+        def upsert_plan_comment(self, issue_number: int, body: str) -> None:
+            super().upsert_plan_comment(issue_number, body)
+            super().upsert_plan_comment(issue_number, body.replace("\n", "\r\n"))
+
+    github = CompetingWriterGitHub()
+
+    with pytest.raises(RuntimeError, match=r"concurrent plan journal write.*another pipeline item"):
+        publish_plan_revision(10, "Expected plan", github, require_change=False)
