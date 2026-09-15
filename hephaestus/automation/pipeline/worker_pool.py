@@ -96,6 +96,7 @@ from hephaestus.automation.git_runtime import (
 )
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillExecutor,
     AthenaSkillJob,
@@ -6696,7 +6697,12 @@ class WorkerPool:
     ) -> _PreparedGitLocks:
         """Validate intake before the compatibility lock creates local state."""
         manager = self._new_repo_intake_manager(job)
-        legacy_lock_path = repo_lock_path(job.repo, self._lock_dir)
+        configured_lock_path = repo_lock_path(job.repo, self._lock_dir)
+        legacy_lock_path = (
+            configured_lock_path
+            if self._lock_dir is not None
+            else manager.caller_root / DEFAULT_STATE_DIR / "locks" / configured_lock_path.name
+        )
         operational_state_paths = (
             legacy_lock_path,
             Path(f"{legacy_lock_path}.owner.lock"),

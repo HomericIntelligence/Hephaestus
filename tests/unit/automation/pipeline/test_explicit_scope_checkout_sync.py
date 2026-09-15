@@ -93,7 +93,7 @@ def _facts(issue: int) -> IssueFacts:
     )
 
 
-def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller(
+def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A direct scope admits work only after a real isolated intake succeeds."""
@@ -236,12 +236,14 @@ def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller(
             manager: RepoIntakeManager | None = None,
             operational_state_paths: Collection[Path] = (),
             admitted_metadata_lock: Path | None = None,
+            expected_compatibility_lock_paths: Collection[Path] | None = None,
         ) -> JobResult:
             result = super()._git_prepare_intake(
                 job,
                 manager=manager,
                 operational_state_paths=operational_state_paths,
                 admitted_metadata_lock=admitted_metadata_lock,
+                expected_compatibility_lock_paths=expected_compatibility_lock_paths,
             )
             if result.ok:
                 events.append("intake-prepared")
@@ -314,7 +316,14 @@ def test_direct_scope_prepares_real_intake_before_labels_and_preserves_caller(
     assert coordinator.config.repo_state_roots["repo-a"] == Path(str(receipt["state_root"]))
     assert intake_root == Path(str(receipt["path"]))
     assert auxiliary.submitted == []
-    assert caller_state() == before
+    after = caller_state()
+    assert after[:4] == before[:4]
+    expected_lock_root = checkout / DEFAULT_STATE_DIR / "locks"
+    expected_operational_state = {
+        f"?? {(expected_lock_root / 'git-repo-a.lock').relative_to(checkout)}",
+        f"?? {(expected_lock_root / 'git-repo-a.lock.owner.lock').relative_to(checkout)}",
+    }
+    assert set(after[4].splitlines()) == set(before[4].splitlines()) | expected_operational_state
     assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "unstaged\n"
     assert (checkout / "untracked.txt").read_text(encoding="utf-8") == "keep\n"
 
