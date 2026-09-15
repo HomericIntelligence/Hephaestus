@@ -1965,13 +1965,14 @@ def safe_git_exec_tmp_path(tmp_path: Path) -> Generator[Path]:
         except FileNotFoundError:
             path.mkdir(mode=0o700)
         _validate_git_exec_components(path)
-    root = fixture_root / f"{os.getpid()}-{tmp_path.name}"
-    root.mkdir(mode=0o700)
+    root: Path | None = None
     try:
+        root = Path(tempfile.mkdtemp(prefix=f"{os.getpid()}-{tmp_path.name}-", dir=fixture_root))
         _validate_git_exec_components(root)
         yield root
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        if root is not None:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.mark.parametrize("unsafe_component", ("cache", "fixture", "cache_symlink"))
@@ -2055,6 +2056,94 @@ def test_safe_git_exec_tmp_path_rejects_unsafe_existing_ancestor(
                 assert not any(target.iterdir())
         finally:
             generator.close()
+    finally:
+        shutil.rmtree(safe_home, ignore_errors=True)
+
+
+def test_safe_git_exec_tmp_path_uses_unique_child_when_stale_child_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use a new child when the expected child already exists."""
+    real_home = Path.home()
+    safe_home = Path(tempfile.mkdtemp(prefix="hephaestus-test-home-", dir=real_home))
+    safe_home.chmod(0o700)
+    cache_root = safe_home / ".cache"
+    fixture_root = cache_root / "hephaestus-test-git-exec-path"
+    stale_root = fixture_root / f"{os.getpid()}-{tmp_path.name}"
+    marker = stale_root / "stale-marker"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: safe_home))
+    cache_root.mkdir(mode=0o700)
+    fixture_root.mkdir(mode=0o700)
+    stale_root.mkdir(mode=0o700)
+    marker.write_text("stale\n", encoding="utf-8")
+    stale_mode = stat.S_IMODE(stale_root.lstat().st_mode)
+    fixture_function = cast(
+        Callable[[Path], Generator[Path]],
+        inspect.unwrap(cast(Callable[..., Any], safe_git_exec_tmp_path)),
+    )
+
+    try:
+        generator = fixture_function(tmp_path)
+        yielded_root: Path | None = None
+        try:
+            try:
+                yielded_root = next(generator)
+            except FileExistsError:
+                pytest.fail("fixture reused a stale child")
+        finally:
+            generator.close()
+        assert yielded_root is not None
+        assert yielded_root != stale_root
+        assert yielded_root.parent == fixture_root
+        assert not yielded_root.exists()
+        assert marker.read_text(encoding="utf-8") == "stale\n"
+        assert stat.S_IMODE(stale_root.lstat().st_mode) == stale_mode
+    finally:
+        shutil.rmtree(safe_home, ignore_errors=True)
+
+
+def test_safe_git_exec_tmp_path_cleans_child_when_final_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remove the new child when final validation fails before yield."""
+    real_home = Path.home()
+    safe_home = Path(tempfile.mkdtemp(prefix="hephaestus-test-home-", dir=real_home))
+    safe_home.chmod(0o700)
+    cache_root = safe_home / ".cache"
+    fixture_root = cache_root / "hephaestus-test-git-exec-path"
+    sibling_root = fixture_root / "unrelated-sibling"
+    sibling_marker = sibling_root / "marker"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: safe_home))
+    cache_root.mkdir(mode=0o700)
+    fixture_root.mkdir(mode=0o700)
+    sibling_root.mkdir(mode=0o700)
+    sibling_marker.write_text("preserve\n", encoding="utf-8")
+    original_validator = _validate_git_exec_components
+
+    def fail_for_child(path: Path) -> None:
+        if path.parent == fixture_root:
+            raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+        original_validator(path)
+
+    monkeypatch.setattr(sys.modules[__name__], "_validate_git_exec_components", fail_for_child)
+    fixture_function = cast(
+        Callable[[Path], Generator[Path]],
+        inspect.unwrap(cast(Callable[..., Any], safe_git_exec_tmp_path)),
+    )
+
+    try:
+        generator = fixture_function(tmp_path)
+        try:
+            with pytest.raises(_HostVerificationBoundaryError) as raised:
+                next(generator)
+            assert str(raised.value) == "host_verification_git_exec_path_unsafe"
+        finally:
+            generator.close()
+        assert set(fixture_root.iterdir()) == {sibling_root}
+        assert sibling_marker.read_text(encoding="utf-8") == "preserve\n"
+        assert sibling_root.is_dir()
     finally:
         shutil.rmtree(safe_home, ignore_errors=True)
 
