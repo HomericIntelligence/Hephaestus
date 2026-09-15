@@ -4,6 +4,12 @@ from hephaestus.automation.pipeline.diagnostics import (
     bounded_pipeline_diagnostic,
     redact_diagnostic_text,
 )
+from hephaestus.diagnostics import redact_truncated_diagnostic_prefix
+
+
+def _pem_marker(action: str, key_type: str) -> str:
+    """Build a synthetic PEM marker without a source-level secret signature."""
+    return "-----" + action + " " + key_type + "-----"
 
 
 def test_redacts_github_tokens() -> None:
@@ -44,8 +50,8 @@ def test_redacts_aws_and_openai_tokens() -> None:
 
 def test_redacts_private_key_blocks() -> None:
     """PEM private-key blocks are masked while surrounding text survives."""
-    begin = "-----BEGIN " + "RSA PRIVATE KEY" + "-----"
-    end = "-----END " + "RSA PRIVATE KEY" + "-----"
+    begin = _pem_marker("BEGIN", "RSA PRIVATE KEY")
+    end = _pem_marker("END", "RSA PRIVATE KEY")
     payload = f"{begin}\nMIIEpA==\n{end}\nafter"
     result = redact_diagnostic_text(payload)
     assert "MIIEpA==" not in result
@@ -53,10 +59,22 @@ def test_redacts_private_key_blocks() -> None:
     assert result.endswith("after")
 
 
+def test_redacts_incomplete_private_key_block_through_end_of_stream() -> None:
+    """An incomplete PEM block cannot persist its body."""
+    begin = _pem_marker("BEGIN", "PRIVATE KEY")
+    key_material = "AAAA" * 24
+    diagnostic = f"before\n{begin}\n{key_material}\n{key_material}"
+
+    result = bounded_pipeline_diagnostic(diagnostic, limit=4000)
+
+    assert result == "before\n<redacted>"
+    assert key_material not in result
+
+
 def test_combined_diagnostic_redacts_pem_before_git_assignments() -> None:
     """The combined helper masks a PEM block before Git assignment rules."""
-    begin = "-----BEGIN " + "PRIVATE KEY" + "-----"
-    end = "-----END " + "PRIVATE KEY" + "-----"
+    begin = _pem_marker("BEGIN", "PRIVATE KEY")
+    end = _pem_marker("END", "PRIVATE KEY")
     key_material = "TEST ONLY PRIVATE KEY BODY"
     diagnostic = f"before\nclient_secret={begin}\n{key_material}\n{end}\nafter"
 
@@ -92,3 +110,40 @@ def test_bounded_diagnostic_is_idempotent_and_keeps_runtime_values() -> None:
         "<redacted-git-url>"
     )
     assert bounded_pipeline_diagnostic(result, limit=200) == result
+
+
+def test_truncated_prefix_masks_terminating_payload_after_every_marker_suffix() -> None:
+    """Each marker suffix masks a long first payload fragment through its terminator."""
+    key_types = (
+        "PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "DSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+    )
+    markers = tuple(_pem_marker("BEGIN", key_type) for key_type in key_types)
+    separators = ("\n", "\r\n", r"\n", r"\r\n")
+    wrappers = ("", " ", "\t", "\r", '"', "'", "\\")
+    terminators = (" ", "\t", "\r", ",", ";", "}", '"', "'", "\\")
+    payload = "A" * 4100
+
+    for marker in markers:
+        for cut in range(1, len(marker)):
+            for separator in separators:
+                for wrapper in wrappers:
+                    for terminator in terminators:
+                        diagnostic = (
+                            marker[cut:] + separator + wrapper + payload + terminator + "after\n"
+                        )
+
+                        result = redact_truncated_diagnostic_prefix(diagnostic)
+
+                        assert result == "<redacted-value>" + terminator + "after\n", (
+                            marker,
+                            cut,
+                            separator,
+                            wrapper,
+                            terminator,
+                        )
+                        assert payload[-4000:] not in result

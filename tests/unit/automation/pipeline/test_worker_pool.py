@@ -252,6 +252,11 @@ _EMPTY_DIFF_OUTPUT = _BoundedGitOutput(
 )
 
 
+def _pem_marker(action: str, key_type: str) -> str:
+    """Build a synthetic PEM marker without a source-level secret signature."""
+    return "-----" + action + " " + key_type + "-----"
+
+
 def _run_controlled_long_commit_waiter(
     completion_q: CompletionQueue,
     shutdown_event: threading.Event,
@@ -3926,8 +3931,8 @@ class TestWorkerPoolSubmitComplete:
             lock_dir=tmp_path / "locks",
             evidence_receipt_dir=receipt_dir,
         )
-        begin = "-----BEGIN " + "PRIVATE KEY" + "-----"
-        end = "-----END " + "PRIVATE KEY" + "-----"
+        begin = _pem_marker("BEGIN", "PRIVATE KEY")
+        end = _pem_marker("END", "PRIVATE KEY")
         key_material = "OPAQUE REDACTION FIXTURE"
         archive_stderr = f"client_secret={begin}\n{key_material}\n{end}"
         job = BuildTestJob(
@@ -4032,7 +4037,7 @@ class TestWorkerPoolSubmitComplete:
     @pytest.mark.skipif(os.name != "posix", reason="The deadline uses POSIX interval timers")
     def test_host_log_tail_bounds_repeated_unmatched_pem_markers(self, tmp_path: Path) -> None:
         """A 64 MiB marker log must produce its bounded tail before the host deadline."""
-        marker = b"-----BEGIN " + b"PRIVATE KEY" + b"-----\n"
+        marker = _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n"
         log_path = tmp_path / "stdout.log"
         target_size = 64 * 1024 * 1024
         chunk = marker * 2048
@@ -4058,8 +4063,8 @@ class TestWorkerPoolSubmitComplete:
 
     def test_host_log_tail_redacts_pem_across_processing_bound(self, tmp_path: Path) -> None:
         """A PEM block that starts before the read window stays fully masked."""
-        begin = b"-----BEGIN " + b"PRIVATE KEY" + b"-----\n"
-        end = b"-----END " + b"PRIVATE KEY" + b"-----\n"
+        begin = _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n"
+        end = _pem_marker("END", "PRIVATE KEY").encode() + b"\n"
         key_line = b"OPAQUE REDACTION FIXTURE\n"
         log_path = tmp_path / "stderr.log"
         log_path.write_bytes(begin + (key_line * 3000) + end + b"after\n")
@@ -4068,6 +4073,264 @@ class TestWorkerPoolSubmitComplete:
 
         assert result == "<redacted>\nafter\n"
         assert key_line.decode().strip() not in result
+
+    @pytest.mark.parametrize(
+        "line_wrapper",
+        (b"", b"  ", b'"', b"\\"),
+        ids=("plain", "indented", "quoted", "backslash-escaped"),
+    )
+    def test_host_log_tail_masks_wrapped_incomplete_pem_body_without_end_marker(
+        self, tmp_path: Path, line_wrapper: bytes
+    ) -> None:
+        """A wrapped PEM continuation cannot expose its later body lines."""
+        begin = _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n"
+        key_line = line_wrapper + (b"A" * 64) + b"\n"
+        window = (key_line * ((64 * 1024 // len(key_line)) + 1))[: 64 * 1024]
+        log_path = tmp_path / "stderr.log"
+        log_path.write_bytes(begin + window)
+
+        result = _tail_file(log_path)
+
+        assert result == "<redacted-value>"
+        assert "A" not in result
+
+    @pytest.mark.parametrize(
+        ("discarded_prefix", "retained", "expected_suffix"),
+        (
+            (
+                b"-----BE",
+                b"GIN PRIVATE KEY-----\n" + (b"A" * (64 * 1024 - 21)),
+                "<redacted-value>",
+            ),
+            (
+                _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n",
+                b"AAAA\n" + (b"A" * (64 * 1024 - 10)) + b"\nAAAA",
+                "<redacted-value>",
+            ),
+            (
+                _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n",
+                b"AAAA\\n" + (b"A" * (64 * 1024 - 12)) + b"\\nAAAA",
+                "<redacted-value>",
+            ),
+            (
+                _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n",
+                b'"AAAA\\n' + (b"A" * (64 * 1024 - 21)) + b'\\nAAAA",after\n',
+                '<redacted-value>",after\n',
+            ),
+        ),
+        ids=(
+            "partial-begin-marker",
+            "short-full-short",
+            "literal-newlines",
+            "quoted-comma-terminator",
+        ),
+    )
+    def test_host_log_tail_masks_ambiguous_incomplete_pem_prefix(
+        self,
+        tmp_path: Path,
+        discarded_prefix: bytes,
+        retained: bytes,
+        expected_suffix: str,
+    ) -> None:
+        """An ambiguous PEM continuation stays masked until a safe terminator."""
+        assert len(retained) == 64 * 1024
+        log_path = tmp_path / "stderr.log"
+        log_path.write_bytes(discarded_prefix + retained)
+
+        result = _tail_file(log_path)
+
+        assert result == expected_suffix
+        assert "AAAA" not in result
+
+    @pytest.mark.parametrize(
+        "marker",
+        tuple(
+            _pem_marker("BEGIN", key_type).encode()
+            for key_type in (
+                "PRIVATE KEY",
+                "ENCRYPTED PRIVATE KEY",
+                "RSA PRIVATE KEY",
+                "DSA PRIVATE KEY",
+                "EC PRIVATE KEY",
+                "OPENSSH PRIVATE KEY",
+            )
+        ),
+        ids=("pkcs8", "encrypted-pkcs8", "rsa", "dsa", "ec", "openssh"),
+    )
+    @pytest.mark.parametrize(
+        "line_wrapper",
+        (b"", b" ", b"\t", b"\r", b'"', b"'", b"\\"),
+        ids=(
+            "plain",
+            "space",
+            "tab",
+            "carriage-return",
+            "double-quote",
+            "single-quote",
+            "backslash",
+        ),
+    )
+    def test_host_log_tail_masks_every_retained_begin_marker_suffix(
+        self,
+        tmp_path: Path,
+        marker: bytes,
+        line_wrapper: bytes,
+    ) -> None:
+        """Each retained PEM marker suffix keeps the following body masked."""
+        log_path = tmp_path / "stderr.log"
+        for cut in range(len(marker)):
+            marker_suffix = line_wrapper + marker[cut:] + b"\n"
+            body = b"A" * (64 * 1024 - len(marker_suffix))
+            log_path.write_bytes(marker[:cut] + marker_suffix + body)
+
+            result = _tail_file(log_path)
+
+            assert "A" * 16 not in result, (cut, marker_suffix)
+            if cut:
+                assert result == "<redacted-value>", (cut, marker_suffix)
+
+    @pytest.mark.parametrize("separator", (b"\n", b"\\n"), ids=("physical", "escaped"))
+    @pytest.mark.parametrize(
+        "line_wrapper",
+        (b"", b" ", b"\t", b"\r", b'"', b"'", b"\\"),
+        ids=(
+            "plain",
+            "space",
+            "tab",
+            "carriage-return",
+            "double-quote",
+            "single-quote",
+            "backslash",
+        ),
+    )
+    @pytest.mark.parametrize(
+        "terminator",
+        (b" ", b"\t", b"\r", b",", b";", b"}", b'"', b"'", b"\\"),
+        ids=(
+            "space",
+            "tab",
+            "carriage-return",
+            "comma",
+            "semicolon",
+            "brace",
+            "double-quote",
+            "single-quote",
+            "backslash",
+        ),
+    )
+    def test_host_log_tail_masks_final_pem_fragment_before_safe_terminator(
+        self,
+        tmp_path: Path,
+        separator: bytes,
+        line_wrapper: bytes,
+        terminator: bytes,
+    ) -> None:
+        """A PEM fragment cannot survive before a proven safe terminator."""
+        first_line = line_wrapper + b"AAAA" + separator
+        final_line = separator + line_wrapper + b"AAAA" + terminator + b"after\n"
+        middle_line = b"A" * (64 * 1024 - len(first_line) - len(final_line))
+        retained = first_line + middle_line + final_line
+        log_path = tmp_path / "stderr.log"
+        begin = _pem_marker("BEGIN", "PRIVATE KEY").encode() + b"\n"
+        log_path.write_bytes(begin + retained)
+
+        result = _tail_file(log_path)
+
+        assert result == "<redacted-value>" + terminator.decode() + "after\n"
+        assert "AAAA" not in result
+
+    def test_host_log_tail_masks_markerless_completed_line_and_final_fragment(
+        self, tmp_path: Path
+    ) -> None:
+        """One full PEM line makes a following terminated fragment ambiguous."""
+        final_fragment = b'"AAAA",after\n'
+        retained = (b"A" * (64 * 1024 - len(final_fragment) - 1)) + b"\n" + final_fragment
+        log_path = tmp_path / "stderr.log"
+        log_path.write_bytes(b"discarded private-key prefix" + retained)
+
+        result = _tail_file(log_path)
+
+        assert result == '<redacted-value>",after\n'
+        assert "AAAA" not in result
+
+    @pytest.mark.parametrize(
+        "separator",
+        (b"\r\n", b"\\n", b"\\r\\n"),
+        ids=("physical-crlf", "escaped-lf", "escaped-crlf"),
+    )
+    @pytest.mark.parametrize(
+        ("line_wrapper", "terminator"),
+        ((b"", b","), (b'"', b'"')),
+        ids=("unwrapped", "wrapped"),
+    )
+    def test_host_log_tail_masks_pem_after_separator_boundary_cut(
+        self,
+        tmp_path: Path,
+        separator: bytes,
+        line_wrapper: bytes,
+        terminator: bytes,
+    ) -> None:
+        """Each interior separator cut keeps the following PEM body masked."""
+        log_path = tmp_path / "stderr.log"
+        completed_line = line_wrapper + (b"A" * 64) + b"\n"
+        safe_suffix = terminator + b",after\n"
+        for cut in range(1, len(separator)):
+            retained_prefix = separator[cut:] + completed_line
+            final_size = 64 * 1024 - len(retained_prefix) - len(line_wrapper) - len(safe_suffix)
+            final_payload = line_wrapper + (b"A" * final_size)
+            retained = retained_prefix + final_payload + safe_suffix
+            log_path.write_bytes(b"discarded" + separator[:cut] + retained)
+
+            result = _tail_file(log_path)
+
+            assert result == "<redacted-value>" + safe_suffix.decode(), (separator, cut)
+            assert "A" * 4000 not in result
+
+    def test_host_log_tail_preserves_ordinary_pytest_failure_summary(self, tmp_path: Path) -> None:
+        """A truncated ordinary log keeps the summary used for classification."""
+        summary = b"1 failed in 0.42s\n"
+        line = b"ordinary diagnostic output\n"
+        separator = b"\n"
+        retained = (
+            line
+            + (b"." * (64 * 1024 - len(line) - len(separator) - len(summary)))
+            + separator
+            + summary
+        )
+        log_path = tmp_path / "stdout.log"
+        log_path.write_bytes(b"discarded ordinary prefix" + retained)
+
+        result = _tail_file(log_path)
+
+        assert result.endswith(summary.decode())
+        assert _host_validation_failure_kind(("uv", "run", "pytest"), 1, result, "") == (
+            "validation"
+        )
+
+    @pytest.mark.parametrize(
+        "candidate_line",
+        (b"a" * 64, b"c" * 40, b"QUFB" * 16),
+        ids=("sha256", "git-sha", "base64-like"),
+    )
+    def test_host_log_tail_preserves_summary_after_ordinary_digest_lines(
+        self, tmp_path: Path, candidate_line: bytes
+    ) -> None:
+        """A safe line after digest-like text keeps the final failure summary."""
+        safe_tail = b"! diagnostic boundary\n1 failed in 0.42s\n"
+        candidates = candidate_line + b"\n" + candidate_line + b"\n"
+        final_candidate = b"A" * (64 * 1024 - len(candidates) - 1 - len(safe_tail))
+        retained = candidates + final_candidate + b"\n" + safe_tail
+        log_path = tmp_path / "stdout.log"
+        log_path.write_bytes(b"discarded ordinary prefix" + retained)
+
+        result = _tail_file(log_path)
+
+        assert result.startswith("<redacted-value>")
+        assert candidate_line.decode() not in result
+        assert result.endswith(safe_tail.decode())
+        assert _host_validation_failure_kind(("uv", "run", "pytest"), 1, result, "") == (
+            "validation"
+        )
 
     @pytest.mark.parametrize(
         ("discarded_prefix", "window_prefix", "terminator", "expected"),
@@ -4084,8 +4347,14 @@ class TestWorkerPoolSubmitComplete:
                 b'"\n',
                 '<redacted-value>"\nafter\n',
             ),
+            (
+                b"password=",
+                b"\r",
+                b",\n",
+                "<redacted-value>,\nafter\n",
+            ),
         ),
-        ids=("space-after-authorization", "quote-after-password"),
+        ids=("space-after-authorization", "quote-after-password", "cr-after-password"),
     )
     def test_host_log_tail_masks_secret_when_window_starts_on_boundary(
         self,
@@ -14527,6 +14796,93 @@ class TestGitOps:
         assert diagnostic["exception_class"] == "TimeoutExpired"
         assert result.stdout_tail.index("push stdout") < result.stdout_tail.index("probe stdout")
         assert result.stderr_tail.index("push stderr") < result.stderr_tail.index("probe stderr")
+
+    def test_rebase_publish_revalidation_timeout_preserves_push_diagnostics(
+        self, pool: WorkerPool, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """The rebased-head path keeps a timed-out push as terminal evidence."""
+        from hephaestus.automation.pipeline.routing import Disposition
+        from hephaestus.automation.pipeline.stages import StageOutcome
+        from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+
+        opaque_value = "OPAQUE_PASSWORD_FIXTURE"
+        source_sha = "c" * 40
+        push = subprocess.TimeoutExpired(
+            ["git", "push"],
+            42,
+            output="push timeout stdout",
+            stderr=f"password={opaque_value}",
+        )
+
+        def fail_push(*_args: object, **_kwargs: object) -> None:
+            git_utils.remaining_operation_timeout(42)
+            raise push
+
+        def revalidate_remote() -> tuple[dict[str, str], tuple[str, ...]]:
+            git_utils.remaining_operation_timeout(42)
+            return {}, ()
+
+        git_utils_mocks.run.side_effect = fail_push
+        with (
+            patch(
+                "hephaestus.automation.git_runtime.time.monotonic",
+                side_effect=(100.0, 102.0),
+            ),
+            git_utils.operation_deadline(101.0),
+        ):
+            result = pool._publish_rebased_head(
+                GitJob("test/repo", "continue_rebase", 42),
+                branch="123-auto-impl",
+                expected_remote_sha="a" * 40,
+                cwd=tmp_path,
+                source_sha=source_sha,
+                remote_env={},
+                remote_config=(),
+                revalidate_remote=revalidate_remote,
+            )
+
+        assert result is not None
+        assert result.ok is False
+        assert result.error == "publish failed: remote probe timeout"
+        assert result.value == {
+            "failure_kind": "publish_timeout",
+            "publication_failure_diagnostic": {
+                "failure_kind": "publication",
+                "phase": "remote_probe",
+                "head_sha": source_sha,
+                "exception_class": "TimeoutExpired",
+                "remote_state": "unverified",
+            },
+        }
+        assert result.stdout_tail == "push timeout stdout"
+        assert opaque_value not in result.stderr_tail
+        assert "<redacted-value>" in result.stderr_tail
+        assert "publication_state" not in result.value
+
+        item = WorkItem(
+            repo="test/repo",
+            kind=ItemKind.PR,
+            issue=3141,
+            pr=3120,
+            stage=StageName.IMPLEMENTATION,
+            state="REBASE_CONTINUE_WAIT",
+        )
+        stage = ImplementationStage()
+        stage.on_job_done(item, result, MagicMock())
+        durable = item.payload["publication_failure_diagnostic"]
+        assert durable["head_sha"] == source_sha
+        assert durable["phase"] == "remote_probe"
+        assert durable["remote_state"] == "unverified"
+        assert durable["stdout_tail"] == "push timeout stdout"
+        assert opaque_value not in durable["stderr_tail"]
+        assert "<redacted>" in durable["stderr_tail"]
+        outcome = stage.step(item, MagicMock())
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert outcome.note.startswith("implementation_rebase_failed:")
+        assert "phase=remote_probe" in outcome.note
+        assert "remote_state=unverified" in outcome.note
 
     def test_publication_diagnostic_cycle_is_bounded(self, pool: WorkerPool) -> None:
         """A cyclic wrapped exception cannot block or expose an unbounded stream."""
