@@ -25,7 +25,7 @@ import yaml
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError, LearnDeliveryRequest
-from hephaestus.automation.mnemosyne_node_runtime import node_runtime_files
+from hephaestus.automation.mnemosyne_node_runtime import node_package_tree, node_runtime_files
 from hephaestus.automation.mnemosyne_validator_dependencies import (
     prepare_dependencies,
     run_learning_subprocess,
@@ -562,37 +562,42 @@ class MnemosynePluginValidator:
                 node, cli = Path(node_value).resolve(), Path(cli_value).resolve()
                 runtime_files = node_runtime_files(node)
                 executables = tuple(
-                    (target, sha256(target.read_bytes()).hexdigest())
-                    for target in (*runtime_files, cli)
+                    (target, sha256(target.read_bytes()).hexdigest()) for target in runtime_files
                 )
-                lint_reads = (
-                    " ".join(f"(literal {json.dumps(str(target))})" for target in runtime_files)
-                    + f" (subpath {json.dumps(str(cli.parent))})"
-                )
-                lint_profile = profile + f"(allow file-read* {lint_reads})"
-                # Offline lint does not use the host TLS configuration.
-                env["OPENSSL_CONF"] = "/dev/null"
-                lint_argv = [
-                    str(node),
-                    str(cli),
-                    "--config",
-                    str(path / ".markdownlint.yaml"),
-                    "skills/*.md",
-                ]
-                try:
-                    lint = self._runner(
-                        [str(sandbox), "-p", lint_profile, *lint_argv],
-                        cwd=path,
-                        timeout=VALIDATOR_TIMEOUT_S,
-                        check=False,
-                        log_on_error=False,
-                        env=env,
-                        track_process_group=True,
+                with node_package_tree(cli) as package_tree:
+                    lint_reads = (
+                        " ".join(f"(literal {json.dumps(str(target))})" for target in runtime_files)
+                        + f" (subpath {json.dumps(str(package_tree.snapshot_root))})"
                     )
-                except (OSError, subprocess.TimeoutExpired):
-                    raise LearnDeliveryError("learning markdownlint runner failed") from None
-                if lint.returncode != 0:
-                    raise LearnDeliveryError("learning markdownlint failed")
+                    source_deny = (
+                        f"(deny file-read* (subpath {json.dumps(str(package_tree.root))}))"
+                    )
+                    lint_profile = profile + source_deny + f"(allow file-read* {lint_reads})"
+                    # Offline lint does not use the host TLS configuration.
+                    env["OPENSSL_CONF"] = "/dev/null"
+                    lint_argv = [
+                        str(node),
+                        str(package_tree.snapshot_cli),
+                        "--config",
+                        str(path / ".markdownlint.yaml"),
+                        "skills/*.md",
+                    ]
+                    package_tree.verify()
+                    try:
+                        lint = self._runner(
+                            [str(sandbox), "-p", lint_profile, *lint_argv],
+                            cwd=path,
+                            timeout=VALIDATOR_TIMEOUT_S,
+                            check=False,
+                            log_on_error=False,
+                            env=env,
+                            track_process_group=True,
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        raise LearnDeliveryError("learning markdownlint runner failed") from None
+                    if lint.returncode != 0:
+                        raise LearnDeliveryError("learning markdownlint failed")
+                    package_tree.verify()
                 if any(
                     sha256(target.read_bytes()).hexdigest() != digest
                     for target, digest in executables
