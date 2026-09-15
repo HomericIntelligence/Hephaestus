@@ -1068,10 +1068,11 @@ Architectural contract:
   A changed canonical plan returns to planning before scope validation. An
   invalid scope blocks admission. The blocked audit states the accepted form
   and the required operator recovery steps.
-- A changed plan returns to planning unless a Codex implementation GO is
+- The stage checks plan identity before it checks Codex scope admission. A
+  changed plan returns to planning, including when a Codex implementation GO is
   pending. If this review wrote a proposed label, the stage restores exclusive
-  `state:needs-plan` with readback. An operator `state:plan-blocked` label has
-  priority.
+  `state:needs-plan` with readback. An existing `state:plan-blocked` label stops
+  automatic recovery and has priority.
 - Invalid output and reviewer-session replacement share a bounded error
   sequence. Two consecutive retries are allowed; the third failure stops the
   item. Session replacement preserves logical review rounds.
