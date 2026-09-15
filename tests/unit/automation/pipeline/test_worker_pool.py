@@ -65,6 +65,12 @@ from hephaestus.automation.pipeline.github_jobs import (
     ReplyJournalAppended,
 )
 from hephaestus.automation.pipeline.host_verification_pyxis import PyxisImageMetadata
+from hephaestus.automation.pipeline.host_capabilities import (
+    CapabilityRequestTarget,
+    FakeQuotaBackend,
+    ProductionGitSigningProvider,
+    WorkerCapabilities,
+)
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -239,6 +245,22 @@ _EMPTY_DIFF_OUTPUT = _BoundedGitOutput(
     sha256=hashlib.sha256(b"").hexdigest(),
     byte_count=0,
 )
+
+
+def _capability_target(cwd: Path, head_sha: str) -> CapabilityRequestTarget:
+    """Build one exact target for an immutable worker test."""
+    request_id = hashlib.sha256(f"{cwd.resolve()}:{head_sha}".encode()).hexdigest()[:32]
+    return CapabilityRequestTarget(
+        repository="test/repo",
+        issue_number=2903,
+        pr_number=3239,
+        repository_root=cwd.resolve(),
+        checkout_path=cwd.resolve(),
+        expected_head_sha=head_sha,
+        phase="pr_review",
+        purpose="scratch",
+        request_id=request_id,
+    )
 
 
 def _run_controlled_long_commit_waiter(
@@ -872,12 +894,30 @@ def pool(
         select_rebase_policy,
     )
 
+    volume_index = 0
+
+    @contextmanager
+    def quota_volume(_target: object, purpose: str) -> Iterator[Path]:
+        nonlocal volume_index
+        volume_index += 1
+        path = tmp_path / "quota-volumes" / f"{volume_index}-{purpose}"
+        path.mkdir(parents=True)
+        try:
+            yield path
+        finally:
+            shutil.rmtree(path)
+
     p = WorkerPool(
         size=1,
         shutdown=shutdown_event,
         completion_q=completion_q,
         lock_dir=tmp_path / "locks",
         rebase_policy_selector=partial(select_rebase_policy, "HomericIntelligence"),
+        host_capabilities=WorkerCapabilities(
+            quota_backend=FakeQuotaBackend(quota_volume),
+            execution_boundary_id="worker-pool-test",
+            signing_provider=ProductionGitSigningProvider(),
+        ),
     )
     yield p
     p.shutdown()
@@ -2144,6 +2184,7 @@ class TestHostVerificationGitExecPath:
             timeout_s=60,
             expected_head_sha=head,
             immutable_source=True,
+            capability_target=_capability_target(checkout, head),
         )
 
         result = pool._run_build_test(job)
@@ -2515,6 +2556,7 @@ class TestHostVerificationGitExecPath:
             timeout_s=60,
             expected_head_sha="a" * 40,
             immutable_source=True,
+            capability_target=_capability_target(tmp_path, "a" * 40),
         )
         with (
             patch(f"{_WP}.sys.platform", "darwin"),
@@ -3570,6 +3612,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
             expected_head_sha=head,
             immutable_source=True,
+            capability_target=_capability_target(checkout, head),
         )
 
         # The host OS boundary has its own command-construction tests.  Keep
@@ -3634,6 +3677,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
             expected_head_sha="a" * 40,
             immutable_source=True,
+            capability_target=_capability_target(tmp_path, "a" * 40),
         )
 
         archive = MagicMock(return_value=(b"", ""))
@@ -3695,6 +3739,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
             expected_head_sha="a" * 40,
             immutable_source=True,
+            capability_target=_capability_target(tmp_path, "a" * 40),
         )
         command_result = JobResult(ok=True, value={"failure_kind": "none"})
 
@@ -3770,6 +3815,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
             expected_head_sha="a" * 40,
             immutable_source=True,
+            capability_target=_capability_target(tmp_path, "a" * 40),
         )
         built: dict[str, object] = {}
 
@@ -4043,6 +4089,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
             expected_head_sha=head,
             immutable_source=True,
+            capability_target=_capability_target(checkout, head),
         )
 
         result = pool._run_build_test(job)
@@ -4068,6 +4115,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
             expected_head_sha=trusted_revision,
             immutable_source=True,
+            capability_target=_capability_target(checkout, trusted_revision),
         )
 
         result = pool._run_build_test(job)
@@ -4100,6 +4148,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
             expected_head_sha=candidate_revision,
             immutable_source=True,
+            capability_target=_capability_target(checkout, candidate_revision),
         )
 
         result = pool._run_build_test(job)
@@ -4130,6 +4179,7 @@ class TestWorkerPoolSubmitComplete:
             timeout_s=60,
             expected_head_sha=candidate_revision,
             immutable_source=True,
+            capability_target=_capability_target(checkout, candidate_revision),
         )
 
         result = pool._run_build_test(job)
