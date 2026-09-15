@@ -215,6 +215,7 @@ class _AcceptedPlanReview:
     label_proposed: bool = False
     blocked_audit_body: str | None = None
     blocked_prior_review_body: str | None = None
+    scope_rejection_reason: str | None = None
 
 
 def _reviewer_failure(item: WorkItem, reason: str) -> StageOutcome:
@@ -738,13 +739,12 @@ class PlanReviewStage(Stage):
                         # Retract it if the plan identity changes before the
                         # blocking write.
                         label_proposed=True,
+                        scope_rejection_reason=reason,
                     )
-                    return self._complete_scope_blocked(
-                        item,
-                        ctx,
-                        reason,
-                        expected_review,
-                    )
+                    item.payload["accepted_plan_review"] = expected_review
+                    item.payload.pop("review_publication_retries", None)
+                    item.state = EVAL
+                    return None
                 logger.info("plan_review:%d: already plan-go; advancing", item.issue)
                 return StageOutcome(Disposition.ADVANCE, "plan already approved")
             if snapshot.current_review and snapshot.current_review_revision == snapshot.revision:
@@ -1072,6 +1072,13 @@ class PlanReviewStage(Stage):
 
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
+        if review.scope_rejection_reason is not None:
+            return self._complete_scope_blocked(
+                item,
+                ctx,
+                review.scope_rejection_reason,
+                review,
+            )
         if verdict.is_go and (scope_outcome := self._scope_admission_outcome(item, ctx, review)):
             return scope_outcome
         if review.charged_round is None:

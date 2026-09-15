@@ -70,7 +70,9 @@ from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkI
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
+from hephaestus.automation.review_journal import render_current_plan, render_pending_review
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED, STATE_PLAN_GO
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -306,6 +308,7 @@ def make_coordinator(
     github: FakeStageGitHub | None = None,
     github_job_runner: Any | None = None,
     enable_learn: bool = True,
+    agent: str = "claude",
 ) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
     """Build a Coordinator wired to fakes, with seeding scripted per pass."""
     config = PipelineConfig(
@@ -318,6 +321,7 @@ def make_coordinator(
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         enable_learn=enable_learn,
+        agent=agent,
         projects_dir=tmp_path,
         rate_guard_enabled=False,
     )
@@ -328,6 +332,70 @@ def make_coordinator(
     )
     script_source_passes(coordinator, monkeypatch, seed_entries or [[]])
     return coordinator, pool, gh
+
+
+@pytest.mark.parametrize("failure", ["audit_write", "label_confirmation"])
+def test_restart_scope_rejection_retries_publication_without_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """A restart retries scope publication failures without a reviewer job."""
+
+    class FailFirstPublicationGitHub(FakeStageGitHub):
+        edit_count = 0
+        audit_count = 0
+
+        def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+            self.edit_count += 1
+            if failure == "label_confirmation" and self.edit_count == 1:
+                labels = self._issue_labels(issue_number)
+                labels.update(add)
+                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+                return
+            super().edit_labels(issue_number, add=add, remove=remove)
+
+        def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+            self.audit_count += 1
+            if failure == "audit_write" and self.audit_count == 1:
+                raise OSError("audit write failed")
+            super().upsert_issue_comment(*args, **kwargs)
+
+    github = FailFirstPublicationGitHub(labels=[STATE_PLAN_GO])
+    github.comments[41] = [
+        render_current_plan("## Exact file scope and ownership\n- `tests/unit/one.py`"),
+        render_pending_review(revision=1),
+    ]
+    coordinator, pool, _ = make_coordinator(
+        tmp_path,
+        monkeypatch,
+        github=github,
+        agent="codex",
+    )
+    item = _issue_item(41, StageName.PLAN_REVIEW)
+
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=True)
+    coordinator._drain_queues()
+
+    assert item.state == "EVAL"
+    expected_labels = (
+        {STATE_PLAN_GO, STATE_PLAN_BLOCKED}
+        if failure == "label_confirmation"
+        else {STATE_PLAN_BLOCKED}
+    )
+    assert github.labels[41] == expected_labels
+    assert len(coordinator.timers) == 1
+    assert pool.submitted == []
+
+    _deadline, sequence, parked_item = coordinator.timers[0]
+    coordinator.timers[0] = (0.0, sequence, parked_item)
+    coordinator._wake_timers()
+    coordinator._drain_queues()
+
+    assert item.result is not None
+    assert item.result.reason == "blocked: plan scope is invalid"
+    assert github.labels[41] == {STATE_PLAN_BLOCKED}
+    assert github.comments[41][-1].endswith(STATE_PLAN_BLOCKED)
+    assert "plan_scope_invalid" in github.comments[41][-1]
+    assert pool.submitted == []
 
 
 def _issue_item(
