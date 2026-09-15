@@ -32,7 +32,7 @@ def test_source_rebase_metadata_does_not_reach_the_git_helper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A real rebase must use the closed helper contract after source admission."""
-    root, _, revision = _repository(tmp_path)
+    root, revision, base_revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     pool = _pool(tmp_path, threading.Event())
@@ -40,18 +40,7 @@ def test_source_rebase_metadata_does_not_reach_the_git_helper(
     monkeypatch.setattr(git_utils, "rebase_worktree_onto", rebase)
     monkeypatch.setattr(worker_pool, "_required_git_signing_env", lambda *args, **kwargs: {})
     monkeypatch.setattr(
-        pool, "_authenticated_remote_revalidator", lambda **kwargs: lambda: ({}, ())
-    )
-    monkeypatch.setattr(
-        git_utils,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 1 if command[1:3] == ["merge-base", "--is-ancestor"] else 0, "", ""
-        ),
-    )
-    monkeypatch.setattr(pool, "_read_publish_head", lambda *_args, **_kwargs: revision)
-    monkeypatch.setattr(
-        pool, "_git_fetch_main", lambda _job: JobResult(ok=True, value={"head_sha": revision})
+        pool, "_git_fetch_main", lambda _job: JobResult(ok=True, value={"head_sha": base_revision})
     )
     job = GitJob(
         "repo",
@@ -81,7 +70,7 @@ def test_writer_creation_stops_while_its_handoff_lock_is_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool
 ) -> None:
     """A contended writer lock must not extend the job budget or delay shutdown."""
-    root, _, _ = _repository(tmp_path)
+    root, _, _ = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     shutdown = threading.Event()
     pool = _pool(tmp_path, shutdown)
@@ -132,7 +121,7 @@ def test_publication_timeout_keeps_the_recorded_local_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refresh: bool
 ) -> None:
     """An uncertain push must retain the exact local head without a second push."""
-    root, _, revision = _repository(tmp_path)
+    root, _, revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     clock = [100.0]
@@ -140,9 +129,6 @@ def test_publication_timeout_keeps_the_recorded_local_head(
     pool = _pool(tmp_path, threading.Event())
     monkeypatch.setattr(pool, "_verify_implementation_edit_scope", lambda *args, **kwargs: None)
     monkeypatch.setattr(pool, "_verify_scope_retraction", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        pool, "_authenticated_remote_revalidator", lambda **kwargs: lambda: ({}, ())
-    )
     monkeypatch.setattr(pool, "_writer_tracking_head", lambda *args, **kwargs: revision)
     local_heads: list[str] = []
     observed_receipts: list[str] = []

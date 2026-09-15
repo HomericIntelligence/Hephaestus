@@ -4035,6 +4035,26 @@ def _git_lock_failure_result(
     )
 
 
+def _dirty_direct_failure_result(
+    exc: Exception,
+    *,
+    fallback_error: str,
+    fallback_value: dict[str, object],
+    timeout_value: dict[str, object] | None = None,
+) -> JobResult:
+    """Map one dirty writer timeout and preserve the operation failure contract."""
+    if (
+        isinstance(exc, SourceWorkspacePreparationError)
+        and exc.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
+    ):
+        return JobResult(ok=False, error="timeout", value=timeout_value)
+    return JobResult(
+        ok=False,
+        error=fallback_error,
+        value=fallback_value,
+    )
+
+
 def _git_environment_failure_result(
     exc: _RebaseSigningEnvironmentError | _RemoteGitAuthenticationError,
 ) -> JobResult:
@@ -6791,7 +6811,11 @@ class WorkerPool:
         if job.deadline_s is not None:
             operation_deadline_s = min(operation_deadline_s, job.deadline_s)
         admitted_kwargs = job.kwargs
-        if job.op == "create_worktree" and prepared.authoritative_checkout is not None:
+        if (
+            job.op == "create_worktree"
+            and job.workspace is None
+            and prepared.authoritative_checkout is not None
+        ):
             admitted_kwargs = {**job.kwargs, "repo_root": str(prepared.authoritative_checkout)}
         elif job.op == "fetch_main" and prepared.authoritative_checkout is not None:
             admitted_kwargs = {**job.kwargs, "cwd": str(prepared.authoritative_checkout)}
@@ -10032,12 +10056,12 @@ class WorkerPool:
                 )
         except InterruptedError:
             raise
-        except (SourceWorkspaceError, OSError, RuntimeError, subprocess.SubprocessError):
+        except (SourceWorkspaceError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
             path = manager.path_for(issue, SourceLane.IMPLEMENTATION)
-            return JobResult(
-                ok=False,
-                error="dirty_direct_claim_failed",
-                value={"preserved_worktree": str(path)}
+            return _dirty_direct_failure_result(
+                exc,
+                fallback_error="dirty_direct_claim_failed",
+                fallback_value={"preserved_worktree": str(path)}
                 if path.exists() or path.is_symlink()
                 else {},
             )
@@ -10210,18 +10234,21 @@ class WorkerPool:
                         "dirty_direct_continuation": True,
                     },
                 )
+        except InterruptedError:
+            raise
         except (OSError, RuntimeError, TypeError, ValueError, subprocess.SubprocessError) as exc:
-            return JobResult(
-                ok=False,
-                error="dirty_direct_publication_failed",
-                interrupted=isinstance(exc, InterruptedError),
-                value={
-                    "phase": phase,
-                    "reason": type(exc).__name__,
-                    "committed": committed,
-                    "pushed": pushed,
-                    "local_head": local_head,
-                },
+            diagnostics: dict[str, object] = {
+                "phase": phase,
+                "reason": type(exc).__name__,
+                "committed": committed,
+                "pushed": pushed,
+                "local_head": local_head,
+            }
+            return _dirty_direct_failure_result(
+                exc,
+                fallback_error="dirty_direct_publication_failed",
+                fallback_value=diagnostics,
+                timeout_value=diagnostics,
             )
 
     def _git_finish_dirty_direct_publication(self, job: GitJob) -> JobResult:

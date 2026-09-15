@@ -77,6 +77,7 @@ def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path)
     (repo / "module.py").write_text("value = 1\n", encoding="utf-8")
     git("add", "module.py")
     git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+    git("remote", "add", "origin", "https://github.com/test-org/test-repo.git")
     head = git("rev-parse", "HEAD").stdout.strip()
     manager = SourceWorkspaceManager(repo, repository="test-repo")
     binding = manager.prepare_bounded(

@@ -22,7 +22,7 @@ def test_host_git_operation_uses_current_source_lease(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stale: bool
 ) -> None:
     """Only the current receipt can admit a host operation under its lane lock."""
-    root, _, revision = _repository(tmp_path)
+    root, _, revision = _repository(tmp_path, origin_repository="example/project")
     manager = SourceWorkspaceManager(root, repository="example/project")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     expected = replace(binding, generation=binding.generation + 1) if stale else binding
@@ -62,6 +62,9 @@ def test_host_git_operation_uses_current_source_lease(
         result = pool._run_git(job)
         assert result.ok is not stale
         if stale:
+            assert result.error == (
+                "source_workspace_ownership_unavailable: implementation publication binding changed"
+            )
             operation.assert_not_called()
         else:
             operation.assert_called_once()

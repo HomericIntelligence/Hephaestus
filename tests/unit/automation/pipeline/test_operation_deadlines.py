@@ -291,6 +291,7 @@ def test_checkout_interrupt_after_admission_is_not_lock_contention(tmp_path: Pat
                 "repo",
                 "sync_checkout",
                 30,
+                kwargs={"dest": str(tmp_path / "checkout")},
                 repository_lock_wait_timeout_s=5,
             )
         )

@@ -39,7 +39,7 @@ def test_source_job_returns_its_full_receipt_from_the_held_lease(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     """The coordinator must receive full source facts without a second live read."""
-    root, _, revision = _repository(tmp_path)
+    root, _, revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     receipt = manager._require_receipt(42, SourceLane.IMPLEMENTATION)
@@ -93,7 +93,7 @@ def test_source_publication_preserves_a_failure_before_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: JobResult
 ) -> None:
     """A valid source lease must preserve a closed signing or scope failure."""
-    root, _, revision = _repository(tmp_path)
+    root, _, revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     pool = WorkerPool(

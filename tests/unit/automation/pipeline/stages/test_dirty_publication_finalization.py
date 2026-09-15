@@ -29,7 +29,7 @@ def test_confirmed_dirty_pr_queues_source_finalization_before_review(
     make_work_item: Any,
 ) -> None:
     """Only the worker may retire the consumed claim after strict PR readback."""
-    root, _, revision = _repository(tmp_path)
+    root, _, revision = _repository(tmp_path, origin_repository="test-org/repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     claim = replace(_claim(), reservation_base_sha=revision)
     original = manager.prepare(12, SourceLane.IMPLEMENTATION, revision, branch=claim.branch)

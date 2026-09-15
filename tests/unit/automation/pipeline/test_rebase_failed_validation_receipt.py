@@ -40,6 +40,7 @@ def test_completed_rebase_keeps_local_receipt_when_validation_fails(
     _git(root, "init", "-b", "main")
     _git(root, "config", "user.email", "test@example.invalid")
     _git(root, "config", "user.name", "Test User")
+    _git(root, "remote", "add", "origin", "https://github.com/repo.git")
     (root / "tracked.txt").write_text("initial\n")
     _git(root, "add", "tracked.txt")
     _git(root, "commit", "-m", "initial")
