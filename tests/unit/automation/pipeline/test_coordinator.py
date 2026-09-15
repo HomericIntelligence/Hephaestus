@@ -1563,23 +1563,59 @@ class TestFailBackRouting:
     def test_diagnostic_failure_reason_is_durable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A bounded stage summary becomes the durable terminal reason."""
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
-        item = _issue_item(2797, StageName.IMPLEMENTATION)
-        summary = (
-            "implementation_rebase_failed: failure_kind=publication; phase=push; "
-            "remote_state=unchanged; returncode=1; stderr=hook rejected"
+        """A raw worker failure becomes one safe durable terminal reason."""
+        del monkeypatch
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
         )
+        item = _issue_item(2797, StageName.IMPLEMENTATION)
+        item.state = "REBASE_WAIT"
+        credential_value = "DIAGNOSTIC_" + "VALUE"
+        job = GitJob(repo="repo-a", op="rebase", timeout_s=60)
+        handle = JobHandle(job=job, on_done_state="REBASE_WAIT")
+        claim_test_item(coordinator, item)
+        coordinator.in_flight[handle] = item
+        coordinator.inflight_per_repo[item.repo] = 1
 
-        coordinator._push_item(item, StageName.IMPLEMENTATION, enter=False)
-        coordinator._route(
-            claim_test_item(coordinator, item),
-            StageOutcome(Disposition.FINISH_FAIL, summary),
+        coordinator._handle_completion(
+            handle,
+            JobResult(
+                ok=False,
+                error="publish failed: transport failure",
+                value={
+                    "failure_kind": "publish_transport_failed",
+                    "publication_failure_diagnostic": {
+                        "failure_kind": "publication",
+                        "phase": "push",
+                        "head_sha": "a" * 40,
+                        "returncode": 1,
+                        "exception_class": "CalledProcessError",
+                        "remote_state": "unchanged",
+                    },
+                },
+                stderr_tail=f"hook rejected api_key={credential_value}",
+            ),
         )
 
         assert item.result is not None
-        assert item.result.reason == summary
+        assert item.result.reason.startswith("implementation_rebase_failed: ")
+        assert "failure_kind=publication" in item.result.reason
+        assert "stderr=hook rejected api_key=<redacted>" in item.result.reason
+        assert credential_value not in item.result.reason
         assert len(item.result.reason) <= 500
+        event_text = event_log_path.read_text()
+        assert credential_value not in event_text
+        assert "api_key=<redacted>" in event_text
 
     def test_merge_wait_late_thread_stand_down_is_terminal_not_rerouted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

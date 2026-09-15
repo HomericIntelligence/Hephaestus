@@ -125,6 +125,18 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             ),
             (
                 "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
+                "test_rebase_publish_revalidation_timeout_preserves_push_diagnostics"
+            ),
+            (
+                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
+                "test_rebase_publish_revalidation_failure_preserves_push_diagnostics"
+            ),
+            (
+                "tests/unit/automation/pipeline/test_worker_pool.py::"
+                "test_ordinary_publication_probe_failure_keeps_push_timeout_metadata"
+            ),
+            (
+                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
                 "test_publication_diagnostic_cycle_is_bounded"
             ),
             (

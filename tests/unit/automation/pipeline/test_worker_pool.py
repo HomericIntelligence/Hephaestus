@@ -58,6 +58,7 @@ from hephaestus.automation.agent_config import (
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline import worker_pool as worker_pool_module
 from hephaestus.automation.pipeline.codex_worktree_boundary import (
     CodexWorktreeBoundaryError,
     _open_no_follow_path,
@@ -14883,6 +14884,61 @@ class TestGitOps:
         assert outcome.note.startswith("implementation_rebase_failed:")
         assert "phase=remote_probe" in outcome.note
         assert "remote_state=unverified" in outcome.note
+
+    @pytest.mark.parametrize("revalidation_kind", ("command", "authentication"))
+    def test_rebase_publish_revalidation_failure_preserves_push_diagnostics(
+        self,
+        pool: WorkerPool,
+        git_utils_mocks: Any,
+        tmp_path: Path,
+        revalidation_kind: str,
+    ) -> None:
+        """A failed remote revalidation keeps the rejected push evidence."""
+        source_sha = "c" * 40
+        push = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            output="push stdout",
+            stderr="push stderr",
+        )
+        git_utils_mocks.run.side_effect = push
+
+        def revalidate_remote() -> tuple[dict[str, str], tuple[str, ...]]:
+            if revalidation_kind == "command":
+                raise subprocess.CalledProcessError(
+                    128,
+                    ["git", "remote", "get-url", "origin"],
+                    output="probe stdout",
+                    stderr="probe stderr",
+                )
+            raise worker_pool_module._RemoteGitAuthenticationError(
+                "remote authentication unavailable"
+            )
+
+        result = pool._publish_rebased_head(
+            GitJob("test/repo", "continue_rebase", 42),
+            branch="123-auto-impl",
+            expected_remote_sha="a" * 40,
+            cwd=tmp_path,
+            source_sha=source_sha,
+            remote_env={},
+            remote_config=(),
+            revalidate_remote=revalidate_remote,
+        )
+
+        assert result is not None
+        assert result.ok is False
+        assert result.error == "publish failed: remote probe transport failure"
+        assert result.value["publication_failure_diagnostic"]["remote_state"] == "unverified"
+        assert "push stdout" in result.stdout_tail
+        assert "push stderr" in result.stderr_tail
+        if revalidation_kind == "command":
+            assert result.stdout_tail.index("push stdout") < result.stdout_tail.index(
+                "probe stdout"
+            )
+            assert result.stderr_tail.index("push stderr") < result.stderr_tail.index(
+                "probe stderr"
+            )
 
     def test_publication_diagnostic_cycle_is_bounded(self, pool: WorkerPool) -> None:
         """A cyclic wrapped exception cannot block or expose an unbounded stream."""

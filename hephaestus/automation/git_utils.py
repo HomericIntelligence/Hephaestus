@@ -660,6 +660,10 @@ def push_head_to_branch(
                 raise BranchPublicationRemoteProbeError(
                     failure_kind="timeout"
                 ) from revalidation_exc
+            except (OSError, RuntimeError, subprocess.SubprocessError) as revalidation_exc:
+                raise BranchPublicationRemoteProbeError(
+                    failure_kind="transport"
+                ) from revalidation_exc
             run_kwargs = _timeout_kw(timeout)
             run_kwargs["env"] = env
         try:

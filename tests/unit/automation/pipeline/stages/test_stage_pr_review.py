@@ -2878,13 +2878,20 @@ class TestPrReviewStageStep:
         """A worker-pool change runs each publication diagnostic regression."""
         path = "tests/unit/automation/pipeline/test_worker_pool.py"
         specs = _host_verification_specs([path])
+        source_specs = _host_verification_specs(["hephaestus/automation/pipeline/worker_pool.py"])
 
         spec = next(
             spec for spec in specs if spec.descr == "review_worker_pool_publication_diagnostics"
         )
+        source_spec = next(
+            spec
+            for spec in source_specs
+            if spec.descr == "review_worker_pool_publication_diagnostics"
+        )
 
         assert spec.changed_path == path
         assert spec.additional_changed_paths == ("hephaestus/automation/pipeline/worker_pool.py",)
+        assert source_spec == spec
         assert spec.argv == (
             "uv",
             "run",
@@ -2911,6 +2918,15 @@ class TestPrReviewStageStep:
                 f"{path}::TestGitOps::"
                 "test_rebase_publish_remote_probe_failure_preserves_push_and_probe_diagnostics"
             ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_revalidation_timeout_preserves_push_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_revalidation_failure_preserves_push_diagnostics"
+            ),
+            (f"{path}::test_ordinary_publication_probe_failure_keeps_push_timeout_metadata"),
             f"{path}::TestGitOps::test_publication_diagnostic_cycle_is_bounded",
             (
                 f"{path}::TestGitOps::"
