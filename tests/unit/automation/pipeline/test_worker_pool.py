@@ -1963,7 +1963,7 @@ def safe_git_exec_tmp_path(tmp_path: Path) -> Generator[Path]:
         try:
             path.lstat()
         except FileNotFoundError:
-            path.mkdir(mode=0o700)
+            path.mkdir(mode=0o700, exist_ok=True)
         _validate_git_exec_components(path)
     root: Path | None = None
     try:
@@ -1987,7 +1987,6 @@ def test_safe_git_exec_tmp_path_rejects_unsafe_existing_ancestor(
     safe_home.chmod(0o700)
     cache_root = safe_home / ".cache"
     fixture_root = cache_root / "hephaestus-test-git-exec-path"
-    child = fixture_root / f"{os.getpid()}-{tmp_path.name}"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: safe_home))
     fixture_function = cast(
         Callable[[Path], Generator[Path]],
@@ -2024,39 +2023,135 @@ def test_safe_git_exec_tmp_path_rejects_unsafe_existing_ancestor(
         original_modes = {path: stat.S_IMODE(path.lstat().st_mode) for path in original_paths}
 
         mkdir_calls: list[Path] = []
+        allocation_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         original_mkdir = Path.mkdir
+        original_mkdtemp = tempfile.mkdtemp
 
         def mkdir_spy(self: Path, *args: Any, **kwargs: Any) -> None:
             mkdir_calls.append(self)
             original_mkdir(self, *args, **kwargs)
 
+        def mkdtemp_spy(*args: Any, **kwargs: Any) -> str:
+            allocation_calls.append((args, kwargs))
+            return original_mkdtemp(*args, **kwargs)
+
         monkeypatch.setattr(Path, "mkdir", mkdir_spy)
+        monkeypatch.setattr(tempfile, "mkdtemp", mkdtemp_spy)
         generator = fixture_function(tmp_path)
         try:
             rejection: _HostVerificationBoundaryError | None = None
-            yielded_root: Path | None = None
             try:
-                yielded_root = next(generator)
+                next(generator)
             except _HostVerificationBoundaryError as exc:
                 rejection = exc
             calls_before_close = tuple(mkdir_calls)
 
-            if yielded_root is not None:
-                assert not child.exists(), "fixture created a child before rejection"
             assert rejection is not None
             assert str(rejection) == "host_verification_git_exec_path_unsafe"
+            assert allocation_calls == []
             assert not any(
                 path == unsafe_path or unsafe_path in path.parents for path in calls_before_close
             )
             for path, mode in original_modes.items():
                 assert stat.S_IMODE(path.lstat().st_mode) == mode
-            assert not child.exists()
             if target is not None:
                 assert cache_root.is_symlink()
                 assert not any(target.iterdir())
         finally:
             generator.close()
     finally:
+        shutil.rmtree(safe_home, ignore_errors=True)
+
+
+def test_safe_git_exec_tmp_path_accepts_parent_creation_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate a cache directory that another process creates first."""
+    real_home = Path.home()
+    safe_home = Path(tempfile.mkdtemp(prefix="hephaestus-test-home-", dir=real_home))
+    safe_home.chmod(0o700)
+    cache_root = safe_home / ".cache"
+    fixture_root = cache_root / "hephaestus-test-git-exec-path"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: safe_home))
+    fixture_function = cast(
+        Callable[[Path], Generator[Path]],
+        inspect.unwrap(cast(Callable[..., Any], safe_git_exec_tmp_path)),
+    )
+    original_mkdir = Path.mkdir
+    race_exercised = False
+
+    def mkdir_with_cache_race(self: Path, *args: Any, **kwargs: Any) -> None:
+        nonlocal race_exercised
+        if self == cache_root and not race_exercised:
+            race_exercised = True
+            original_mkdir(self, mode=0o700)
+            if not kwargs.get("exist_ok", False):
+                raise FileExistsError(self)
+            return
+        original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_cache_race)
+    generator = fixture_function(tmp_path)
+    try:
+        root = next(generator)
+        assert race_exercised is True
+        assert root.parent == fixture_root
+        assert stat.S_IMODE(cache_root.stat().st_mode) == 0o700
+        assert stat.S_IMODE(fixture_root.stat().st_mode) == 0o700
+    finally:
+        generator.close()
+        shutil.rmtree(safe_home, ignore_errors=True)
+
+
+def test_safe_git_exec_tmp_path_rejects_unsafe_parent_creation_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject an unsafe cache directory that another process creates first."""
+    real_home = Path.home()
+    safe_home = Path(tempfile.mkdtemp(prefix="hephaestus-test-home-", dir=real_home))
+    safe_home.chmod(0o700)
+    cache_root = safe_home / ".cache"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: safe_home))
+    fixture_function = cast(
+        Callable[[Path], Generator[Path]],
+        inspect.unwrap(cast(Callable[..., Any], safe_git_exec_tmp_path)),
+    )
+    original_mkdir = Path.mkdir
+    original_mkdtemp = tempfile.mkdtemp
+    allocation_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    race_exercised = False
+
+    def mkdir_with_unsafe_cache_race(self: Path, *args: Any, **kwargs: Any) -> None:
+        nonlocal race_exercised
+        if self == cache_root and not race_exercised:
+            race_exercised = True
+            original_mkdir(self, mode=0o700)
+            self.chmod(0o777)
+            if not kwargs.get("exist_ok", False):
+                raise FileExistsError(self)
+            return
+        original_mkdir(self, *args, **kwargs)
+
+    def mkdtemp_spy(*args: Any, **kwargs: Any) -> str:
+        allocation_calls.append((args, kwargs))
+        return original_mkdtemp(*args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_unsafe_cache_race)
+    monkeypatch.setattr(tempfile, "mkdtemp", mkdtemp_spy)
+    generator = fixture_function(tmp_path)
+    try:
+        with pytest.raises(
+            _HostVerificationBoundaryError,
+            match=r"^host_verification_git_exec_path_unsafe$",
+        ):
+            next(generator)
+        assert race_exercised is True
+        assert allocation_calls == []
+        assert stat.S_IMODE(cache_root.stat().st_mode) == 0o777
+    finally:
+        generator.close()
         shutil.rmtree(safe_home, ignore_errors=True)
 
 
