@@ -1735,6 +1735,23 @@ class TestFailBackRouting:
         assert item.stage is StageName.IMPLEMENTATION
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
 
+    def test_changed_plan_fail_back_forces_a_new_planning_epoch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The coordinator keeps plan drift through the planning handoff."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(4, StageName.PLAN_REVIEW)
+        coordinator._push_item(item, StageName.PLAN_REVIEW, enter=False)
+
+        coordinator._route(
+            claim_test_item(coordinator, item),
+            StageOutcome(Disposition.FAIL_BACK, "plan_changed"),
+        )
+
+        assert item.stage is StageName.PLANNING
+        assert len(coordinator.queues[StageName.PLANNING]) == 1
+        assert item.payload["update_plan_required"] is True
+
     def test_empty_pr_diff_routes_to_substantive_implementation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
