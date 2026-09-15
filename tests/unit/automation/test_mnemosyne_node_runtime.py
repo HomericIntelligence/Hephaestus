@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import importlib
 import json
 import os
@@ -11,10 +13,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, TypedDict
 
 import pytest
@@ -140,6 +142,94 @@ def _node_package_tree(cli: Path) -> NodePackageTree:
     if not callable(factory):
         pytest.fail("node_package_tree is not available")
     return factory(cli)
+
+
+def _observe_bound_link_native_reader(
+    runtime: ModuleType,
+    real_native: Callable[..., int],
+    real_fstat: Callable[[int], os.stat_result],
+    capability: Any,
+    descriptor: int,
+    buffer: Any,
+    capacity: int,
+    expected_identity: tuple[int, int, int],
+    observations: list[dict[str, Any]],
+    *,
+    before_reader: Callable[[], None] | None = None,
+) -> int:
+    """Record one bound native link read and keep its native ABI intact."""
+    opened = real_fstat(descriptor)
+    if (opened.st_dev, opened.st_ino, opened.st_mode) != expected_identity:
+        return real_native(capability, descriptor, buffer, capacity)
+    observation: dict[str, Any] = {
+        "abi": capability.abi,
+        "descriptor": descriptor,
+        "identity": (opened.st_dev, opened.st_ino, opened.st_mode),
+        "capacity": capacity,
+    }
+
+    def observe_reader(*args: Any) -> int:
+        observation["reader_args"] = args
+        if before_reader is not None:
+            before_reader()
+        ctypes.set_errno(0)
+        result = capability.reader(*args)
+        observation["reader_errno"] = ctypes.get_errno()
+        observation["return_count"] = result
+        if isinstance(result, int) and 0 <= result <= capacity:
+            observation["returned_bytes"] = bytes(buffer[:result])
+        return result
+
+    observed_capability = runtime._PackageLinkCapability(
+        capability.abi,
+        capability.open_flags,
+        observe_reader,
+        capability.maximum_target_bytes,
+        capability.close_policy,
+    )
+    result = real_native(observed_capability, descriptor, buffer, capacity)
+    observation["wrapper_result"] = result
+    observations.append(observation)
+    return result
+
+
+def _assert_bound_link_native_observation(
+    observation: dict[str, Any],
+    expected_identity: tuple[int, int, int],
+    expected_target: bytes,
+    expected_capacity: int,
+    *,
+    allow_darwin_einval_after_replacement: bool,
+) -> None:
+    """Check one native link read without accepting attacker data."""
+    abi = observation["abi"]
+    assert abi in {"linux", "darwin"}
+    assert observation["identity"] == expected_identity
+    assert observation["capacity"] == expected_capacity
+    result = observation["return_count"]
+    assert observation["wrapper_result"] == result
+    if result < 0:
+        assert result == -1
+        assert allow_darwin_einval_after_replacement
+        assert abi == "darwin"
+        assert observation["reader_errno"] == errno.EINVAL
+        assert "returned_bytes" not in observation
+    else:
+        assert result == len(expected_target)
+        assert observation["reader_errno"] == 0
+        assert observation["returned_bytes"] == expected_target
+    reader_args = observation["reader_args"]
+    if abi == "linux":
+        assert len(reader_args) == 4
+        assert reader_args[0] == observation["descriptor"]
+        assert reader_args[1] == b""
+        assert ctypes.cast(reader_args[2], ctypes.c_void_p).value
+        assert reader_args[3] == observation["capacity"]
+        return
+    assert len(reader_args) == 3
+    assert reader_args[0] == observation["descriptor"]
+    assert ctypes.cast(reader_args[1], ctypes.c_void_p).value
+    assert reader_args[2] == observation["capacity"]
 
 
 def _remove_test_tree(path: Path) -> None:
@@ -763,6 +853,8 @@ def test_node_package_tree_bounds_symlink_target_metadata(
     target.write_text("target\n", encoding="utf-8")
     (dependency_file.parent / "entry-link.js").symlink_to(target.name)
     monkeypatch.setattr(runtime, "_MAX_PACKAGE_LINK_TARGET_BYTES", 8, raising=False)
+    monkeypatch.setattr(runtime, "_PACKAGE_LINK_CAPABILITY", None)
+    monkeypatch.setattr(runtime, "_PACKAGE_LINK_CAPABILITY_INITIALIZED", False)
 
     with pytest.raises(LearnDeliveryError, match="dependency tree is too large"):
         _node_package_tree(cli_link)
@@ -815,9 +907,7 @@ def test_node_package_tree_bounds_active_descriptors_on_deep_tree(
         peak = max(peak, len(active))
         return duplicate
 
-    def track_children(
-        descriptor: int, budget: Any, deadline: float | None = None
-    ) -> list[os.DirEntry[str]]:
+    def track_children(descriptor: int, budget: Any, deadline: float | None = None) -> list[Any]:
         nonlocal reached_deep_directory
         opened = os.fstat(descriptor)
         if (opened.st_dev, opened.st_ino) == deep_identity:
@@ -1168,7 +1258,7 @@ def test_package_tree_records_enforces_global_entry_budget_across_siblings(
         directory_descriptor: int,
         allocation_budget: Any,
         deadline: float | None = None,
-    ) -> list[os.DirEntry[str]]:
+    ) -> list[Any]:
         nonlocal pending, peak_allocated
         children = real_children(directory_descriptor, allocation_budget, deadline)
         pending += len(children)
@@ -1254,7 +1344,7 @@ def test_node_package_tree_keeps_nested_directory_binding_during_aba(
         directory_descriptor: int,
         allocation_budget: Any,
         deadline: float | None = None,
-    ) -> list[os.DirEntry[str]]:
+    ) -> list[Any]:
         nonlocal changed
         opened = os.fstat(directory_descriptor)
         if not changed and (opened.st_dev, opened.st_ino) == (initial.st_dev, initial.st_ino):
@@ -1863,3 +1953,607 @@ def test_node_package_tree_detects_directory_entry_change(tmp_path: Path, operat
 
     with pytest.raises(LearnDeliveryError):
         scope.verify()
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_node_package_tree_rejects_directory_replacement_after_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory replacement after enumeration cannot enter the package snapshot."""
+    from hephaestus.automation import mnemosyne_node_runtime as runtime
+
+    _npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
+    dependency = dependency_file.parent
+    parent_identity = dependency.parent.stat()
+    detached = dependency.with_name("globby-original")
+    replacement_payload = "export const replacement = true;\n"
+    replaced = False
+    scope: NodePackageTree | None = None
+    real_children = runtime._bounded_package_children
+
+    def replace_after_enumeration(
+        directory_descriptor: int,
+        entry_budget: Any,
+        deadline: float | None = None,
+    ) -> list[Any]:
+        nonlocal replaced
+        children = real_children(directory_descriptor, entry_budget, deadline)
+        opened = os.fstat(directory_descriptor)
+        if not replaced and (opened.st_dev, opened.st_ino) == (
+            parent_identity.st_dev,
+            parent_identity.st_ino,
+        ):
+            dependency.rename(detached)
+            dependency.mkdir()
+            (dependency / "replacement.js").write_text(replacement_payload, encoding="utf-8")
+            replaced = True
+        return children
+
+    monkeypatch.setattr(runtime, "_bounded_package_children", replace_after_enumeration)
+    try:
+        with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+            scope = _node_package_tree(cli_link)
+    finally:
+        if scope is not None:
+            scope.close()
+    assert replaced
+    assert (dependency / "replacement.js").read_text(encoding="utf-8") == replacement_payload
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_node_package_tree_rejects_regular_file_replacement_after_descriptor_precondition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A regular file replacement after descriptor binding cannot supply its bytes."""
+    _npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
+    expected = dependency_file.stat()
+    detached = dependency_file.with_name("index-original.js")
+    replacement_payload = b"replacement bytes must not be read\n"
+    replaced = False
+    replacement_read = False
+    real_read = os.read
+    real_fstat = os.fstat
+
+    def replace_before_read(descriptor: int, size: int) -> bytes:
+        nonlocal replaced, replacement_read
+        opened = real_fstat(descriptor)
+        if not replaced and (opened.st_dev, opened.st_ino) == (expected.st_dev, expected.st_ino):
+            dependency_file.rename(detached)
+            dependency_file.write_bytes(replacement_payload)
+            replaced = True
+        payload = real_read(descriptor, size)
+        if replaced and replacement_payload in payload:
+            replacement_read = True
+        return payload
+
+    monkeypatch.setattr(os, "read", replace_before_read)
+    with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+        _node_package_tree(cli_link)
+    assert replaced
+    assert not replacement_read
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_bounded_regular_file_rejects_full_identity_change_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed regular-file mode fails before descriptor bytes are read."""
+    from hephaestus.automation import mnemosyne_node_runtime as runtime
+
+    path = tmp_path / "entry.js"
+    path.write_bytes(b"must not be read\n")
+    path.chmod(0o644)
+    parent = os.open(tmp_path, runtime._PACKAGE_DIRECTORY_FLAGS)
+    metadata = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+    real_open = os.open
+    real_fstat = os.fstat
+    real_read = os.read
+    file_descriptor: int | None = None
+    changed = False
+    read_calls = 0
+
+    def select_open(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal file_descriptor
+        descriptor = real_open(name, flags, *args, **kwargs)
+        if name == path.name and kwargs.get("dir_fd") == parent:
+            file_descriptor = descriptor
+        return descriptor
+
+    def change_before_fstat(descriptor: int) -> os.stat_result:
+        nonlocal changed
+        if descriptor == file_descriptor and not changed:
+            path.chmod(0o600)
+            changed = True
+        return real_fstat(descriptor)
+
+    def observe_read(descriptor: int, size: int) -> bytes:
+        nonlocal read_calls
+        if descriptor == file_descriptor:
+            read_calls += 1
+        return real_read(descriptor, size)
+
+    try:
+        monkeypatch.setattr(os, "open", select_open)
+        monkeypatch.setattr(os, "fstat", change_before_fstat)
+        monkeypatch.setattr(os, "read", observe_read)
+        with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+            runtime._read_bounded_regular_file(
+                parent,
+                path.name,
+                metadata,
+                len(b"must not be read\n"),
+                unavailable_message="Node package dependency tree is unavailable",
+                too_large_message="Node package dependency tree is too large",
+            )
+    finally:
+        os.close(parent)
+    assert changed
+    assert read_calls == 0
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_node_package_tree_rejects_entry_symlink_replacement_before_target_consumption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry link replacement after binding cannot expose its attacker target."""
+    from hephaestus.automation import mnemosyne_node_runtime as runtime
+
+    _npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
+    parent = dependency_file.parent
+    parent_identity = parent.stat()
+    entry = parent / "entry-link.js"
+    entry.symlink_to(dependency_file.name)
+    attacker_target = parent / "attacker-entry.js"
+    attacker_target.write_text("attacker target\n", encoding="utf-8")
+    entry_identity = entry.lstat()
+    expected_entry_identity = (
+        entry_identity.st_dev,
+        entry_identity.st_ino,
+        entry_identity.st_mode,
+    )
+    attacker_identity = attacker_target.stat()
+    replaced = False
+    capture_seen = False
+    attacker_target_read = False
+    attacker_target_resolved = False
+    entry_dispatch_active = False
+    entry_dispatch_calls = 0
+    entry_resolution_active = False
+    entry_resolution_calls = 0
+    native_observations: list[dict[str, Any]] = []
+    scope: NodePackageTree | None = None
+    real_stat = os.stat
+    real_fstat = os.fstat
+    real_read = os.read
+    real_native = runtime._package_link_native_call
+    real_link_entry = runtime._link_package_entry
+    real_resolve_link = runtime._resolve_package_link
+
+    def replace_entry() -> None:
+        nonlocal replaced
+        entry.unlink()
+        entry.symlink_to(attacker_target.name)
+        replaced = True
+
+    def capture_metadata(
+        path: Any, *, dir_fd: int | None = None, follow_symlinks: bool = True
+    ) -> os.stat_result:
+        nonlocal capture_seen, attacker_target_resolved
+        metadata = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if (
+            path == entry.name
+            and dir_fd is not None
+            and not follow_symlinks
+            and (real_fstat(dir_fd).st_dev, real_fstat(dir_fd).st_ino)
+            == (parent_identity.st_dev, parent_identity.st_ino)
+        ):
+            capture_seen = True
+        if (
+            entry_resolution_active
+            and replaced
+            and path == attacker_target.name
+            and dir_fd is not None
+            and (real_fstat(dir_fd).st_dev, real_fstat(dir_fd).st_ino)
+            == (parent_identity.st_dev, parent_identity.st_ino)
+        ):
+            attacker_target_resolved = True
+        return metadata
+
+    def observe_entry_dispatch(*args: Any, **kwargs: Any) -> Any:
+        nonlocal entry_dispatch_active, entry_dispatch_calls
+        entry_dispatch_calls += 1
+        entry_dispatch_active = True
+        try:
+            return real_link_entry(*args, **kwargs)
+        finally:
+            entry_dispatch_active = False
+
+    def observe_link_resolution(*args: Any, **kwargs: Any) -> Any:
+        nonlocal entry_resolution_active, entry_resolution_calls
+        entry_resolution_calls += 1
+        entry_resolution_active = True
+        try:
+            return real_resolve_link(*args, **kwargs)
+        finally:
+            entry_resolution_active = False
+
+    def observe_native(capability: Any, descriptor: int, buffer: Any, capacity: int) -> int:
+        before_reader = replace_entry if entry_dispatch_active and not replaced else None
+        return _observe_bound_link_native_reader(
+            runtime,
+            real_native,
+            real_fstat,
+            capability,
+            descriptor,
+            buffer,
+            capacity,
+            expected_entry_identity,
+            native_observations,
+            before_reader=before_reader,
+        )
+
+    def observe_read(descriptor: int, size: int) -> bytes:
+        nonlocal attacker_target_read
+        payload = real_read(descriptor, size)
+        opened = real_fstat(descriptor)
+        is_attacker_target = (opened.st_dev, opened.st_ino) == (
+            attacker_identity.st_dev,
+            attacker_identity.st_ino,
+        )
+        if replaced and is_attacker_target and b"attacker target\n" in payload:
+            attacker_target_read = True
+        return payload
+
+    monkeypatch.setattr(os, "stat", capture_metadata)
+    monkeypatch.setattr(os, "read", observe_read)
+    monkeypatch.setattr(runtime, "_link_package_entry", observe_entry_dispatch)
+    monkeypatch.setattr(runtime, "_resolve_package_link", observe_link_resolution)
+    monkeypatch.setattr(runtime, "_package_link_native_call", observe_native)
+    try:
+        with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+            scope = _node_package_tree(cli_link)
+    finally:
+        if scope is not None:
+            scope.close()
+    assert capture_seen
+    assert replaced
+    assert not attacker_target_read
+    assert not attacker_target_resolved
+    assert entry_dispatch_calls >= 1
+    assert entry_resolution_calls >= 1
+    assert native_observations
+    expected_target = dependency_file.name.encode()
+    for observation in native_observations:
+        _assert_bound_link_native_observation(
+            observation,
+            expected_entry_identity,
+            expected_target,
+            min(256, runtime._MAX_PACKAGE_LINK_TARGET_BYTES + 1),
+            allow_darwin_einval_after_replacement=replaced,
+        )
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_node_package_tree_rejects_intermediate_symlink_replacement_before_target_consumption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An intermediate link replacement after binding cannot redirect link resolution."""
+    from hephaestus.automation import mnemosyne_node_runtime as runtime
+
+    _npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
+    parent = dependency_file.parent
+    parent_identity = parent.stat()
+    benign = parent / "benign"
+    attacker = parent / "attacker"
+    benign.mkdir()
+    attacker.mkdir()
+    (benign / "target.js").write_text("benign\n", encoding="utf-8")
+    (attacker / "target.js").write_text("attacker\n", encoding="utf-8")
+    alias = parent / "alias"
+    alias.symlink_to(benign.name, target_is_directory=True)
+    entry = parent / "entry-link.js"
+    entry.symlink_to(f"{alias.name}/target.js")
+    alias_identity = alias.lstat()
+    expected_alias_identity = (
+        alias_identity.st_dev,
+        alias_identity.st_ino,
+        alias_identity.st_mode,
+    )
+    attacker_identity = (attacker / "target.js").stat()
+    replaced = False
+    attacker_target_read = False
+    attacker_target_resolved = False
+    expanded_alias_active = False
+    expanded_alias_calls = 0
+    link_resolution_active = False
+    link_resolution_calls = 0
+    native_observations: list[dict[str, Any]] = []
+    scope: NodePackageTree | None = None
+    real_stat = os.stat
+    real_fstat = os.fstat
+    real_read = os.read
+    real_native = runtime._package_link_native_call
+    real_expanded_link = runtime._expanded_package_link
+    real_resolve_link = runtime._resolve_package_link
+
+    def replace_alias() -> None:
+        nonlocal replaced
+        alias.unlink()
+        alias.symlink_to(attacker.name, target_is_directory=True)
+        replaced = True
+
+    def capture_metadata(
+        path: Any, *, dir_fd: int | None = None, follow_symlinks: bool = True
+    ) -> os.stat_result:
+        nonlocal attacker_target_resolved
+        metadata = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if (
+            link_resolution_active
+            and replaced
+            and path == attacker.name
+            and dir_fd is not None
+            and (real_fstat(dir_fd).st_dev, real_fstat(dir_fd).st_ino)
+            == (parent_identity.st_dev, parent_identity.st_ino)
+        ):
+            attacker_target_resolved = True
+        return metadata
+
+    def observe_expanded_link(
+        parent_descriptor: int,
+        component: str,
+        metadata: os.stat_result,
+        prefix: tuple[str, ...],
+        remainder: tuple[str, ...],
+        deadline: float,
+    ) -> tuple[str, ...]:
+        nonlocal expanded_alias_active, expanded_alias_calls
+        if component != alias.name:
+            return real_expanded_link(
+                parent_descriptor,
+                component,
+                metadata,
+                prefix,
+                remainder,
+                deadline,
+            )
+        expanded_alias_calls += 1
+        expanded_alias_active = True
+        try:
+            return real_expanded_link(
+                parent_descriptor,
+                component,
+                metadata,
+                prefix,
+                remainder,
+                deadline,
+            )
+        finally:
+            expanded_alias_active = False
+
+    def observe_link_resolution(*args: Any, **kwargs: Any) -> Any:
+        nonlocal link_resolution_active, link_resolution_calls
+        link_resolution_calls += 1
+        link_resolution_active = True
+        try:
+            return real_resolve_link(*args, **kwargs)
+        finally:
+            link_resolution_active = False
+
+    def observe_native(capability: Any, descriptor: int, buffer: Any, capacity: int) -> int:
+        before_reader = replace_alias if expanded_alias_active and not replaced else None
+        return _observe_bound_link_native_reader(
+            runtime,
+            real_native,
+            real_fstat,
+            capability,
+            descriptor,
+            buffer,
+            capacity,
+            expected_alias_identity,
+            native_observations,
+            before_reader=before_reader,
+        )
+
+    def observe_read(descriptor: int, size: int) -> bytes:
+        nonlocal attacker_target_read
+        payload = real_read(descriptor, size)
+        opened = real_fstat(descriptor)
+        is_attacker_target = (opened.st_dev, opened.st_ino) == (
+            attacker_identity.st_dev,
+            attacker_identity.st_ino,
+        )
+        if replaced and is_attacker_target and b"attacker\n" in payload:
+            attacker_target_read = True
+        return payload
+
+    monkeypatch.setattr(os, "stat", capture_metadata)
+    monkeypatch.setattr(os, "read", observe_read)
+    monkeypatch.setattr(runtime, "_expanded_package_link", observe_expanded_link)
+    monkeypatch.setattr(runtime, "_resolve_package_link", observe_link_resolution)
+    monkeypatch.setattr(runtime, "_package_link_native_call", observe_native)
+    try:
+        with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+            scope = _node_package_tree(cli_link)
+    finally:
+        if scope is not None:
+            scope.close()
+    assert replaced
+    assert not attacker_target_read
+    assert not attacker_target_resolved
+    assert expanded_alias_calls >= 1
+    assert link_resolution_calls >= 1
+    assert native_observations
+    expected_target = benign.name.encode()
+    for observation in native_observations:
+        _assert_bound_link_native_observation(
+            observation,
+            expected_alias_identity,
+            expected_target,
+            min(256, runtime._MAX_PACKAGE_LINK_TARGET_BYTES + 1),
+            allow_darwin_einval_after_replacement=replaced,
+        )
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_node_package_tree_rejects_missing_native_link_capability_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing native link capability fails before target-read dispatch."""
+    from hephaestus.automation import mnemosyne_node_runtime as runtime
+
+    _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    native_calls = 0
+
+    def missing_capability() -> None:
+        return None
+
+    def forbidden_native(*args: Any, **kwargs: Any) -> int:
+        nonlocal native_calls
+        native_calls += 1
+        raise AssertionError("native link target read was dispatched")
+
+    monkeypatch.setattr(runtime, "_package_link_capability", missing_capability)
+    monkeypatch.setattr(runtime, "_package_link_native_call", forbidden_native)
+
+    with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+        _node_package_tree(cli_link)
+    assert native_calls == 0
+
+
+def test_package_link_capability_caches_the_complete_native_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache one complete native link record for one platform resolution."""
+    from hephaestus.automation import mnemosyne_node_runtime as runtime
+
+    resolutions = 0
+
+    def reader(*_args: Any) -> int:
+        return 0
+
+    expected = runtime._PackageLinkCapability(
+        "linux",
+        os.O_RDONLY,
+        reader,
+        runtime._MAX_PACKAGE_LINK_TARGET_BYTES,
+        runtime._PACKAGE_LINK_CLOSE_POLICY,
+    )
+
+    def resolve() -> Any:
+        nonlocal resolutions
+        resolutions += 1
+        return expected
+
+    monkeypatch.setattr(runtime, "_PACKAGE_LINK_CAPABILITY", None)
+    monkeypatch.setattr(runtime, "_PACKAGE_LINK_CAPABILITY_INITIALIZED", False)
+    monkeypatch.setattr(runtime, "_resolve_package_link_capability", resolve)
+
+    assert runtime._package_link_capability() is expected
+    assert runtime._package_link_capability() is expected
+    assert resolutions == 1
+    assert expected.maximum_target_bytes == runtime._MAX_PACKAGE_LINK_TARGET_BYTES
+    assert expected.close_policy == runtime._PACKAGE_LINK_CLOSE_POLICY
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_incomplete_cached_link_capability_rejects_before_link_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject an incomplete cached link record before its descriptor opens."""
+    from hephaestus.automation import mnemosyne_node_runtime as runtime
+
+    entry = tmp_path / "entry-link.js"
+    entry.symlink_to("target.js")
+    parent_descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    expected = entry.lstat()
+    link_open_calls = 0
+    real_open = os.open
+
+    incomplete = SimpleNamespace(
+        abi="linux",
+        open_flags=os.O_RDONLY,
+        reader=lambda *_args: 0,
+        maximum_target_bytes=runtime._MAX_PACKAGE_LINK_TARGET_BYTES,
+        close_policy=None,
+    )
+
+    def forbid_link_open(
+        path: Any,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal link_open_calls
+        if path == entry.name and dir_fd == parent_descriptor:
+            link_open_calls += 1
+            raise AssertionError("link descriptor opened with an incomplete capability")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(runtime, "_package_link_capability", lambda: incomplete)
+    monkeypatch.setattr(os, "open", forbid_link_open)
+    try:
+        with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+            runtime._read_package_link_target(
+                parent_descriptor,
+                entry.name,
+                expected,
+                runtime._package_deadline(),
+            )
+    finally:
+        os.close(parent_descriptor)
+    assert link_open_calls == 0
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_node_package_tree_closes_link_descriptor_after_native_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A native link-read failure closes its descriptor before returning."""
+    from hephaestus.automation import mnemosyne_node_runtime as runtime
+
+    _npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
+    parent = dependency_file.parent
+    entry = parent / "entry-link.js"
+    entry.symlink_to(dependency_file.name)
+    expected = entry.lstat()
+    expected_identity = (expected.st_dev, expected.st_ino, expected.st_mode)
+    real_open = os.open
+    real_close = os.close
+    real_fstat = os.fstat
+    real_native = runtime._package_link_native_call
+    opened: set[int] = set()
+    closed: set[int] = set()
+
+    def track_open(
+        path: Any,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        actual = real_fstat(descriptor)
+        if (actual.st_dev, actual.st_ino, actual.st_mode) == expected_identity:
+            opened.add(descriptor)
+        return descriptor
+
+    def track_close(descriptor: int) -> None:
+        if descriptor in opened:
+            closed.add(descriptor)
+        real_close(descriptor)
+
+    def fail_for_entry(capability: Any, descriptor: int, buffer: Any, capacity: int) -> int:
+        actual = real_fstat(descriptor)
+        if (actual.st_dev, actual.st_ino, actual.st_mode) == expected_identity:
+            raise OSError("injected native link-read failure")
+        return real_native(capability, descriptor, buffer, capacity)
+
+    monkeypatch.setattr(os, "open", track_open)
+    monkeypatch.setattr(os, "close", track_close)
+    monkeypatch.setattr(runtime, "_package_link_native_call", fail_for_entry)
+
+    with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+        _node_package_tree(cli_link)
+    assert opened
+    assert opened <= closed

@@ -55,14 +55,23 @@ def _run_selected_repository(
     """Run loop_runner.main and Coordinator with controlled external dependencies."""
     ambient = ("checkout-owner", "checkout")
     selected = ambient if same_checkout else ("target-owner", "target")
-    checkout = tmp_path / ambient[1]
+    projects_dir = tmp_path / "projects"
+    diagnostics_root = tmp_path / "diagnostics"
+    projects_dir.mkdir()
+    diagnostics_root.mkdir(mode=0o700)
+    checkout = projects_dir / ambient[1]
     checkout.mkdir()
-    (tmp_path / selected[1]).mkdir(exist_ok=True)
+    (projects_dir / selected[1]).mkdir(exist_ok=True)
     monkeypatch.chdir(checkout)
     monkeypatch.setattr(github_api, "_issue_state_cache", {})
     monkeypatch.setattr(github_api, "get_repo_info", lambda: ambient)
     monkeypatch.setattr(pipeline_cli, "_detect_cwd_repo", lambda **kwargs: ambient)
-    monkeypatch.setattr(pipeline_cli, "DEFAULT_STATE_DIR", tmp_path / "state")
+
+    monkeypatch.setattr(
+        pipeline_cli,
+        "_pipeline_diagnostics_roots",
+        lambda: iter(((diagnostics_root, diagnostics_root),)),
+    )
     monkeypatch.setattr(pipeline_cli, "_preflight_token_scopes", lambda *args, **kwargs: None)
     monkeypatch.setattr("hephaestus.utils.terminal.install_sigtstp_only", lambda: None)
     monkeypatch.setattr(
@@ -134,7 +143,7 @@ def _run_selected_repository(
                 "--issues",
                 "27" if read_failure else "27,28",
                 "--projects-dir",
-                str(tmp_path),
+                str(projects_dir),
                 "--stages",
                 "planning,plan_review",
                 "--loops",

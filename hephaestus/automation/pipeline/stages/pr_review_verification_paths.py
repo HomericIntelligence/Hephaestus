@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .pr_review_verification_publication_specs import _PUBLICATION_DIAGNOSTIC_TEST_NODES
+
 
 @dataclass(frozen=True)
 class _HostVerificationSpec:
@@ -103,78 +105,7 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "pytest",
             "-o",
             "addopts=",
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_continue_rebase_command_failure_preserves_redacted_bounded_diagnostics"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_continue_rebase_timeout_preserves_redacted_bounded_diagnostics"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_continue_rebase_additional_conflict_returns_conflict_receipt"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_rebase_publish_remote_unchanged_preserves_hook_diagnostics"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_rebase_publish_remote_probe_failure_preserves_push_and_probe_diagnostics"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_rebase_publish_revalidation_timeout_preserves_push_diagnostics"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_rebase_publish_revalidation_failure_preserves_push_diagnostics"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::"
-                "test_ordinary_publication_probe_failure_keeps_push_timeout_metadata"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_publication_diagnostic_cycle_is_bounded"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_commit_push_hook_failure_preserves_local_head_and_diagnostics"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_direct_reservation_hook_failure_preserves_head_and_diagnostics"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_direct_reservation_probe_failure_uses_probe_metadata"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_run_git_redacts_generic_subprocess_tails"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_run_git_timeout_redacts_before_tail_truncation"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_source_git_timeout_redacts_before_tail_truncation"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_source_git_command_failure_redacts_before_tail_truncation"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_initial_reservation_failure_keeps_publication_diagnostics"
-            ),
-            (
-                "tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps::"
-                "test_commit_push_probe_failure_orders_push_and_probe_diagnostics"
-            ),
+            *_PUBLICATION_DIAGNOSTIC_TEST_NODES,
             "-q",
             "--tb=short",
         ),
