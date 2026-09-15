@@ -111,8 +111,9 @@ from hephaestus.automation.pipeline.github_jobs import (
     RebaseConflictInspected,
 )
 from hephaestus.automation.pipeline.host_capabilities import (
-    RECEIPT_FAILED_TOKEN,
+    QUOTA_BACKEND_NOT_APPLICABLE_TOKEN,
     QUOTA_UNAVAILABLE_TOKEN,
+    RECEIPT_FAILED_TOKEN,
     CapabilityRequestTarget,
     HostCapabilityError,
     HostCapabilityReceipt,
@@ -4851,11 +4852,16 @@ class WorkerPool:
                 value={"failure_kind": "runner"},
             )
         if capabilities is None or capabilities.quota_backend is None:
+            token = (
+                QUOTA_BACKEND_NOT_APPLICABLE_TOKEN
+                if sys.platform not in {"darwin", "linux"}
+                else QUOTA_UNAVAILABLE_TOKEN
+            )
             receipt = HostCapabilityReceipt(
                 target=target,
                 outcome="unavailable",
                 available=False,
-                token=QUOTA_UNAVAILABLE_TOKEN,
+                token=token,
                 failed_step="backend",
                 purpose=request.purpose,
                 receipt_id=uuid.uuid4().hex,
@@ -4873,6 +4879,7 @@ class WorkerPool:
                 error=RECEIPT_FAILED_TOKEN,
                 value={
                     "failure_kind": "runner",
+                    "token": RECEIPT_FAILED_TOKEN,
                     "receipt_error": redact_diagnostic_text(str(error))[:_ERR_MAX],
                 },
             )
@@ -5928,7 +5935,7 @@ class WorkerPool:
         except InterruptedError:
             return JobResult(ok=False, error="interrupted", interrupted=True)
 
-    def _run_immutable_build_test(self, job: BuildTestJob) -> JobResult:
+    def _run_immutable_build_test(self, job: BuildTestJob) -> JobResult:  # noqa: C901
         """Run a fixed host check in an archive of the proven review commit."""
         checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
         if checkout_error is not None:
@@ -6118,7 +6125,7 @@ class WorkerPool:
         except OSError as exc:
             return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
 
-    def _run_linux_immutable_build_test(self, job: BuildTestJob) -> JobResult:
+    def _run_linux_immutable_build_test(self, job: BuildTestJob) -> JobResult:  # noqa: C901
         """Run one fixed check in the local, read-only Pyxis CI image."""
         if not _pyxis_runtime_available(shutdown=self._shutdown):
             return JobResult(
@@ -6159,6 +6166,49 @@ class WorkerPool:
                 },
             )
 
+        capabilities = self._host_capabilities
+        if (
+            job.capability_target is None
+            or capabilities is None
+            or capabilities.quota_backend is None
+        ):
+            if isinstance(quota_value, CrossNodePathBinding):
+                quota_value.close()
+            return JobResult(
+                ok=False,
+                error=QUOTA_UNAVAILABLE_TOKEN,
+                value={
+                    "head_sha": job.expected_head_sha,
+                    "immutable_source": True,
+                    "failure_kind": "runner",
+                    "platform": "linux",
+                    "status": "failed",
+                },
+            )
+        try:
+            scratch_target = bind_receipt_target(
+                job.capability_target,
+                execution_boundary_id=capabilities.execution_boundary_id,
+                source_head_sha=job.expected_head_sha,
+            )
+            pi_target = bind_receipt_target(
+                replace(
+                    job.capability_target,
+                    purpose="pi_smoke_logs",
+                    request_id=uuid.uuid4().hex,
+                ),
+                execution_boundary_id=capabilities.execution_boundary_id,
+                source_head_sha=job.expected_head_sha,
+            )
+        except (OSError, ValueError) as exc:
+            if isinstance(quota_value, CrossNodePathBinding):
+                quota_value.close()
+            return JobResult(
+                ok=False,
+                error=f"capability_target_invalid: {exc!s}"[:_ERR_MAX],
+                value={"failure_kind": "runner"},
+            )
+
         git_executable = _trusted_git_executable()
         if git_executable is None:
             if isinstance(quota_value, CrossNodePathBinding):
@@ -6172,7 +6222,6 @@ class WorkerPool:
                     else bind_cross_node_root(Path(quota_value))
                 )
                 bindings.callback(quota_binding.close)
-                quota_root = quota_binding.path
                 with tempfile.TemporaryDirectory(
                     prefix=".hephaestus-pyxis-exec-", dir=image.path.parent
                 ) as staging_dir:
@@ -6199,65 +6248,66 @@ class WorkerPool:
                         git_metadata = _prepare_immutable_git_metadata(
                             job.cwd, job.expected_head_sha, source, root, git_executable
                         )
-                        with tempfile.TemporaryDirectory(
-                            prefix="hephaestus-host-verification-run-", dir=quota_root
-                        ) as quota_temp_dir:
-                            quota_binding.revalidate()
-                            quota_run = Path(quota_temp_dir)
-                            with bind_cross_node_root(quota_run) as run_binding:
-                                scratch = quota_run / "scratch"
-                                scratch.mkdir(mode=0o700)
-                                pi_smoke_logs = quota_run / "pi-smoke-logs"
-                                pi_smoke_logs.mkdir(mode=0o700)
-                                (source / "pi-smoke-logs").mkdir()
-                                _prepare_host_output_aliases(source, scratch)
-                                _seal_host_runtime(source)
-                                shared_binding.bind_path(
-                                    source,
-                                    kind="directory",
-                                    require_read_only=True,
-                                )
-                                shared_binding.bind_path(
-                                    git_metadata,
-                                    kind="directory",
-                                    require_read_only=True,
-                                )
-                                shared_binding.seal_root()
-                                run_binding.bind_path(scratch, kind="directory")
-                                run_binding.bind_path(pi_smoke_logs, kind="directory")
-                                environment = _build_pyxis_environment(
-                                    source=source, scratch=scratch
-                                )
-                                command = _build_pyxis_srun_command(
-                                    image=staged_image,
-                                    source=source,
-                                    git_metadata=git_metadata,
-                                    scratch=scratch,
-                                    pi_smoke_logs=pi_smoke_logs,
-                                    argv=job.argv,
-                                    environment=environment,
-                                    timeout_s=job.timeout_s,
-                                    placement=self._host_verification_pyxis_placement,
-                                )
+                        with capabilities.quota_backend.volume(
+                            scratch_target, "scratch"
+                        ) as scratch:
+                            with capabilities.quota_backend.volume(
+                                pi_target, "pi_smoke_logs"
+                            ) as pi_smoke_logs:
+                                scratch_root = scratch.parent
+                                pi_root = pi_smoke_logs.parent
+                                with bind_cross_node_root(scratch_root) as scratch_binding:
+                                    with bind_cross_node_root(pi_root) as pi_binding:
+                                        scratch_binding.bind_path(scratch, kind="directory")
+                                        pi_binding.bind_path(pi_smoke_logs, kind="directory")
+                                        (source / "pi-smoke-logs").mkdir()
+                                        _prepare_host_output_aliases(source, scratch)
+                                        _seal_host_runtime(source)
+                                        shared_binding.bind_path(
+                                            source,
+                                            kind="directory",
+                                            require_read_only=True,
+                                        )
+                                        shared_binding.bind_path(
+                                            git_metadata,
+                                            kind="directory",
+                                            require_read_only=True,
+                                        )
+                                        shared_binding.seal_root()
+                                        environment = _build_pyxis_environment(
+                                            source=source, scratch=scratch
+                                        )
+                                        command = _build_pyxis_srun_command(
+                                            image=staged_image,
+                                            source=source,
+                                            git_metadata=git_metadata,
+                                            scratch=scratch,
+                                            pi_smoke_logs=pi_smoke_logs,
+                                            argv=job.argv,
+                                            environment=environment,
+                                            timeout_s=job.timeout_s,
+                                            placement=self._host_verification_pyxis_placement,
+                                        )
 
-                                def revalidate_launch_paths() -> None:
-                                    quota_binding.revalidate()
-                                    run_binding.revalidate()
-                                    shared_binding.revalidate()
+                                        def revalidate_launch_paths() -> None:
+                                            quota_binding.revalidate()
+                                            scratch_binding.revalidate()
+                                            pi_binding.revalidate()
+                                            shared_binding.revalidate()
 
-                                result = _run_bounded_host_command(
-                                    _linux_resource_limited_command(
-                                        command, timeout_s=job.timeout_s
-                                    ),
-                                    validation_argv=job.argv,
-                                    source=source,
-                                    scratch=scratch,
-                                    additional_writable_paths=(pi_smoke_logs,),
-                                    environment=environment,
-                                    timeout_s=job.timeout_s,
-                                    shutdown=self._shutdown,
-                                    pre_launch=revalidate_launch_paths,
-                                )
+                                        result = _run_bounded_host_command(
+                                            _linux_resource_limited_command(
+                                                command, timeout_s=job.timeout_s
+                                            ),
+                                            validation_argv=job.argv,
+                                            source=source,
+                                            scratch=scratch,
+                                            additional_writable_paths=(pi_smoke_logs,),
+                                            environment=environment,
+                                            timeout_s=job.timeout_s,
+                                            shutdown=self._shutdown,
+                                            pre_launch=revalidate_launch_paths,
+                                        )
                 checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
                 if checkout_error is not None:
                     return JobResult(
@@ -6284,6 +6334,32 @@ class WorkerPool:
                         "status": "passed" if result.ok else "failed",
                     },
                 )
+        except HostCapabilityError as exc:
+            receipt = exc.receipt
+            try:
+                capabilities.receipt_store_factory(receipt.target.canonical_repository_root).store(
+                    receipt
+                )
+            except (OSError, ValueError):
+                return JobResult(
+                    ok=False,
+                    error=RECEIPT_FAILED_TOKEN,
+                    value={"failure_kind": "runner"},
+                )
+            return JobResult(
+                ok=False,
+                error=receipt.token,
+                value={
+                    **receipt.to_dict(),
+                    "head_sha": job.expected_head_sha,
+                    "immutable_source": True,
+                    "failure_kind": "runner",
+                    "platform": "linux",
+                    "status": "failed",
+                },
+                stdout_tail=receipt.stdout_tail,
+                stderr_tail=receipt.stderr_tail,
+            )
         except _HostVerificationBoundaryError as exc:
             return JobResult(ok=False, error=str(exc))
         except subprocess.TimeoutExpired as exc:
@@ -12590,8 +12666,8 @@ class WorkerPool:
             )
         return None
 
-    @staticmethod
     def _commit_if_changes_with_controlled_signing(
+        self,
         job: GitJob,
         commit_args: tuple[int, Path, str],
         allowed_paths: Collection[str] | None,

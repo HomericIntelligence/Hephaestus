@@ -64,13 +64,15 @@ from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     ReplyJournalAppended,
 )
-from hephaestus.automation.pipeline.host_verification_pyxis import PyxisImageMetadata
 from hephaestus.automation.pipeline.host_capabilities import (
+    QUOTA_BACKEND_NOT_APPLICABLE_TOKEN,
     CapabilityRequestTarget,
+    FakeGitSigningProvider,
     FakeQuotaBackend,
     ProductionGitSigningProvider,
     WorkerCapabilities,
 )
+from hephaestus.automation.pipeline.host_verification_pyxis import PyxisImageMetadata
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -900,8 +902,11 @@ def pool(
     def quota_volume(_target: object, purpose: str) -> Iterator[Path]:
         nonlocal volume_index
         volume_index += 1
-        path = tmp_path / "quota-volumes" / f"{volume_index}-{purpose}"
-        path.mkdir(parents=True)
+        root = tmp_path / "quota-volumes"
+        root.mkdir(mode=0o700, exist_ok=True)
+        root.chmod(0o700)
+        path = root / f"{volume_index}-{purpose}"
+        path.mkdir(mode=0o700)
         try:
             yield path
         finally:
@@ -3732,6 +3737,26 @@ class TestWorkerPoolSubmitComplete:
         pool._host_verification_pyxis_sha256 = "b" * 64
         pool._host_verification_pyxis_authority = tmp_path / "authority.json"
         pool._host_verification_pyxis_quota_root = tmp_path
+        volume_calls: list[str] = []
+
+        @contextmanager
+        def quota_volume(target: object, purpose: str) -> Iterator[Path]:
+            volume_calls.append(purpose)
+            request_id = cast(Any, target).request.request_id
+            request_root = tmp_path / request_id
+            request_root.mkdir(mode=0o700)
+            volume = request_root / purpose.replace("_", "-")
+            volume.mkdir(mode=0o700)
+            try:
+                yield volume
+            finally:
+                shutil.rmtree(volume.parent)
+
+        pool._host_capabilities = WorkerCapabilities(
+            quota_backend=FakeQuotaBackend(quota_volume),
+            execution_boundary_id="linux-pyxis-test",
+            signing_provider=ProductionGitSigningProvider(),
+        )
         job = BuildTestJob(
             repo="test/repo",
             cwd=tmp_path,
@@ -3784,6 +3809,7 @@ class TestWorkerPoolSubmitComplete:
         immutable_source = extract_archive.call_args.args[1]
         assert immutable_source.parent == staging_root
         assert staging_root.parent == image.parent
+        assert volume_calls == ["scratch", "pi_smoke_logs"]
 
     @pytest.mark.parametrize("replaced_path", ("image", "source", "git_metadata", "quota_root"))
     def test_linux_pyxis_revalidates_cross_node_paths_at_launch(
@@ -4269,7 +4295,7 @@ class TestWorkerPoolSubmitComplete:
                 f"{_WP}.subprocess.run",
                 side_effect=(completed, completed, failed_detach, failed_detach),
             ) as run,
-            pytest.raises(RuntimeError, match="host_verification_quota_cleanup_failed"),
+            pytest.raises(RuntimeError, match="host_verification_quota_detach_failed"),
         ):
             with _quota_backed_volume(tmp_path, "scratch.dmg", mountpoint):
                 pass
@@ -11801,10 +11827,12 @@ class TestGitOps:
                     ("-c", "credential.helper=!trusted-gh auth git-credential"),
                 ),
             ),
-            patch(
-                f"{_WP}._controlled_git_signing_env",
+            patch.object(
+                pool,
+                "_controlled_signing_env",
                 return_value={"GIT_CONFIG_KEY_0": "user.signingkey"},
             ),
+            patch.object(pool, "_verify_rebased_commit_metadata", return_value=None),
         ):
             pool.submit(job, StageName.MERGE_WAIT)
             _, result = completion_q.get(timeout=10)
@@ -11956,6 +11984,51 @@ class TestGitOps:
         assert result.value == {"failure_kind": "remote_authentication"}
         rebase.assert_not_called()
 
+    def test_rebase_fails_closed_without_signing_capability(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A rebase stops before Git replay when signing is unavailable."""
+        repo, _predecessor, head = _worker_repository(tmp_path)
+        binding = SourceWorkspaceManager(repo, repository="test/repo").prepare(
+            7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl"
+        )
+        capabilities = cast(WorkerCapabilities, pool._host_capabilities)
+        pool._host_capabilities = replace(
+            capabilities,
+            signing_provider=FakeGitSigningProvider(None),
+        )
+        job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            workspace=binding,
+            kwargs={
+                "cwd": binding.cwd,
+                "repo_root": str(repo),
+                "issue_number": 7,
+                "branch": "7-auto-impl",
+                "base_branch": "main",
+                "rebase_reason": "manual",
+                "publish_rebased_head": True,
+                "expected_remote_sha": head,
+            },
+        )
+        with (
+            patch.object(pool, "_prepare_writer_rebase_source", return_value="b" * 40),
+            patch.object(pool, "_admit_writer_rebase", return_value=None),
+            patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
+        ):
+            pool.submit(job, StageName.MERGE_WAIT)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "host signing configuration unavailable"
+        assert result.value == {"failure_kind": "signing_configuration"}
+        rebase.assert_not_called()
+
     def test_writer_publish_rebase_conflict_returns_actionable_reason(
         self,
         pool: WorkerPool,
@@ -11996,7 +12069,7 @@ class TestGitOps:
                 "hephaestus.automation.git_utils.rebase_worktree_onto",
                 return_value=False,
             ),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(pool, "_conflict_receipt") as receipt,
@@ -12059,7 +12132,7 @@ class TestGitOps:
                 "hephaestus.automation.git_utils.rebase_worktree_onto",
                 return_value=False,
             ),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(
@@ -12148,7 +12221,7 @@ class TestGitOps:
             patch.object(pool, "_revalidate_review_conflict", return_value=None),
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
             patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=False),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(pool, "_verify_noop_writer_rebase") as verify,
@@ -12212,7 +12285,7 @@ class TestGitOps:
             patch.object(pool, "_revalidate_review_conflict", return_value=None),
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
             patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=False),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(
@@ -12286,7 +12359,8 @@ class TestGitOps:
                 "_authenticated_remote_git_configuration",
                 side_effect=((first_env, first_config), (fresh_env, fresh_config)),
             ) as authentication,
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
+            patch.object(pool, "_verify_rebased_commit_metadata", return_value=None),
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
             patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=True),
             patch.object(
@@ -12380,7 +12454,7 @@ class TestGitOps:
                 "hephaestus.automation.git_utils.rebase_worktree_onto",
                 return_value=False,
             ) as rebase,
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(pool, "_conflict_receipt") as receipt,
@@ -13255,7 +13329,7 @@ class TestGitOps:
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch.object(pool, "_run_immutable_build_test", return_value=JobResult(ok=True)),
             patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
@@ -13319,7 +13393,7 @@ class TestGitOps:
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch.object(pool, "_run_immutable_build_test", return_value=failed),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
@@ -13376,7 +13450,7 @@ class TestGitOps:
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch.object(
                 pool,
                 "_run_rebase_structural_validation",
@@ -13400,7 +13474,9 @@ class TestGitOps:
                 "rebase_policy": None,
             },
         )
-        structural.assert_called_once_with(tmp_path, timeout=60, policy=None)
+        structural.assert_called_once_with(
+            tmp_path, timeout=60, policy=None, capability_target=None
+        )
         semantic.assert_called_once_with(tmp_path, policy=None)
         push.assert_called_once()
 
@@ -13437,6 +13513,69 @@ class TestGitOps:
             stderr_tail="pytest diagnostics",
         )
         run_test.assert_called_once()
+
+    def test_initial_rebase_structural_capability_receipt_uses_post_rebase_head(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An initial rebase receipt binds the head that the worker reads."""
+        request = CapabilityRequestTarget(
+            repository="HomericIntelligence/Hephaestus",
+            issue_number=2903,
+            pr_number=None,
+            repository_root=tmp_path.resolve(),
+            checkout_path=tmp_path.resolve(),
+            expected_head_sha="a" * 40,
+            phase="rebase",
+            purpose="scratch",
+            request_id="b" * 32,
+        )
+
+        receipt = pool._capability_receipt(request, "d" * 40)
+
+        assert not isinstance(receipt, JobResult)
+        assert receipt.target.request.expected_head_sha == "a" * 40
+        assert receipt.target.source_head_sha == "d" * 40
+
+    def test_continuation_rebase_structural_capability_receipt_uses_post_rebase_head(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A continued rebase receipt binds the head that the worker reads."""
+        request = CapabilityRequestTarget(
+            repository="HomericIntelligence/Hephaestus",
+            issue_number=2903,
+            pr_number=3239,
+            repository_root=tmp_path.resolve(),
+            checkout_path=tmp_path.resolve(),
+            expected_head_sha="a" * 40,
+            phase="rebase",
+            purpose="scratch",
+            request_id="c" * 32,
+        )
+
+        receipt = pool._capability_receipt(request, "d" * 40)
+
+        assert not isinstance(receipt, JobResult)
+        assert receipt.target.request.expected_head_sha == "a" * 40
+        assert receipt.target.source_head_sha == "d" * 40
+
+    def test_unapproved_platform_returns_backend_not_applicable_receipt(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An unapproved host reports a typed backend decision."""
+        capabilities = cast(WorkerCapabilities, pool._host_capabilities)
+        pool._host_capabilities = replace(capabilities, quota_backend=None)
+        request = replace(
+            _capability_target(tmp_path, "a" * 40),
+            phase="rebase",
+        )
+
+        with patch(f"{_WP}.sys.platform", "freebsd"):
+            receipt = pool._capability_receipt(request, "d" * 40)
+
+        assert not isinstance(receipt, JobResult)
+        assert receipt.available is False
+        assert receipt.token == QUOTA_BACKEND_NOT_APPLICABLE_TOKEN
+        assert receipt.failed_step == "backend"
 
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path
@@ -13890,7 +14029,7 @@ class TestGitOps:
             stderr="error: cannot run gpg: No such file or directory",
         )
         with (
-            patch(f"{_WP}._controlled_git_signing_env", return_value={"GIT_EDITOR": "true"}),
+            patch.object(pool, "_controlled_signing_env", return_value={"GIT_EDITOR": "true"}),
             patch(
                 f"{_WP}.git_utils.run",
                 side_effect=[MagicMock(), MagicMock(), failure],
@@ -13944,7 +14083,7 @@ class TestGitOps:
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
@@ -13984,7 +14123,7 @@ class TestGitOps:
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
         ):
@@ -14021,7 +14160,7 @@ class TestGitOps:
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch.object(pool, "_run_rebase_structural_validation", return_value=None),
             patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(pool, "_controlled_signing_env", return_value={}),
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",
@@ -16278,8 +16417,8 @@ class TestGitOps:
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
         with (
             patch.object(pool, "_writer_tracking_head", return_value=binding.revision),
-            patch(
-                f"{_WP}._controlled_git_signing_env", return_value=signing_env
+            patch.object(
+                pool, "_controlled_signing_env", return_value=signing_env
             ) as controlled_signing,
             patch(
                 "hephaestus.automation.git_utils._commit_changes",
@@ -16456,8 +16595,9 @@ class TestGitOps:
                 "hephaestus.automation.git_utils.run",
                 return_value=MagicMock(stdout=" M pending.py\\n"),
             ),
-            patch(
-                "hephaestus.automation.pipeline.worker_pool._controlled_git_signing_env",
+            patch.object(
+                pool,
+                "_controlled_signing_env",
                 return_value=signing_failure,
             ),
             patch("hephaestus.automation.git_utils._commit_changes") as commit,

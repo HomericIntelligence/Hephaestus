@@ -14,8 +14,9 @@ from hephaestus.automation.pipeline.host_capabilities import (
     QUOTA_AVAILABLE_TOKEN,
     QUOTA_CREATE_FAILED_TOKEN,
     QUOTA_DETACH_FAILED_TOKEN,
-    CapabilityRequestTarget,
     CapabilityReceiptTarget,
+    CapabilityRequestTarget,
+    DirectoryQuotaBackend,
     FakeGitSigningProvider,
     HdiutilQuotaBackend,
     HostCapabilityError,
@@ -163,6 +164,23 @@ def test_preflight_success_removes_probe_root(tmp_path: Path) -> None:
     assert not (tmp_path / "build" / ".host-verification" / ("b" * 32)).exists()
 
 
+def test_volume_detaches_when_source_check_raises(tmp_path: Path) -> None:
+    """A source-check exception does not leave its quota volume attached."""
+    commands: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append(argv)
+        return _completed()
+
+    backend = HdiutilQuotaBackend(command_runner=run)
+
+    with pytest.raises(RuntimeError, match="source check failed"):
+        with backend.volume(_target(_request(tmp_path)), "scratch"):
+            raise RuntimeError("source check failed")
+
+    assert [command[1] for command in commands] == ["create", "attach", "detach"]
+
+
 def test_secure_temporary_root_rejects_symlink_parent(tmp_path: Path) -> None:
     """A symlink in the host-verification path fails before hdiutil starts."""
     outside = tmp_path / "outside"
@@ -256,6 +274,31 @@ def test_pi_smoke_log_create_failure_is_typed(tmp_path: Path) -> None:
     ):
         pass
     assert caught.value.receipt.token == QUOTA_CREATE_FAILED_TOKEN
+
+
+def test_directory_backend_probes_private_pyxis_root(tmp_path: Path) -> None:
+    """The Pyxis backend proves one private writable request directory."""
+    quota_root = tmp_path / "quota"
+    quota_root.mkdir(mode=0o700)
+    backend = DirectoryQuotaBackend(quota_root)
+    target = _target(_request(tmp_path))
+
+    receipt = backend.preflight(target)
+
+    assert receipt.available is True
+    assert list(quota_root.iterdir()) == []
+
+
+def test_directory_backend_rejects_public_pyxis_root(tmp_path: Path) -> None:
+    """A public Pyxis root produces a typed unavailable receipt."""
+    quota_root = tmp_path / "quota"
+    quota_root.mkdir(mode=0o755)
+    backend = DirectoryQuotaBackend(quota_root)
+
+    receipt = backend.preflight(_target(_request(tmp_path)))
+
+    assert receipt.available is False
+    assert receipt.token == QUOTA_CREATE_FAILED_TOKEN
 
 
 def test_fake_signing_provider_is_independent_of_global_git_configuration(

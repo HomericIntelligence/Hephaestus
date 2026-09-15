@@ -147,7 +147,7 @@ from ..github_jobs import (
     ReplyJournalAppended,
     bind_delivery_request,
 )
-from ..host_capabilities import CapabilityRequestTarget
+from ..host_capabilities import RECEIPT_FAILED_TOKEN, CapabilityRequestTarget
 from ..jobs import (
     WORKTREE_MATERIALIZED_KEY,
     RemediationPretestInput,
@@ -2425,7 +2425,7 @@ class ImplementationStage(Stage):
         if item.payload.pop(_REBASE_HEAD_DRIFT, None):
             return self._finish_rebase(item, ctx)
         if item.payload.pop("rebase_error", None):
-            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
+            return self._rebase_failure_outcome(item)
         if item.payload.pop("rebase_complete", None):
             return self._finish_rebase(item, ctx)
         if reason == "implementation_start" and (
@@ -2573,7 +2573,7 @@ class ImplementationStage(Stage):
     def _rebase_continue_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Let the host validate, complete, sign, and lease-publish a paused rebase."""
         if item.payload.pop("rebase_error", None):
-            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
+            return self._rebase_failure_outcome(item)
         if item.payload.pop("rebase_complete", None):
             for key in (
                 "rebase_conflict",
@@ -2657,6 +2657,23 @@ class ImplementationStage(Stage):
     def _rebase_failure_note(item: WorkItem) -> str:
         """Return the bounded host diagnostic for a terminal rebase failure."""
         return str(item.payload.get("rebase_error_detail") or "implementation_rebase_failed")
+
+    @staticmethod
+    def _rebase_failure_outcome(item: WorkItem) -> StageOutcome:
+        """Keep a quota runner failure recoverable for a later host process."""
+        receipt = item.payload.get("rebase_host_capability_receipt")
+        if item.payload.get("rebase_error_kind") == "runner":
+            token = item.payload.get("rebase_error_token")
+            if isinstance(receipt, dict):
+                token = receipt.get("token")
+            if isinstance(token, str) and (
+                token.startswith("host_verification_quota_") or token == RECEIPT_FAILED_TOKEN
+            ):
+                return StageOutcome(Disposition.BLOCKED, token)
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            ImplementationStage._rebase_failure_note(item),
+        )
 
     def _adopted(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ADOPTED advances to pr_review after the adopted worktree is ready."""
@@ -4385,6 +4402,30 @@ class ImplementationStage(Stage):
         failure_kind = value.get("failure_kind")
         if isinstance(failure_kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", failure_kind):
             item.payload["rebase_error_kind"] = failure_kind
+        failure_token = value.get("token")
+        if isinstance(failure_token, str) and re.fullmatch(r"host_[a-z0-9_]+", failure_token):
+            item.payload["rebase_error_token"] = failure_token
+        receipt_fields = {
+            "target",
+            "outcome",
+            "available",
+            "token",
+            "failed_step",
+            "purpose",
+            "receipt_id",
+            "stdout_tail",
+            "stderr_tail",
+            "return_code",
+            "operating_system_error",
+            "exception_type",
+            "cached",
+            "probe_receipt_id",
+            "retained_root",
+        }
+        if receipt_fields.issubset(value):
+            item.payload["rebase_host_capability_receipt"] = {
+                key: value[key] for key in receipt_fields
+            }
         policy = value.get("rebase_policy")
         if isinstance(policy, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", policy):
             item.payload["rebase_error_policy"] = policy

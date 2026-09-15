@@ -18,6 +18,7 @@ from hephaestus.automation.pipeline.athena_executor_scope import (
     pipeline_requires_athena_executor,
 )
 from hephaestus.automation.pipeline.host_capabilities import (
+    DirectoryQuotaBackend,
     HdiutilQuotaBackend,
     ProcessLocalPreflightCache,
     ProductionGitSigningProvider,
@@ -170,7 +171,16 @@ class Coordinator(
                 host_verification_pyxis_authority=config.host_verification_pyxis_authority,
                 host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
                 host_capabilities=WorkerCapabilities(
-                    quota_backend=HdiutilQuotaBackend() if sys.platform == "darwin" else None,
+                    quota_backend=(
+                        HdiutilQuotaBackend()
+                        if sys.platform == "darwin"
+                        else (
+                            DirectoryQuotaBackend(config.host_verification_pyxis_quota_root)
+                            if sys.platform == "linux"
+                            and config.host_verification_pyxis_quota_root is not None
+                            else None
+                        )
+                    ),
                     execution_boundary_id=config.run_identity,
                     signing_provider=ProductionGitSigningProvider(),
                     preflight_cache=ProcessLocalPreflightCache(),

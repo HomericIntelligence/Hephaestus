@@ -1285,6 +1285,11 @@ class TestGate:
         assert result.job.workspace == binding
         assert result.job.op == "rebase"
         assert result.job.descr == "rebase_implementation_writer"
+        assert result.job.capability_target is not None
+        assert result.job.capability_target.repository == "test-org/test-repo"
+        assert result.job.capability_target.expected_head_sha == "a" * 40
+        assert result.job.capability_target.phase == "rebase"
+        assert result.job.capability_target.purpose == "scratch"
         assert result.job.kwargs == {
             "cwd": Path("/tmp/implementation-writer"),
             "repo_root": "/tmp/repo",
@@ -1688,6 +1693,11 @@ class TestGate:
         assert isinstance(request.job, GitJob)
         assert request.job.workspace == binding
         assert request.job.op == "continue_rebase"
+        assert request.job.capability_target is not None
+        assert request.job.capability_target.repository == "test-org/test-repo"
+        assert request.job.capability_target.expected_head_sha == "a" * 40
+        assert request.job.capability_target.phase == "rebase"
+        assert request.job.capability_target.purpose == "scratch"
         assert request.job.kwargs["expected_remote_sha"] == "a" * 40
         assert request.job.kwargs["conflict_index_snapshot"] == "1" * 64
         assert request.job.kwargs["paused_head_sha"] == "c" * 40
@@ -2050,6 +2060,84 @@ class TestGate:
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL,
             "rebase semantic validation failed: duplicate ADR number 0027",
+        )
+
+    def test_rebase_quota_failure_retains_receipt_and_blocks_for_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A quota failure keeps its receipt and remains recoverable."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+        receipt = {
+            "target": {"source_head_sha": "d" * 40},
+            "outcome": "unavailable",
+            "available": False,
+            "token": "host_verification_quota_attach_failed",
+            "failed_step": "attach",
+            "purpose": "scratch",
+            "receipt_id": "e" * 32,
+            "stdout_tail": "",
+            "stderr_tail": "disk image attach failed",
+            "return_code": 1,
+            "operating_system_error": "",
+            "exception_type": "",
+            "cached": False,
+            "probe_receipt_id": None,
+            "retained_root": "/tmp/retained",
+            "failure_kind": "runner",
+            "rebase_policy": "hephaestus-adr-v1",
+        }
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=(
+                    "rebase policy hephaestus-adr-v1 structural validation failed: "
+                    "host_verification_quota_attach_failed"
+                ),
+                value=receipt,
+            ),
+            ctx,
+        )
+
+        assert item.payload["rebase_host_capability_receipt"] == {
+            key: value
+            for key, value in receipt.items()
+            if key not in {"failure_kind", "rebase_policy"}
+        }
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.BLOCKED,
+            "host_verification_quota_attach_failed",
+        )
+
+    def test_rebase_receipt_store_failure_blocks_for_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A receipt-store failure remains a recoverable runner block."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.payload["rebase_reason"] = "manual"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="host_capability_receipt_failed",
+                value={
+                    "failure_kind": "runner",
+                    "token": "host_capability_receipt_failed",
+                    "receipt_error": "readback failed",
+                },
+            ),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.BLOCKED,
+            "host_capability_receipt_failed",
         )
 
     @pytest.mark.parametrize(

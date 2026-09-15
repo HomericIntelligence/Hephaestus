@@ -57,9 +57,7 @@ _RECEIPT_KEYS = frozenset(
 )
 
 QUOTA_AVAILABLE_TOKEN = "host_verification_quota_available"  # noqa: S105
-QUOTA_BACKEND_NOT_APPLICABLE_TOKEN = (  # noqa: S105
-    "host_verification_quota_backend_not_applicable"
-)
+QUOTA_BACKEND_NOT_APPLICABLE_TOKEN = "host_verification_quota_backend_not_applicable"  # noqa: S105
 QUOTA_CREATE_FAILED_TOKEN = "host_verification_quota_create_failed"  # noqa: S105
 QUOTA_ATTACH_FAILED_TOKEN = "host_verification_quota_attach_failed"  # noqa: S105
 QUOTA_DETACH_FAILED_TOKEN = "host_verification_quota_detach_failed"  # noqa: S105
@@ -294,6 +292,7 @@ class HostCapabilityError(RuntimeError):
     """Report one typed host capability failure with its complete receipt."""
 
     def __init__(self, receipt: HostCapabilityReceipt) -> None:
+        """Initialize the error from its strict receipt."""
         super().__init__(receipt.token)
         self.receipt = receipt
 
@@ -355,7 +354,7 @@ def _directory_flags() -> int:
     return flags
 
 
-def _open_secure_subdirectory(
+def _open_secure_subdirectory(  # noqa: C901
     root: Path, components: tuple[str, ...], *, create: bool
 ) -> tuple[Path, int]:
     """Open a repository-confined directory through no-follow descriptors."""
@@ -406,6 +405,7 @@ class HostCapabilityReceiptStore:
     _COMPONENTS = ("build", ".issue_implementer", "host-capability-receipts")
 
     def __init__(self, repository_root: Path) -> None:
+        """Bind the store to one canonical repository root."""
         self._repository_root = repository_root.resolve(strict=True)
 
     def store(self, receipt: HostCapabilityReceipt) -> HostCapabilityReceipt:
@@ -505,6 +505,7 @@ class ProcessLocalPreflightCache:
     """Cache probes only inside one process and exact execution boundary."""
 
     def __init__(self) -> None:
+        """Create an empty process-local cache."""
         self._lock = threading.Lock()
         self._receipts: dict[tuple[object, ...], HostCapabilityReceipt] = {}
 
@@ -546,6 +547,7 @@ class HdiutilQuotaBackend:
     backend_id = "hdiutil-v2"
 
     def __init__(self, command_runner: CommandRunner | None = None) -> None:
+        """Use the fixed system tool or an injected test runner."""
         self._command_runner = command_runner or subprocess.run
 
     def preflight(self, target: CapabilityReceiptTarget) -> HostCapabilityReceipt:
@@ -570,7 +572,7 @@ class HdiutilQuotaBackend:
             yield mounted
 
     @contextmanager
-    def _open_volume(
+    def _open_volume(  # noqa: C901
         self,
         target: CapabilityReceiptTarget,
         purpose: str,
@@ -695,17 +697,32 @@ class HdiutilQuotaBackend:
                 QUOTA_ATTACH_FAILED_TOKEN,
             )
             attached = True
-            yield mount
-            self._assert_leaf(mount_parent_fd, mount_leaf, directory=True)
-            self._run(
-                (str(binary), "detach", "-force", str(mount)),
-                target,
-                receipt_id,
-                "detach",
-                QUOTA_DETACH_FAILED_TOKEN,
-                retained_root=str(request_root),
-            )
-            attached = False
+            try:
+                yield mount
+            finally:
+                if attached:
+                    try:
+                        self._assert_leaf(mount_parent_fd, mount_leaf, directory=True)
+                    except (OSError, ValueError) as error:
+                        raise HostCapabilityError(
+                            self._failure(
+                                target,
+                                receipt_id,
+                                QUOTA_DETACH_FAILED_TOKEN,
+                                "detach",
+                                error=error,
+                                retained_root=str(request_root),
+                            )
+                        ) from error
+                    self._run(
+                        (str(binary), "detach", "-force", str(mount)),
+                        target,
+                        receipt_id,
+                        "detach",
+                        QUOTA_DETACH_FAILED_TOKEN,
+                        retained_root=str(request_root),
+                    )
+                    attached = False
         except HostCapabilityError as error:
             retain = error.receipt.failed_step == "detach"
             raise
@@ -782,7 +799,7 @@ class HdiutilQuotaBackend:
         except FileNotFoundError:
             if allow_missing:
                 return
-            raise ValueError("quota volume leaf disappeared")
+            raise ValueError("quota volume leaf disappeared") from None
         expected = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
         if stat.S_ISLNK(info.st_mode) or not expected:
             raise ValueError("quota volume leaf is unsafe")
@@ -815,10 +832,125 @@ class HdiutilQuotaBackend:
         )
 
 
+class DirectoryQuotaBackend:
+    """Use one operator-supplied bounded directory for Pyxis workers."""
+
+    def __init__(self, root: Path) -> None:
+        """Bind the backend to one private absolute quota root."""
+        if not root.is_absolute():
+            raise ValueError("quota directory root is unsafe")
+        self._root = root
+        self.backend_id = f"directory-v1:{root}"
+
+    def preflight(self, target: CapabilityReceiptTarget) -> HostCapabilityReceipt:
+        """Prove that one private request directory can be created and removed."""
+        try:
+            with self.volume(target, target.request.purpose):
+                pass
+        except HostCapabilityError as error:
+            return error.receipt
+        except (OSError, ValueError) as error:
+            return HostCapabilityReceipt(
+                target=target,
+                outcome="unavailable",
+                available=False,
+                token=QUOTA_CREATE_FAILED_TOKEN,
+                failed_step="create",
+                purpose=target.request.purpose,
+                receipt_id=uuid.uuid4().hex,
+                operating_system_error=_tail(str(error)),
+                exception_type=type(error).__name__,
+            )
+        return HostCapabilityReceipt.available_receipt(target)
+
+    @contextmanager
+    def volume(
+        self,
+        target: CapabilityReceiptTarget,
+        purpose: str,
+        *,
+        mountpoint: Path | None = None,
+    ) -> Iterator[Path]:
+        """Yield one private purpose directory below the bounded root."""
+        if mountpoint is not None:
+            raise ValueError("the directory backend does not support a mountpoint")
+        if target.request.purpose != purpose or purpose not in _PURPOSES:
+            raise ValueError("quota directory purpose does not match target")
+        receipt_id = uuid.uuid4().hex
+        request_root = self._root / target.request.request_id
+        volume = request_root / _VOLUME_PATHS[purpose][1]
+        root_fd = -1
+        request_fd = -1
+        try:
+            canonical_root = self._root.resolve(strict=True)
+            if canonical_root != self._root:
+                raise ValueError("quota directory root is unsafe")
+            root_fd = os.open(canonical_root, _directory_flags())
+            root_info = os.fstat(root_fd)
+            if root_info.st_uid != os.geteuid() or stat.S_IMODE(root_info.st_mode) & 0o077:
+                raise ValueError("quota directory root is not private")
+            os.mkdir(target.request.request_id, 0o700, dir_fd=root_fd)
+            request_fd = os.open(
+                target.request.request_id,
+                _directory_flags(),
+                dir_fd=root_fd,
+            )
+            os.fchmod(request_fd, 0o700)
+            volume_name = _VOLUME_PATHS[purpose][1]
+            os.mkdir(volume_name, 0o700, dir_fd=request_fd)
+            volume_fd = os.open(volume_name, _directory_flags(), dir_fd=request_fd)
+            try:
+                os.fchmod(volume_fd, 0o700)
+            finally:
+                os.close(volume_fd)
+            yield volume
+        except HostCapabilityError:
+            raise
+        except (OSError, ValueError) as error:
+            receipt = HostCapabilityReceipt(
+                target=target,
+                outcome="unavailable",
+                available=False,
+                token=QUOTA_CREATE_FAILED_TOKEN,
+                failed_step="create",
+                purpose=target.request.purpose,
+                receipt_id=uuid.uuid4().hex,
+                operating_system_error=_tail(str(error)),
+                exception_type=type(error).__name__,
+            )
+            raise HostCapabilityError(receipt) from error
+        finally:
+            if request_fd >= 0:
+                os.close(request_fd)
+            if root_fd >= 0:
+                try:
+                    shutil.rmtree(target.request.request_id, dir_fd=root_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    raise HostCapabilityError(
+                        HostCapabilityReceipt(
+                            target=target,
+                            outcome="unavailable",
+                            available=False,
+                            token=QUOTA_DETACH_FAILED_TOKEN,
+                            failed_step="detach",
+                            purpose=target.request.purpose,
+                            receipt_id=receipt_id,
+                            operating_system_error=_tail(str(error)),
+                            exception_type=type(error).__name__,
+                            retained_root=str(request_root),
+                        )
+                    ) from error
+                finally:
+                    os.close(root_fd)
+
+
 class FakeGitSigningProvider:
     """Provide deterministic signing data for worker tests."""
 
     def __init__(self, environment: Mapping[str, str] | None) -> None:
+        """Store one deterministic environment for tests."""
         self._environment = None if environment is None else dict(environment)
 
     def environment(self, cwd: Path, *, timeout: int) -> dict[str, str] | None:
@@ -838,6 +970,7 @@ class FakeQuotaBackend:
         *,
         preflight_receipt: HostCapabilityReceipt | None = None,
     ) -> None:
+        """Store deterministic preflight and volume seams for tests."""
         self._volume_factory = volume_factory
         self._preflight_receipt = preflight_receipt
 
@@ -893,6 +1026,7 @@ class ProductionGitSigningProvider:
         *,
         global_config: Path | None = None,
     ) -> None:
+        """Use the system Git configuration or injected test seams."""
         self._command_runner = command_runner or subprocess.run
         self._global_config = global_config or (Path.home() / ".gitconfig")
 
@@ -971,6 +1105,7 @@ class WorkerCapabilities:
     receipt_store_factory: Callable[[Path], HostCapabilityReceiptStore] = HostCapabilityReceiptStore
 
     def __post_init__(self) -> None:
+        """Reject an empty or overlong execution-boundary identifier."""
         if not self.execution_boundary_id or len(self.execution_boundary_id) > 128:
             raise ValueError("execution boundary id is required")
 
