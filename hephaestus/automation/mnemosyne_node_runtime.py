@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Final
 
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError
+from hephaestus.automation.mnemosyne_package_snapshot import (
+    DirectoryBinding,
+    PackageSnapshot,
+    verify_snapshot_base,
+)
 
 NodeInspector = Callable[[tuple[str, ...], float], subprocess.CompletedProcess[str]]
 _MAX_FILES = 128
@@ -32,9 +37,6 @@ _MAX_PACKAGE_METADATA_BYTES = 16 * 1024 * 1024
 _MAX_PACKAGE_ACTIVE_DESCRIPTORS = 128
 _PACKAGE_WALK_TIMEOUT_S = 10.0
 _PACKAGE_TIMEOUT_MESSAGE = "Node package dependency tree timed out"
-_SNAPSHOT_SCANDIR = os.scandir
-_SNAPSHOT_UNLINK = os.unlink
-_SNAPSHOT_RMDIR = os.rmdir
 
 
 @dataclass
@@ -47,14 +49,30 @@ class NodePackageTree:
     snapshot_cli: Path
     _snapshot_parent: Path
     _snapshot_digest: str
+    _source_binding: _BoundPackageRoot
+    _snapshot: PackageSnapshot
     _closed: bool = False
 
     def verify(self) -> None:
         """Reject a package tree that changed after its admission."""
+        if self._closed:
+            raise LearnDeliveryError("Node package dependency tree is unavailable")
         deadline = _package_deadline()
         if (
-            _package_tree_digest(self.root, deadline=deadline) != self.digest
-            or _package_tree_digest(self.snapshot_root, deadline=deadline) != self._snapshot_digest
+            _package_tree_digest(
+                self.root,
+                root_binding=self._source_binding,
+                extra_descriptors=len(self._snapshot.descriptors),
+                deadline=deadline,
+            )
+            != self.digest
+            or _package_tree_digest(
+                self.snapshot_root,
+                root_binding=self._snapshot,
+                extra_descriptors=len(self._source_binding.descriptors),
+                deadline=deadline,
+            )
+            != self._snapshot_digest
         ):
             raise LearnDeliveryError("Node package dependency tree changed")
 
@@ -62,8 +80,15 @@ class NodePackageTree:
         """Remove the private package snapshot."""
         if self._closed:
             return
-        _remove_package_snapshot(self._snapshot_parent)
         self._closed = True
+        primary_error = False
+        try:
+            self._snapshot.close()
+        except BaseException:
+            primary_error = True
+            raise
+        finally:
+            self._source_binding.close(preserve_error=primary_error)
 
     def __enter__(self) -> NodePackageTree:
         """Return this active package snapshot."""
@@ -229,13 +254,6 @@ _PACKAGE_FILE_FLAGS = (
     | getattr(os, "O_NONBLOCK", 0)
     | getattr(os, "O_CLOEXEC", 0)
 )
-_SNAPSHOT_FILE_FLAGS = (
-    os.O_WRONLY
-    | os.O_CREAT
-    | os.O_EXCL
-    | getattr(os, "O_NOFOLLOW", 0)
-    | getattr(os, "O_CLOEXEC", 0)
-)
 
 
 @dataclass
@@ -293,17 +311,6 @@ class _BoundPackageRoot:
             unavailable_message="Node package dependency tree is unavailable",
             preserve_error=preserve_error,
         )
-
-
-@dataclass
-class _SnapshotCleanupFrame:
-    """Keep one bounded iterative snapshot cleanup frame."""
-
-    descriptor: int
-    parent_descriptor: int | None
-    name: str | None
-    children: list[os.DirEntry[str]]
-    index: int = 0
 
 
 @dataclass(frozen=True)
@@ -426,172 +433,10 @@ def _close_package_descriptors(
     for descriptor in descriptors:
         try:
             os.close(descriptor)
-        except OSError:
+        except BaseException:
             failed = True
     if failed and not preserve_error:
         raise LearnDeliveryError(unavailable_message)
-
-
-def _bounded_snapshot_children(descriptor: int) -> list[os.DirEntry[str]]:
-    """Return cleanup children without an unbounded directory allocation."""
-    with _SNAPSHOT_SCANDIR(descriptor) as entries:
-        children: list[os.DirEntry[str]] = []
-        for child in entries:
-            if len(children) >= _MAX_PACKAGE_ENTRIES:
-                raise LearnDeliveryError("Node package snapshot cleanup failed")
-            children.append(child)
-    return children
-
-
-def _append_snapshot_cleanup_frame(
-    frames: list[_SnapshotCleanupFrame],
-    *,
-    parent_descriptor: int | None,
-    name: str | None,
-    metadata: os.stat_result | None = None,
-    root: Path | None = None,
-) -> None:
-    """Acquire and transfer one cleanup descriptor to the frame stack."""
-    descriptor = -1
-    transferred = False
-    primary_error = False
-    try:
-        if parent_descriptor is None:
-            if root is None:
-                raise LearnDeliveryError("Node package snapshot cleanup failed")
-            descriptor = os.open(root, _PACKAGE_DIRECTORY_FLAGS)
-        else:
-            if name is None or metadata is None:
-                raise LearnDeliveryError("Node package snapshot cleanup failed")
-            descriptor = _open_package_directory(parent_descriptor, name, metadata)
-        os.fchmod(descriptor, 0o700)
-        children = _bounded_snapshot_children(descriptor)
-        frames.append(_SnapshotCleanupFrame(descriptor, parent_descriptor, name, children))
-        transferred = True
-    except BaseException:
-        primary_error = True
-        raise
-    finally:
-        if descriptor >= 0 and not transferred:
-            _close_package_descriptors(
-                (descriptor,),
-                unavailable_message="Node package snapshot cleanup failed",
-                preserve_error=primary_error,
-            )
-
-
-def _remove_package_snapshot(snapshot_parent: Path) -> None:
-    """Remove one private snapshot with a bounded descriptor walk."""
-    try:
-        snapshot_parent.lstat()
-    except FileNotFoundError:
-        return
-    except OSError:
-        raise LearnDeliveryError("Node package snapshot cleanup failed") from None
-    frames: list[_SnapshotCleanupFrame] = []
-    primary_error = False
-    try:
-        _append_snapshot_cleanup_frame(
-            frames,
-            parent_descriptor=None,
-            name=None,
-            root=snapshot_parent,
-        )
-        while frames:
-            frame = frames[-1]
-            if frame.index < len(frame.children):
-                child = frame.children[frame.index]
-                frame.index += 1
-                metadata = os.stat(child.name, dir_fd=frame.descriptor, follow_symlinks=False)
-                if stat.S_ISDIR(metadata.st_mode):
-                    if len(frames) > _MAX_PACKAGE_DEPTH + 1:
-                        raise LearnDeliveryError("Node package snapshot cleanup failed")
-                    _append_snapshot_cleanup_frame(
-                        frames,
-                        parent_descriptor=frame.descriptor,
-                        name=child.name,
-                        metadata=metadata,
-                    )
-                else:
-                    _SNAPSHOT_UNLINK(child.name, dir_fd=frame.descriptor)
-                continue
-            completed = frames.pop()
-            os.close(completed.descriptor)
-            if completed.parent_descriptor is not None and completed.name is not None:
-                _SNAPSHOT_RMDIR(completed.name, dir_fd=completed.parent_descriptor)
-        _SNAPSHOT_RMDIR(snapshot_parent)
-    except LearnDeliveryError:
-        primary_error = True
-        raise LearnDeliveryError("Node package snapshot cleanup failed") from None
-    except OSError:
-        primary_error = True
-        raise LearnDeliveryError("Node package snapshot cleanup failed") from None
-    finally:
-        descriptors = tuple(frame.descriptor for frame in reversed(frames))
-        _close_package_descriptors(
-            descriptors,
-            unavailable_message="Node package snapshot cleanup failed",
-            preserve_error=primary_error,
-        )
-
-
-def _write_snapshot_file(path: Path, payload: bytes, mode: int, deadline: float) -> None:
-    """Write descriptor-read bytes to one exclusive snapshot file."""
-    _check_package_deadline(deadline)
-    try:
-        descriptor = os.open(path, _SNAPSHOT_FILE_FLAGS, 0o600)
-    except OSError:
-        raise LearnDeliveryError("Node package dependency tree is unavailable") from None
-    primary_error = False
-    try:
-        offset = 0
-        while offset < len(payload):
-            _check_package_deadline(deadline)
-            written = os.write(descriptor, payload[offset:])
-            _check_package_deadline(deadline)
-            if written <= 0:
-                raise LearnDeliveryError("Node package dependency tree is unavailable")
-            offset += written
-        os.fchmod(descriptor, 0o500 if mode & 0o111 else 0o400)
-    except BaseException:
-        primary_error = True
-        raise
-    finally:
-        _close_package_descriptors(
-            (descriptor,),
-            unavailable_message="Node package dependency tree is unavailable",
-            preserve_error=primary_error,
-        )
-
-
-def _snapshot_package_link(
-    snapshot_root: Path,
-    relative_path: Path,
-    target_relative: Path,
-    *,
-    target_is_directory: bool,
-    deadline: float,
-) -> None:
-    """Create one internal snapshot link from its validated source target."""
-    _check_package_deadline(deadline)
-    snapshot_path = snapshot_root / relative_path
-    snapshot_target = snapshot_root / target_relative
-    target_text = os.path.relpath(snapshot_target, start=snapshot_path.parent)
-    try:
-        snapshot_path.symlink_to(target_text, target_is_directory=target_is_directory)
-    except OSError:
-        raise LearnDeliveryError("Node package dependency tree is unavailable") from None
-    _check_package_deadline(deadline)
-
-
-def _freeze_package_snapshot(snapshot_root: Path, deadline: float) -> None:
-    """Remove write permission from all directories in one private snapshot."""
-    try:
-        for directory, _children, _files in os.walk(snapshot_root, topdown=False):
-            _check_package_deadline(deadline)
-            os.chmod(directory, 0o500)
-    except OSError:
-        raise LearnDeliveryError("Node package dependency tree is unavailable") from None
 
 
 def _read_package_regular_file(
@@ -852,7 +697,7 @@ def _regular_package_entry(
     mode: int,
     remaining_bytes: int,
     remaining_metadata_bytes: int,
-    snapshot_root: Path | None,
+    snapshot_root: PackageSnapshot | None,
     expected_identities: dict[str, os.stat_result],
     captured_payloads: dict[str, bytes],
     deadline: float,
@@ -871,7 +716,7 @@ def _regular_package_entry(
         remaining_metadata_bytes,
     )
     if snapshot_root is not None:
-        _write_snapshot_file(snapshot_root / relative_path, payload, mode, deadline)
+        snapshot_root.write_file(relative_path, payload, mode, deadline)
     relative_text = relative_path.as_posix()
     if relative_text == _PACKAGE_MANIFEST_RELATIVE or relative_text in expected_identities:
         captured_payloads[relative_text] = payload
@@ -886,7 +731,8 @@ def _directory_package_entry(
     relative: bytes,
     mode: int,
     remaining_metadata_bytes: int,
-    snapshot_root: Path | None,
+    snapshot_root: PackageSnapshot | None,
+    deadline: float,
 ) -> _PackageEntryResult:
     """Open, record, and optionally allocate one package directory."""
     if len(relative_path.parts) > _MAX_PACKAGE_DEPTH:
@@ -898,7 +744,11 @@ def _directory_package_entry(
     transferred = False
     try:
         if snapshot_root is not None:
-            (snapshot_root / relative_path).mkdir(mode=0o700)
+            snapshot_root.outside_descriptors += 1
+            try:
+                snapshot_root.mkdir(relative_path, deadline)
+            finally:
+                snapshot_root.outside_descriptors -= 1
         result = (record, 0, (descriptor, relative_path, name, metadata))
         transferred = True
         return result
@@ -913,7 +763,9 @@ def _directory_package_entry(
             )
 
 
-def _bounded_link_components(base: tuple[str, ...], target_text: str) -> tuple[str, ...]:
+def _bounded_link_components(  # noqa: C901
+    base: tuple[str, ...], target_text: str
+) -> tuple[str, ...]:
     """Normalize one internal link target within every path byte limit."""
     try:
         target_bytes = target_text.encode("utf-8")
@@ -924,10 +776,13 @@ def _bounded_link_components(base: tuple[str, ...], target_text: str) -> tuple[s
     if target_text.startswith("/"):
         raise LearnDeliveryError("Node package dependency link escapes its root")
     components = list(base)
+    has_unresolved_component = False
     for component in target_text.split("/"):
         if component in {"", "."}:
             continue
         if component == "..":
+            if has_unresolved_component:
+                raise LearnDeliveryError("Node package dependency tree is unavailable")
             if not components:
                 raise LearnDeliveryError("Node package dependency link escapes its root")
             components.pop()
@@ -939,6 +794,7 @@ def _bounded_link_components(base: tuple[str, ...], target_text: str) -> tuple[s
         if not encoded or len(encoded) > _MAX_PACKAGE_COMPONENT_BYTES:
             raise _too_large()
         components.append(component)
+        has_unresolved_component = True
     if len(components[:-1]) > _MAX_PACKAGE_DEPTH:
         raise _too_large()
     relative = "/".join(components).encode("utf-8")
@@ -1091,7 +947,7 @@ def _link_package_entry(
     relative: bytes,
     mode: int,
     remaining_metadata_bytes: int,
-    snapshot_root: Path | None,
+    snapshot_root: PackageSnapshot | None,
     descriptor_slots: int,
     deadline: float,
 ) -> _PackageEntryResult:
@@ -1113,13 +969,7 @@ def _link_package_entry(
         remaining_metadata_bytes,
     )
     if snapshot_root is not None:
-        _snapshot_package_link(
-            snapshot_root,
-            relative_path,
-            target.relative_path,
-            target_is_directory=target.is_directory,
-            deadline=deadline,
-        )
+        snapshot_root.symlink(relative_path, target.relative_path, deadline)
     return record, 0, None
 
 
@@ -1130,7 +980,7 @@ def _package_tree_entry_record(
     child: os.DirEntry[str],
     remaining_bytes: int,
     remaining_metadata_bytes: int,
-    snapshot_root: Path | None,
+    snapshot_root: PackageSnapshot | None,
     expected_identities: dict[str, os.stat_result],
     captured_payloads: dict[str, bytes],
     descriptor_slots: int,
@@ -1173,6 +1023,7 @@ def _package_tree_entry_record(
                 mode,
                 remaining_metadata_bytes,
                 snapshot_root,
+                deadline,
             )
         if stat.S_ISLNK(metadata.st_mode):
             return _link_package_entry(
@@ -1229,12 +1080,17 @@ def _bounded_package_children(
             entry_budget.release_pending(reserved)
 
 
-def _open_package_root(root: Path) -> _BoundPackageRoot:
+def _open_package_root(
+    root: Path, *, available_descriptors: int | None = None
+) -> _BoundPackageRoot:
     """Open each canonical root component once without following links."""
-    if not root.is_absolute() or root.name != _PACKAGE_ROOT_NAME:
+    if not root.is_absolute():
         raise LearnDeliveryError("Node package dependency tree is unavailable")
     names = tuple(root.parts[1:])
-    if len(names) + 1 > _MAX_PACKAGE_ACTIVE_DESCRIPTORS:
+    available = (
+        _MAX_PACKAGE_ACTIVE_DESCRIPTORS if available_descriptors is None else available_descriptors
+    )
+    if len(names) + 1 > available:
         raise _too_large()
     descriptors: list[int] = []
     identities: list[os.stat_result] = []
@@ -1277,6 +1133,22 @@ def _open_package_root(root: Path) -> _BoundPackageRoot:
             )
 
 
+def _open_snapshot_base(available_descriptors: int) -> tuple[Path, _BoundPackageRoot]:
+    """Select an available temporary root with trusted path components."""
+    candidates = (Path(tempfile.gettempdir()), Path("/tmp"))
+    for candidate in candidates:
+        binding: _BoundPackageRoot | None = None
+        try:
+            root = candidate.resolve()
+            binding = _open_package_root(root, available_descriptors=available_descriptors)
+            verify_snapshot_base(binding)
+            return root, binding
+        except (OSError, RuntimeError, LearnDeliveryError):
+            if binding is not None:
+                binding.close(preserve_error=True)
+    raise LearnDeliveryError("Node package dependency tree is unavailable")
+
+
 def _finish_package_directory_frame(
     frame: _PackageDirectoryFrame, parent_descriptor: int | None
 ) -> None:
@@ -1307,13 +1179,14 @@ def _finish_package_directory_frame(
             )
 
 
-def _package_tree_records(
+def _package_tree_records(  # noqa: C901
     root: Path,
     *,
-    root_binding: _BoundPackageRoot | None = None,
-    snapshot_root: Path | None = None,
+    root_binding: DirectoryBinding | None = None,
+    snapshot_root: PackageSnapshot | None = None,
     expected_identities: dict[str, os.stat_result] | None = None,
     captured_payloads: dict[str, bytes] | None = None,
+    extra_descriptors: int = 0,
     deadline: float | None = None,
 ) -> tuple[bytes, ...]:
     """Return deterministic records for every entry in one npm root."""
@@ -1327,9 +1200,15 @@ def _package_tree_records(
     required_identities = expected_identities or {}
     payloads = captured_payloads if captured_payloads is not None else {}
     primary_error = False
+    snapshot_outside = snapshot_root.outside_descriptors if snapshot_root is not None else 0
     try:
         if binding is None:
-            binding = _open_package_root(root)
+            binding = _open_package_root(
+                root, available_descriptors=_MAX_PACKAGE_ACTIVE_DESCRIPTORS - extra_descriptors
+            )
+        retained_elsewhere = extra_descriptors
+        if snapshot_root is not None:
+            retained_elsewhere += len(snapshot_root.descriptors)
         opened_root = os.fstat(binding.descriptor)
         entry_budget = _PackageEntryBudget(_MAX_PACKAGE_ENTRIES)
         entry_budget.consume_unreserved()
@@ -1351,6 +1230,8 @@ def _package_tree_records(
         total_bytes = 0
         total_metadata_bytes = len(root_record) + 1
         binding.verify()
+        if len(binding.descriptors) + retained_elsewhere + 1 > _MAX_PACKAGE_ACTIVE_DESCRIPTORS:
+            raise _too_large()
         frames[0].children = _bounded_package_children(
             binding.descriptor, entry_budget, effective_deadline
         )
@@ -1364,9 +1245,13 @@ def _package_tree_records(
             child = frame.children[frame.index]
             frame.index += 1
             entry_budget.consume_pending()
-            active_descriptors = len(binding.descriptors) + len(frames) - 1
+            active_descriptors = len(binding.descriptors) + len(frames) - 1 + retained_elsewhere
             if active_descriptors + 1 > _MAX_PACKAGE_ACTIVE_DESCRIPTORS:
                 raise _too_large()
+            if snapshot_root is not None:
+                snapshot_root.outside_descriptors = (
+                    len(binding.descriptors) + len(frames) - 1 + extra_descriptors
+                )
             record, size, child_directory = _package_tree_entry_record(
                 binding.descriptor,
                 frame.descriptor,
@@ -1388,6 +1273,8 @@ def _package_tree_records(
                 descriptor, relative_path, name, initial = child_directory
                 transferred = False
                 try:
+                    if active_descriptors + 2 > _MAX_PACKAGE_ACTIVE_DESCRIPTORS:
+                        raise _too_large()
                     children = _bounded_package_children(
                         descriptor,
                         entry_budget,
@@ -1415,6 +1302,8 @@ def _package_tree_records(
         primary_error = True
         raise
     finally:
+        if snapshot_root is not None:
+            snapshot_root.outside_descriptors = snapshot_outside
         _close_package_descriptors(
             tuple(frame.descriptor for frame in frames if frame.close_descriptor),
             unavailable_message="Node package dependency tree is unavailable",
@@ -1433,10 +1322,23 @@ def _package_records_digest(records: tuple[bytes, ...]) -> str:
     return digest.hexdigest()
 
 
-def _package_tree_digest(root: Path, *, deadline: float | None = None) -> str:
+def _package_tree_digest(
+    root: Path,
+    *,
+    root_binding: DirectoryBinding | None = None,
+    extra_descriptors: int = 0,
+    deadline: float | None = None,
+) -> str:
     """Hash every entry and mode in one admitted package tree."""
     effective_deadline = _package_deadline(deadline)
-    digest = _package_records_digest(_package_tree_records(root, deadline=effective_deadline))
+    digest = _package_records_digest(
+        _package_tree_records(
+            root,
+            root_binding=root_binding,
+            extra_descriptors=extra_descriptors,
+            deadline=effective_deadline,
+        )
+    )
     _check_package_deadline(effective_deadline)
     return digest
 
@@ -1457,26 +1359,29 @@ def node_package_tree(cli: Path) -> NodePackageTree:
     deadline = time.monotonic() + _PACKAGE_WALK_TIMEOUT_S
     cli_relative = cli.relative_to(root).as_posix()
     binding = _open_package_root(root)
-    primary_error = False
-    snapshot_parent: Path | None = None
+    snapshot: PackageSnapshot | None = None
     try:
         manifest_payload, expected_identities = _bind_package_inputs(
             binding, cli_relative, deadline
         )
-        try:
-            snapshot_parent = Path(tempfile.mkdtemp(prefix="hephaestus-node-package-")).resolve()
-        except OSError:
-            raise LearnDeliveryError("Node package dependency tree is unavailable") from None
-        snapshot_root = snapshot_parent / _PACKAGE_ROOT_NAME
-        try:
-            snapshot_root.mkdir(mode=0o700)
-        except OSError:
-            raise LearnDeliveryError("Node package dependency tree is unavailable") from None
+        temporary_root, temporary_binding = _open_snapshot_base(
+            _MAX_PACKAGE_ACTIVE_DESCRIPTORS - len(binding.descriptors) - 2
+        )
+        snapshot = PackageSnapshot.create(
+            temporary_root,
+            temporary_binding,
+            deadline=deadline,
+            max_entries=_MAX_PACKAGE_ENTRIES,
+            max_depth=_MAX_PACKAGE_DEPTH,
+            timeout_s=_PACKAGE_WALK_TIMEOUT_S,
+            max_descriptors=_MAX_PACKAGE_ACTIVE_DESCRIPTORS,
+            outside_descriptors=len(binding.descriptors),
+        )
         captured_payloads: dict[str, bytes] = {}
         records = _package_tree_records(
             root,
             root_binding=binding,
-            snapshot_root=snapshot_root,
+            snapshot_root=snapshot,
             expected_identities=expected_identities,
             captured_payloads=captured_payloads,
             deadline=deadline,
@@ -1486,28 +1391,29 @@ def node_package_tree(cli: Path) -> NodePackageTree:
         snapshot_cli_relative = _manifest_bin_target(
             captured_payloads[_PACKAGE_MANIFEST_RELATIVE], cli_relative
         )
-        _freeze_package_snapshot(snapshot_root, deadline)
-        snapshot_cli = snapshot_root / snapshot_cli_relative
-        if not snapshot_cli.is_file() or snapshot_cli.is_symlink():
-            raise LearnDeliveryError("Node package dependency tree is unavailable")
+        snapshot.seal(deadline)
         binding.verify()
-        binding.close(preserve_error=False)
         result = NodePackageTree(
             root=root,
             digest=_package_records_digest(records),
-            snapshot_root=snapshot_root,
-            snapshot_cli=snapshot_cli,
-            _snapshot_parent=snapshot_parent,
-            _snapshot_digest=_package_tree_digest(snapshot_root, deadline=deadline),
+            snapshot_root=snapshot.root,
+            snapshot_cli=snapshot.root / snapshot_cli_relative,
+            _snapshot_parent=snapshot.parent,
+            _snapshot_digest=_package_tree_digest(
+                snapshot.root,
+                root_binding=snapshot,
+                extra_descriptors=len(binding.descriptors),
+                deadline=deadline,
+            ),
+            _source_binding=binding,
+            _snapshot=snapshot,
         )
         _check_package_deadline(deadline)
         return result
-    except BaseException:
-        primary_error = True
+    except BaseException as error:
+        if snapshot is not None:
+            snapshot.close(preserve_error=True)
         binding.close(preserve_error=True)
-        if snapshot_parent is not None:
-            with suppress(LearnDeliveryError):
-                _remove_package_snapshot(snapshot_parent)
+        if isinstance(error, OSError):
+            raise LearnDeliveryError("Node package dependency tree is unavailable") from None
         raise
-    finally:
-        binding.close(preserve_error=primary_error)

@@ -595,7 +595,8 @@ def test_markdownlint_failure_prevents_validation_receipt(
 
 
 def test_markdownlint_runs_only_from_immutable_npm_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Markdown lint receives only one immutable npm snapshot."""
     import json
@@ -699,7 +700,14 @@ def test_markdownlint_runs_only_from_immutable_npm_snapshot(
             assert str(snapshot_cli) in argv
             assert str(cli) not in argv
             assert f"(subpath {json.dumps(str(snapshot_root))})" in profile
-            assert f"(subpath {json.dumps(str(npm_root))})" not in profile
+            recursive_grants = (
+                Path(json.loads(value))
+                for value in __import__("re").findall(
+                    r"\(subpath (\"(?:[^\"\\]|\\.)*\")\)", profile
+                )
+            )
+            assert any(npm_root.is_relative_to(grant) for grant in recursive_grants)
+            assert f"(deny file-read* (subpath {json.dumps(str(npm_root))}))" in profile
             assert "attacker" not in snapshot_cli.read_text(encoding="utf-8")
             assert "attacker" not in snapshot_dependency.read_text(encoding="utf-8")
             assert "(deny network*)" in profile
@@ -709,8 +717,14 @@ def test_markdownlint_runs_only_from_immutable_npm_snapshot(
 
     assert result[1].endswith("skills/*.md")
     assert scope_calls == [cli]
-    assert package_scope.verify.call_count == 1
-    assert events == ["snapshot-enter", "lint", "tree-verify", "snapshot-exit"]
+    assert package_scope.verify.call_count == 2
+    assert events == [
+        "snapshot-enter",
+        "tree-verify",
+        "lint",
+        "tree-verify",
+        "snapshot-exit",
+    ]
 
 
 @pytest.mark.parametrize("bucket", ["pass", "fail", "pending", "cancel", "skipping", "unknown"])

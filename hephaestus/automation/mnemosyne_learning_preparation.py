@@ -569,7 +569,10 @@ class MnemosynePluginValidator:
                         " ".join(f"(literal {json.dumps(str(target))})" for target in runtime_files)
                         + f" (subpath {json.dumps(str(package_tree.snapshot_root))})"
                     )
-                    lint_profile = profile + f"(allow file-read* {lint_reads})"
+                    source_deny = (
+                        f"(deny file-read* (subpath {json.dumps(str(package_tree.root))}))"
+                    )
+                    lint_profile = profile + source_deny + f"(allow file-read* {lint_reads})"
                     # Offline lint does not use the host TLS configuration.
                     env["OPENSSL_CONF"] = "/dev/null"
                     lint_argv = [
@@ -579,6 +582,7 @@ class MnemosynePluginValidator:
                         str(path / ".markdownlint.yaml"),
                         "skills/*.md",
                     ]
+                    package_tree.verify()
                     try:
                         lint = self._runner(
                             [str(sandbox), "-p", lint_profile, *lint_argv],

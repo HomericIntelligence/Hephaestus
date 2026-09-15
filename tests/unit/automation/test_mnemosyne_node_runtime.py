@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -13,16 +14,37 @@ import time
 from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypedDict
 
 import pytest
 
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError
 from hephaestus.automation.mnemosyne_node_runtime import NodePackageTree, node_runtime_files
+from hephaestus.automation.mnemosyne_package_snapshot import (
+    DirectoryBinding,
+    PackageSnapshot,
+    verify_snapshot_base as strict_verify_snapshot_base,
+)
 
 _POSIX_DESCRIPTOR_TEST = os.name == "posix" and all(
     hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
 )
+
+
+@pytest.fixture(autouse=True)
+def _use_controlled_snapshot_ancestry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep functional snapshot tests independent of host ancestry."""
+    from hephaestus.automation import (
+        mnemosyne_node_runtime as runtime,
+        mnemosyne_package_snapshot as snapshot_module,
+    )
+
+    def verify(binding: DirectoryBinding) -> None:
+        binding.verify()
+
+    monkeypatch.setattr(runtime, "verify_snapshot_base", verify)
+    monkeypatch.setattr(snapshot_module, "verify_snapshot_base", verify)
 
 
 class _NpmCliFixtureKwargs(TypedDict, total=False):
@@ -120,6 +142,58 @@ def _node_package_tree(cli: Path) -> NodePackageTree:
     return factory(cli)
 
 
+def _remove_test_tree(path: Path) -> None:
+    """Remove one test-owned tree after a deliberate cleanup failure."""
+    if not path.exists():
+        return
+    for directory, children, _files in os.walk(path):
+        root = Path(directory)
+        root.chmod(0o700)
+        for name in children:
+            child = root / name
+            if not child.is_symlink():
+                child.chmod(0o700)
+    shutil.rmtree(path)
+
+
+@pytest.mark.parametrize(
+    ("owner", "mode", "allowed"),
+    [
+        ("current", 0o700, True),
+        ("root", 0o1777, True),
+        ("other", 0o755, False),
+        ("current", 0o770, False),
+        ("root", 0o777, False),
+    ],
+)
+def test_snapshot_base_requires_trusted_owner_and_mode(
+    monkeypatch: pytest.MonkeyPatch, owner: str, mode: int, allowed: bool
+) -> None:
+    """The snapshot base accepts only private or root-sticky ancestry."""
+
+    class Binding:
+        descriptor = 17
+
+        def __init__(self) -> None:
+            self.descriptors = [17]
+
+        def verify(self) -> None:
+            return None
+
+        def close(self, *, preserve_error: bool) -> None:
+            return None
+
+    owners = {"current": os.geteuid(), "root": 0, "other": os.geteuid() + 1}
+    metadata = SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=owners[owner])
+    monkeypatch.setattr(os, "fstat", lambda _descriptor: metadata)
+
+    if allowed:
+        strict_verify_snapshot_base(Binding())
+    else:
+        with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+            strict_verify_snapshot_base(Binding())
+
+
 def test_node_runtime_collects_rpath_and_transitive_libraries(tmp_path: Path) -> None:
     """Node's library closure uses exact files without a directory grant."""
     node = tmp_path / "bin/node"
@@ -172,9 +246,10 @@ def test_node_package_tree_binds_flat_and_nested_dependencies(tmp_path: Path, la
     assert scope.digest == digest
 
 
-def test_node_package_tree_builds_private_immutable_snapshot(tmp_path: Path) -> None:
+@pytest.mark.parametrize("layout", ["flat", "nested"])
+def test_node_package_tree_builds_private_immutable_snapshot(tmp_path: Path, layout: str) -> None:
     """The admitted CLI and dependencies use one private snapshot."""
-    npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
+    npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path, layout=layout)
     cli = cli_link.resolve()
     scope = _node_package_tree(cli_link)
     snapshot_root = scope.snapshot_root
@@ -198,6 +273,49 @@ def test_node_package_tree_builds_private_immutable_snapshot(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_snapshot_destination_replacement_cannot_redirect_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replaced snapshot root cannot receive package writes elsewhere."""
+    _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    external = tmp_path / "external"
+    external.mkdir()
+    real_write = PackageSnapshot.write_file
+    replaced = False
+    redirected: Path | None = None
+    snapshot_parent: Path | None = None
+
+    def replace_root(
+        snapshot: PackageSnapshot, relative: Path, payload: bytes, mode: int, deadline: float
+    ) -> None:
+        nonlocal replaced, redirected, snapshot_parent
+        if not replaced:
+            snapshot_parent = snapshot.parent
+            root = snapshot.root
+            redirected = external / relative
+            redirected.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            detached = root.with_name("detached-node-modules")
+            root.rename(detached)
+            root.symlink_to(external, target_is_directory=True)
+            replaced = True
+        real_write(snapshot, relative, payload, mode, deadline)
+
+    monkeypatch.setattr(PackageSnapshot, "write_file", replace_root)
+
+    try:
+        with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+            _node_package_tree(cli_link)
+        assert replaced
+        assert redirected is not None
+        assert not redirected.exists()
+        assert stat.S_IMODE(redirected.parent.stat().st_mode) == 0o700
+    finally:
+        if snapshot_parent is not None:
+            _remove_test_tree(snapshot_parent)
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
 @pytest.mark.parametrize("replacement", ["package", "cli", "ancestor-link"])
 def test_node_package_tree_binds_validation_and_snapshot_to_one_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
@@ -206,10 +324,10 @@ def test_node_package_tree_binds_validation_and_snapshot_to_one_root(
     npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
     cli = cli_link.resolve()
     package = cli.parent
-    original_mkdtemp = tempfile.mkdtemp
+    real_create = PackageSnapshot.create
     replaced = False
 
-    def replace_before_snapshot(*args: Any, **kwargs: Any) -> str:
+    def replace_before_snapshot(*args: Any, **kwargs: Any) -> PackageSnapshot:
         nonlocal replaced
         if replacement == "package":
             package.rename(package.with_name("markdownlint-cli2-original"))
@@ -245,9 +363,9 @@ def test_node_package_tree_binds_validation_and_snapshot_to_one_root(
             (attacker_package / cli.name).write_text("attacker CLI\n", encoding="utf-8")
             npm_parent.symlink_to(attacker, target_is_directory=True)
         replaced = True
-        return original_mkdtemp(*args, **kwargs)
+        return real_create(*args, **kwargs)
 
-    monkeypatch.setattr(tempfile, "mkdtemp", replace_before_snapshot)
+    monkeypatch.setattr(PackageSnapshot, "create", replace_before_snapshot)
 
     with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
         _node_package_tree(cli_link)
@@ -277,31 +395,43 @@ def test_node_package_tree_rejects_unsafe_entries(
         _node_package_tree(cli_link)
 
 
+def test_node_package_tree_rejects_parent_step_after_unresolved_link_component(
+    tmp_path: Path,
+) -> None:
+    """A link cannot apply a parent step after an unresolved link component."""
+    npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    nested = npm_root / "a" / "b"
+    nested.mkdir(parents=True)
+    (npm_root / "a" / "value.js").write_text("benign\n", encoding="utf-8")
+    (npm_root / "value.js").write_text("different\n", encoding="utf-8")
+    (npm_root / "alias").symlink_to(Path("a") / "b", target_is_directory=True)
+    (npm_root / "semantic-link.js").symlink_to(Path("alias") / ".." / "value.js")
+
+    with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
+        _node_package_tree(cli_link)
+
+
 def test_failed_package_admission_removes_partial_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Failed admission removes its partially built private snapshot."""
-    from hephaestus.automation import mnemosyne_node_runtime as runtime
-
     _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path, special_entry=True)
-    temporary_root = Path(tempfile.gettempdir())
-    before = set(temporary_root.glob("hephaestus-node-package-*"))
-    real_chmod = os.chmod
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    real_create = PackageSnapshot.create
+    snapshots: list[PackageSnapshot] = []
 
-    def reject_snapshot_chmod(path: Any, mode: int) -> None:
-        if Path(path).name.startswith("hephaestus-node-package-"):
-            raise OSError("injected cleanup traversal failure")
-        real_chmod(path, mode)
+    def record_create(*args: Any, **kwargs: Any) -> PackageSnapshot:
+        snapshot = real_create(*args, **kwargs)
+        snapshots.append(snapshot)
+        return snapshot
 
-    monkeypatch.setattr(os, "chmod", reject_snapshot_chmod)
-    try:
-        with pytest.raises(LearnDeliveryError, match="special entry"):
-            _node_package_tree(cli_link)
-        assert set(temporary_root.glob("hephaestus-node-package-*")) == before
-    finally:
-        monkeypatch.setattr(os, "chmod", real_chmod)
-        for leftover in set(temporary_root.glob("hephaestus-node-package-*")) - before:
-            runtime._remove_package_snapshot(leftover)
+    monkeypatch.setattr(PackageSnapshot, "create", record_create)
+
+    with pytest.raises(LearnDeliveryError, match="special entry"):
+        _node_package_tree(cli_link)
+    assert len(snapshots) == 1
+    assert snapshots[0]._closed
+    assert not snapshots[0].parent.exists()
 
 
 @pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
@@ -310,16 +440,16 @@ def test_package_snapshot_cleanup_closes_untransferred_child_descriptor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     """A child setup failure closes every cleanup descriptor."""
-    from hephaestus.automation import mnemosyne_node_runtime as runtime
-
     _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     scope = _node_package_tree(cli_link)
-    child_identity = scope.snapshot_root.stat()
+    child_identity = scope.snapshot_cli.parent.stat()
     real_open = os.open
     real_close = os.close
     real_fchmod = os.fchmod
-    real_scandir = runtime._SNAPSHOT_SCANDIR
-    active: set[int] = set()
+    real_scandir = os.scandir
+    active = set(scope._source_binding.descriptors + scope._snapshot.descriptors)
+    failed = False
 
     def track_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
         descriptor = real_open(path, flags, *args, **kwargs)
@@ -331,21 +461,25 @@ def test_package_snapshot_cleanup_closes_untransferred_child_descriptor(
         real_close(descriptor)
 
     def selected_fchmod(descriptor: int, mode: int) -> None:
+        nonlocal failed
         opened = os.fstat(descriptor)
         if failure == "fchmod" and (opened.st_dev, opened.st_ino) == (
             child_identity.st_dev,
             child_identity.st_ino,
         ):
+            failed = True
             raise OSError("injected child fchmod failure")
         real_fchmod(descriptor, mode)
 
     def selected_scandir(path: Any) -> Iterator[os.DirEntry[str]]:
+        nonlocal failed
         if failure == "scandir" and isinstance(path, int):
             opened = os.fstat(path)
             if (opened.st_dev, opened.st_ino) == (
                 child_identity.st_dev,
                 child_identity.st_ino,
             ):
+                failed = True
                 raise OSError("injected child scandir failure")
         return real_scandir(path)
 
@@ -354,16 +488,16 @@ def test_package_snapshot_cleanup_closes_untransferred_child_descriptor(
             scoped.setattr(os, "open", track_open)
             scoped.setattr(os, "close", track_close)
             scoped.setattr(os, "fchmod", selected_fchmod)
-            scoped.setattr(runtime, "_SNAPSHOT_SCANDIR", selected_scandir)
+            scoped.setattr(os, "scandir", selected_scandir)
             with pytest.raises(LearnDeliveryError, match="snapshot cleanup failed"):
                 scope.close()
+            assert failed
             assert active == set()
     finally:
         for descriptor in tuple(active):
             with suppress(OSError):
                 real_close(descriptor)
-        with suppress(LearnDeliveryError):
-            runtime._remove_package_snapshot(scope._snapshot_parent)
+        _remove_test_tree(scope._snapshot_parent)
 
 
 def test_node_package_tree_normalizes_snapshot_allocation_failure(
@@ -371,47 +505,101 @@ def test_node_package_tree_normalizes_snapshot_allocation_failure(
 ) -> None:
     """A temporary snapshot allocation error has one stable contract."""
     _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    allocation_calls: list[Path] = []
 
-    def fail_allocation(*_args: Any, **_kwargs: Any) -> str:
+    def fail_allocation(base: Path, binding: DirectoryBinding, **_kwargs: Any) -> PackageSnapshot:
+        allocation_calls.append(base)
+        binding.close(preserve_error=True)
         raise OSError("injected snapshot allocation failure")
 
-    monkeypatch.setattr(tempfile, "mkdtemp", fail_allocation)
+    monkeypatch.setattr(PackageSnapshot, "create", fail_allocation)
 
     with pytest.raises(LearnDeliveryError, match="Node package dependency tree is unavailable"):
         _node_package_tree(cli_link)
+    assert len(allocation_calls) == 1
 
 
 def test_node_package_tree_preserves_snapshot_root_creation_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A root creation error stays primary when snapshot cleanup also fails."""
-    from hephaestus.automation import mnemosyne_node_runtime as runtime
-
     _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
-    snapshot_parent = tmp_path / "private-snapshot"
-    snapshot_parent.mkdir()
-    snapshot_root = snapshot_parent / "node_modules"
-    real_mkdir = Path.mkdir
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    real_mkdir = os.mkdir
+    real_close = PackageSnapshot.close
     cleanup_calls: list[Path] = []
+    failed = False
 
-    def fail_root_creation(path: Path, *args: Any, **kwargs: Any) -> None:
-        if path == snapshot_root:
+    def fail_root_creation(path: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal failed
+        if path == "node_modules" and kwargs.get("dir_fd") is not None:
+            failed = True
             raise OSError("injected snapshot root creation failure")
         real_mkdir(path, *args, **kwargs)
 
-    def fail_cleanup(path: Path) -> None:
-        cleanup_calls.append(path)
+    def fail_cleanup(snapshot: PackageSnapshot, *, preserve_error: bool = False) -> None:
+        cleanup_calls.append(snapshot.parent)
+        real_close(snapshot, preserve_error=preserve_error)
         raise LearnDeliveryError("Node package snapshot cleanup failed")
 
-    monkeypatch.setattr(tempfile, "mkdtemp", lambda **_kwargs: str(snapshot_parent))
-    monkeypatch.setattr(Path, "mkdir", fail_root_creation)
-    monkeypatch.setattr(runtime, "_remove_package_snapshot", fail_cleanup)
+    monkeypatch.setattr(os, "mkdir", fail_root_creation)
+    monkeypatch.setattr(PackageSnapshot, "close", fail_cleanup)
+    with pytest.raises(LearnDeliveryError, match="Node package dependency tree is unavailable"):
+        _node_package_tree(cli_link)
+    assert failed
+    assert len(cleanup_calls) == 1
+    assert not cleanup_calls[0].exists()
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_snapshot_creation_cleanup_does_not_chmod_rejected_root_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failed creation preserves a replacement root and its mode."""
+    from hephaestus.automation import (
+        mnemosyne_node_runtime as runtime,
+        mnemosyne_package_snapshot as snapshot_module,
+    )
+
+    _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def verify_base(binding: DirectoryBinding) -> None:
+        binding.verify()
+
+    monkeypatch.setattr(runtime, "verify_snapshot_base", verify_base)
+    monkeypatch.setattr(snapshot_module, "verify_snapshot_base", verify_base)
+    real_open = os.open
+    rejected: Path | None = None
+
+    def replace_root(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal rejected
+        if path != "node_modules" or kwargs.get("dir_fd") is None or rejected is not None:
+            return real_open(path, flags, *args, **kwargs)
+        parents = tuple(tmp_path.glob("hephaestus-node-package-*"))
+        if not parents:
+            return real_open(path, flags, *args, **kwargs)
+        parent = parents[0]
+        owned = parent / "node_modules"
+        detached = parent / "owned-node_modules"
+        rejected = parent / "rejected-node_modules"
+        owned.rename(detached)
+        owned.mkdir(mode=0o755)
+        owned.chmod(0o755)
+        descriptor = real_open(path, flags, *args, **kwargs)
+        owned.rename(rejected)
+        detached.rename(owned)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", replace_root)
     try:
-        with pytest.raises(LearnDeliveryError, match="Node package dependency tree is unavailable"):
+        with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
             _node_package_tree(cli_link)
+        assert rejected is not None
+        assert stat.S_IMODE(rejected.stat().st_mode) == 0o755
     finally:
-        snapshot_parent.rmdir()
-    assert cleanup_calls == [snapshot_parent]
+        for parent in tmp_path.glob("hephaestus-node-package-*"):
+            _remove_test_tree(parent)
 
 
 def test_node_package_tree_rejects_oversized_manifest(
@@ -520,14 +708,23 @@ def test_node_package_tree_bounds_directory_depth_and_cleans_snapshot(
     for index in range(4):
         current = current / f"level-{index}"
         current.mkdir()
-    temporary_root = Path(tempfile.gettempdir())
-    before = set(temporary_root.glob("hephaestus-node-package-*"))
+    real_create = PackageSnapshot.create
+    snapshots: list[PackageSnapshot] = []
+
+    def record_create(*args: Any, **kwargs: Any) -> PackageSnapshot:
+        snapshot = real_create(*args, **kwargs)
+        snapshots.append(snapshot)
+        return snapshot
+
     monkeypatch.setattr(runtime, "_MAX_PACKAGE_DEPTH", 2, raising=False)
+    monkeypatch.setattr(PackageSnapshot, "create", record_create)
 
     with pytest.raises(LearnDeliveryError, match="dependency tree is too large"):
         _node_package_tree(cli_link)
 
-    assert set(temporary_root.glob("hephaestus-node-package-*")) == before
+    assert len(snapshots) == 1
+    assert snapshots[0]._closed
+    assert not snapshots[0].parent.exists()
 
 
 @pytest.mark.parametrize(
@@ -591,15 +788,14 @@ def test_node_package_tree_bounds_active_descriptors_on_deep_tree(
     """A deep tree fails before it can exceed the descriptor limit."""
     from hephaestus.automation import mnemosyne_node_runtime as runtime
 
-    npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
-    current = dependency_file.parent
-    for index in range(8):
-        current = current / f"d{index}"
-        current.mkdir()
+    _npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
     real_open = os.open
+    real_dup = os.dup
     real_close = os.close
+    real_children = runtime._bounded_package_children
     active: set[int] = set()
     peak = 0
+    reached_deep_directory = False
 
     def track_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
         nonlocal peak
@@ -612,15 +808,48 @@ def test_node_package_tree_bounds_active_descriptors_on_deep_tree(
         active.discard(descriptor)
         real_close(descriptor)
 
-    root_components = len(npm_root.resolve().parts)
-    descriptor_limit = root_components + 5
-    monkeypatch.setattr(runtime, "_MAX_PACKAGE_ACTIVE_DESCRIPTORS", descriptor_limit, raising=False)
+    def track_dup(descriptor: int) -> int:
+        nonlocal peak
+        duplicate = real_dup(descriptor)
+        active.add(duplicate)
+        peak = max(peak, len(active))
+        return duplicate
+
+    def track_children(
+        descriptor: int, budget: Any, deadline: float | None = None
+    ) -> list[os.DirEntry[str]]:
+        nonlocal reached_deep_directory
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) == deep_identity:
+            reached_deep_directory = True
+        return real_children(descriptor, budget, deadline)
+
     monkeypatch.setattr(os, "open", track_open)
+    monkeypatch.setattr(os, "dup", track_dup)
     monkeypatch.setattr(os, "close", track_close)
+
+    shallow = _node_package_tree(cli_link)
+    retained = len(shallow._source_binding.descriptors) + len(shallow._snapshot.descriptors)
+    shallow.close()
+    assert active == set()
+    descriptor_limit = retained + 6
+    monkeypatch.setattr(runtime, "_MAX_PACKAGE_ACTIVE_DESCRIPTORS", descriptor_limit, raising=False)
+    peak = 0
+
+    current = dependency_file.parent
+    deep_identity = (-1, -1)
+    for index in range(8):
+        current = current / f"d{index}"
+        current.mkdir()
+        if index == 2:
+            status = current.stat()
+            deep_identity = status.st_dev, status.st_ino
+    monkeypatch.setattr(runtime, "_bounded_package_children", track_children)
 
     with pytest.raises(LearnDeliveryError, match="dependency tree is too large"):
         _node_package_tree(cli_link)
 
+    assert reached_deep_directory
     assert peak <= descriptor_limit
     assert active == set()
 
@@ -650,9 +879,9 @@ def test_package_tree_records_closes_root_binding_when_initial_fstat_fails(
         active.discard(descriptor)
         real_close(descriptor)
 
-    def open_then_arm(path: Path) -> Any:
+    def open_then_arm(path: Path, **kwargs: Any) -> Any:
         nonlocal target_descriptor, armed
-        binding = real_open_root(path)
+        binding = real_open_root(path, **kwargs)
         target_descriptor = binding.descriptor
         armed = True
         return binding
@@ -733,22 +962,14 @@ def test_snapshot_cleanup_close_failure_does_not_close_reused_descriptor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Snapshot cleanup disowns a descriptor before its close attempt."""
-    from hephaestus.automation import mnemosyne_node_runtime as runtime
-
-    snapshot_parent = tmp_path / "snapshot"
-    snapshot_parent.mkdir()
+    _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    scope = _node_package_tree(cli_link)
     real_open = os.open
     real_close = os.close
-    cleanup_descriptor = -1
+    cleanup_descriptor = scope._snapshot.descriptor
     replacement_descriptor = -1
     failed = False
-
-    def select_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-        nonlocal cleanup_descriptor
-        descriptor = real_open(path, flags, *args, **kwargs)
-        if path == snapshot_parent:
-            cleanup_descriptor = descriptor
-        return descriptor
 
     def fail_after_reuse(descriptor: int) -> None:
         nonlocal replacement_descriptor, failed
@@ -761,17 +982,111 @@ def test_snapshot_cleanup_close_failure_does_not_close_reused_descriptor(
         real_close(descriptor)
 
     try:
-        monkeypatch.setattr(os, "open", select_open)
         monkeypatch.setattr(os, "close", fail_after_reuse)
 
         with pytest.raises(LearnDeliveryError, match="snapshot cleanup failed"):
-            runtime._remove_package_snapshot(snapshot_parent)
+            scope.close()
         assert failed
+        scope.close()
         os.fstat(replacement_descriptor)
+        assert not scope._snapshot_parent.exists()
     finally:
         if replacement_descriptor >= 0:
             with suppress(OSError):
                 real_close(replacement_descriptor)
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_snapshot_cleanup_preserves_replaced_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Snapshot cleanup does not unlink a child that changed identity."""
+    _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    scope = _node_package_tree(cli_link)
+    target = scope.snapshot_cli
+    parent_identity = target.parent.stat()
+    replacement = b"replacement\n"
+    real_stat = os.stat
+    real_unlink = os.unlink
+    replaced = False
+
+    def replace_before_identity_check(
+        path: Any, *args: Any, dir_fd: int | None = None, **kwargs: Any
+    ) -> os.stat_result:
+        nonlocal replaced
+        if (
+            not replaced
+            and path == target.name
+            and dir_fd is not None
+            and (os.fstat(dir_fd).st_dev, os.fstat(dir_fd).st_ino)
+            == (parent_identity.st_dev, parent_identity.st_ino)
+        ):
+            os.fchmod(dir_fd, 0o700)
+            real_unlink(path, dir_fd=dir_fd)
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=dir_fd,
+            )
+            try:
+                os.write(descriptor, replacement)
+            finally:
+                os.close(descriptor)
+            replaced = True
+        return real_stat(path, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr(os, "stat", replace_before_identity_check)
+
+    try:
+        with pytest.raises(LearnDeliveryError, match="snapshot cleanup failed"):
+            scope.close()
+        assert replaced
+        assert target.read_bytes() == replacement
+    finally:
+        _remove_test_tree(scope._snapshot_parent)
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_snapshot_cleanup_uses_one_global_entry_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All cleanup directories share one entry budget."""
+    _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    scope = _node_package_tree(cli_link)
+    scope._snapshot.max_entries = 4
+
+    try:
+        with pytest.raises(LearnDeliveryError, match="snapshot cleanup failed"):
+            scope.close()
+    finally:
+        _remove_test_tree(scope._snapshot_parent)
+
+
+@pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
+def test_snapshot_cleanup_enforces_elapsed_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Snapshot cleanup stops after one elapsed-time limit."""
+    _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    scope = _node_package_tree(cli_link)
+    calls = 0
+
+    def monotonic() -> float:
+        nonlocal calls
+        calls += 1
+        return 0.0 if calls == 1 else 11.0
+
+    monkeypatch.setattr(time, "monotonic", monotonic)
+
+    try:
+        with pytest.raises(LearnDeliveryError, match="snapshot cleanup failed"):
+            scope.close()
+    finally:
+        _remove_test_tree(scope._snapshot_parent)
 
 
 @pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
@@ -880,41 +1195,53 @@ def test_package_tree_records_enforces_global_entry_budget_across_siblings(
 def test_node_package_tree_bounds_open_directories_on_wide_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A wide valid tree keeps only its active directory depth open."""
-    _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
-    for index in range(32):
-        (cli_link.resolve().parent.parent / f"wide-{index:02d}").mkdir()
+    """A wide valid tree stays within the total descriptor limit."""
+    from hephaestus.automation import mnemosyne_node_runtime as runtime
+
+    npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
+    descriptor_limit = runtime._MAX_PACKAGE_ACTIVE_DESCRIPTORS
+    for index in range(descriptor_limit * 2):
+        (npm_root / f"wide-{index:03d}").mkdir()
     real_open = os.open
+    real_dup = os.dup
     real_close = os.close
-    directories: set[int] = set()
+    active: set[int] = set()
     peak = 0
 
     def track_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
         nonlocal peak
         descriptor = real_open(path, flags, *args, **kwargs)
-        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
-            directories.add(descriptor)
-            peak = max(peak, len(directories))
+        active.add(descriptor)
+        peak = max(peak, len(active))
         return descriptor
 
     def track_close(descriptor: int) -> None:
-        directories.discard(descriptor)
+        active.discard(descriptor)
         real_close(descriptor)
 
+    def track_dup(descriptor: int) -> int:
+        nonlocal peak
+        duplicate = real_dup(descriptor)
+        active.add(duplicate)
+        peak = max(peak, len(active))
+        return duplicate
+
     monkeypatch.setattr(os, "open", track_open)
+    monkeypatch.setattr(os, "dup", track_dup)
     monkeypatch.setattr(os, "close", track_close)
 
-    _node_package_tree(cli_link)
+    with _node_package_tree(cli_link) as scope:
+        scope.verify()
 
-    assert peak <= len(_npm_root.resolve().parts) + 4
-    assert directories == set()
+    assert peak <= descriptor_limit
+    assert active == set()
 
 
 @pytest.mark.skipif(not _POSIX_DESCRIPTOR_TEST, reason="POSIX descriptor boundary")
-def test_node_package_tree_rejects_nested_directory_aba(
+def test_node_package_tree_keeps_nested_directory_binding_during_aba(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A nested directory cannot leave and return during one tree read."""
+    """A nested replacement cannot redirect the descriptor-bound tree read."""
     from hephaestus.automation import mnemosyne_node_runtime as runtime
 
     _npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
@@ -946,8 +1273,13 @@ def test_node_package_tree_rejects_nested_directory_aba(
 
     monkeypatch.setattr(runtime, "_bounded_package_children", replace_and_restore)
 
-    with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
-        _node_package_tree(cli_link)
+    scope = _node_package_tree(cli_link)
+    try:
+        snapshot_dependency = scope.snapshot_root / dependency_file.relative_to(scope.root)
+        assert snapshot_dependency.read_text(encoding="utf-8") == "export const globby = [];\n"
+        assert not (scope.snapshot_root / "globby" / "replacement.js").exists()
+    finally:
+        scope.close()
     assert changed
 
 
@@ -1009,7 +1341,7 @@ def test_node_package_tree_keeps_admission_deadline_during_snapshot_digest(
     from hephaestus.automation import mnemosyne_node_runtime as runtime
 
     _npm_root, cli_link, _dependency_file = _npm_cli_fixture(tmp_path)
-    real_freeze = runtime._freeze_package_snapshot
+    real_seal = PackageSnapshot.seal
     real_digest = runtime._package_records_digest
     elapsed = 0.0
     digest_calls = 0
@@ -1017,9 +1349,9 @@ def test_node_package_tree_keeps_admission_deadline_during_snapshot_digest(
     def monotonic() -> float:
         return elapsed
 
-    def finish_freeze(snapshot_root: Path, deadline: float) -> None:
+    def finish_seal(snapshot: PackageSnapshot, deadline: float) -> None:
         nonlocal elapsed
-        real_freeze(snapshot_root, deadline)
+        real_seal(snapshot, deadline)
         elapsed = 9.0
 
     def expire_during_hash(records: tuple[bytes, ...]) -> str:
@@ -1032,7 +1364,7 @@ def test_node_package_tree_keeps_admission_deadline_during_snapshot_digest(
 
     monkeypatch.setattr(time, "monotonic", monotonic)
     monkeypatch.setattr(runtime, "_PACKAGE_WALK_TIMEOUT_S", 10.0, raising=False)
-    monkeypatch.setattr(runtime, "_freeze_package_snapshot", finish_freeze)
+    monkeypatch.setattr(PackageSnapshot, "seal", finish_seal)
     monkeypatch.setattr(runtime, "_package_records_digest", expire_during_hash)
 
     with pytest.raises(LearnDeliveryError, match="dependency tree timed out"):
@@ -1408,6 +1740,23 @@ def test_node_package_tree_detects_dependency_mutation(tmp_path: Path) -> None:
 
     with pytest.raises(LearnDeliveryError):
         scope.verify()
+
+
+def test_node_package_tree_detects_snapshot_mutation(tmp_path: Path) -> None:
+    """A changed snapshot file fails the bound tree check."""
+    npm_root, cli_link, dependency_file = _npm_cli_fixture(tmp_path)
+    scope = _node_package_tree(cli_link)
+    snapshot_dependency = scope.snapshot_root / dependency_file.relative_to(npm_root)
+    snapshot_dependency.chmod(0o600)
+    snapshot_dependency.write_text("changed snapshot\n", encoding="utf-8")
+
+    try:
+        with pytest.raises(LearnDeliveryError, match="dependency tree changed"):
+            scope.verify()
+    finally:
+        with suppress(LearnDeliveryError):
+            scope.close()
+        _remove_test_tree(scope._snapshot_parent)
 
 
 def test_node_package_tree_detects_regular_file_mode_change(tmp_path: Path) -> None:
