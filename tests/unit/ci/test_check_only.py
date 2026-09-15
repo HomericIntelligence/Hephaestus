@@ -34,9 +34,28 @@ from pathlib import Path
 
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
-with open(os.environ["CHECK_ONLY_TOOL_LOG"], "a") as stream:
-    stream.write(json.dumps({"name": name, "args": args, "cwd": os.getcwd()}) + "\n")
-if os.environ.get("CHECK_ONLY_TOOL_FAIL") == name:
+environment_names = (
+    "AWS_SECRET_ACCESS_KEY",
+    "GH_TOKEN",
+    "PATH",
+    "PRE_COMMIT_NO_CONCURRENCY",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONPATH",
+    "SSH_AUTH_SOCK",
+    "UV_NO_SYNC",
+    "UV_OFFLINE",
+    "UV_PROJECT_ENVIRONMENT",
+)
+tool_root = Path(sys.argv[0]).parent
+with open(tool_root / ".events.jsonl", "a") as stream:
+    stream.write(json.dumps({
+        "name": name,
+        "args": args,
+        "cwd": os.getcwd(),
+        "environment": {key: os.environ.get(key) for key in environment_names},
+    }) + "\n")
+failure_marker = tool_root / ".fail"
+if failure_marker.is_file() and failure_marker.read_text() == name:
     print("fixture validator failure", file=sys.stderr)
     raise SystemExit(37)
 if name == "uv":
@@ -121,7 +140,6 @@ class Workspace:
             TMPDIR=str(self.scratch),
             UV_NO_SYNC="1",
             UV_OFFLINE="1",
-            CHECK_ONLY_TOOL_LOG=str(self.log),
         )
         env.update(overrides)
         return env
@@ -130,6 +148,11 @@ class Workspace:
         self, *, catalog: dict[str, str] | None = None, **overrides: str
     ) -> subprocess.CompletedProcess[str]:
         """Run the public command and distinguish an absent CLI from a failure."""
+        failure_marker = self.tools / ".fail"
+        failure_marker.unlink(missing_ok=True)
+        failure_name = overrides.pop("CHECK_ONLY_TOOL_FAIL", None)
+        if failure_name is not None:
+            failure_marker.write_text(failure_name)
         command = [sys.executable, "-B", "-m", "hephaestus.ci.check_only"]
         if catalog is not None:
             command = [
@@ -163,7 +186,11 @@ def workspace(tmp_path: Path) -> Workspace:
     root = tmp_path / "candidate"
     root.mkdir()
     value = Workspace(
-        root, tmp_path / "tools", tmp_path / "cache", tmp_path / "tools.jsonl", tmp_path / "scratch"
+        root,
+        tmp_path / "tools",
+        tmp_path / "cache",
+        tmp_path / "tools" / ".events.jsonl",
+        tmp_path / "scratch",
     )
     value.tools.mkdir()
     (value.tools / "python3").symlink_to(sys.executable)
@@ -654,6 +681,53 @@ def test_external_symlink_cannot_expose_original_source_to_a_mutating_tool(
     assert "symlink" in (result.stdout + result.stderr).lower()
     assert outside.read_bytes() == b"outside  \n"
     assert workspace.events() == []
+
+
+def test_candidate_hooks_exclude_secrets_and_keep_required_environment(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """Exclude parent secrets and keep the private check environment."""
+    workspace.write("sample.py", "VALUE = 1\n")
+    workspace.config(
+        [
+            {
+                "repo": "local",
+                "hooks": [_local("ruff-check-python", "uv run ruff check --fix")],
+            }
+        ]
+    )
+    workspace.stage()
+
+    aws_credential = "-".join(("test", "only", "aws", "credential"))
+    github_credential = "-".join(("test", "only", "github", "credential"))
+    result = workspace.run(
+        AWS_SECRET_ACCESS_KEY=aws_credential,
+        GH_TOKEN=github_credential,
+        SSH_AUTH_SOCK=str(tmp_path / "test-agent.sock"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    environment = workspace.events()[0]["environment"]
+    assert all(
+        environment[name] is None for name in ("AWS_SECRET_ACCESS_KEY", "GH_TOKEN", "SSH_AUTH_SOCK")
+    )
+    assert environment["PATH"]
+    assert Path(environment["PYTHONPATH"]).name == "candidate"
+    assert environment["UV_PROJECT_ENVIRONMENT"] == sys.prefix
+    assert {
+        name: environment[name]
+        for name in (
+            "PRE_COMMIT_NO_CONCURRENCY",
+            "PYTHONDONTWRITEBYTECODE",
+            "UV_NO_SYNC",
+            "UV_OFFLINE",
+        )
+    } == {
+        "PRE_COMMIT_NO_CONCURRENCY": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "UV_NO_SYNC": "1",
+        "UV_OFFLINE": "1",
+    }
 
 
 def test_git_children_keep_private_candidate_and_exclude_ambient_values(

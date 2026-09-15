@@ -31,7 +31,10 @@ from pre_commit.repository import _hook_installed, all_hooks
 from pre_commit.store import Store
 
 from hephaestus.cli.localization import text
-from hephaestus.config.child_environments import build_check_only_git_env
+from hephaestus.config.child_environments import (
+    build_check_only_git_env,
+    read_approved_parent_env,
+)
 
 
 class PreparationError(RuntimeError):
@@ -377,6 +380,20 @@ def _restore(candidate: Path, baseline: Path, names: tuple[str, ...]) -> bool:
     return changed
 
 
+def _finite_environment_patches(
+    additions: Sequence[tuple[str, Any]],
+) -> tuple[tuple[str, Any], ...]:
+    """Replace the parent environment with approved and explicit values."""
+    environment = read_approved_parent_env()
+    for name, value in additions:
+        if value is UNSET:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
+    removed = tuple((name, UNSET) for name in os.environ if name not in environment)
+    return (*removed, *environment.items())
+
+
 def _run(source: Path, temporary: Path) -> int:
     candidate = temporary / "candidate"
     candidate.mkdir()
@@ -398,13 +415,14 @@ def _run(source: Path, temporary: Path) -> int:
         ("PYTHONDONTWRITEBYTECODE", "1"),
         ("PRE_COMMIT_NO_CONCURRENCY", "1"),
     )
+    hook_environment = _finite_environment_patches(patches)
     failed = False
     with contextlib.chdir(candidate), envcontext(patches):
         config = load_config(".pre-commit-config.yaml")
         selected = _selected(config, names)
         for hook, filenames in selected:
             language = languages[hook.language]
-            with language.in_env(hook.prefix, hook.language_version):
+            with envcontext(hook_environment), language.in_env(hook.prefix, hook.language_version):
                 status, output = language.run_hook(
                     hook.prefix,
                     hook.entry,
