@@ -306,7 +306,7 @@ def test_prepared_interpreter_keeps_validation_failures_terminal(
     import platform
     import shutil
     from collections.abc import Iterator
-    from contextlib import contextmanager
+    from contextlib import contextmanager, nullcontext
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -321,7 +321,15 @@ def test_prepared_interpreter_keeps_validation_failures_terminal(
     monkeypatch.setattr(
         preparation,
         "node_package_tree",
-        lambda path: SimpleNamespace(root=tmp_path, digest="a" * 64, verify=lambda: None),
+        lambda path: nullcontext(
+            SimpleNamespace(
+                root=tmp_path,
+                snapshot_root=tmp_path,
+                snapshot_cli=cli,
+                digest="a" * 64,
+                verify=lambda: None,
+            )
+        ),
     )
     verified = Mock()
     if failure == "artifact":
@@ -537,7 +545,7 @@ def test_markdownlint_failure_prevents_validation_receipt(
     import platform
     import shutil
     from collections.abc import Iterator
-    from contextlib import contextmanager
+    from contextlib import contextmanager, nullcontext
     from types import SimpleNamespace
 
     from hephaestus.automation import mnemosyne_learning_preparation as preparation
@@ -551,7 +559,15 @@ def test_markdownlint_failure_prevents_validation_receipt(
     monkeypatch.setattr(
         preparation,
         "node_package_tree",
-        lambda path: SimpleNamespace(root=tmp_path, digest="a" * 64, verify=lambda: None),
+        lambda path: nullcontext(
+            SimpleNamespace(
+                root=tmp_path,
+                snapshot_root=tmp_path,
+                snapshot_cli=cli,
+                digest="a" * 64,
+                verify=lambda: None,
+            )
+        ),
     )
 
     @contextmanager
@@ -578,10 +594,10 @@ def test_markdownlint_failure_prevents_validation_receipt(
         MnemosynePluginValidator(runner=runner).validate(tmp_path)
 
 
-def test_markdownlint_profile_binds_the_complete_npm_root(
+def test_markdownlint_runs_only_from_immutable_npm_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Markdown lint receives one validated npm root and checks it after lint."""
+    """Markdown lint receives only one immutable npm snapshot."""
     import json
     import platform
     import shutil
@@ -599,6 +615,9 @@ def test_markdownlint_profile_binds_the_complete_npm_root(
     cli_package.mkdir(parents=True)
     cli = cli_package / "markdownlint-cli2-bin.mjs"
     cli.write_text("import { globby } from 'globby';\n")
+    dependency = npm_root / "globby" / "index.js"
+    dependency.parent.mkdir()
+    dependency.write_text("export const globby = [];\n", encoding="utf-8")
     (cli_package / "package.json").write_text(
         json.dumps(
             {
@@ -613,12 +632,40 @@ def test_markdownlint_profile_binds_the_complete_npm_root(
     def verify_package_scope() -> None:
         events.append("tree-verify")
 
-    package_scope = SimpleNamespace(
-        root=npm_root, digest="a" * 64, verify=Mock(side_effect=verify_package_scope)
-    )
+    snapshot_root = tmp_path / "snapshot" / "node_modules"
+    snapshot_cli = snapshot_root / "markdownlint-cli2" / cli.name
+    snapshot_cli.parent.mkdir(parents=True)
+    snapshot_cli.write_text(cli.read_text(encoding="utf-8"), encoding="utf-8")
+    snapshot_dependency = snapshot_root / "globby" / "index.js"
+    snapshot_dependency.parent.mkdir()
+    snapshot_dependency.write_text(dependency.read_text(encoding="utf-8"), encoding="utf-8")
+
+    class PackageScope:
+        """Track the explicit snapshot lifecycle in this test."""
+
+        root = npm_root
+        digest = "a" * 64
+        verify = Mock(side_effect=verify_package_scope)
+
+        def __enter__(self) -> PackageScope:
+            events.append("snapshot-enter")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            events.append("snapshot-exit")
+
+        @property
+        def snapshot_root(self) -> Path:
+            return snapshot_root
+
+        @property
+        def snapshot_cli(self) -> Path:
+            return snapshot_cli
+
+    package_scope = PackageScope()
     scope_calls: list[Path] = []
 
-    def package_tree(value: Path) -> SimpleNamespace:
+    def package_tree(value: Path) -> PackageScope:
         scope_calls.append(value)
         return package_scope
 
@@ -647,8 +694,14 @@ def test_markdownlint_profile_binds_the_complete_npm_root(
         if argv[-1] == "skills/*.md":
             events.append("lint")
             profile = argv[2]
-            assert f"(subpath {json.dumps(str(npm_root))})" in profile
-            assert f"(subpath {json.dumps(str(npm_root.parent))})" not in profile
+            cli.write_text("attacker CLI\n", encoding="utf-8")
+            dependency.write_text("attacker dependency\n", encoding="utf-8")
+            assert str(snapshot_cli) in argv
+            assert str(cli) not in argv
+            assert f"(subpath {json.dumps(str(snapshot_root))})" in profile
+            assert f"(subpath {json.dumps(str(npm_root))})" not in profile
+            assert "attacker" not in snapshot_cli.read_text(encoding="utf-8")
+            assert "attacker" not in snapshot_dependency.read_text(encoding="utf-8")
             assert "(deny network*)" in profile
         return subprocess.CompletedProcess(argv, 0)
 
@@ -657,7 +710,7 @@ def test_markdownlint_profile_binds_the_complete_npm_root(
     assert result[1].endswith("skills/*.md")
     assert scope_calls == [cli]
     assert package_scope.verify.call_count == 1
-    assert events == ["lint", "tree-verify"]
+    assert events == ["snapshot-enter", "lint", "tree-verify", "snapshot-exit"]
 
 
 @pytest.mark.parametrize("bucket", ["pass", "fail", "pending", "cancel", "skipping", "unknown"])

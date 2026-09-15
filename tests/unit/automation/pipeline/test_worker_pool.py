@@ -9,6 +9,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import selectors
 import shlex
 import shutil
@@ -20,7 +21,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -1951,54 +1952,615 @@ def _git_exec_path_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return system_git, toolchain, git_exec_path, developer_git
 
 
-def _safe_git_exec_fixture_root(tmp_path: Path) -> Path:
-    """Create a checked private root for Git path fixtures."""
-    cache_root = Path.home() / ".cache"
-    _validate_git_exec_components(cache_root.parent)
-    cache_root.mkdir(mode=0o700, exist_ok=True)
-    _validate_git_exec_components(cache_root)
+_GIT_FIXTURE_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+_POSIX_GIT_FIXTURE = os.name == "posix" and all(
+    hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW")
+)
+_GIT_FIXTURE_CREATE_ATTEMPTS = 8
+
+
+def _git_fixture_identity(metadata: os.stat_result) -> tuple[int, int]:
+    """Return the filesystem identity of one fixture entry."""
+    return metadata.st_dev, metadata.st_ino
+
+
+def _open_git_fixture_child(
+    parent: int,
+    name: str,
+    *,
+    create: bool,
+    require_safe_mode: bool = True,
+    expected_identity: tuple[int, int] | None = None,
+) -> int:
+    """Open one fixture directory through a bound parent descriptor."""
+    try:
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        if not create:
+            raise
+        with suppress(FileExistsError):
+            os.mkdir(name, mode=0o700, dir_fd=parent)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not stat.S_ISDIR(named.st_mode) or (require_safe_mode and named.st_mode & 0o022):
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+    try:
+        child = os.open(name, _GIT_FIXTURE_DIRECTORY_FLAGS, dir_fd=parent)
+    except OSError as exc:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe") from exc
+    try:
+        opened = os.fstat(child)
+    except OSError as exc:
+        os.close(child)
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe") from exc
+    opened_identity = _git_fixture_identity(opened)
+    if _git_fixture_identity(named) != opened_identity or (
+        expected_identity is not None and expected_identity != opened_identity
+    ):
+        os.close(child)
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+    return child
+
+
+def _open_git_fixture_absolute(path: Path, *, create: bool) -> int:
+    """Open an absolute fixture path one bound component at a time."""
+    if not path.is_absolute():
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+    descriptor = os.open(path.anchor, _GIT_FIXTURE_DIRECTORY_FLAGS)
+    try:
+        for index, part in enumerate(path.parts[1:]):
+            child = _open_git_fixture_child(
+                descriptor,
+                part,
+                create=create and index == len(path.parts[1:]) - 1,
+            )
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _create_git_fixture_child(parent: int, prefix: str) -> tuple[str, int, tuple[int, int]]:
+    """Create and bind one random private child without reuse."""
+    for _attempt in range(_GIT_FIXTURE_CREATE_ATTEMPTS):
+        name = f"{prefix}-{secrets.token_hex(16)}"
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe") from exc
+        identity: tuple[int, int] | None = None
+        try:
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            identity = _git_fixture_identity(named)
+            descriptor = _open_git_fixture_child(
+                parent,
+                name,
+                create=False,
+                expected_identity=identity,
+            )
+        except (OSError, _HostVerificationBoundaryError) as exc:
+            try:
+                created = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if stat.S_ISDIR(created.st_mode) and (
+                    identity is None or _git_fixture_identity(created) == identity
+                ):
+                    os.rmdir(name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe") from exc
+        return name, descriptor, identity
+    raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+
+
+def _remove_git_fixture_contents(descriptor: int) -> None:
+    """Remove fixture content without following a replaced path."""
+    with os.scandir(descriptor) as entries:
+        children = tuple(entries)
+    for child in children:
+        metadata = os.stat(child.name, dir_fd=descriptor, follow_symlinks=False)
+        if not stat.S_ISDIR(metadata.st_mode):
+            os.unlink(child.name, dir_fd=descriptor)
+            continue
+        child_descriptor = _open_git_fixture_child(
+            descriptor,
+            child.name,
+            create=False,
+            require_safe_mode=False,
+            expected_identity=_git_fixture_identity(metadata),
+        )
+        try:
+            _remove_git_fixture_contents(child_descriptor)
+        finally:
+            os.close(child_descriptor)
+        current = os.stat(child.name, dir_fd=descriptor, follow_symlinks=False)
+        if _git_fixture_identity(metadata) != _git_fixture_identity(current):
+            raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+        os.rmdir(child.name, dir_fd=descriptor)
+
+
+def _remove_git_fixture_root(
+    root_descriptor: int,
+    fixture_descriptor: int,
+    name: str,
+    owned_identity: tuple[int, int],
+) -> None:
+    """Remove the bound root only if its name still has the same identity."""
+    opened_root = os.fstat(root_descriptor)
+    if _git_fixture_identity(opened_root) != owned_identity:
+        raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+    _remove_git_fixture_contents(root_descriptor)
+    try:
+        named_root = os.stat(name, dir_fd=fixture_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if _git_fixture_identity(named_root) == _git_fixture_identity(opened_root):
+        os.rmdir(name, dir_fd=fixture_descriptor)
+
+
+@contextmanager
+def _safe_git_exec_fixture_root(tmp_path: Path, *, cache_root: Path) -> Iterator[Path]:
+    """Create one fixture through validated directory descriptors."""
+    cache_descriptor = _open_git_fixture_absolute(cache_root, create=True)
+    fixture_descriptor = -1
+    root_descriptor = -1
+    root_identity: tuple[int, int] | None = None
     fixture_root = cache_root / "hephaestus-test-git-exec-path"
-    fixture_root.mkdir(mode=0o700, exist_ok=True)
-    _validate_git_exec_components(fixture_root)
-    root = fixture_root / f"{os.getpid()}-{tmp_path.name}"
-    root.mkdir(mode=0o700)
-    _validate_git_exec_components(root)
-    return root
+    root = fixture_root
+    try:
+        fixture_descriptor = _open_git_fixture_child(
+            cache_descriptor, "hephaestus-test-git-exec-path", create=True
+        )
+        root_name, root_descriptor, root_identity = _create_git_fixture_child(
+            fixture_descriptor, f"{os.getpid()}-{tmp_path.name}"
+        )
+        root = fixture_root / root_name
+        try:
+            _validate_git_exec_components(root)
+            named_root = root.lstat()
+        except OSError as exc:
+            raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe") from exc
+        if _git_fixture_identity(named_root) != _git_fixture_identity(os.fstat(root_descriptor)):
+            raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
+        yield root
+    finally:
+        try:
+            if root_descriptor >= 0:
+                try:
+                    if root_identity is not None:
+                        _remove_git_fixture_root(
+                            root_descriptor,
+                            fixture_descriptor,
+                            root.name,
+                            root_identity,
+                        )
+                finally:
+                    os.close(root_descriptor)
+        finally:
+            try:
+                if fixture_descriptor >= 0:
+                    os.close(fixture_descriptor)
+            finally:
+                os.close(cache_descriptor)
 
 
 @pytest.fixture
 def safe_git_exec_tmp_path(tmp_path: Path) -> Iterator[Path]:
     """Put Git path fixtures below a private user-cache child."""
-    root = _safe_git_exec_fixture_root(tmp_path)
-    try:
+    if not _POSIX_GIT_FIXTURE:
+        pytest.skip("POSIX descriptor boundary")
+    with _safe_git_exec_fixture_root(tmp_path, cache_root=Path.home() / ".cache") as root:
         yield root
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+
+
+class TestSafeGitExecTmpPathFixture:
+    """Tests for safe Git fixture setup."""
+
+    def test_rejects_unsafe_existing_directory_before_child_creation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
+        """An unsafe fixture directory stays unchanged and has no new child."""
+        cache_root = safe_git_exec_tmp_path
+        fixture_root = cache_root / "hephaestus-test-git-exec-path"
+        fixture_root.mkdir(mode=0o700)
+        fixture_root.chmod(0o777)
+        child = fixture_root / f"{os.getpid()}-{tmp_path.name}"
+        fixture_identity = fixture_root.stat()
+        mkdir = os.mkdir
+        creation_attempted = False
+
+        def record_creation(
+            path: Any,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> None:
+            nonlocal creation_attempted
+            if os.fspath(path) == os.fspath(child) or (
+                path == child.name
+                and dir_fd is not None
+                and _git_fixture_identity(os.fstat(dir_fd))
+                == _git_fixture_identity(fixture_identity)
+            ):
+                creation_attempted = True
+            mkdir(path, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "mkdir", record_creation)
+        try:
+            with (
+                pytest.raises(
+                    _HostVerificationBoundaryError,
+                    match=r"^host_verification_git_exec_path_unsafe$",
+                ),
+                _safe_git_exec_fixture_root(tmp_path, cache_root=cache_root),
+            ):
+                pass
+            assert stat.S_IMODE(fixture_root.lstat().st_mode) == 0o777
+            assert creation_attempted is False
+            assert not child.exists()
+        finally:
+            shutil.rmtree(cache_root, ignore_errors=True)
+
+    def test_rejects_symlinked_ancestor_before_child_creation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
+        """A linked fixture directory cannot redirect child creation."""
+        cache_root = safe_git_exec_tmp_path
+        fixture_root = cache_root / "hephaestus-test-git-exec-path"
+        redirected = cache_root / "redirected"
+        redirected.mkdir(mode=0o700)
+        fixture_root.symlink_to(redirected, target_is_directory=True)
+        child = redirected / f"{os.getpid()}-{tmp_path.name}"
+        requested_child = fixture_root / f"{os.getpid()}-{tmp_path.name}"
+        redirected_identity = redirected.stat()
+        mkdir = os.mkdir
+        creation_attempted = False
+
+        def record_creation(
+            path: Any,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> None:
+            nonlocal creation_attempted
+            if os.fspath(path) == os.fspath(requested_child) or (
+                path == requested_child.name
+                and dir_fd is not None
+                and _git_fixture_identity(os.fstat(dir_fd))
+                == _git_fixture_identity(redirected_identity)
+            ):
+                creation_attempted = True
+            mkdir(path, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "mkdir", record_creation)
+        try:
+            with (
+                pytest.raises(
+                    _HostVerificationBoundaryError,
+                    match=r"^host_verification_git_exec_path_unsafe$",
+                ),
+                _safe_git_exec_fixture_root(tmp_path, cache_root=cache_root),
+            ):
+                pass
+            assert fixture_root.is_symlink()
+            assert creation_attempted is False
+            assert not child.exists()
+        finally:
+            fixture_root.unlink(missing_ok=True)
+            shutil.rmtree(cache_root, ignore_errors=True)
+
+    def test_parent_replacement_cannot_redirect_child_creation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
+        """A replaced cache name cannot redirect descriptor-bound creation."""
+        cache_root = safe_git_exec_tmp_path / "cache"
+        detached = safe_git_exec_tmp_path / "detached-cache"
+        redirected = safe_git_exec_tmp_path / "redirected"
+        cache_root.mkdir(mode=0o700)
+        redirected.mkdir(mode=0o700)
+        mkdir = os.mkdir
+        replaced = False
+
+        def replace_parent(
+            path: Any,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> None:
+            nonlocal replaced
+            if not replaced and path == "hephaestus-test-git-exec-path":
+                cache_root.rename(detached)
+                cache_root.symlink_to(redirected, target_is_directory=True)
+                replaced = True
+            mkdir(path, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "mkdir", replace_parent)
+        with pytest.raises(_HostVerificationBoundaryError):
+            with _safe_git_exec_fixture_root(tmp_path, cache_root=cache_root):
+                pytest.fail("A replaced cache path must not yield a fixture.")
+        assert replaced
+        assert not (redirected / "hephaestus-test-git-exec-path").exists()
+
+    def test_child_fstat_failure_closes_descriptor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
+        """A failed child identity check closes its opened descriptor."""
+        child = safe_git_exec_tmp_path / "child"
+        child.mkdir(mode=0o700)
+        parent = os.open(safe_git_exec_tmp_path, _GIT_FIXTURE_DIRECTORY_FLAGS)
+        real_open = os.open
+        real_fstat = os.fstat
+        real_close = os.close
+        child_descriptor = -1
+        closed: set[int] = set()
+
+        def select_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            nonlocal child_descriptor
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if path == child.name:
+                child_descriptor = descriptor
+            return descriptor
+
+        def fail_fstat(descriptor: int) -> os.stat_result:
+            if descriptor == child_descriptor:
+                raise OSError("injected fstat failure")
+            return real_fstat(descriptor)
+
+        def track_close(descriptor: int) -> None:
+            closed.add(descriptor)
+            real_close(descriptor)
+
+        try:
+            with monkeypatch.context() as scoped:
+                scoped.setattr(os, "open", select_open)
+                scoped.setattr(os, "fstat", fail_fstat)
+                scoped.setattr(os, "close", track_close)
+                with pytest.raises(_HostVerificationBoundaryError):
+                    _open_git_fixture_child(parent, child.name, create=False)
+            assert child_descriptor in closed
+        finally:
+            real_close(parent)
+
+    @pytest.mark.parametrize("failure_step", ["stat", "open", "bind"])
+    def test_created_child_bind_failure_removes_child_and_closes_descriptor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        safe_git_exec_tmp_path: Path,
+        failure_step: str,
+    ) -> None:
+        """A new child is removed when its identity binding fails."""
+        parent = os.open(safe_git_exec_tmp_path, _GIT_FIXTURE_DIRECTORY_FLAGS)
+        real_open = os.open
+        real_stat = os.stat
+        real_fstat = os.fstat
+        real_close = os.close
+        child_name = "candidate-failed"
+        child_descriptor = -1
+        closed: set[int] = set()
+        stat_failed = False
+
+        def select_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            nonlocal child_descriptor
+            if failure_step == "open" and path == child_name:
+                raise OSError("injected child open failure")
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if path == child_name:
+                child_descriptor = descriptor
+            return descriptor
+
+        def select_stat(
+            path: Any,
+            *args: Any,
+            dir_fd: int | None = None,
+            **kwargs: Any,
+        ) -> os.stat_result:
+            nonlocal stat_failed
+            if failure_step == "stat" and path == child_name and not stat_failed:
+                stat_failed = True
+                raise OSError("injected child stat failure")
+            return real_stat(path, *args, dir_fd=dir_fd, **kwargs)
+
+        def fail_fstat(descriptor: int) -> os.stat_result:
+            if failure_step == "bind" and descriptor == child_descriptor:
+                raise OSError("injected child bind failure")
+            return real_fstat(descriptor)
+
+        def track_close(descriptor: int) -> None:
+            closed.add(descriptor)
+            real_close(descriptor)
+
+        try:
+            with monkeypatch.context() as scoped:
+                scoped.setattr(secrets, "token_hex", lambda _size: "failed")
+                scoped.setattr(os, "open", select_open)
+                scoped.setattr(os, "stat", select_stat)
+                scoped.setattr(os, "fstat", fail_fstat)
+                scoped.setattr(os, "close", track_close)
+                with pytest.raises(
+                    _HostVerificationBoundaryError,
+                    match=r"^host_verification_git_exec_path_unsafe$",
+                ):
+                    _create_git_fixture_child(parent, "candidate")
+            assert child_descriptor < 0 or child_descriptor in closed
+            assert not (safe_git_exec_tmp_path / child_name).exists()
+        finally:
+            real_close(parent)
+
+    def test_cleanup_failure_closes_all_fixture_descriptors(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
+        """A cleanup error does not bypass descriptor closure."""
+        cache_root = safe_git_exec_tmp_path / "cleanup-cache"
+        cache_root.mkdir(mode=0o700)
+        real_open = os.open
+        real_close = os.close
+        balances: dict[int, int] = {}
+
+        def track_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            descriptor = real_open(path, flags, *args, **kwargs)
+            balances[descriptor] = balances.get(descriptor, 0) + 1
+            return descriptor
+
+        def track_close(descriptor: int) -> None:
+            balances[descriptor] = balances.get(descriptor, 0) - 1
+            real_close(descriptor)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(os, "open", track_open)
+            scoped.setattr(os, "close", track_close)
+            scoped.setattr(
+                sys.modules[__name__],
+                "_remove_git_fixture_root",
+                Mock(side_effect=RuntimeError("injected cleanup failure")),
+            )
+
+            with pytest.raises(RuntimeError, match="injected cleanup failure"):
+                with _safe_git_exec_fixture_root(tmp_path, cache_root=cache_root):
+                    pass
+        assert all(balance == 0 for balance in balances.values())
+
+    def test_cleanup_replacement_is_not_recursively_deleted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
+        """Cleanup does not delete a directory that replaced its checked name."""
+        cache_root = safe_git_exec_tmp_path / "cleanup-replacement-cache"
+        cache_root.mkdir(mode=0o700)
+        real_stat = os.stat
+        victim_name = "victim"
+        replacement_marker: Path | None = None
+        detached: Path | None = None
+        fixture_root: Path | None = None
+        calls = 0
+
+        def replace_before_open(
+            path: Any,
+            *args: Any,
+            dir_fd: int | None = None,
+            **kwargs: Any,
+        ) -> os.stat_result:
+            nonlocal calls, detached, replacement_marker
+            if path == victim_name and dir_fd is not None:
+                calls += 1
+                if calls == 2:
+                    assert fixture_root is not None
+                    victim = fixture_root / victim_name
+                    detached = fixture_root / "victim-detached"
+                    victim.rename(detached)
+                    victim.mkdir(mode=0o700)
+                    replacement_marker = victim / "keep.txt"
+                    replacement_marker.write_text("keep\n", encoding="utf-8")
+            return real_stat(path, *args, dir_fd=dir_fd, **kwargs)
+
+        try:
+            with (
+                monkeypatch.context() as scoped,
+                pytest.raises(_HostVerificationBoundaryError),
+                _safe_git_exec_fixture_root(tmp_path, cache_root=cache_root) as root,
+            ):
+                fixture_root = root
+                victim = root / victim_name
+                victim.mkdir(mode=0o700)
+                (victim / "original.txt").write_text("original\n", encoding="utf-8")
+                scoped.setattr(os, "stat", replace_before_open)
+            assert replacement_marker is not None and replacement_marker.exists()
+            assert detached is not None and detached.exists()
+        finally:
+            shutil.rmtree(cache_root, ignore_errors=True)
+
+    def test_stale_deterministic_child_is_not_reused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
+        """A stale child with the former deterministic name stays unchanged."""
+        cache_root = safe_git_exec_tmp_path / "stale-child-cache"
+        fixture_root = cache_root / "hephaestus-test-git-exec-path"
+        fixture_root.mkdir(mode=0o700, parents=True)
+        stale = fixture_root / f"{os.getpid()}-{tmp_path.name}"
+        stale.mkdir(mode=0o700)
+        marker = stale / "keep.txt"
+        marker.write_text("keep\n", encoding="utf-8")
+        monkeypatch.setattr(secrets, "token_hex", Mock(return_value="fresh"))
+        try:
+            with _safe_git_exec_fixture_root(tmp_path, cache_root=cache_root) as root:
+                assert root != stale
+                assert root.name.endswith("-fresh")
+            assert marker.read_text(encoding="utf-8") == "keep\n"
+        finally:
+            shutil.rmtree(cache_root, ignore_errors=True)
+
+    def test_random_child_collisions_fail_without_reuse(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        safe_git_exec_tmp_path: Path,
+    ) -> None:
+        """Repeated random-name collisions do not reuse an existing child."""
+        cache_root = safe_git_exec_tmp_path / "collision-cache"
+        fixture_root = cache_root / "hephaestus-test-git-exec-path"
+        fixture_root.mkdir(mode=0o700, parents=True)
+        collision = fixture_root / f"{os.getpid()}-{tmp_path.name}-collision"
+        collision.mkdir(mode=0o700)
+        marker = collision / "keep.txt"
+        marker.write_text("keep\n", encoding="utf-8")
+        monkeypatch.setattr(secrets, "token_hex", Mock(return_value="collision"))
+        try:
+            with pytest.raises(
+                _HostVerificationBoundaryError,
+                match=r"^host_verification_git_exec_path_unsafe$",
+            ):
+                with _safe_git_exec_fixture_root(tmp_path, cache_root=cache_root):
+                    pytest.fail("A colliding child name must not be reused.")
+            assert marker.read_text(encoding="utf-8") == "keep\n"
+        finally:
+            shutil.rmtree(cache_root, ignore_errors=True)
 
 
 def test_safe_git_exec_fixture_rejects_cache_link_before_child_creation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, safe_git_exec_tmp_path: Path
 ) -> None:
     """The Git fixture does not create a child through an unsafe cache link."""
-    home = tmp_path / "home"
+    home = safe_git_exec_tmp_path / "home"
     home.mkdir()
-    outside = tmp_path / "outside"
+    outside = safe_git_exec_tmp_path / "outside"
     outside.mkdir()
     cache_root = home / ".cache"
     cache_root.symlink_to(outside, target_is_directory=True)
-    original_validator = _validate_git_exec_components
-
-    def validate_fixture_path(path: Path) -> None:
-        if path != home:
-            original_validator(path)
-
-    monkeypatch.setattr(Path, "home", lambda: home)
-    monkeypatch.setattr(f"{__name__}._validate_git_exec_components", validate_fixture_path)
-    with pytest.raises(
-        _HostVerificationBoundaryError,
-        match=r"^host_verification_git_exec_path_unsafe$",
+    with (
+        pytest.raises(
+            _HostVerificationBoundaryError,
+            match=r"^host_verification_git_exec_path_unsafe$",
+        ),
+        _safe_git_exec_fixture_root(tmp_path, cache_root=cache_root),
     ):
-        _safe_git_exec_fixture_root(tmp_path)
+        pass
 
     assert not (outside / "hephaestus-test-git-exec-path").exists()
 
