@@ -321,6 +321,7 @@ class RepoStage(Stage):
                     repo=item.repo,
                     op="verify_issue_wave_ancestry",
                     timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
+                    expected_repository=f"{ctx.org}/{item.repo}",
                     kwargs={
                         "repo_root": str(ctx.paths.repo_root),
                         "main_sha": str(main_sha),
@@ -556,6 +557,7 @@ class RepoStage(Stage):
                 repo=item.repo,
                 op="sync_checkout",
                 timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
                 repository_lock_wait_timeout_s=admission_wait_s,
                 kwargs={
                     "repo": f"{ctx.org}/{item.repo}",

@@ -3913,6 +3913,7 @@ class _PreparedGitLocks:
     authoritative_checkout: Path | None = None
     expected_common_lock_path: Path | None = None
     common_parent_identity: tuple[int, int] | None = None
+    validated_repository: str | None = None
     remediation_receipt: RemediationRecoveryReceipt | None = None
 
 
@@ -6382,7 +6383,14 @@ class WorkerPool:
         lock_wait_timeout_s: float,
     ) -> JobResult:
         """Validate lock paths, take both lock pairs, and dispatch one job."""
-        prepared = self._prepare_git_locks(job, lock_attempt_started_s)
+        preparation_deadline_s = lock_attempt_started_s + job.timeout_s
+        if job.deadline_s is not None:
+            preparation_deadline_s = min(preparation_deadline_s, job.deadline_s)
+        with git_utils.operation_deadline(
+            preparation_deadline_s,
+            shutdown=self._shutdown,
+        ):
+            prepared = self._prepare_git_locks(job, lock_attempt_started_s)
         common_lock_path = prepared.common_lock_path
         wait_deadline_s = lock_attempt_started_s + lock_wait_timeout_s
         repo_lock_options: dict[str, Any] = {}
@@ -6432,12 +6440,13 @@ class WorkerPool:
                 authoritative_checkout=binding.cwd,
                 expected_common_lock_path=lock_path,
                 common_parent_identity=parent_identity,
+                validated_repository=job.transport_repository,
             )
         if job.op == "sync_checkout":
             candidate = Path(str(job.kwargs.get("dest") or ""))
             if not (candidate / ".git").exists():
                 return _PreparedGitLocks(None)
-            checkout, _expected_repo = self._validated_sync_checkout(job)
+            checkout, expected_repo = self._validated_sync_checkout(job)
             try:
                 lock_path = WorktreeManager.git_metadata_lock_path(checkout)
                 lock_path = lock_path.parent.resolve(strict=True) / lock_path.name
@@ -6449,6 +6458,7 @@ class WorkerPool:
                 authoritative_checkout=checkout,
                 expected_common_lock_path=lock_path,
                 common_parent_identity=parent_identity,
+                validated_repository=expected_repo,
             )
         if job.op == "fetch_main":
             checkout, lock_path, parent_identity = self._validated_fetch_main_lock_path(job)
@@ -6457,6 +6467,7 @@ class WorkerPool:
                 authoritative_checkout=checkout,
                 expected_common_lock_path=lock_path,
                 common_parent_identity=parent_identity,
+                validated_repository=job.transport_repository,
             )
         return self._validated_operation_git_locks(job)
 
@@ -6481,6 +6492,7 @@ class WorkerPool:
             authoritative_checkout=checkout,
             expected_common_lock_path=common_dir / lock_path.name,
             common_parent_identity=parent_identity,
+            validated_repository=job.transport_repository,
         )
 
     def _validated_fetch_main_lock_path(self, job: GitJob) -> tuple[Path, Path, tuple[int, int]]:
@@ -6549,6 +6561,7 @@ class WorkerPool:
             authoritative_checkout=resolved_checkout,
             expected_common_lock_path=canonical_lock,
             common_parent_identity=parent_identity,
+            validated_repository=job.transport_repository,
             remediation_receipt=receipt,
         )
 
@@ -6585,6 +6598,7 @@ class WorkerPool:
             authoritative_checkout=manager.caller_root,
             expected_common_lock_path=common_lock_path,
             common_parent_identity=parent_identity,
+            validated_repository=manager.repository,
         )
 
     @staticmethod
@@ -6652,7 +6666,7 @@ class WorkerPool:
             if prepared.authoritative_checkout is not None and prepared.intake_manager is None:
                 self._authenticated_remote_git_configuration(
                     cwd=prepared.authoritative_checkout,
-                    expected_repo=timed_job.transport_repository,
+                    expected_repo=prepared.validated_repository,
                     timeout=timed_job.timeout_s,
                 )
             if prepared.intake_manager is not None:
@@ -6667,7 +6681,14 @@ class WorkerPool:
                     timed_job, receipt=prepared.remediation_receipt
                 )
             if timed_job.op == "sync_checkout" and common_lock_path is not None:
-                return self._git_sync_checkout(timed_job, admitted_metadata_lock=common_lock_path)
+                return self._git_sync_checkout(
+                    timed_job,
+                    admitted_metadata_lock=common_lock_path,
+                    validated_checkout=prepared.authoritative_checkout,
+                    validated_repository=prepared.validated_repository,
+                )
+            if timed_job.op == "remove_worktree" and common_lock_path is not None:
+                return self._dispatch_admitted_cleanup(timed_job, common_lock_path)
             return self._dispatch_locked_git(timed_job)
 
     def _dispatch_locked_git(self, job: GitJob) -> JobResult:
@@ -6960,6 +6981,17 @@ class WorkerPool:
         if job.op not in {"remove_worktree", "release_branch_reservation"}:
             raise TypeError(f"unsupported cleanup Git operation: {job.op}")
         return self._run_git(job)
+
+    @staticmethod
+    def _dispatch_admitted_cleanup(job: GitJob, admitted_metadata_lock: Path) -> JobResult:
+        """Dispatch cleanup with its admitted common-directory lock."""
+        from .git_cleanup import run_cleanup_job
+
+        return run_cleanup_job(
+            job,
+            worktree_manager_type=WorktreeManager,
+            admitted_metadata_lock=admitted_metadata_lock,
+        )
 
     def _dispatch_git_op(self, job: GitJob) -> JobResult:  # noqa: C901
         """Dispatch a git operation to its handler.
@@ -9336,17 +9368,28 @@ class WorkerPool:
         return None
 
     def _git_sync_checkout(
-        self, job: GitJob, *, admitted_metadata_lock: Path | None = None
+        self,
+        job: GitJob,
+        *,
+        admitted_metadata_lock: Path | None = None,
+        validated_checkout: Path | None = None,
+        validated_repository: str | None = None,
     ) -> JobResult:
         """Validate and fast-forward a clean reusable checkout.
 
         Tracked staged or unstaged changes block synchronization. Untracked
         files are left in place because issue work runs in isolated worktrees.
         """
-        try:
-            checkout, expected_repo = self._validated_sync_checkout(job)
-        except _GitCheckoutBindingError as exc:
-            return JobResult(ok=False, error=str(exc))
+        if validated_checkout is None or validated_repository is None:
+            try:
+                checkout, expected_repo = self._validated_sync_checkout(job)
+            except _GitCheckoutBindingError as exc:
+                return JobResult(ok=False, error=str(exc))
+            origin_validated_under_lock = False
+        else:
+            checkout = validated_checkout
+            expected_repo = validated_repository
+            origin_validated_under_lock = True
 
         try:
             metadata_lock = admitted_metadata_lock or WorktreeManager.git_metadata_lock_path(
@@ -9359,6 +9402,7 @@ class WorkerPool:
                 checkout=checkout,
                 expected_repo=expected_repo,
                 timeout_s=job.timeout_s,
+                origin_validated=origin_validated_under_lock,
             )
 
     @staticmethod
@@ -9475,25 +9519,27 @@ class WorkerPool:
         checkout: Path,
         expected_repo: str,
         timeout_s: int,
+        origin_validated: bool = False,
     ) -> JobResult:
         """Validate and synchronize one checkout while its metadata lock is held."""
-        origin = git_utils.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=checkout,
-            timeout=timeout_s,
-            env=_controlled_git_env(),
-        ).stdout.strip()
-        normalized_origin = origin.rstrip("/").removesuffix(".git")
-        expected_origins = {
-            f"https://github.com/{expected_repo}",
-            f"ssh://git@github.com/{expected_repo}",
-            f"git@github.com:{expected_repo}",
-        }
-        if normalized_origin not in expected_origins:
-            return JobResult(
-                ok=False,
-                error=f"checkout has unexpected origin; expected origin {expected_repo}",
-            )
+        if not origin_validated:
+            origin = git_utils.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=checkout,
+                timeout=timeout_s,
+                env=_controlled_git_env(),
+            ).stdout.strip()
+            normalized_origin = origin.rstrip("/").removesuffix(".git")
+            expected_origins = {
+                f"https://github.com/{expected_repo}",
+                f"ssh://git@github.com/{expected_repo}",
+                f"git@github.com:{expected_repo}",
+            }
+            if normalized_origin not in expected_origins:
+                return JobResult(
+                    ok=False,
+                    error=f"checkout has unexpected origin; expected origin {expected_repo}",
+                )
 
         status = git_utils.run(
             [

@@ -35,6 +35,11 @@ _operation_file_locks: ContextVar[frozenset[Path]] = ContextVar(
 )
 
 
+def _canonical_lock_identity(path: Path) -> Path:
+    """Canonicalize a lock parent without resolving the lock entry."""
+    return path.parent.resolve(strict=False) / path.name
+
+
 @contextmanager
 def operation_deadline(
     deadline_s: float | None, *, shutdown: threading.Event | None = None
@@ -64,7 +69,7 @@ def current_operation_shutdown() -> threading.Event | None:
 @contextmanager
 def operation_file_lock_held(path: Path) -> Iterator[None]:
     """Record a file lock that an outer operation scope already holds."""
-    normalized = path.absolute()
+    normalized = _canonical_lock_identity(path)
     token = _operation_file_locks.set(_operation_file_locks.get() | {normalized})
     try:
         yield
@@ -89,7 +94,7 @@ def remaining_operation_timeout(timeout: int | float | None) -> int | float | No
 @contextmanager
 def operation_file_lock(path: Path, *, require_exclusive: bool = False) -> Iterator[None]:
     """Hold a file lock within the active Git operation's time and stop limits."""
-    normalized = path.absolute()
+    normalized = _canonical_lock_identity(path)
     if normalized in _operation_file_locks.get():
         remaining_operation_timeout(None)
         yield

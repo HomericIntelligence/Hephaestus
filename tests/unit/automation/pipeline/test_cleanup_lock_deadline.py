@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -13,7 +14,6 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import source_worktree
-from hephaestus.automation.pipeline import git_cleanup
 from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.queues import CompletionQueue
@@ -34,6 +34,17 @@ def test_auxiliary_cleanup_stops_while_its_lock_remains_held(
 ) -> None:
     """A stopped cleanup keeps the worktree and its source receipt unchanged."""
     root, _, revision = _repository(tmp_path)
+    subprocess.run(
+        [
+            "git",
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ],
+        cwd=root,
+        check=True,
+    )
     manager = SourceWorkspaceManager(root, repository="example/project")
     binding = manager.prepare(7, SourceLane.REVIEW, revision)
     receipt_path = manager._receipt_path(7, SourceLane.REVIEW)
@@ -67,11 +78,18 @@ def test_auxiliary_cleanup_stops_while_its_lock_remains_held(
         with file_lock(path, **kwargs):
             yield
 
-    monkeypatch.setattr(
-        source_worktree if lock_kind == "source" else git_cleanup,
-        "file_lock",
-        observed_lock,
-    )
+    if lock_kind == "source":
+        monkeypatch.setattr(source_worktree, "file_lock", observed_lock)
+    else:
+        common_lock = main_pool._git_common_lock
+
+        @contextmanager
+        def observed_common_lock(*args: Any, **kwargs: Any) -> Iterator[None]:
+            attempted.set()
+            with common_lock(*args, **kwargs):
+                yield
+
+        monkeypatch.setattr(main_pool, "_git_common_lock", observed_common_lock)
     kwargs: dict[str, object] = {
         "worktree_path": str(binding.cwd),
         "repo_root": str(root),

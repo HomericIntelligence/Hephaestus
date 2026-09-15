@@ -206,6 +206,7 @@ class TestCleanup:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob) and result.job.op == "remove_worktree"
+        assert result.job.expected_repository == f"{ctx.org}/repo-a"
         assert result.job.kwargs == {
             "worktree_path": "/wt/issue-42",
             "repo_root": str(ctx.paths.repo_root),

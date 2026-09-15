@@ -25,6 +25,7 @@ from hephaestus.utils.file_lock import (
 class TestFileLock:
     """Behaviour of the ``file_lock`` context manager."""
 
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     @pytest.mark.parametrize("name", ["metadata.lock", "metadata.lock.owner.lock"])
     @pytest.mark.parametrize("unsafe_kind", ["symlink", "hardlink", "fifo", "mode", "owner"])
     def test_file_lock_at_rejects_unsafe_existing_entry(
@@ -62,6 +63,7 @@ class TestFileLock:
         if unsafe_kind == "mode":
             assert entry.stat().st_mode & 0o777 == 0o644
 
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     @pytest.mark.parametrize("name", ["metadata.lock", "metadata.lock.owner.lock"])
     def test_file_lock_at_creates_one_safe_entry(self, tmp_path: Path, name: str) -> None:
         """A missing descriptor-relative entry is created with exact safe metadata."""
@@ -84,7 +86,7 @@ class TestFileLock:
     ) -> None:
         """Exclusive descriptor locking fails closed without safe open support."""
         if capability == "nofollow":
-            monkeypatch.delattr(os, "O_NOFOLLOW")
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
         elif capability == "dir_fd":
             monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {os.open})
         elif capability == "stat_dir_fd":
@@ -104,13 +106,9 @@ class TestFileLock:
                 return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
             monkeypatch.setattr(builtins, "__import__", fake_import)
-        parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            with pytest.raises(ExclusiveLockUnavailableError):
-                with file_lock_at(parent_fd, "metadata.lock", require_exclusive=True):
-                    pytest.fail("an unsupported exclusive lock was admitted")
-        finally:
-            os.close(parent_fd)
+        with pytest.raises(ExclusiveLockUnavailableError):
+            with file_lock_at(-1, "metadata.lock", require_exclusive=True):
+                pytest.fail("an unsupported exclusive lock was admitted")
         assert not (tmp_path / "metadata.lock").exists()
 
     def test_acquire_release_round_trip_creates_file(self, tmp_path: Path) -> None:

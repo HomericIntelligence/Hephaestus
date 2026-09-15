@@ -608,6 +608,7 @@ class TestExplicitPrReviewRetry:
         assert isinstance(removal, JobRequest)
         assert isinstance(removal.job, GitJob)
         assert removal.job.op == "remove_worktree"
+        assert removal.job.expected_repository == f"{ctx.org}/{item.repo}"
         stage.on_job_done(item, JobResult(ok=True), ctx)
         item.state = removal.on_done_state
         result = stage.step(item, ctx)
@@ -1385,6 +1386,7 @@ class TestPrReviewStageStep:
         assert isinstance(removal, JobRequest)
         assert isinstance(removal.job, GitJob)
         assert removal.job.op == "remove_worktree"
+        assert removal.job.expected_repository == f"{ctx.org}/{item.repo}"
         assert removal.job.kwargs["expected_head"] == "a" * 40
         assert removal.job.kwargs["expected_detached"] is True
         assert removal.job.kwargs["source_lane"] == "review"

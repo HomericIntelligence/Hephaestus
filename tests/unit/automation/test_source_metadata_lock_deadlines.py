@@ -9,6 +9,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -224,3 +225,18 @@ def test_operation_lock_keeps_manual_blocking_default(tmp_path: Path) -> None:
     assert not worker.is_alive()
     assert completed.is_set()
     assert effects == ["entered"]
+
+
+def test_operation_lock_reuses_held_lock_through_parent_alias(tmp_path: Path) -> None:
+    """Equivalent parent paths identify the same held operation lock."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    canonical = parent / "metadata.lock"
+    alias = parent / ".." / "parent" / "metadata.lock"
+    with (
+        patch.object(git_runtime, "file_lock") as acquire,
+        git_runtime.operation_file_lock_held(canonical),
+        git_runtime.operation_file_lock(alias),
+    ):
+        pass
+    acquire.assert_not_called()

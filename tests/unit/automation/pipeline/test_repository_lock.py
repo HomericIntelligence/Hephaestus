@@ -74,6 +74,7 @@ def _sidecar(repository: str = "owner/repo") -> dict[str, object]:
 class TestRepositoryOperationLock:
     """Verify the three-layer repository lock contract."""
 
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     @pytest.mark.parametrize("change", ["remove", "replace"])
     def test_existing_parent_lock_does_not_create_through_a_changed_path(
         self, tmp_path: Path, change: str
@@ -459,7 +460,7 @@ class TestRepositoryOperationLock:
             monotonic=lambda: now[0],
         )
 
-        def late_record(_holder: object) -> None:
+        def late_record(_holder: object, _parent_fd: int) -> None:
             now[0] = 1.0
 
         with (
@@ -470,6 +471,8 @@ class TestRepositoryOperationLock:
         ):
             with lock.acquire(operation="commit_push", timeout_s=0.5):
                 pytest.fail("a late owner record dispatched")
+
+        assert now[0] == 1.0
 
     def test_shutdown_prevents_dispatch(self, tmp_path: Path) -> None:
         """Shutdown stops acquisition before the critical section."""

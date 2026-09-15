@@ -5868,13 +5868,14 @@ class TestGitOps:
 
     @pytest.fixture(autouse=True)
     def _mock_trusted_gh_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Keep checkout-sync tests independent of the host's gh install layout."""
+        """Keep handler tests independent of lock admission and the host gh path."""
 
         def executable(_root: Path | None = None) -> str:
             return "/usr/bin/gh"
 
         monkeypatch.setattr(f"{_WP}._trusted_gh_executable", executable)
         monkeypatch.setattr(f"{__name__}._trusted_gh_executable", executable)
+        monkeypatch.setattr(f"{_WP}._git_job_checkout_candidate", lambda _job: None)
 
     @staticmethod
     def _inspection_writer(
@@ -5900,6 +5901,7 @@ class TestGitOps:
         (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
         git("add", "tracked.txt")
         git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        git("remote", "add", "origin", "https://github.com/test/repo.git")
         head = git("rev-parse", "HEAD").stdout.strip()
         git("worktree", "add", "-q", "-b", branch, str(writer))
         return repo, writer, head
@@ -5933,6 +5935,7 @@ class TestGitOps:
         (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
         git("add", ".gitignore", "tracked.txt")
         git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        git("remote", "add", "origin", "https://github.com/test/repo.git")
         head = git("rev-parse", "HEAD").stdout.strip()
         relative_args = ("--relative-paths",) if relative_paths else ()
         git("worktree", "add", "-q", *relative_args, "--detach", str(intake), head)
@@ -16113,6 +16116,7 @@ class TestGitOps:
     ) -> None:
         """The reviewer-only detached publish mode has no compatibility path."""
         repo, _predecessor, head = _worker_repository(tmp_path)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/test/repo.git")
         binding = SourceWorkspaceManager(repo, repository="test/repo").prepare(
             70, SourceLane.IMPLEMENTATION, head, branch="70-existing"
         )
@@ -16272,11 +16276,10 @@ class TestGitOps:
         assert mock_commit.call_args.kwargs["git_env"]["GIT_CONFIG"] == os.devnull
         assert 0 < mock_commit.call_args.kwargs["timeout"] <= job.timeout_s
         assert 0 < mock_commit.call_args.kwargs["git_message_timeout"] <= job.timeout_s
-        authentication.assert_called_once_with(
-            cwd=tmp_path,
-            expected_repo="test/repo",
-            timeout=60,
-        )
+        assert authentication.call_args_list == [
+            call(cwd=tmp_path, expected_repo="test/repo", timeout=60),
+            call(cwd=tmp_path, expected_repo="test/repo", timeout=60),
+        ]
         mock_push.assert_called_once_with(
             "5-auto",
             tmp_path,
@@ -17864,6 +17867,7 @@ class TestGitOps:
             error="host signing configuration unavailable",
         )
         with (
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(
                 "hephaestus.automation.git_utils.run",
                 return_value=MagicMock(stdout=" M pending.py\\n"),
@@ -17911,6 +17915,7 @@ class TestGitOps:
             },
         )
         with (
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
             patch(
                 "hephaestus.automation.git_utils.run",
@@ -17973,6 +17978,7 @@ class TestGitOps:
             },
         )
         with (
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
             patch("hephaestus.automation.git_utils.run") as diff,
             patch("hephaestus.automation.git_utils.push_branch") as push,
@@ -18241,6 +18247,7 @@ class TestGitOps:
             },
         )
         with (
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
             patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=False),
@@ -18342,6 +18349,7 @@ class TestGitOps:
             },
         )
         with (
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
             patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=True),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
@@ -18377,7 +18385,10 @@ class TestGitOps:
                 "expected_remote_sha": binding.revision,
             },
         )
-        with patch("hephaestus.automation.git_utils.commit_if_changes") as commit:
+        with (
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+            patch("hephaestus.automation.git_utils.commit_if_changes") as commit,
+        ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
@@ -18415,7 +18426,10 @@ class TestGitOps:
         mock_commit.assert_not_called()
         mock_push.assert_not_called()
         assert result.ok is False
-        assert result.error == "source_workspace_ownership_unavailable: publication binding invalid"
+        assert result.error == (
+            "source_workspace_ownership_unavailable: "
+            "Git source operation does not match its workspace"
+        )
 
     def test_clone_dispatch_threads_timeout(
         self,
@@ -18456,7 +18470,10 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with (
+            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+            patch("hephaestus.automation.git_utils.run") as mock_run,
+        ):
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout=""),
@@ -18684,6 +18701,7 @@ class TestGitOps:
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
@@ -18818,12 +18836,19 @@ class TestGitOps:
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=" M changed.py\n"),
             ]
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
         assert mock_run.call_args_list == [
+            call(
+                ["git", "remote", "get-url", "origin"],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
             call(
                 ["git", "remote", "get-url", "origin"],
                 cwd=checkout,
@@ -19001,6 +19026,7 @@ class TestGitOps:
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="git@github.com:owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout="git@github.com:owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
@@ -19016,7 +19042,7 @@ class TestGitOps:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
-        fetch_call = mock_run.call_args_list[4]
+        fetch_call = mock_run.call_args_list[5]
         ssh_command = _executable_path("ssh", path=os.defpath)
         ssh_config = (
             f"{shlex.quote(ssh_command)} -F {shlex.quote(os.devnull)} "
@@ -19087,7 +19113,7 @@ class TestGitOps:
         assert fetch_env["GIT_CONFIG_GLOBAL"] == os.devnull
         assert fetch_env["GIT_CONFIG_NOSYSTEM"] == "1"
         assert fetch_env["GIT_NO_REPLACE_OBJECTS"] == "1"
-        assert mock_run.call_args_list[3] == call(
+        assert mock_run.call_args_list[4] == call(
             [_trusted_gh_executable(), "api", "repos/owner/name", "--jq", ".default_branch"],
             cwd=checkout,
             timeout=120,
@@ -19383,6 +19409,7 @@ class TestGitOps:
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="feature\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
@@ -19419,6 +19446,7 @@ class TestGitOps:
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 1, stdout=""),
             ]
@@ -19426,6 +19454,12 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert mock_run.call_args_list == [
+            call(
+                ["git", "remote", "get-url", "origin"],
+                cwd=checkout,
+                timeout=120,
+                env=ANY,
+            ),
             call(
                 ["git", "remote", "get-url", "origin"],
                 cwd=checkout,
@@ -19467,30 +19501,51 @@ class TestGitOps:
         checkout = tmp_path / "checkout"
         checkout.mkdir()
         metadata_lock = checkout / ".git" / ".hephaestus-git-metadata.lock"
+        metadata_lock.parent.mkdir()
+        holder = WorkerPool(
+            1,
+            threading.Event(),
+            CompletionQueue(),
+            lock_dir=tmp_path / "holder-locks",
+        )
         job = GitJob(
             repo="test/repo",
             op="sync_checkout",
             timeout_s=1,
+            repository_lock_wait_timeout_s=1,
             kwargs={"repo": "owner/name", "dest": str(checkout)},
         )
-        with (
-            file_lock(metadata_lock),
-            patch("hephaestus.automation.git_utils.run") as mock_run,
-        ):
-            mock_run.side_effect = [
-                subprocess.CompletedProcess([], 0, stdout=""),
-                subprocess.CompletedProcess([], 0, stdout=""),
-                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
-                subprocess.CompletedProcess([], 0, stdout=""),
-                subprocess.CompletedProcess([], 0, stdout="main\n"),
-                subprocess.CompletedProcess([], 0, stdout="main\n"),
-                subprocess.CompletedProcess([], 0, stdout="main\n"),
-            ]
-            pool.submit(job, StageName.REPO)
-            _, result = completion_q.get(timeout=10)
+        try:
+            with (
+                holder._git_common_lock(
+                    "holder-alias",
+                    metadata_lock,
+                    operation="fetch_main",
+                    timeout_s=30,
+                    deadline_s=None,
+                    wait_deadline_s=time.monotonic() + 30,
+                ),
+                patch("hephaestus.automation.git_utils.run") as mock_run,
+            ):
+                mock_run.side_effect = [
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess(
+                        [], 0, stdout="https://github.com/owner/name.git\n"
+                    ),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout="main\n"),
+                    subprocess.CompletedProcess([], 0, stdout="main\n"),
+                    subprocess.CompletedProcess([], 0, stdout="main\n"),
+                ]
+                pool.submit(job, StageName.REPO)
+                _, result = completion_q.get(timeout=10)
+        finally:
+            holder.shutdown()
 
         assert result.ok is False
-        assert result.error == "timeout"
+        assert result.error == "lock_timeout"
+        assert result.value["holder_source"] == "owner_sidecar"
         assert mock_run.call_args_list == [
             call(
                 [
@@ -19508,6 +19563,12 @@ class TestGitOps:
             ),
             call(
                 ["git", "rev-parse", "--git-path", "info/grafts"],
+                cwd=checkout,
+                timeout=ANY,
+                env=ANY,
+            ),
+            call(
+                ["git", "remote", "get-url", "origin"],
                 cwd=checkout,
                 timeout=ANY,
                 env=ANY,
@@ -19548,6 +19609,12 @@ class TestGitOps:
             patch(f"{_WP}.time.monotonic", side_effect=lambda: clock[0]),
             patch("hephaestus.automation.git_runtime.time.monotonic", side_effect=lambda: clock[0]),
             patch(f"{_WP}._checkout_preflight_error", side_effect=preflight),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout="https://github.com/owner/name.git\n"
+                ),
+            ),
             patch(f"{_WP}.WorktreeManager.git_metadata_lock_path", return_value=metadata_lock),
             patch(f"{_WP}.operation_file_lock", side_effect=observe_lock),
             patch.object(pool, "_sync_checkout_locked", return_value=JobResult(ok=True)),
@@ -19574,6 +19641,7 @@ class TestGitOps:
         )
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
@@ -19613,6 +19681,7 @@ class TestGitOps:
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="\n"),
@@ -19647,6 +19716,7 @@ class TestGitOps:
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
@@ -19679,6 +19749,7 @@ class TestGitOps:
         )
         with patch("hephaestus.automation.git_utils.run") as mock_run:
             mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
@@ -19814,6 +19885,144 @@ class TestGitLocking:
         )
 
         assert waiter.ok is True
+
+    @pytest.mark.parametrize("operation", ["generic", "fetch", "sync", "intake"])
+    @pytest.mark.parametrize("stop", ["deadline", "cancellation"])
+    def test_lock_preparation_applies_job_stop_limits(
+        self,
+        pool: WorkerPool,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+        operation: str,
+        stop: str,
+    ) -> None:
+        """Checkout validation stops before lock admission when its job stops."""
+        checkout = tmp_path / "checkout"
+        (checkout / ".git").mkdir(parents=True)
+        kwargs: dict[str, object]
+        if operation == "intake":
+            op = "prepare_intake"
+            kwargs = {"repo": "owner/repo", "caller_root": str(checkout)}
+        elif operation == "sync":
+            op = "sync_checkout"
+            kwargs = {"repo": "owner/repo", "dest": str(checkout)}
+        elif operation == "fetch":
+            op = "fetch_main"
+            kwargs = {"cwd": str(checkout)}
+        else:
+            op = "verify_issue_wave_ancestry"
+            kwargs = {
+                "repo_root": str(checkout),
+                "main_sha": "a" * 40,
+                "ancestor_shas": (),
+            }
+        job = GitJob(
+            "repo",
+            op,
+            30,
+            expected_repository="owner/repo",
+            deadline_s=time.monotonic() + 30,
+            kwargs=kwargs,
+        )
+        observed: list[str] = []
+
+        def stop_during_preparation(*_args: object, **_kwargs: object) -> object:
+            if stop == "cancellation":
+                shutdown_event.set()
+            try:
+                remaining = git_utils.remaining_operation_timeout(None)
+            except InterruptedError:
+                observed.append("interrupted")
+                raise
+            observed.append("unbounded" if remaining is None else "bounded")
+            if remaining is not None and stop == "deadline":
+                raise subprocess.TimeoutExpired("preparation", remaining)
+            return (checkout.resolve(), "owner/repo") if operation == "sync" else ({}, ())
+
+        patches = [patch.object(pool, "_dispatch_locked_git")]
+        if operation == "intake":
+            patches.append(
+                patch.object(
+                    pool,
+                    "_new_repo_intake_manager",
+                    side_effect=stop_during_preparation,
+                )
+            )
+        elif operation == "sync":
+            patches.extend(
+                [
+                    patch.object(
+                        pool,
+                        "_validated_sync_checkout",
+                        side_effect=stop_during_preparation,
+                    ),
+                    patch.object(
+                        pool,
+                        "_authenticated_remote_git_configuration",
+                        return_value=({}, ()),
+                    ),
+                ]
+            )
+        else:
+            patches.append(
+                patch.object(
+                    pool,
+                    "_authenticated_remote_git_configuration",
+                    side_effect=stop_during_preparation,
+                )
+            )
+        with ExitStack() as stack:
+            active = [stack.enter_context(item) for item in patches]
+            result = pool._run_git(job)
+
+        dispatch = active[0]
+        dispatch.assert_not_called()
+        assert observed == ["interrupted" if stop == "cancellation" else "bounded"]
+        assert result.error == ("interrupted" if stop == "cancellation" else "timeout")
+
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
+    @pytest.mark.parametrize("repo_path_kind", ["canonical", "parent-alias"])
+    def test_remove_worktree_reuses_admitted_common_lock(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+        repo_path_kind: str,
+    ) -> None:
+        """A real linked-worktree cleanup does not reacquire its outer common lock."""
+        repo, _predecessor, head = _worker_repository(tmp_path)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+        worktree = repo / "build" / ".worktrees" / "issue-7"
+        worktree.parent.mkdir(parents=True)
+        _git(repo, "worktree", "add", "--detach", str(worktree), head)
+        repo_root = repo if repo_path_kind == "canonical" else repo / "build" / ".."
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "repo",
+            "remove_worktree",
+            2,
+            expected_repository="owner/repo",
+            deadline_s=time.monotonic() + 2,
+            kwargs={
+                "worktree_path": str(worktree),
+                "repo_root": str(repo_root),
+                "issue_number": 7,
+                "expected_head": head,
+                "expected_detached": True,
+                "force": False,
+            },
+        )
+        try:
+            with (
+                patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+                patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+            ):
+                result = pool.run_cleanup_git(job)
+        finally:
+            pool.shutdown()
+
+        assert result.ok is True
+        assert not worktree.exists()
 
     def test_long_commit_push_keeps_shared_metadata_serialized(
         self,
@@ -20806,6 +21015,54 @@ class TestGitLocking:
         publish.assert_not_called()
         assert result.error == "lock_timeout"
 
+    def test_remediation_recovery_keeps_mixed_case_transport_identity(
+        self,
+        completion_q: CompletionQueue,
+        shutdown_event: threading.Event,
+        tmp_path: Path,
+    ) -> None:
+        """Recovery uses the admitted transport identity for its locked recheck."""
+        repo, _predecessor, _head = _worker_repository(tmp_path)
+        _git(repo, "remote", "set-url", "origin", "https://github.com/Owner/Name.git")
+        receipt = MagicMock(
+            review_input=MagicMock(
+                repository="owner/name",
+                repo_root=str(repo),
+                worktree_path=str(repo),
+            )
+        )
+        pool = WorkerPool(1, shutdown_event, completion_q, lock_dir=tmp_path / "locks")
+        job = GitJob(
+            "Name",
+            "publish_remediation_recovery",
+            30,
+            expected_repository="Owner/Name",
+            kwargs={
+                "recovery_receipt": {},
+                "reply_result": {},
+                "remediation_batch_nonce": "4" * 32,
+            },
+        )
+        try:
+            with (
+                patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
+                patch(f"{_WP}._trusted_remote_git_config", return_value=()),
+                patch(f"{_WP}.RemediationRecoveryReceipt.from_dict", return_value=receipt),
+                patch.object(
+                    pool,
+                    "_git_publish_remediation_recovery",
+                    return_value=JobResult(ok=True),
+                ) as publish,
+            ):
+                result = pool._run_git(job)
+        finally:
+            pool.shutdown()
+
+        assert result.ok is True
+        publish.assert_called_once()
+        assert publish.call_args.kwargs["receipt"] is receipt
+        assert publish.call_args.args[0].expected_repository == "Owner/Name"
+
     def test_foreign_remediation_recovery_receipt_does_not_write_git_state(
         self,
         completion_q: CompletionQueue,
@@ -20977,6 +21234,7 @@ class TestGitLocking:
         assert result.error == "Git common directory changed before operation admission"
 
     @pytest.mark.parametrize("change", ["remove", "replace"])
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     def test_common_directory_change_at_lock_open_does_not_write_new_parent(
         self,
         completion_q: CompletionQueue,
@@ -21349,6 +21607,8 @@ class TestGitLocking:
 
         assert result.ok is True
         assert events == [
+            "network_enter",
+            "network_exit",
             "repo_enter",
             "network_enter",
             "network_exit",
@@ -23052,7 +23312,10 @@ def test_fresh_direct_reservation_allows_exactly_one_initial_rebase(
     with patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())):
         first = pool._run_git(rebase)
     assert first.ok, first.error
-    with patch.object(pool, "_git_fetch_main") as fetch:
+    with (
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+        patch.object(pool, "_git_fetch_main") as fetch,
+    ):
         second = pool._run_git(
             replace(rebase, workspace=WorkspaceBinding.from_dict(first.value["source_workspace"]))
         )
@@ -23540,13 +23803,15 @@ def test_actual_pretest_completion_persists_for_fresh_worker(
             repo="project",
             op="invalidate_remediation_pretest_candidate",
             timeout_s=30,
+            expected_repository="example/project",
             kwargs={
                 "repo_root": str(root),
                 "remediation_pretest_input": inputs,
                 "remediation_pretest_record_sha256": candidate.digest,
             },
         )
-        invalidated = pool._run(invalidate)
+        with patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())):
+            invalidated = pool._run(invalidate)
         assert invalidated.ok, invalidated.error
         fix_inputs = replace(
             inputs,
@@ -23628,6 +23893,7 @@ def test_actual_pretest_completion_persists_for_fresh_worker(
     try:
         with (
             patch.object(fresh, "_read_remote_branch_head", return_value=head),
+            patch.object(fresh, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch.object(fresh, "_invoke_agent") as reinvoke,
             patch.object(fresh, "_git_create_worktree_with_handoff") as recreate,
         ):
@@ -23728,6 +23994,7 @@ def _assert_pretest_clean_no_change(
         },
     )
     with (
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
         patch.object(pool, "_commit_if_changes_with_controlled_signing", return_value=False),
         patch.object(pool, "_read_remote_branch_head", return_value=head),
         patch.object(pool, "_publish_commit_push") as publish,
