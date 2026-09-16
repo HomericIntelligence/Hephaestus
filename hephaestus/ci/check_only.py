@@ -105,6 +105,7 @@ _PYGREP_CONTRACTS = {
         ("file",),
     ),
 }
+_PYGREP_ROOT_SELECTORS = ("", "^$")
 _REMOTE_ENTRIES = {
     "https://github.com/pre-commit/pre-commit-hooks": {
         "trailing-whitespace": "trailing-whitespace-fixer",
@@ -340,11 +341,17 @@ def _ready(hook: Hook) -> None:
 
 
 def _selected(
-    config: dict[str, Any], names: tuple[str, ...]
+    config: dict[str, Any], names: tuple[str, ...], store: PreparedStore
 ) -> tuple[tuple[Hook, tuple[str, ...]], ...]:
+    configured_hooks = tuple(all_hooks(config, store))
+    has_policy_hook = any(
+        hook.src == "local" and hook.id in _PYGREP_CONTRACTS for hook in configured_hooks
+    )
+    if has_policy_hook and (config["files"], config["exclude"]) != _PYGREP_ROOT_SELECTORS:
+        raise PreparationError("Unsupported root file selection contract for policy hooks")
     classifier = Classifier.from_config(names, config["files"], config["exclude"])
     selected = []
-    for configured in all_hooks(config, PreparedStore()):
+    for configured in configured_hooks:
         if configured.src == "local" and configured.id in _PYGREP_CONTRACTS:
             hook = _adapt(configured)
         else:
@@ -414,16 +421,14 @@ def _run(source: Path, temporary: Path) -> int:
         ("PRE_COMMIT_NO_CONCURRENCY", "1"),
     )
     hook_environment = _hook_environment(patches)
+    store = PreparedStore()
     failed = False
-    with contextlib.chdir(candidate), envcontext(patches):
+    with contextlib.chdir(candidate), patch.dict("os.environ", hook_environment, clear=True):
         config = load_config(".pre-commit-config.yaml")
-        selected = _selected(config, names)
+        selected = _selected(config, names, store)
         for hook, filenames in selected:
             language = languages[hook.language]
-            with (
-                patch.dict("os.environ", hook_environment, clear=True),
-                language.in_env(hook.prefix, hook.language_version),
-            ):
+            with language.in_env(hook.prefix, hook.language_version):
                 status, output = language.run_hook(
                     hook.prefix,
                     hook.entry,

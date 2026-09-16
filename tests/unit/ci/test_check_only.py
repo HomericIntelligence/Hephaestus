@@ -145,9 +145,14 @@ class Workspace:
         return env
 
     def run(
-        self, *, catalog: dict[str, str] | None = None, **overrides: str
+        self,
+        *,
+        catalog: dict[str, str] | None = None,
+        environment: dict[str, str] | None = None,
+        **overrides: str,
     ) -> subprocess.CompletedProcess[str]:
         """Run the public command and distinguish an absent CLI from a failure."""
+        overrides = {**(environment or {}), **overrides}
         failure_marker = self.tools / ".fail"
         failure_marker.unlink(missing_ok=True)
         failure_name = overrides.pop("CHECK_ONLY_TOOL_FAIL", None)
@@ -269,6 +274,54 @@ def _cache_remote(
         connection.execute("INSERT INTO repos VALUES (?, ?, ?)", (repo, rev, str(cached)))
     workspace.tool(entry)
     return {"repo": repo, "rev": rev, "hooks": [{"id": hook_id}]}
+
+
+def _cache_remote_node(workspace: Workspace) -> dict[str, Any]:
+    """Prepare one remote Node hook and its installed environment."""
+    cached = workspace.cache / "pinned-repository"
+    cached.mkdir(parents=True)
+    manifest = [
+        {
+            "id": "markdownlint-cli2",
+            "name": "markdownlint-cli2",
+            "entry": "markdownlint-cli2",
+            "language": "node",
+            "types": ["markdown"],
+        }
+    ]
+    (cached / ".pre-commit-hooks.yaml").write_text(yaml.safe_dump(manifest))
+    with sqlite3.connect(workspace.cache / "db.db") as connection:
+        connection.execute(
+            "CREATE TABLE repos (repo TEXT, ref TEXT, path TEXT, PRIMARY KEY (repo, ref))"
+        )
+        connection.execute(
+            "INSERT INTO repos VALUES (?, ?, ?)", (MARKDOWN_REPO, MARKDOWN_REV, str(cached))
+        )
+    environment = cached / "node_env-system"
+    node = environment / "bin" / "node"
+    node.parent.mkdir(parents=True)
+    node.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        f"with open({str(workspace.log)!r}, 'a') as stream:\n"
+        "    stream.write(json.dumps({\n"
+        "        'name': 'node',\n"
+        "        'args': sys.argv[1:],\n"
+        "        'cwd': os.getcwd(),\n"
+        "        'environment': {name: os.environ.get(name) for name in (\n"
+        "            'AWS_SECRET_ACCESS_KEY', 'GH_TOKEN', 'SSH_AUTH_SOCK',\n"
+        "        )},\n"
+        "    }) + '\\n')\n"
+        "print('v25.7.0')\n"
+    )
+    node.chmod(0o755)
+    workspace.tool("markdownlint-cli2", environment / "bin")
+    (environment / ".install_state_v2").write_text("")
+    return {
+        "repo": MARKDOWN_REPO,
+        "rev": MARKDOWN_REV,
+        "hooks": [{"id": "markdownlint-cli2", "language_version": "system"}],
+    }
 
 
 def test_external_tool_fixture_reports_real_exit_and_source_change(workspace: Workspace) -> None:
@@ -430,6 +483,29 @@ def test_pygrep_accepts_the_bound_contract(workspace: Workspace, hook_id: str) -
     workspace.stage()
     result = workspace.run()
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("files", "^absent$"), ("exclude", ".*")],
+    ids=["files", "exclude"],
+)
+def test_pygrep_rejects_changed_root_selection(
+    workspace: Workspace, field: str, value: str
+) -> None:
+    """Reject a root selector that can disable a required policy hook."""
+    workspace.write("scripts/checked.sh", "command || true\n")
+    workspace.config(
+        [{"repo": "local", "hooks": [_configured_local_hook("forbid-or-true")]}],
+        **{field: value},
+    )
+    workspace.stage()
+
+    result = workspace.run()
+
+    assert result.returncode == 2
+    assert "root file selection" in result.stderr.lower()
+    assert workspace.events() == []
 
 
 @pytest.mark.parametrize(
@@ -730,6 +806,30 @@ def test_candidate_hooks_exclude_secrets_and_keep_required_environment(
     }
 
 
+def test_remote_readiness_excludes_parent_credentials(workspace: Workspace, tmp_path: Path) -> None:
+    """Exclude parent credentials from remote hook readiness checks."""
+    workspace.write(".markdownlint-cli2.jsonc", '{"fix": false}\n')
+    workspace.config([_cache_remote_node(workspace)])
+    workspace.stage()
+
+    ambient = {
+        "AWS_SECRET_ACCESS_KEY": "-".join(("test", "only", "readiness", "aws", "credential")),
+        "GH_TOKEN": "-".join(("test", "only", "readiness", "github", "credential")),
+        "SSH_AUTH_SOCK": str(tmp_path / "test-readiness-agent.sock"),
+    }
+    result = workspace.run(environment=ambient)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    readiness = [event for event in workspace.events() if event["name"] == "node"]
+    assert readiness
+    assert all(event["args"] == ["--version"] for event in readiness)
+    assert all(
+        event["environment"][name] is None
+        for event in readiness
+        for name in ("AWS_SECRET_ACCESS_KEY", "GH_TOKEN", "SSH_AUTH_SOCK")
+    )
+
+
 def test_git_children_keep_private_candidate_and_exclude_ambient_values(
     workspace: Workspace, tmp_path: Path
 ) -> None:
@@ -867,7 +967,7 @@ def test_public_output_localizes_templates_without_translating_runtime_values(
         "fixture validator failure": "INCORRECTLY_TRANSLATED_TOOL_OUTPUT",
         error: "INCORRECTLY_TRANSLATED_RUNTIME_ERROR",
     }
-    result = workspace.run(catalog=catalog, **overrides)
+    result = workspace.run(catalog=catalog, environment=overrides)
     expected_exit = {"passed": 0, "failed": 1, "changed": 1, "preparation-error": 2}
     assert result.returncode == expected_exit[outcome], result.stdout + result.stderr
     if outcome == "preparation-error":
