@@ -2022,6 +2022,9 @@ The exhaustive classification is maintained in the
  local bytes after the read. A recovered ready sequence does not invent its
  historical predecessor digest. Live test-fix jobs must provide the exact
  invalidated predecessor before the provider can run.
+ For `create_worktree`, Git admission replaces `repo_root` with its selected
+ checkout only when the job has no source binding. A source-bound job keeps
+ its validated reusable repository root.
 - [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py) — one frozen
  typed request. The request can recover a normal reply journal, recover a
  remediation-only format-three journal, append a prepared journal, deliver an
@@ -2051,6 +2054,16 @@ and other stage-local payloads before the auxiliary queue accepts the item.
 failure with bounded output and error text. A failure can retain a typed
 recovery value. Consumers must inspect that value before they select a retry.
 An unsuccessful result does not prove that no external effect occurred.
+
+A dirty direct claim preparation error with cause `GIT_TIMEOUT` produces
+`timeout` and `value=None`. Other caught claim failures return
+`dirty_direct_claim_failed`. Their value includes `preserved_worktree` when
+its path exists or is a symlink. Dirty direct publication uses `timeout` for
+the same cause. Its value retains `phase`, `reason`, `committed`, `pushed`,
+and `local_head`, as with other caught publication failures. Both operations
+propagate `InterruptedError` to
+[`_run_git`](../hephaestus/automation/pipeline/worker_pool.py),
+which returns `interrupted` with `interrupted=True` and `value=None`.
 
 During forced shutdown, a failed typed learning result remains interrupted
 after host execution starts. The coordinator retains the uncertain claim;
