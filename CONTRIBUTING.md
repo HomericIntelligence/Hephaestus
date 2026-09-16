@@ -261,31 +261,36 @@ For a manual contribution, use this sequence:
    again.
 5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
    Record `git rev-parse HEAD`.
-6. Run the complete normal local pytest selection:
-
-   ```bash
-   uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
-     -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
-   ```
+6. Run focused checks on this head. Select tests for the affected behavior and
+   each new or changed test. Use locked pytest commands with explicit paths or
+   node IDs and `--override-ini="addopts="`. Confirm nonempty collection and
+   success. For documentation-only changes, use the applicable existing
+   documentation checks. A complete local suite is not required.
 
 7. Record `git rev-parse HEAD` again. Require the same value and an empty
    `git status --porcelain=v1 --untracked-files=all` result.
 8. If the branch changes after this run, repeat the final-rebase sequence and
-   test run.
+   focused checks for the resulting change.
 
-Record the command, branch head, result, and test summary. A pre-push hook can
-supply step 6 only when it runs the exact locked command on the final rebased
-head and records the result. A hook that does not run this command does not
-supply complete normal-test evidence. The checks in
+Record each command, branch head, result, and test summary. A hook result can
+supply focused evidence only when it collected and passed the selected tests
+on that head and recorded the command and result. Required PR checks provide
+head-bound merge evidence. Nightly CI/CD owns full suites and coverage. A fast
+PR result is not full-suite evidence. The checks in
 [Your first day](#your-first-day) verify a new development environment. They
 do not verify a later branch change.
 
 This manual sequence uses
-[ADR-0051](docs/adr/0051-manual-final-rebase-verification.md). The automation
+[ADR-0053](docs/adr/0053-focused-local-ci-full-validation.md). The automation
 loop uses the rebase policy in
 [ADR-0048](docs/adr/0048-automation-rebase-triggers.md). It prepares the branch
 before implementation and does not do a routine final rebase. An operator can
 request the explicit `--rebase` path.
+
+Source review is separate from test execution. The reviewer inspects source
+and recorded evidence. Reviewer-run tests and a local review image are not
+prerequisites. CI/CD results do not replace source review or authorize its GO
+state. A complete local suite is not a PR-creation or merge prerequisite.
 
 ### Test environment requirements
 
@@ -407,7 +412,8 @@ Before you create the PR, complete the [change-verification sequence](#change-ve
 Keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages. Never
 bypass pre-commit hooks with `--no-verify`. Pre-commit runs the shared fast
-test selection. It does not supply the required complete normal-test evidence.
+test selection. Focused tests supply local change evidence; CI/CD owns full
+validation.
 
 ## Developer Certificate of Origin (DCO)
 

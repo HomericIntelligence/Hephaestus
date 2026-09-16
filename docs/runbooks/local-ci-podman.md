@@ -139,8 +139,11 @@ changes it. They mount the original checkout read-only and disable Python
 dependency syncing. The full selection requires the pinned Gitleaks image and
 disables pulls for both scans. The lint selection does not run these scans. Do
 not combine this selection with `--rebuild`; image preparation is separate. They
-do not provide the queue's native fallback. They also do not
-replace the final complete normal-test command in [AGENTS](../../AGENTS.md).
+do not provide the queue's native fallback. Use [AGENTS](../../AGENTS.md) and
+[ADR-0053](../adr/0053-focused-local-ci-full-validation.md) for focused checks
+on the final source. These commands supply focused evidence only for applicable
+tests that they collected and passed. A complete local suite is not required.
+Source review does not require these optional image commands.
 See [delegated local verification](../ci/required-checks.md#delegated-local-verification)
 for the separate PR/static, manual contribution, nightly, and optional lanes.
 

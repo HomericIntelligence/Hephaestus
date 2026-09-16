@@ -17,6 +17,10 @@ evidence.
 ADR-0049 replaces the pre-commit exclusion and the full-suite schedule below.
 The focused-test evidence requirement remains in effect.
 
+ADR-0051 later added a full local run for manual contributions. That requirement
+is superseded by [ADR-0053](0053-focused-local-ci-full-validation.md), which
+restores focused local checks and keeps CI/CD as the full-validation owner.
+
 Do not run pytest from pre-commit. Required CI/CD runs the full unit and
 integration test suites and applies the coverage gate.
 

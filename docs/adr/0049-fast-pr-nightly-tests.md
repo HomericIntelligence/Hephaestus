@@ -13,6 +13,10 @@ pre-commit policy in ADR-0047.
 
 ## Decision
 
+[ADR-0053](0053-focused-local-ci-full-validation.md) defines focused verification
+on the final manual contribution head. It supersedes the full local run from
+ADR-0051 and retains the fast PR and nightly full-validation schedule below.
+
 Use `scripts/run_fast_tests.sh` for pre-commit, `just test`, and required PR lint.
 Profile this selection against the full baseline. Approximately ten percent is
 a target, not a hard timing gate. Jobs shorter than one minute are exempt from

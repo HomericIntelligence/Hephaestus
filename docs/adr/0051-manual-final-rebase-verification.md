@@ -1,6 +1,6 @@
 # ADR-0051: Manual final-rebase verification
 
-- Status: Accepted
+- Status: Superseded by [ADR-0053](0053-focused-local-ci-full-validation.md)
 - Date: 2026-09-11
 - Tracks: #3111
 
@@ -18,6 +18,10 @@ the default pytest marker can start opt-in artifact, contract, performance, or
 host tests that the contributor environment does not supply.
 
 ## Decision
+
+This section records the historical decision. ADR-0053 replaces its full local
+suite prerequisite with focused local checks. The canonical upstream, signed
+rebase, signature checks, and exact-head evidence safeguards remain in effect.
 
 For a manual contribution, require a complete normal local pytest run after
 the final rebase and before pull request creation. If the branch changes after
