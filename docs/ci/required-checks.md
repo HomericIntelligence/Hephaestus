@@ -130,17 +130,18 @@ cache paths remain inputs; temporary tool caches belong to the private run. The
 Gitleaks history scan also mounts the original checkout read-only.
 
 A pass supplies the current PR/static selection, including the fast pytest
-hook. It does not supply the manual contribution's complete normal-test
-evidence. After the final signed rebase and clean-head checks, a test-only agent
-must also run the exact command required by [AGENTS](../../AGENTS.md) and
-[ADR-0051](../adr/0051-manual-final-rebase-verification.md):
+hook. It supplies focused evidence only for the applicable tests that it
+collected and passed on the final source. After the signed rebase and clean-head
+checks, a test-only agent must cover the affected behavior and each new or
+changed test under [AGENTS](../../AGENTS.md) and
+[ADR-0053](../adr/0053-focused-local-ci-full-validation.md). Use locked focused
+commands and confirm nonempty collection and success. Documentation-only
+changes use applicable documentation checks. A complete local suite is not
+required before PR creation or merge.
 
-```bash
-uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
-  -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
-```
-
-Keep the recorded head and source unchanged across that run. Full unit coverage,
+Keep the recorded head and source unchanged across focused checks. Source
+review does not execute tests or require these optional local image commands.
+Full unit coverage,
 installed CLI and package checks, artifact tests, Pi checks, and cross-platform
 nightly jobs retain their existing owners. Contract, performance, live Pyxis,
 and GitHub PR-policy evidence remain separate when applicable. Local success

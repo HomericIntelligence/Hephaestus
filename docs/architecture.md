@@ -2281,12 +2281,10 @@ path so hatch-vcs, tests, and scanners resolve the candidate commit without
 granting container write access to repository metadata.
 
 This automation-loop gate is separate from developer pre-commit. Developer
-hooks and required PR lint run the shared fast pytest selection. Nightly CI
-owns full unit coverage and the remaining functional lanes under ADR-0049.
-Before PR creation, a contributor must also run each new or changed test and
-verify that pytest collects it and reports success. Manual contributions also
-require the exact final normal-test command and clean-head evidence in AGENTS
-and ADR-0051.
+pre-commit and required PR checks run the shared fast selection. Nightly CI/CD
+owns full suites and coverage. Before PR creation, a contributor runs focused
+checks for affected behavior and each new or changed test. The result must show
+nonempty collection and success. A complete local suite is not required.
 
 The selected `just ci-check-only` and `just ci-lint-check-only` commands support
 test-only agents. They use the same PR/static runner resources and the
@@ -2318,7 +2316,7 @@ private label and keep the files read-only. The history scan completes before
 the candidate scan starts.
 The queue's fixed command and source admission remain unchanged. See
 [required checks](ci/required-checks.md#delegated-local-verification) for the
-separate manual normal-test and nightly requirements.
+separate focused manual checks and nightly requirements.
 
 The implementation stage submits only the fixed command and the source
 revision in a `BuildTestJob`. The closed worker resolves the system
@@ -2424,9 +2422,10 @@ not establish that replay is safe. See the
 Developer validation uses the relevant new and changed tests on a supported
 native host. Container reproduction is optional for this local development
 workflow. This does not alter the product's fixed `BuildTestJob` commands,
-source verification, or macOS and Linux isolation requirements. PR CI runs the
-fast selection and static checks. Nightly CI runs the full suites and coverage
-gate; manual contributions also require AGENTS' final normal-test evidence.
+source verification, or macOS and Linux isolation requirements. Required PR
+checks run the fast selection. Nightly CI runs full suites and the coverage
+gate. ADR-0053 defines focused manual contribution evidence. Source review is
+separate from test execution and does not require a local review image.
 
 ---
 
