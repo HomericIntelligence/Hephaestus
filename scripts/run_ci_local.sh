@@ -57,11 +57,18 @@ if [ -n "${HEPHAESTUS_VERIFIED_RUNNER_FD:-}" ]; then
 fi
 SUBSET="${1:-all}"
 REBUILD=0
+CHECK_ONLY=0
 for arg in "$@"; do
     case "${arg}" in
         --rebuild) REBUILD=1 ;;
+        --check-only) CHECK_ONLY=1 ;;
     esac
 done
+
+if [ "${CHECK_ONLY}" -eq 1 ] && [ "${REBUILD}" -eq 1 ]; then
+    printf '%s\n' 'Use --rebuild to prepare the image before --check-only verification.' >&2
+    exit 1
+fi
 
 if [ -n "${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD:-}" ]; then
     if [[ ! "${HEPHAESTUS_VERIFIED_INSTALL_HELPERS_FD}" =~ ^([3-9]|[1-9][0-9]+)$ ]]; then
@@ -429,6 +436,9 @@ resolve_image() {
             return 1
         fi
         log_info "Using local CI image: ${CI_IMAGE}"
+    elif [ "${CHECK_ONLY}" -eq 1 ]; then
+        log_error "Local image '${LOCAL_IMAGE}' is not prepared. Build it before check-only verification."
+        return 1
     else
         log_warn "Local image '${LOCAL_IMAGE}' not found; building it now."
         if ! build_ci_image; then
@@ -463,7 +473,7 @@ resolve_git_metadata_mount() {
 # Run a command inside the CI container
 # ============================================================================
 # Volume mounts:
-#   /workspace  — the full repo (rw, :Z for SELinux/Podman)
+#   /workspace  — the full repo (:Z; read-only in check-only mode)
 # --userns=keep-id:uid=1000,gid=1000 — run as the image's non-root 'ci' user
 # while mapping it to the invoking host UID, so mounted-file ownership works on
 # both dev hosts (uid 1000) and GitHub runners (uid 1001).
@@ -478,6 +488,7 @@ _run_in_container() {
     local engine_flags=()
     local candidate_mount=()
     local codex_fixture_mount=()
+    local workspace_mount="${PROJECT_ROOT}:/workspace:Z"
 
     if [ "${CONTAINER_ENGINE}" = "podman" ]; then
         engine_flags+=("--userns=keep-id:uid=1000,gid=1000")
@@ -485,8 +496,13 @@ _run_in_container() {
         # Docker runs as the invoking host UID so bind-mounted artifacts retain
         # host ownership. Arbitrary UIDs cannot update the ci-owned baked venv,
         # so keep it read-only and import project code from the mounted checkout.
-        engine_flags+=(--user "$(id -u):$(id -g)" --env HOME=/tmp \
-            --env UV_NO_SYNC=1 --env PYTHONPATH=/workspace)
+        engine_flags+=(--user "$(id -u):$(id -g)" --env HOME=/tmp)
+    fi
+    if [ "${CHECK_ONLY}" -eq 1 ] || [ "${CONTAINER_ENGINE}" = "docker" ]; then
+        engine_flags+=(--env UV_NO_SYNC=1 --env PYTHONPATH=/workspace)
+    fi
+    if [ "${CHECK_ONLY}" -eq 1 ]; then
+        workspace_mount="${PROJECT_ROOT}:/workspace:ro,Z"
     fi
 
     if [ -n "${CANDIDATE_TREE}" ]; then
@@ -511,7 +527,7 @@ _run_in_container() {
         ${GIT_METADATA_MOUNT[@]+"${GIT_METADATA_MOUNT[@]}"} \
         ${candidate_mount[@]+"${candidate_mount[@]}"} \
         --tmpfs /tmp:rw,size=4g,mode=1777 \
-        --volume "${PROJECT_ROOT}:/workspace:Z" \
+        --volume "${workspace_mount}" \
         ${codex_fixture_mount[@]+"${codex_fixture_mount[@]}"} \
         --workdir /workspace \
         "${CI_IMAGE}" \
@@ -533,13 +549,19 @@ run_in_container_with_codex_fixture() {
 # ============================================================================
 
 run_lint() {
-    log_step "Lint (pre-commit + doc-link validation)"
+    local validator=(uv run pre-commit run --all-files --show-diff-on-failure)
+    if [ "${CHECK_ONLY}" -eq 1 ]; then
+        log_step "Lint (check-only validators + doc-link validation)"
+        validator=(env UV_NO_SYNC=1 uv run python -m hephaestus.ci.check_only)
+    else
+        log_step "Lint (pre-commit + doc-link validation)"
+    fi
     prepare_candidate_snapshot || return 1
     run_in_container env \
         "GIT_INDEX_FILE=${CANDIDATE_INDEX_CONTAINER}" \
         "GIT_OBJECT_DIRECTORY=${CANDIDATE_OBJECTS_CONTAINER}" \
         "GIT_ALTERNATE_OBJECT_DIRECTORIES=${REPOSITORY_OBJECTS_CONTAINER}" \
-        uv run pre-commit run --all-files --show-diff-on-failure || return 1
+        "${validator[@]}" || return 1
     run_in_container uv run hephaestus-validate-links docs --repo-root . || return 1
 }
 
@@ -676,19 +698,27 @@ run_secrets() {
     log_step "Gitleaks repository scan"
     local history_args=(detect --source=. --verbose --exit-code=1)
     local candidate_args=(dir --verbose --exit-code=1 .)
+    local pull_flags=()
+    local repository_mount="${PROJECT_ROOT}:/repo:Z"
+    if [ "${CHECK_ONLY}" -eq 1 ]; then
+        pull_flags+=(--pull=never)
+        repository_mount="${PROJECT_ROOT}:/repo:ro,Z"
+    fi
     prepare_candidate_snapshot || return 1
     if [ -f .gitleaks.toml ]; then
         history_args+=(--config=.gitleaks.toml)
         candidate_args+=(--config=.gitleaks.toml)
     fi
     "${CONTAINER_ENGINE}" run --rm \
+        ${pull_flags[@]+"${pull_flags[@]}"} \
         ${GIT_METADATA_MOUNT[@]+"${GIT_METADATA_MOUNT[@]}"} \
-        --volume "${PROJECT_ROOT}:/repo:Z" \
+        --volume "${repository_mount}" \
         --workdir /repo \
         "${GITLEAKS_IMAGE}" \
         "${history_args[@]}" || return 1
     "${CONTAINER_ENGINE}" run --rm \
-        --volume "${CANDIDATE_TREE}:/candidate:ro" \
+        ${pull_flags[@]+"${pull_flags[@]}"} \
+        --volume "${CANDIDATE_TREE}:/candidate:ro,Z" \
         --workdir /candidate \
         "${GITLEAKS_IMAGE}" \
         "${candidate_args[@]}"
@@ -731,7 +761,7 @@ prepare_container_runner() {
 }
 
 if ! prepare_container_runner; then
-    if [ "${SUBSET}" = "all" ]; then
+    if [ "${SUBSET}" = "all" ] && [ "${CHECK_ONLY}" -eq 0 ]; then
         case "${CONTAINER_RUNNER_FAILURE_CODE}" in
             container-engine-absent|container-engine-unavailable|container-start-failed)
                 cleanup

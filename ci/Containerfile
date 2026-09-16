@@ -106,6 +106,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # astral-sh/setup-uv in .github/workflows/*.yml when bumping).
 COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 
+# Prepare hooks with the same pinned Node/npm prefix used by the runtime.
+# Both stages must select the same pre-commit system Node environment.
+COPY --from=node /usr/local/ /usr/local/
+
 # Layer 1: Dependency files + the package source the hatchling build needs.
 # The package tree is copied so `uv sync` can install the project itself,
 # mirroring `uv sync --all-groups --all-extras --locked` in CI. Layer stays
