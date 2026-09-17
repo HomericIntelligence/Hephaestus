@@ -10779,7 +10779,7 @@ class WorkerPool:
         source_manager = SourceWorkspaceManager(
             repo_root,
             repository=job.repo or job.transport_repository,
-            base_dir=repo_root / "build" / ".worktrees",
+            base_dir=WorktreeManager.default_base_dir(repo_root),
         )
         try:
             with source_manager.implementation_writer_handoff(
@@ -10981,7 +10981,8 @@ class WorkerPool:
                 )
                 worktree = Path(intent.worktree_path)
                 expected_path = (
-                    repo_root / "build" / ".worktrees" / source_worktree_name(issue_number, "impl")
+                    WorktreeManager.default_base_dir(repo_root)
+                    / source_worktree_name(issue_number, "impl")
                 ).resolve(strict=False)
                 if worktree.resolve(strict=True) != expected_path:
                     raise ValueError("prepared remediation writer path is invalid")
@@ -11142,7 +11143,8 @@ class WorkerPool:
             )
             if loaded is None:
                 expected_path = (
-                    repo_root / "build" / ".worktrees" / source_worktree_name(issue_number, "impl")
+                    WorktreeManager.default_base_dir(repo_root)
+                    / source_worktree_name(issue_number, "impl")
                 ).resolve(strict=False)
                 if expected_path.exists():
                     linked_env = _linked_worktree_git_env(
@@ -11164,7 +11166,8 @@ class WorkerPool:
             review_input = receipt.review_input
             worktree = Path(review_input.worktree_path)
             expected_path = (
-                repo_root / "build" / ".worktrees" / source_worktree_name(issue_number, "impl")
+                WorktreeManager.default_base_dir(repo_root)
+                / source_worktree_name(issue_number, "impl")
             ).resolve(strict=False)
             if worktree.resolve(strict=True) != expected_path:
                 raise ValueError("prepared remediation writer path is invalid")
@@ -11314,7 +11317,7 @@ class WorkerPool:
         if isinstance(direct_setup, JobResult):
             return direct_setup
         base_sha, branch_name = direct_setup
-        base_dir = repo_root / "build" / ".worktrees"
+        base_dir = WorktreeManager.default_base_dir(repo_root)
         implementation_adoption_head = kwargs.get("implementation_adoption_head")
         adopting_implementation_writer = implementation_adoption_head is not None
         if adopting_implementation_writer and (
@@ -11653,7 +11656,7 @@ class WorkerPool:
         if created is None:
             if source_lane == "impl":
                 return self._creation_receipt_failure(
-                    base_dir=repo_root / "build" / ".worktrees",
+                    base_dir=WorktreeManager.default_base_dir(repo_root),
                     item_number=item_number,
                     exc=SourceWorkspaceError("implementation writer was not materialized"),
                     branch_name=branch_name,

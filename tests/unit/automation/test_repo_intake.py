@@ -44,6 +44,7 @@ def _run_git(cwd: Path, *arguments: str, check: bool = True) -> subprocess.Compl
         capture_output=True,
         text=True,
         check=check,
+        env=_controlled_git_env(),
     )
 
 
@@ -128,7 +129,9 @@ def test_prepare_rejects_a_common_lock_that_changed_after_admission(
     foreign = tmp_path / "foreign-git"
     foreign.mkdir()
     selected = foreign / admitted.name
-    monkeypatch.setattr(WorktreeManager, "git_metadata_lock_path", lambda _root: selected)
+    monkeypatch.setattr(
+        "hephaestus.automation.repo_intake.git_metadata_lock_path", lambda _root: selected
+    )
 
     with pytest.raises(RepoIntakeError, match="changed before preparation"):
         manager.prepare(admitted_metadata_lock=admitted)

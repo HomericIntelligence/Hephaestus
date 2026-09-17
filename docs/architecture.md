@@ -779,8 +779,9 @@ Repo intake has three separate worktree layers:
   outside the user checkout. Its receipt records the common directory, exact
   fetched SHA, default branch, and ownership generation.
 - The per-item implementation and review worktrees are created from the
-  verified intake worktree. They retain their existing strict dirty-state and
-  cleanup checks.
+  verified intake worktree. Their files use `build/.worktrees` below the
+  receipt-bound intake state root, outside the intake checkout. They retain
+  their existing strict dirty-state and cleanup checks.
 
 Before intake preparation starts, the main worker pool takes an exclusive
 nonblocking run lease for the Git common directory. The lease path is stable
@@ -1996,7 +1997,10 @@ worktree-management control plane. For each issue or linked PR, planning and
 reviewer source reads reuse the detached
 `build/.worktrees/auto-<#>-review` source at the captured default-branch
 revision. Implementation, remediation, and writer recovery source reads reuse
-`build/.worktrees/auto-<#>-impl`. Changed revisions rebind the same path and
+`build/.worktrees/auto-<#>-impl`. For a verified intake checkout, these paths
+start at its receipt-bound state root. An ordinary checkout keeps its existing
+local path convention. A missing or invalid intake receipt cannot select the
+ordinary path convention. Changed revisions rebind the same path and
 increment its receipt generation. Review never creates a review branch. The
 stable `auto-<#>-guard` ref is a CAS-protected ownership record only and never
 owns a third worktree. Dirty lanes and lanes with durable learning or cleanup
