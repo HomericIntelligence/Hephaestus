@@ -27,6 +27,10 @@ from hephaestus.automation.remediation_recovery import (
     RemediationReviewInput,
     encode_remediation_review_input,
 )
+from hephaestus.automation.repo_intake import (
+    repository_host_state_root,
+    repository_worker_path_is_valid,
+)
 from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceReceipt
 
 _STORE_DIR = "remediation-prepublication"
@@ -116,7 +120,8 @@ class RemediationPreparationIntent:
         if (
             not repo_root.is_absolute()
             or not worktree.is_absolute()
-            or repo_root not in worktree.parents
+            or os.path.normpath(self.repo_root) != self.repo_root
+            or os.path.normpath(self.worktree_path) != self.worktree_path
             or not self.thread_snapshot_json
         ):
             raise ValueError("remediation prepublication intent path is invalid")
@@ -332,9 +337,38 @@ def _parse(raw: object) -> tuple[RemediationRecoveryReceipt, str]:
     return receipt, batch_nonce
 
 
+def _require_worker_path(
+    repo_root: Path,
+    worktree: Path,
+    repository: str,
+    issue_number: int,
+    *,
+    allow_root: bool = True,
+) -> None:
+    """Require host path authority before durable state changes."""
+    if (
+        not allow_root and worktree.resolve(strict=False) == repo_root.resolve(strict=True)
+    ) or not repository_worker_path_is_valid(
+        repo_root, worktree, repository=repository, item_number=issue_number
+    ):
+        raise ValueError("remediation worker path is not authorized")
+
+
+def _require_prepublication_source(repo_root: Path, review_input: RemediationReviewInput) -> None:
+    """Bind the serialized source identity to this host operation."""
+    if review_input.repo_root != str(repo_root.resolve(strict=True)):
+        raise ValueError("remediation prepublication repository path changed")
+    _require_worker_path(
+        repo_root,
+        Path(review_input.worktree_path),
+        review_input.repository,
+        review_input.issue_number,
+    )
+
+
 def _directory(repo_root: Path, *, create: bool) -> tuple[Path, int]:
     """Open the host state directory without following path components."""
-    root = repo_root.resolve(strict=True)
+    root = repository_host_state_root(repo_root)
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     current_fd = os.open(root, flags)
     try:
@@ -435,6 +469,7 @@ def save_prepublication_receipt(
     batch_nonce: str,
 ) -> None:
     """Persist one exact prepared child before its first publication attempt."""
+    _require_prepublication_source(repo_root, receipt.review_input)
     record = _record(receipt, batch_nonce)
     encoded = _canonical_json(record)
     directory, directory_fd = _directory(repo_root, create=True)
@@ -543,6 +578,7 @@ def save_prepublication_intent(
     batch_nonce: str,
 ) -> None:
     """Persist fail-closed ownership before the private commit operation."""
+    _require_worker_path(repo_root, worktree_path, repository, issue_number, allow_root=False)
     record = _intent_record(
         RemediationPreparationIntent(
             repository=repository,
@@ -856,8 +892,6 @@ def _validate_pretest_source(candidate: RemediationPretestCandidate) -> None:
             or os.path.normpath(value) != value
         ):
             raise ValueError("remediation pretest path is invalid")
-    if Path(candidate.repo_root) not in Path(candidate.worktree_path).parents:
-        raise ValueError("remediation pretest writer must be inside its repository")
     if (
         ".." in candidate.branch
         or candidate.branch.startswith(("/", "-"))
@@ -1104,6 +1138,13 @@ def save_pretest_candidate(
     """Compare and replace host-validated evidence under the exclusive record lock."""
     if candidate.repo_root != str(repo_root.resolve(strict=True)):
         raise ValueError("remediation pretest repository path changed")
+    _require_worker_path(
+        repo_root,
+        Path(candidate.worktree_path),
+        candidate.repository,
+        candidate.issue_number,
+        allow_root=False,
+    )
     with _pretest_directory(repo_root, candidate.pr_number, create=True) as directory_fd:
         name = _pretest_filename(candidate.pr_number)
         current = _read_pretest(directory_fd, name)

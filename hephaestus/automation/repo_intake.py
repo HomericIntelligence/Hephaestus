@@ -37,6 +37,7 @@ from hephaestus.utils.file_lock import (
     LockUnavailableError,
     file_lock,
 )
+from hephaestus.utils.worktree_identity import source_worktree_name
 
 
 class RepoIntakeError(RuntimeError):
@@ -235,6 +236,61 @@ def intake_worker_base(
     if base.resolve(strict=False) != base:
         raise RepoIntakeError("repository-intake worker base is unsafe")
     return base
+
+
+def checkout_intake_worker_base(repo_root: Path, *, repository: str | None = None) -> Path | None:
+    """Read intake worker authority without creating state."""
+    root = repo_root.resolve(strict=True)
+    if not (root / ".git").exists():
+        return None
+    common = git_metadata_lock_path(root).parent.resolve(strict=True)
+    return intake_worker_base(root, common, repository=repository)
+
+
+def repository_worker_path_is_valid(
+    repo_root: Path,
+    worktree: Path,
+    *,
+    repository: str,
+    item_number: int | None = None,
+    lane: str = "impl",
+) -> bool:
+    """Check checkout ancestry or the exact verified intake worker boundary."""
+    base = (
+        checkout_intake_worker_base(repo_root, repository=repository)
+        if repo_root.exists()
+        else None
+    )
+    if base is None:
+        return worktree == repo_root or repo_root in worktree.parents
+    if (
+        repo_root.is_symlink()
+        or repo_root.resolve(strict=True) != repo_root
+        or worktree.parent != base
+        or not isinstance(item_number, int)
+        or isinstance(item_number, bool)
+        or item_number <= 0
+        or lane not in {"impl", "review"}
+        or worktree.name != source_worktree_name(item_number, lane)
+    ):
+        return False
+    if worktree.is_symlink() or worktree.resolve(strict=True) != worktree:
+        return False
+    return git_metadata_lock_path(worktree).parent.resolve(strict=True) == (
+        git_metadata_lock_path(repo_root).parent.resolve(strict=True)
+    )
+
+
+def repository_host_state_root(repo_root: Path) -> Path:
+    """Select durable host storage without changing source identity."""
+    root = repo_root.resolve(strict=True)
+    base = checkout_intake_worker_base(root)
+    if base is None:
+        return root
+    legacy = root / DEFAULT_STATE_DIR
+    if legacy.exists() or legacy.is_symlink():
+        raise RepoIntakeError("legacy intake state requires explicit recovery")
+    return base.parent.parent
 
 
 def _is_valid_branch(value: object) -> TypeGuard[str]:
