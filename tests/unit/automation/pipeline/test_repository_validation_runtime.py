@@ -17,7 +17,7 @@ CAP = 16_777_216
 
 
 def _api() -> ModuleType:
-    name = "hephaestus.automation.pipeline.repository_validation_runtime"
+    name = "hephaestus.automation.repository_validation_runtime"
     assert importlib.util.find_spec(name) is not None, "Runtime admission is not available."
     return importlib.import_module(name)
 

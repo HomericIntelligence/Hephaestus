@@ -71,6 +71,8 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate, Stage):
 
         if item.state in {
             "REPOSITORY_VALIDATION_CI_WAIT",
+            "REPOSITORY_VALIDATION_SOURCE_WAIT",
+            "REPOSITORY_VALIDATION_RUNTIME_WAIT",
             "VALIDATE_WAIT",
             "EVAL",
             "POST",

@@ -21,15 +21,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
+from hephaestus.automation.pipeline.repository_validation import (
+    RepositoryValidationExecution,
+    validate_repository_validation_execution,
+)
 from hephaestus.automation.pipeline_github_review_validation import (
     comet_local_check_ids,
     comet_profile_digest,
     comet_validation_checks,
-)
-
-from .repository_validation import (
-    RepositoryValidationExecution,
-    validate_repository_validation_execution,
 )
 
 _CAPABILITY_PATH = Path("build/hephaestus-review-validation/comet")

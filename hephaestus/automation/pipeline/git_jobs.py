@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from hephaestus.agents.workspace import WorkspaceBinding
@@ -13,9 +13,12 @@ from hephaestus.automation.worktree_snapshot import (
     DIRTY_SNAPSHOT_GIT_MAX_BYTES as DIRTY_SNAPSHOT_GIT_MAX_BYTES,
 )
 
+from .repository_validation_preparation import RepositoryValidationSourceRequest
+
 GIT_OPS: frozenset[str] = frozenset(
     {
         "clone",
+        "prepare_repository_validation",
         "prepare_intake",
         "sync_checkout",
         "verify_issue_wave_ancestry",
@@ -67,11 +70,13 @@ class GitJob:
     deadline_s: float | None = None
     workspace: WorkspaceBinding | None = None
     repository_lock_wait_timeout_s: float | None = None
+    repository_validation_preparation: RepositoryValidationSourceRequest | None = None
 
     def __post_init__(self) -> None:
         """Reject an operation outside the closed Git vocabulary."""
         if self.op not in GIT_OPS:
             raise ValueError(f"unknown git op {self.op!r}; expected one of {sorted(GIT_OPS)}")
+        validate_git_repository_validation(self)
         if self.deadline_s is not None and (
             isinstance(self.deadline_s, bool)
             or not isinstance(self.deadline_s, (int, float))
@@ -98,3 +103,30 @@ class GitJob:
     def transport_repository(self) -> str:
         """Return the canonical identity required for authenticated Git transport."""
         return self.expected_repository or self.repo
+
+
+def validate_git_repository_validation(job: GitJob) -> None:
+    """Reject source preparation that conflicts with its closed job fields."""
+    request = job.repository_validation_preparation
+    if request is None:
+        if job.op == "prepare_repository_validation":
+            raise ValueError("Source preparation requires a bound request.")
+        return
+    if type(request) is not RepositoryValidationSourceRequest:
+        raise ValueError("The source preparation request type is invalid.")
+    replace(request)
+    if (
+        job.op != "prepare_repository_validation"
+        or job.kwargs != {}
+        or type(job.repo) is not str
+        or job.repo.casefold() not in {request.repository.casefold(), "comet"}
+        or job.transport_repository.casefold() != request.repository.casefold()
+        or job.workspace != request.workspace
+        or type(job.timeout_s) is not int
+        or not 0 < job.timeout_s <= 120
+        or type(job.deadline_s) not in {int, float}
+        or job.deadline_s is None
+        or not 0 < job.deadline_s <= request.deadline_s
+        or job.repository_lock_wait_timeout_s is not None
+    ):
+        raise ValueError("The source preparation job does not match its request.")

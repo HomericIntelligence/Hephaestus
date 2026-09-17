@@ -3383,16 +3383,17 @@ class TestPrReviewStageStep:
         )
         stage = PrReviewStage()
         uncaught = StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_uncaught")
-        with patch.object(
-            pr_review_jobs,
-            "source_workspace_binding",
+        with patch(
+            "hephaestus.automation.pipeline.stages."
+            "pr_review_repository_validation.source_workspace_binding",
             side_effect=RuntimeError("review source unavailable"),
-        ):
+        ) as source_binding:
             try:
                 result = stage.step(item, make_ctx())
             except RuntimeError:
                 result = uncaught
 
+        source_binding.assert_called_once()
         assert result == StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
 
     def test_non_hephaestus_repository_has_no_hephaestus_host_plan(self) -> None:

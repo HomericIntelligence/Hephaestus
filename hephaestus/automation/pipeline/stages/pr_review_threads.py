@@ -139,6 +139,8 @@ REVIEW_WAIT = "REVIEW_WAIT"
 REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
 HOST_VERIFICATION_WAIT = "HOST_VERIFICATION_WAIT"
 REPOSITORY_VALIDATION_CI_WAIT = "REPOSITORY_VALIDATION_CI_WAIT"
+REPOSITORY_VALIDATION_SOURCE_WAIT = "REPOSITORY_VALIDATION_SOURCE_WAIT"
+REPOSITORY_VALIDATION_RUNTIME_WAIT = "REPOSITORY_VALIDATION_RUNTIME_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
 ANCHOR_CORRECTION_WAIT = "ANCHOR_CORRECTION_WAIT"
 POST = "POST"
@@ -163,6 +165,8 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     REVIEW_CHECKOUT_WAIT: "_review_checkout_wait",
     HOST_VERIFICATION_WAIT: "_host_verification_wait",
     REPOSITORY_VALIDATION_CI_WAIT: "_repository_validation_ci_wait",
+    REPOSITORY_VALIDATION_SOURCE_WAIT: "_repository_validation_source_wait",
+    REPOSITORY_VALIDATION_RUNTIME_WAIT: "_repository_validation_runtime_wait",
     VALIDATE_WAIT: "_validate_wait",
     ANCHOR_CORRECTION_WAIT: "_anchor_correction_wait",
     POST: "_post",
@@ -631,6 +635,12 @@ if _typing.TYPE_CHECKING:
         def _handoff_implementation(self, item: WorkItem, ctx: StageContext) -> StepResult:
             raise NotImplementedError
 
+        @staticmethod
+        def _submit_host_verification(
+            item: WorkItem, ctx: StageContext, verification: _HostVerificationSpec
+        ) -> JobRequest:
+            raise NotImplementedError
+
 
 else:
 
@@ -657,6 +667,8 @@ __all__ = [
     "IMPLEMENTATION_GO_AUDIT_RETRY_CAP",
     "POST",
     "REPOSITORY_VALIDATION_CI_WAIT",
+    "REPOSITORY_VALIDATION_RUNTIME_WAIT",
+    "REPOSITORY_VALIDATION_SOURCE_WAIT",
     "REVIEW_CHECKOUT_RETRY_CAP",
     "REVIEW_CHECKOUT_WAIT",
     "REVIEW_ERROR_RETRY_CAP",
