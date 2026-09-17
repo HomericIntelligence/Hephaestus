@@ -253,6 +253,8 @@ from hephaestus.automation.verified_runner import (
     build_verified_runner_argv,
 )
 from hephaestus.automation.worktree_manager import (
+    ADOPTED_HEAD_TRANSPORT_FAILED,
+    ADOPTED_HEAD_VALIDATION_FAILED,
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
     ImplementationWriterAuthority,
@@ -11375,6 +11377,15 @@ class WorkerPool:
             kwargs["remote_branch_reserved"] = True
         if implementation_writer_handoff is not None:
             kwargs["implementation_writer_handoff"] = implementation_writer_handoff
+        if adopting_implementation_writer:
+            fetch_failure = self._fetch_adopted_head(
+                manager,
+                branch_name=branch_name,
+                expected_head=cast(str, implementation_adoption_head),
+                timeout_s=job.timeout_s,
+            )
+            if fetch_failure is not None:
+                return fetch_failure
         if (
             implementation_source_lane
             and source_manager is not None
@@ -11478,6 +11489,34 @@ class WorkerPool:
         ):
             result = replace(result, value={**result.value, "fresh_branch_created": True})
         return result
+
+    @staticmethod
+    def _fetch_adopted_head(
+        manager: WorktreeManager, *, branch_name: str, expected_head: str, timeout_s: int
+    ) -> JobResult | None:
+        """Verify the remote prerequisite before a writer transition starts."""
+        try:
+            manager.fetch_adopted_implementation_head(
+                branch_name=branch_name, expected_head=expected_head, timeout=timeout_s
+            )
+        except InterruptedError:
+            raise
+        except WorktreeCreationReceiptError:
+            error = ADOPTED_HEAD_VALIDATION_FAILED
+        except (OSError, subprocess.SubprocessError, RemoteGitRefreshError):
+            error = ADOPTED_HEAD_TRANSPORT_FAILED
+        else:
+            return None
+        return JobResult(
+            ok=False,
+            error=error,
+            value={
+                "failure_kind": "adopted_head_fetch",
+                "source_workspace_creation_failure": (
+                    SourceWorkspaceCreationFailure.REMOTE_REFRESH.value
+                ),
+            },
+        )
 
     def _create_managed_worktree(
         self,

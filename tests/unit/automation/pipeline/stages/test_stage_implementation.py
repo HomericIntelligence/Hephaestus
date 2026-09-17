@@ -9227,3 +9227,34 @@ def test_verified_runner_snapshot_retains_selected_podman_connection(tmp_path: P
         pool.shutdown(mark_interrupted=False)
     assert result.ok, result.stderr_tail
     assert result.stdout_tail == "podman:hephaestus-ci"
+
+
+@pytest.mark.parametrize("failure", ["validation", "transport"])
+def test_adopted_head_fetch_failure_stops_without_git_retry(
+    make_ctx: Any, make_work_item: Any, failure: str
+) -> None:
+    """A failed prerequisite stops before implementation or a generic retry."""
+    stage = ImplementationStage()
+    item = make_work_item(issue=602, state="WORKTREE_WAIT")
+    ctx = make_ctx()
+    error = f"adopted_head_{failure}_failed"
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=False,
+            error=error,
+            value={
+                "failure_kind": "adopted_head_fetch",
+                "source_workspace_creation_failure": "remote_refresh",
+            },
+        ),
+        ctx,
+    )
+    item.state = "DIRTY_DECISION_WAIT"
+    outcome = stage.step(item, ctx)
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition == Disposition.FINISH_FAIL
+    assert error in outcome.note
+    assert not item.payload.get("git_error_retries")
+    assert not item.payload.get("source_workspace_terminal")
+    assert ctx.github.mutation_log == []

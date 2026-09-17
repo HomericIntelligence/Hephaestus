@@ -122,7 +122,7 @@ from hephaestus.automation.state_labels import (
     is_plan_go,
     is_skipped,
 )
-from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
+from hephaestus.automation.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
 from ..admission import dependency_block_reason, parse_issue_dependencies
@@ -1935,6 +1935,13 @@ class ImplementationStage(Stage):
         if item.payload.get("source_workspace_preserve") is True:
             return StageOutcome(
                 Disposition.FINISH_FAIL, "source_workspace_terminal: Preserve the writer."
+            )
+        adopted_head_failure = item.payload.pop("adopted_head_failure", None)
+        if isinstance(adopted_head_failure, str) and adopted_head_failure in ADOPTED_HEAD_FAILURES:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                f"{adopted_head_failure}: Check authenticated access "
+                "and refresh the PR head before retry.",
             )
         issue = _issue_number(item)
         inspection = item.payload.pop("remediation_writer_inspection_receipt", None)
@@ -4462,6 +4469,14 @@ class ImplementationStage(Stage):
                 item.payload.pop("git_error_retries", None)
                 return
             result_value = result.value if isinstance(result.value, dict) else {}
+            if (
+                result_value.get("failure_kind") == "adopted_head_fetch"
+                and result.error in ADOPTED_HEAD_FAILURES
+            ):
+                item.payload["adopted_head_failure"] = result.error
+                item.payload.pop("git_error", None)
+                item.payload.pop("git_error_retries", None)
+                return
             if result_value.get("failure_kind") == "source_workspace_terminal":
                 item.payload["source_workspace_preserve"] = True
                 item.payload["source_workspace_creation_failure"] = (
