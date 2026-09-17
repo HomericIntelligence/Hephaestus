@@ -154,11 +154,13 @@ def test_changed_restart_plan_cannot_reuse_stale_plan_go(
     assert PlanningStage().step(item, ctx) == Continue(next_state=next_state)
 
 
+@pytest.mark.parametrize("prior_forced_epoch", [False, True])
 def test_missing_restart_plan_cannot_reuse_stale_plan_go(
     make_ctx: Any,
     make_work_item: Any,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    prior_forced_epoch: bool,
 ) -> None:
     """An absent admission plan forces a new planning epoch before work."""
     github = FakeStageGitHub(labels=[STATE_PLAN_GO])
@@ -171,6 +173,7 @@ def test_missing_restart_plan_cannot_reuse_stale_plan_go(
             "_synced_default_branch_sha": "a" * 40,
             "plan_text": "cached stale plan",
             "plan_revision": 1,
+            "forced_planning_epoch_started": prior_forced_epoch,
         },
     )
     original_payload = dict(item.payload)

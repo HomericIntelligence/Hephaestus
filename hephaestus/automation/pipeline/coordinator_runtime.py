@@ -1274,6 +1274,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 and target is ct.StageName.PLANNING
                 and outcome.note == "plan_changed"
             ):
+                # A new drift event must not reuse the previous planning epoch.
+                item.payload.pop("forced_planning_epoch_started", None)
                 item.payload["update_plan_required"] = True
             self._handoff_item(item, target, enter=True)
 
