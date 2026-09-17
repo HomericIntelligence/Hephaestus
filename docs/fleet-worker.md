@@ -43,6 +43,8 @@ the current gate.
 uses a new local socket connection. The socket is `state-dir/worker.sock`, with
 mode `0600`. It is never exposed as a TCP listener. Commands run serially; Codex
 turns continue concurrently in their separate conversations.
+Use short private state paths: Unix socket addresses have a platform length
+limit. The same constraint applies to the supervisor's attachment socket paths.
 Use `--codex-bin /absolute/path/to/codex` when the pinned executable is outside
 the fixed runtime search path. Wrapper scripts must have their interpreter on
 that registered search path; the worker does not inherit the operator's `PATH`.
@@ -93,8 +95,10 @@ the assigned issue. Interrupt and cancel return `accepted` until an actual
 `turn/completed` notification supplies the outcome. An idle cancellation first
 reads the provider thread and requires an actual `idle` status. Both stop paths
 then clean and inspect background terminals. Only a confirmed empty inventory
-permits release and a correlated stop fact. An idle cancellation then returns
-`completed`.
+permits a noncontained session to release its reservation and emit a correlated
+stop fact. A contained cancellation additionally requires matching supervisor
+disposal, as described below. An idle cancellation returns `completed` only after
+the applicable cleanup is confirmed.
 
 Assignment fields can also appear in `payload` for an attached client. Duplicate
 fields must agree with the controller envelope. Conflicts fail before dispatch.
@@ -129,7 +133,8 @@ stage, provider IDs, `observedAt`, `activity`, and `waitingReason`.
 The observed activities are `model_working`, `tool_running`, `waiting_approval`,
 `waiting_input`, `idle`, `disconnected`, and `unknown`. An idle turn can have a
 `completed`, `failed`, `interrupted`, or `cancelled` outcome. None releases the
-canonical issue claim. A confirmed interrupt releases active execution capacity
+canonical issue claim. For the noncontained protocol path, a confirmed interrupt
+releases active execution capacity
 and retains workspace ownership. Resume reacquires capacity before it loads the
 same conversation. It does not submit a prompt or start a turn. A confirmed
 cancellation makes that session terminal and releases its local workspace and
@@ -143,9 +148,38 @@ stopped turn are removed; an old approval cannot reactivate it.
 Resume and each new input invalidate previous cleanup evidence before provider
 dispatch. Natural completed/failed turns inspect the current background inventory
 without terminating interactive services. Only a fresh empty inventory reports
-`confirmed_empty` for that provider turn; nonempty or unavailable inventory
+`confirmed_empty` for that noncontained provider turn; nonempty or unavailable
+inventory
 reports `unconfirmed` and blocks manual task resolution. These observations do
 not themselves release the task claim or conversation reservation.
+
+For a contained session, provider cleanup is insufficient. The worker records
+`providerBackgroundCleanup` privately and keeps the shared `backgroundCleanup`
+marker unconfirmed until disposal succeeds. This rule applies to natural turn
+completion as well as cancellation. Before each new turn, the worker invalidates
+both observations. Provider-only cleanup and interruption outcomes do not appear
+in activity events.
+
+Contained cancellation requires an injected `ContainedExecSupervisor` that owns
+the registry's exact lease. The worker rechecks configuration, assignment, and
+the immutable lease digest before disposal. It then checks the confirmed disposal
+document and its digest. The supervisor retains the complete receipt; the worker
+records its lease ID and digest before releasing the session. A missing
+supervisor, changed binding, or uncertain disposal leaves activity `unknown`,
+reason `container_disposal_unconfirmed`, and reservations intact. A later stop
+observation reconciles an uncertain removal without issuing another removal.
+Duplicate command delivery still returns its retained command receipt.
+
+Contained interruption retains the container and reservation. The worker keeps
+the provider's interrupted outcome privately and reports `unknown` with reason
+`contained_interrupt_requires_reconciliation`. It does not publish a terminal
+interrupted event with incomplete cleanup: the controller would reject that
+event and block replay at its cursor. The controller therefore keeps this stop
+pending and blocks new controls. Resume and explicit recovery remain deployment
+gates. Closing an attachment or worker does not substitute for cancellation or
+prove contained disposal. The default CLI does not yet construct the supervisor
+and fixed registry needed for this composed path.
+
 Prompt text, model output, shell command text, and credential values are excluded
 from activity facts and command receipts.
 
@@ -225,13 +259,47 @@ process boundary. Runtime credentials and container-control sockets must remain
 outside those containers. The current selection adapter does not create these
 containers or claim that their process boundaries are enforced.
 
-`EnvironmentLease` binds worker, session, generation, environment ID, complete
-container ID, image digest, workspace, and an absolute Podman launcher path.
+`EnvironmentLease` binds worker, session, execution, generation, environment ID,
+complete container ID, image digest, host workspace, and an absolute Python
+attachment program. It also binds the private supervisor socket, lease ID, and
+immutable lease digest. `EnvironmentLease.from_endpoint` derives these fields
+from the live `AttachmentEndpoint` and the installed Python interpreter.
+The immutable canonical lease document accompanies the registration. Before
+writing configuration, the registry recomputes its endpoint digest and compares
+every declared worker, session, execution, generation, workspace, image,
+container, and lease identity against that document. Reusing one endpoint's
+digest with another assignment fails with `environment_binding_mismatch`.
 `EnvironmentRegistry` rejects overlapping workspaces and repeated container or
 environment IDs. It writes private `environments.toml` once and checks a digest
 of all lease fields on reconstruction. An existing configuration change requires
-reconciliation. The fixed attachment command is `podman start --attach
---interactive --sig-proxy=false CONTAINER_ID`.
+reconciliation. A missing supervisor binding fails with
+`supervised_attachment_required`; the registry does not launch the engine.
+
+The program transport invokes `python -m hephaestus.automation.fleet_attachment`
+with `--socket`, `--lease-id`, and `--binding-digest`. The endpoint validates the
+current assignment and completes supervisor engine and kernel checks before
+exposing streams. A connection cannot supply an engine command. Stream content
+is not recorded. Closing the connection does not dispose its container or
+release the reservation.
+Handshake reads use one monotonic deadline on each side. Endpoint close
+interrupts its owned accepted socket, including an incomplete handshake. Relay
+cleanup restores descriptor flags before closing an owned writer and does not
+touch its released descriptor number afterward.
+When the remote stream ends, the client drains received output and exits even
+if the provider keeps its input pipe open. On the server side, client input EOF
+still permits the remaining process output to drain. Stream completion does not
+prove container disposal.
+
+The host workspace maps to `/workspace`. Thread cwd, roots, filesystem grants,
+and tool HOME/XDG values use that contained path; the worker's journal keeps the
+canonical host path. The host prepares the workspace directories before thread
+startup. The registry checks every attachment socket directory against all
+configured workspaces. Before creating leases, the supervisor owner must supply
+all private runtime, authentication, and spool roots in `protected_roots`.
+The supervisor persists those exclusions, checks every new workspace and every
+unresolved lease at restart, and retains exclusions omitted from later
+configuration. Engine home and socket separation remain the engine adapter's
+responsibility.
 
 The registry sets `include_local=false` and `default="none"`. The worker sends an
 explicit singleton `environments` array on every `thread/start` and `turn/start`.
@@ -286,9 +354,10 @@ file and zero sessions. Those captures bind the frozen source manifest
 Later source edits require another explicit freeze before image validation.
 Fleet execution acceptance still requires the enforced adapter.
 
-Before admission, integrate and validate the supervisor that creates and inspects each
-immutable boundary, verifies the selected environment, and observes its complete
-cgroup after disposal. Missing or uncertain disposal evidence must retain the
+Before admission, validate this attachment through restricted provider thread
+startup and normal tool routing. The supervisor creates and inspects each
+immutable boundary and observes its complete cgroup after disposal. Missing or
+uncertain disposal evidence must retain the
 workspace and execution reservation. Codex's tracked-terminal list is not this
 evidence. Normal model tool calls can also require bubblewrap inside the tool
 container; the direct exec-server probe cannot establish that compatibility.
@@ -436,10 +505,18 @@ source manifest and retained raw output outside the repository. It measured
 direct exec-server operations; it did not measure normal provider tool routing
 or enable session admission.
 
-The supervisor is not connected to Fleet admission or provider environment
-attachment yet. Its lifecycle receipts cannot open those gates. Pinned Codex
-thread startup can require a nested platform sandbox when it reads `AGENTS.md`
-under the restricted profile, before the external turn policy is available.
-That startup contract, normal model-tool routing, all private authority roots,
-and cold-resume environment binding still need an enforced integration. Keep
-native and shared Linux admission closed until those gates pass.
+The private attachment connects provider program transport to the supervisor;
+it does not connect or authorize Fleet admission. Socket and scripted-provider
+tests do not replace a measured provider startup or model-tool route. Pinned
+Codex thread startup can require a nested platform sandbox when it reads
+`AGENTS.md` under the restricted profile, before the external turn policy is
+available. The next no-model startup probe must use a fresh empty authority home,
+permit only initialization, environment status, and restricted thread startup,
+and observe the exact active lease and causal disposal. It must reject account,
+turn, and direct tool RPCs and retain a failed or uncertain result.
+
+Restricted startup, normal model-tool routing, complete deployment private-root
+configuration, and cold-resume ownership remain execution gates. The default CLI
+does not provision contained environments. Keep native and shared Linux
+admission closed until those gates pass; retain the Codex 0.153.4 pin, disabled
+nested subagents, and disabled local fallback.

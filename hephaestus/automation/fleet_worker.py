@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -11,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.fleet_attachment import binding_digest
+from hephaestus.automation.fleet_containment import TOOL_ENVIRONMENT, ContainedExecSupervisor
 from hephaestus.automation.fleet_environments import EnvironmentRegistry
 from hephaestus.automation.fleet_isolation import (
     require_execution_platform,
@@ -84,6 +87,7 @@ class FleetWorker:
         allocation_id: str | None = None,
         provider_command: list[str] | None = None,
         environment_registry: EnvironmentRegistry | None = None,
+        containment_supervisor: ContainedExecSupervisor | None = None,
     ) -> None:
         """Open private receipts without starting a provider or admitting work."""
         if type(generation) is not int or generation < 1 or not 1 <= capacity <= 24:
@@ -104,6 +108,7 @@ class FleetWorker:
         }
         self.provider = CodexAppServer(provider_command or ["codex"], self.codex_home)
         self.environment_registry = environment_registry
+        self.containment_supervisor = containment_supervisor
         self.pending: dict[str | int, dict[str, Any]] = {}
         self._pending_bytes = 0
         self._pending_sizes: dict[str | int, int] = {}
@@ -221,6 +226,7 @@ class FleetWorker:
                 raise ValueError("worker_capacity")
             session["admissionReserved"] = True
         session.pop("backgroundCleanup", None)
+        session.pop("providerBackgroundCleanup", None)
         self.journal.append("session", session)
         result = self.provider.request(
             "thread/resume",
@@ -240,17 +246,24 @@ class FleetWorker:
 
     def _thread_parameters(self, session: dict[str, Any]) -> dict[str, Any]:
         workspace = session["workspace"]
+        selection = self._environment_parameters(session, "thread/start")
+        tool_environment = shell_environment_policy(Path(workspace))
+        filesystem = {
+            ":minimal": "read",
+            workspace: "write",
+            str(self.codex_home): "deny",
+            str(self.journal.directory.resolve()): "deny",
+        }
+        if selection:
+            workspace = selection["environments"][0]["cwd"]
+            filesystem = {":minimal": "read", workspace: "write"}
+            tool_environment = {**tool_environment, "set": dict(TOOL_ENVIRONMENT)}
         profile = {
-            "filesystem": {
-                ":minimal": "read",
-                workspace: "write",
-                str(self.codex_home): "deny",
-                str(self.journal.directory.resolve()): "deny",
-            },
+            "filesystem": filesystem,
             "network": {"enabled": False},
         }
         return {
-            **self._environment_parameters(session, "thread/start"),
+            **selection,
             "cwd": workspace,
             "runtimeWorkspaceRoots": [workspace],
             "permissions": "fleet",
@@ -264,7 +277,7 @@ class FleetWorker:
                     "multi_agent_v2": False,
                     "shell_snapshot": False,
                 },
-                "shell_environment_policy": shell_environment_policy(Path(workspace)),
+                "shell_environment_policy": tool_environment,
             },
         }
 
@@ -354,6 +367,7 @@ class FleetWorker:
             params.update(selection)
         # Persist invalidation before a provider call can admit another turn.
         session.pop("backgroundCleanup", None)
+        session.pop("providerBackgroundCleanup", None)
         self.journal.append("session", session)
         result = self.provider.request(method, params)
         if method == "turn/start":
@@ -428,11 +442,68 @@ class FleetWorker:
         self.journal.append("session", session)
         if not self._clean_background_terminals(session):
             raise ValueError("background_cleanup_unconfirmed")
+        if not self._confirm_contained_disposal(session):
+            raise ValueError("container_disposal_unconfirmed")
         session["released"] = True
         session["admissionReserved"] = False
         session["outcome"] = "cancelled"
         self._activity(session, "idle", commandId=command["commandId"])
         return result_for(command, "completed", sessionId=session["sessionId"])
+
+    def _confirm_contained_disposal(self, session: dict[str, Any]) -> bool:
+        """Retain ownership until the selected supervisor records matching disposal."""
+        if self.environment_registry is None:
+            return True
+        try:
+            lease = self.environment_registry.lease_for(session)
+            owner = self.containment_supervisor
+            if owner is None or lease.lease_id is None:
+                raise ValueError("containment_supervisor_required")
+            with owner.operation_lock:
+                retained = owner.inspect(lease.lease_id)
+                if binding_digest(retained) != lease.binding_digest:
+                    raise ValueError("environment_binding_mismatch")
+                if retained["phase"] in {"created", "active"}:
+                    result = owner.dispose(lease.lease_id)
+                else:
+                    # An uncertain remove is observed, never submitted again.
+                    result = owner.reconcile(lease.lease_id)
+                disposal = dict(result.get("disposal", {}))
+                digest = disposal.pop("digest", None)
+                expected_digest = hashlib.sha256(
+                    json.dumps(disposal, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                if (
+                    result["phase"] != "disposed"
+                    or binding_digest(result) != lease.binding_digest
+                    or disposal.get("confirmed") is not True
+                    or disposal.get("leaseId") != lease.lease_id
+                    or disposal.get("containerId") != lease.container_id
+                    or disposal.get("spec") != result["spec"]
+                    or not disposal.get("before")
+                    or disposal["before"] != result.get("disposalBefore")
+                    or not disposal.get("observedAt")
+                    or digest != expected_digest
+                ):
+                    raise ValueError("container_disposal_unconfirmed")
+        except (KeyError, TypeError, OSError, ValueError, RuntimeError):
+            session["backgroundCleanup"] = "unconfirmed"
+            session["outcome"] = None
+            self._activity(session, "unknown", "container_disposal_unconfirmed")
+            return False
+        session["containmentDisposal"] = {"leaseId": lease.lease_id, "digest": digest}
+        session["backgroundCleanup"] = "confirmed_empty"
+        self.journal.append("session", session)
+        return True
+
+    def _record_provider_cleanup(self, session: dict[str, Any], confirmed: bool) -> None:
+        """Separate provider terminal absence from complete contained cleanup."""
+        status = "confirmed_empty" if confirmed else "unconfirmed"
+        if self.environment_registry is None:
+            session["backgroundCleanup"] = status
+        else:
+            session["providerBackgroundCleanup"] = status
+            session["backgroundCleanup"] = "unconfirmed"
 
     def _clean_background_terminals(self, session: dict[str, Any]) -> bool:
         params = {"threadId": session["providerThreadId"]}
@@ -448,18 +519,18 @@ class FleetWorker:
                     "thread/backgroundTerminals/list", params, timeout=remaining
                 )
                 if inventory.get("data") == [] and not inventory.get("nextCursor"):
-                    session["backgroundCleanup"] = "confirmed_empty"
+                    self._record_provider_cleanup(session, True)
                     return True
                 time.sleep(0.02)
         except ProviderError:
             pass
-        session["backgroundCleanup"] = "unconfirmed"
+        self._record_provider_cleanup(session, False)
         session["outcome"] = None
         self._activity(session, "unknown", "background_cleanup_unconfirmed")
         return False
 
     def _observe_background_inventory(self, session: dict[str, Any]) -> str | None:
-        session["backgroundCleanup"] = "unconfirmed"
+        self._record_provider_cleanup(session, False)
         try:
             inventory = self.provider.request(
                 "thread/backgroundTerminals/list",
@@ -467,8 +538,12 @@ class FleetWorker:
                 timeout=1.0,
             )
             if inventory.get("data") == [] and not inventory.get("nextCursor"):
-                session["backgroundCleanup"] = "confirmed_empty"
-                return None
+                self._record_provider_cleanup(session, True)
+                return (
+                    "container_cleanup_unconfirmed"
+                    if self.environment_registry is not None
+                    else None
+                )
         except ProviderError:
             pass
         return "background_cleanup_unconfirmed"
@@ -487,7 +562,14 @@ class FleetWorker:
         fact = {
             key: value
             for key, value in session.items()
-            if key not in {"workspace", "stopOperation"}
+            if key
+            not in {
+                "workspace",
+                "stopOperation",
+                "providerBackgroundCleanup",
+                "providerOutcome",
+                "containmentDisposal",
+            }
         }
         fact.update(details)
         sequence = len(self.journal.events) + 1
@@ -635,8 +717,19 @@ class FleetWorker:
         ):
             return
         if status == "interrupted" and session.get("stopOperation") == "cancel":
+            if not self._confirm_contained_disposal(session):
+                return
             outcome = "cancelled"
             session["released"] = True
+        elif (
+            status == "interrupted"
+            and session.get("stopCommandId")
+            and self.environment_registry is not None
+        ):
+            session["providerOutcome"] = "interrupted"
+            session["outcome"] = None
+            self._activity(session, "unknown", "contained_interrupt_requires_reconciliation")
+            return
         if status == "interrupted" and session.get("stopCommandId"):
             session["admissionReserved"] = False
         session["outcome"] = outcome

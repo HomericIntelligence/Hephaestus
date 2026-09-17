@@ -2865,13 +2865,40 @@ cgroup, and retained process identities show absence. A stopped stream or an
 empty provider terminal list is insufficient. Uncertain observations retain the
 lease and workspace exclusion.
 
-The supervisor is not yet connected to provider environment attachment.
+The private [`AttachmentEndpoint`](../hephaestus/automation/fleet_attachment.py)
+connects provider program transport to one retained supervisor lease. Its client
+sends only the immutable binding, then forwards bounded process streams. The
+endpoint completes supervisor engine and kernel checks before exposing the
+stream. An operation lock serializes supervisor journal access across attachment
+threads. Detachment retains the lease and its workspace reservation.
 [`EnvironmentRegistry`](../hephaestus/automation/fleet_environments.py) supplies
-immutable remote-only selection metadata; metadata cannot prove containment.
+immutable remote-only selection and the private attachment command. It rejects
+missing supervisor bindings and checks worker, session, execution, and generation
+ownership on every selection. It verifies those declared fields against the
+canonical lease document and the endpoint's immutable digest before writing
+configuration. The worker retains host paths in its journal and
+uses `/workspace` for contained cwd, roots, filesystem grants, and tool storage.
+The registry checks private socket directories against all configured workspaces;
+the supervisor persists declared private roots and checks future mounts and
+unresolved leases against them. Metadata alone cannot prove containment.
+
+For a worker with a fixed environment registry, cancellation also requires the
+matching `ContainedExecSupervisor`. The worker checks the immutable lease before
+disposal, verifies the supervisor's causal disposal receipt, and retains a private
+receipt reference before releasing its session reservation. An uncertain removal
+is reconciled through observation; it is not submitted again. Provider terminal
+cleanup alone cannot publish the `backgroundCleanup: confirmed_empty` marker.
+The journal, inventory, and activity events use that marker only when complete
+contained cleanup is confirmed. Provider-only cleanup and outcomes stay private.
+An interrupted contained session retains its lease and reservation and reports
+`unknown` until reconciliation. The controller keeps that interruption pending;
+this change does not establish an interrupt/resume recovery path. A normal
+completed turn also retains its container and does not complete the issue.
+
 Native macOS and shared Linux session admission remain disabled by
 [`fleet_isolation`](../hephaestus/automation/fleet_isolation.py).
-The next integration must replace raw engine attachment with the supervisor,
-map permission and tool paths into the remote workspace, and prove restricted
-thread startup, normal tool routing, and cold-resume ownership. It must preserve
-the disabled local fallback. The [Fleet worker design and runbook](fleet-worker.md)
+The next execution gates must prove restricted thread startup, normal tool
+routing, and cold-resume ownership through this attachment. The default CLI does
+not provision a supervisor or admit a contained session. Preserve the disabled
+local fallback. The [Fleet worker design and runbook](fleet-worker.md)
 records the supported contracts, bounded probes, and remaining gates.

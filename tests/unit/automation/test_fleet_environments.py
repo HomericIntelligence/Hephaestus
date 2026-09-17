@@ -1,6 +1,7 @@
 """Check exclusive tool-environment routing without authorizing execution."""
 
 import json
+import sys
 import tomllib
 from dataclasses import replace
 from pathlib import Path
@@ -10,22 +11,26 @@ import pytest
 pytestmark = pytest.mark.precommit
 
 
-def lease(tmp_path, number=1):
+def lease(tmp_path, number=1, **changes):
     """Use synthetic container identities and disjoint workspace roots."""
-    from hephaestus.automation.fleet_environments import EnvironmentLease
+    from tests.fixtures.fleet_environment import environment_lease
 
     workspace = tmp_path / f"workspace-{number}"
     workspace.mkdir(exist_ok=True)
-    return EnvironmentLease(
-        worker_id="worker-a",
-        session_id=f"session-{number}",
-        generation=1,
-        environment_id=f"session-{number}-g1",
-        container_id=str(number) * 64,
-        image_digest="sha256:" + "a" * 64,
-        workspace=workspace,
-        engine_program=Path("/usr/bin/podman"),
-    )
+    values = {
+        "worker_id": "worker-a",
+        "session_id": f"session-{number}",
+        "generation": 1,
+        "environment_id": f"session-{number}-g1",
+        "container_id": str(number) * 64,
+        "image_digest": "sha256:" + "a" * 64,
+        "workspace": workspace,
+        "attachment_program": Path(sys.executable),
+        "execution_id": f"session-{number}-exec",
+        "socket_path": tmp_path / "supervisor" / f"s{number}.sock",
+        "lease_id": str(number) * 32,
+    }
+    return environment_lease(**{**values, **changes})
 
 
 def registry(tmp_path, *leases):
@@ -42,6 +47,7 @@ def assignment(item):
     return {
         "workerId": item.worker_id,
         "sessionId": item.session_id,
+        "executionId": item.execution_id,
         "generation": item.generation,
         "workspace": str(item.workspace),
     }
@@ -61,11 +67,14 @@ def test_private_configuration_disables_implicit_and_local_environments(tmp_path
         second.environment_id,
     ]
     assert parsed["environments"][0]["args"] == [
-        "start",
-        "--attach",
-        "--interactive",
-        "--sig-proxy=false",
-        first.container_id,
+        "-m",
+        "hephaestus.automation.fleet_attachment",
+        "--socket",
+        str(first.socket_path),
+        "--lease-id",
+        first.lease_id,
+        "--binding-digest",
+        first.binding_digest,
     ]
     assert "auth" not in json.dumps(parsed)
 
@@ -92,6 +101,7 @@ def test_selection_uses_exactly_one_owned_environment(tmp_path, operation):
     [
         ("workerId", "other"),
         ("sessionId", "other"),
+        ("executionId", "other"),
         ("generation", 2),
         ("workspace", "/some/other/workspace"),
     ],
@@ -170,6 +180,15 @@ def test_restart_cannot_rebind_retained_environment_metadata(tmp_path, field, va
     """Every immutable ownership field must survive configuration reconstruction."""
     item = lease(tmp_path)
     registry(tmp_path, item).write_configuration()
-    replacement = registry(tmp_path, replace(item, **{field: value}))
+    replacement = registry(tmp_path, lease(tmp_path, **{field: value}))
     with pytest.raises(ValueError, match="environment_configuration_changed"):
         replacement.write_configuration()
+
+
+def test_registry_rejects_raw_engine_without_a_supervised_attachment(tmp_path):
+    """A raw engine command cannot replace the supervisor's ownership gate."""
+    with pytest.raises(ValueError, match="supervised_attachment_required"):
+        registry(
+            tmp_path,
+            replace(lease(tmp_path), socket_path=None, attachment_program=Path("/usr/bin/podman")),
+        )
