@@ -25,12 +25,12 @@ from typing import Any, NoReturn, Self, TypeGuard
 from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
 from hephaestus.automation.git_runtime import (
     current_operation_shutdown,
+    git_metadata_lock_path,
     operation_deadline,
     operation_file_lock,
     remaining_operation_timeout,
 )
 from hephaestus.automation.models import DEFAULT_STATE_DIR
-from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import (
     ExclusiveLockUnavailableError,
@@ -184,6 +184,59 @@ def _validate_receipt_values(receipt: RepoIntakeReceipt) -> None:
         raise RepoIntakeError("repository-intake receipt state root is unsafe")
 
 
+def intake_worker_base(
+    repo_root: Path, common_dir: Path, *, repository: str | None = None
+) -> Path | None:
+    """Return the external worker base for a receipt-bound intake checkout."""
+    digest = hashlib.sha256(str(common_dir).encode()).hexdigest()[:16]
+    state_parent = common_dir.parent.parent / ".hephaestus-repo-intake"
+    state_root = state_parent / digest
+    expected_root = state_root / "worktree"
+    if repo_root != expected_root:
+        return None
+    for path in (state_parent, state_root):
+        if path.is_symlink() or path.resolve(strict=True) != path:
+            raise RepoIntakeError("repository-intake worker state path is unsafe")
+    receipt_path = state_root / "receipt.json"
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(receipt_path, flags), "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o077
+                or (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
+            ):
+                raise RepoIntakeError("repository-intake worker receipt is unsafe")
+            encoded = stream.read(65537)
+        if len(encoded) > 65536:
+            raise RepoIntakeError("repository-intake worker receipt is too large")
+        payload = json.loads(encoded)
+        if not isinstance(payload, dict):
+            raise RepoIntakeError("repository-intake worker receipt must be an object")
+        receipt = RepoIntakeReceipt.from_dict(payload)
+    except (OSError, ValueError) as exc:
+        raise RepoIntakeError("repository-intake worker receipt is unavailable or invalid") from exc
+    if repository is not None and repository not in {
+        receipt.repository,
+        receipt.repository.rsplit("/", 1)[-1],
+    }:
+        raise RepoIntakeError("repository-intake worker repository does not match")
+    identity = f"{receipt.repository}:{digest}"
+    if (
+        receipt.common_dir != common_dir
+        or receipt.path != expected_root
+        or receipt.state_root != state_root
+        or receipt.repository_identity != identity
+        or receipt.ownership_key != f"{identity}:intake"
+    ):
+        raise RepoIntakeError("repository-intake worker receipt ownership does not match")
+    base = state_root / "build" / ".worktrees"
+    if base.resolve(strict=False) != base:
+        raise RepoIntakeError("repository-intake worker base is unsafe")
+    return base
+
+
 def _is_valid_branch(value: object) -> TypeGuard[str]:
     """Return whether a branch name is safe as a Git ref component."""
     return bool(
@@ -306,7 +359,7 @@ class RepoIntakeManager:
             if remaining_s is None:
                 raise RepoIntakeError("repository-intake timeout is unavailable")
             deadline_s = started_s + float(remaining_s)
-            metadata_lock = WorktreeManager.git_metadata_lock_path(self.caller_root)
+            metadata_lock = git_metadata_lock_path(self.caller_root)
             metadata_lock = metadata_lock.parent.resolve(strict=True) / metadata_lock.name
             if admitted_metadata_lock is not None and metadata_lock != admitted_metadata_lock:
                 raise RepoIntakeError("Git common directory changed before preparation")

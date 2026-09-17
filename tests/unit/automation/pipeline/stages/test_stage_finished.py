@@ -1023,3 +1023,26 @@ def test_terminal_evidence_restores_creation_failure_without_item_payload(
         stage.step(item, ctx)
 
     assert ledger[0].reason.endswith("creation_failure=writer_receipt")
+
+
+@pytest.mark.precommit
+def test_terminal_recovery_does_not_create_state_inside_intake(
+    tmp_path: Path, stage: FinishedStage, make_ctx: Any
+) -> None:
+    """Invalid terminal evidence must leave the intake checkout unchanged."""
+    from tests.unit.automation.test_repo_intake import _make_repository, _manager
+
+    caller, remote = _make_repository(tmp_path)
+    intake = _manager(caller, remote).prepare()
+    item = _item(state="RECORD")
+    item.repo = "repo"
+    item.payload["source_workspace_preserve"] = True
+    item.payload["source_workspace_terminal"] = {
+        "identity": "42-impl-terminal.json",
+        "content_sha256": "b" * 64,
+    }
+    ctx = make_ctx(paths=SimpleNamespace(repo_root=intake.path))
+
+    stage.step(item, ctx)
+
+    assert not (intake.path / "build").exists()

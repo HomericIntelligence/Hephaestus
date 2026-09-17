@@ -23,6 +23,39 @@ from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subproc
 
 logger = logging.getLogger(__name__)
 
+_GIT_METADATA_LOCK_NAME = ".hephaestus-git-metadata.lock"
+
+
+def git_metadata_lock_path(repo_root: Path) -> Path:
+    """Return the cross-process lock guarding ``repo_root``'s Git metadata.
+
+    The sentinel belongs in ``.git`` so acquiring it never creates an
+    untracked file in a reusable checkout's worktree.  Linked worktrees
+    use a ``.git`` *file*, so resolve their ``commondir`` and share the
+    sentinel with the primary checkout.
+    """
+    git_entry = repo_root / ".git"
+    if not git_entry.is_file():
+        return git_entry / _GIT_METADATA_LOCK_NAME
+
+    gitdir_line = git_entry.read_text(encoding="utf-8").strip()
+    prefix = "gitdir: "
+    if not gitdir_line.startswith(prefix):
+        raise RuntimeError(f"Invalid Git directory reference: {git_entry}")
+    git_dir = Path(gitdir_line.removeprefix(prefix))
+    if not git_dir.is_absolute():
+        git_dir = repo_root / git_dir
+    git_dir = git_dir.resolve()
+
+    common_dir_file = git_dir / "commondir"
+    if common_dir_file.is_file():
+        common_dir = Path(common_dir_file.read_text(encoding="utf-8").strip())
+        if not common_dir.is_absolute():
+            common_dir = git_dir / common_dir
+        return common_dir.resolve() / _GIT_METADATA_LOCK_NAME
+    return git_dir / _GIT_METADATA_LOCK_NAME
+
+
 _operation_deadline_s: ContextVar[float | None] = ContextVar(
     "git_operation_deadline_s",
     default=None,

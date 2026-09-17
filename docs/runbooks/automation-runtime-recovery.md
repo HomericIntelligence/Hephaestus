@@ -56,3 +56,32 @@ the run proceeds. Confirm completion from the live PR merge and issue state.
 Do not repeat a failed run until its cause or input has changed. A GitHub
 connectivity failure does not invalidate a published plan. Read that plan
 again after connectivity recovers before requesting another planning job.
+
+## Preserve an old nested worker
+
+An older runtime can create a worker below the intake checkout in
+`build/.worktrees`. The next intake preparation rejects that checkout as dirty.
+A corrected runtime places new workers outside the intake checkout. It does
+not move old workers or rewrite their ownership receipts.
+
+Stop the old coordinator before recovery. Preserve its checkout, worktrees,
+receipts, logs, and incomplete transitions. Do not add an ignore rule, remove
+worker files, reset a branch, or edit a receipt to make intake pass.
+
+A fresh independent campaign clone is possible only under these conditions:
+
+- No coordinator or writer still uses the old campaign.
+- The preserved worker is clean and has no rebase or merge in progress.
+- Its branch and full HEAD match the current remote PR branch and commit.
+- No local commit, dirty file, or unresolved ownership transition needs recovery.
+- The old campaign and all of its state remain available for inspection.
+
+Record these facts before creating the independent clone. Recheck the live PR
+head before the new runtime adopts it. Use the same explicit issue or PR and
+approved models. Do not copy ownership receipts across Git common directories.
+The new clone has a different local repository identity.
+
+If any condition fails, retain the old campaign and report the precise recovery
+need. A fresh clone must not conceal unpublished work or an active writer.
+This procedure does not authorize deletion, production access, or merge without
+review and successful required checks.
