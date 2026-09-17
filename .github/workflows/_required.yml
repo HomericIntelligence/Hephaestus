@@ -72,6 +72,9 @@ jobs:
               .github/workflows/_required.yml) continue ;;
               # Exempt any runbook that documents the rule (if present)
               docs/runbooks/no-silent-failures.md) continue ;;
+              # Preserve fixed external source controls.
+              tests/fixtures/comet-review-validation/current/*) continue ;;
+              tests/fixtures/comet-review-validation/historical/controls/*) continue ;;
             esac
             scan_files+=("$f")
           done
