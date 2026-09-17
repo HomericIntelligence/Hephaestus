@@ -1,0 +1,436 @@
+name: postgres-tests
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: false
+        default: ${{ github.sha }}
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full lowercase commit SHA to test
+        type: string
+        required: true
+      test_keyword:
+        description: One literal pytest keyword fragment
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-integration:
+    name: ${{ inputs.test_keyword && 'postgres-focused' || 'postgres-integration' }}
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: comet-postgres-test
+        ports: [5432]
+        options: >-
+          --health-cmd "pg_isready --username postgres --dbname postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      COMET_POSTGRES_IMAGE: postgres:17.11-alpine3.24@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
+      COMET_POSTGRES_USER: postgres
+      COMET_POSTGRES_DB: postgres
+      COMET_POSTGRES_PASSWORD: comet-postgres-test
+      COMET_TEST_POSTGRES_HOST: localhost
+      COMET_TEST_KEEP_DATABASES: "0"
+    steps:
+      - name: Validate the source commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          TEST_KEYWORD: ${{ inputs.test_keyword }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${EVENT_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Manual PostgreSQL validation must use the main workflow." >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The source commit must be a full lowercase hexadecimal SHA." >&2
+            exit 1
+          fi
+          keyword="${TEST_KEYWORD:-}"
+          if [[ -n "${keyword}" ]]; then
+            export LC_ALL=C
+            if [[ "${EVENT_NAME}" != "workflow_dispatch" || "${#keyword}" -gt 128 || ! "${keyword}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ || "${keyword,,}" =~ ^(and|or|not)$ ]]; then
+              echo "::error::The test selector is not valid." >&2
+              exit 1
+            fi
+          fi
+      - name: Install the YAML reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes python3-yaml
+          /usr/bin/python3 --version
+          dpkg-query --show --showformat='${Version}\n' python3-yaml
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          TEST_KEYWORD: ${{ inputs.test_keyword }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "${actual_sha}" != "${SOURCE_SHA}" ]]; then
+            echo "::error::The checked-out commit does not match the selected source." >&2
+            exit 1
+          fi
+          printf 'workflow_sha=%s\ntested_sha=%s\n' "${WORKFLOW_SHA}" "${actual_sha}" > postgres-source.txt
+          python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          keyword = os.environ.get("TEST_KEYWORD", "")
+          postgres = ["uv", "run", "--locked", "--extra", "dev", "pytest", "-m", "postgres",
+                      "--junitxml=postgres-junit.xml"]
+          if keyword:
+              postgres.extend(["-k", keyword])
+          grafana = ["uv", "run", "--locked", "--extra", "dev", "pytest",
+                     "tests/test_grafana_provisioning.py::test_expanded_grafana_queries_execute_on_postgresql_17_tls",
+                     "--junitxml=grafana-postgres-junit.xml"]
+          scope = {"schema_version": 1, "scope": "focused" if keyword else "full",
+                   "selector": keyword, "postgres_argv": postgres, "grafana_argv": grafana,
+                   "workflow_sha": os.environ["WORKFLOW_SHA"], "tested_sha": os.environ["SOURCE_SHA"]}
+          Path("postgres-scope.json").write_text(json.dumps(scope, sort_keys=True) + "\n")
+          PY
+      - name: Read the selected PostgreSQL retention value
+        id: read-postgres-retention
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          value="$(/usr/bin/timeout 30s /usr/bin/python3 -I - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          import yaml
+          from yaml.events import MappingEndEvent, MappingStartEvent, SequenceEndEvent, SequenceStartEvent
+          from yaml.nodes import MappingNode, ScalarNode, SequenceNode
+
+          SOURCE_PATH = ".github/workflows/postgres-tests.yml"
+          STRING_TAG = "tag:yaml.org,2002:str"
+
+          def fail():
+              raise ValueError
+
+          def git_output(arguments, limit, environment):
+              command = [
+                  "/usr/bin/timeout",
+                  "30s",
+                  "/usr/bin/git",
+                  *arguments,
+              ]
+              process = subprocess.Popen(
+                  command,
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+                  env=environment,
+              )
+              assert process.stdout is not None
+              data = process.stdout.read(limit + 1)
+              if len(data) > limit:
+                  process.kill()
+              process.stdout.close()
+              if process.wait() != 0 or len(data) > limit:
+                  fail()
+              return data
+
+          def inspect(node, depth):
+              if depth > 64:
+                  fail()
+              if isinstance(node, MappingNode):
+                  keys = set()
+                  for key, value in node.value:
+                      if not isinstance(key, ScalarNode) or key.tag != STRING_TAG:
+                          fail()
+                      if key.value == "<<" or key.value in keys:
+                          fail()
+                      keys.add(key.value)
+                      inspect(key, depth + 1)
+                      inspect(value, depth + 1)
+              elif isinstance(node, SequenceNode):
+                  for value in node.value:
+                      inspect(value, depth + 1)
+
+          def member(mapping, name):
+              if not isinstance(mapping, MappingNode):
+                  fail()
+              values = [value for key, value in mapping.value if key.value == name]
+              if len(values) != 1:
+                  fail()
+              return values[0]
+
+          try:
+              source_sha = os.environ["SOURCE_SHA"]
+              if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+                  fail()
+              object_store = Path(".git/objects")
+              if not object_store.is_dir():
+                  fail()
+              with tempfile.TemporaryDirectory(prefix="comet-postgres-git-") as directory:
+                  private_git = Path(directory)
+                  (private_git / "refs").mkdir()
+                  (private_git / "objects/info").mkdir(parents=True)
+                  (private_git / "HEAD").write_text("ref: refs/heads/none\n", encoding="ascii")
+                  (private_git / "config").write_text(
+                      "[core]\n\trepositoryformatversion = 0\n\tbare = true\n", encoding="ascii"
+                  )
+                  (private_git / "objects/info/alternates").write_text(
+                      str(object_store.resolve()) + "\n", encoding="ascii"
+                  )
+                  environment = {
+                      "GIT_CONFIG_GLOBAL": "/dev/null",
+                      "GIT_CONFIG_COUNT": "1",
+                      "GIT_CONFIG_KEY_0": "core.useReplaceRefs",
+                      "GIT_CONFIG_VALUE_0": "false",
+                      "GIT_CONFIG_NOSYSTEM": "1",
+                      "GIT_DIR": str(private_git),
+                      "GIT_NO_REPLACE_OBJECTS": "1",
+                      "GIT_OPTIONAL_LOCKS": "0",
+                      "GIT_PAGER": "cat",
+                      "GIT_TERMINAL_PROMPT": "0",
+                      "LC_ALL": "C",
+                      "PATH": "/usr/bin:/bin",
+                  }
+                  entry = git_output(
+                      ["ls-tree", "-z", "--full-tree", source_sha, "--", SOURCE_PATH], 4096, environment
+                  )
+                  match = re.fullmatch(
+                      rb"100644 blob ([0-9a-f]{40})\t\.github/workflows/postgres-tests\.yml\0", entry
+                  )
+                  if match is None:
+                      fail()
+                  blob = match.group(1).decode("ascii")
+                  declared_size = git_output(["cat-file", "-s", blob], 4096, environment)
+                  if re.fullmatch(rb"[1-9][0-9]*\n", declared_size) is None:
+                      fail()
+                  size = int(declared_size)
+                  if size > 256 * 1024:
+                      fail()
+                  data = git_output(["cat-file", "blob", blob], size, environment)
+              if len(data) != size:
+                  fail()
+              text = data.decode("utf-8")
+              events = 0
+              depth = 0
+              for event in yaml.parse(text, Loader=yaml.BaseLoader):
+                  events += 1
+                  if events > 16_384 or getattr(event, "anchor", None) is not None:
+                      fail()
+                  if getattr(event, "tag", None) is not None:
+                      fail()
+                  if getattr(event, "version", None) is not None or getattr(event, "tags", None):
+                      fail()
+                  if isinstance(event, (MappingStartEvent, SequenceStartEvent)):
+                      depth += 1
+                      if depth > 64:
+                          fail()
+                  elif isinstance(event, (MappingEndEvent, SequenceEndEvent)):
+                      depth -= 1
+                      if depth < 0:
+                          fail()
+              documents = list(yaml.compose_all(text, Loader=yaml.BaseLoader))
+              if len(documents) != 1 or not isinstance(documents[0], MappingNode):
+                  fail()
+              root = documents[0]
+              inspect(root, 1)
+              terminal = member(member(member(member(root, "jobs"), "postgres-integration"), "env"), "COMET_TEST_KEEP_DATABASES")
+              if not isinstance(terminal, ScalarNode) or terminal.tag != STRING_TAG:
+                  fail()
+              if terminal.style not in {"'", '"'} or terminal.value not in {"0", "1"}:
+                  fail()
+              spelling = text[terminal.start_mark.index:terminal.end_mark.index]
+              if spelling not in {"'0'", '"0"', "'1'", '"1"'}:
+                  fail()
+          except (KeyError, OSError, RecursionError, UnicodeError, ValueError, yaml.YAMLError):
+              raise SystemExit("The selected PostgreSQL retention value is not correct.") from None
+          sys.stdout.write(terminal.value)
+          PY
+          )"
+          if [[ "${value}" != "0" && "${value}" != "1" ]]; then
+            echo "::error::The selected PostgreSQL retention value is not correct." >&2
+            exit 1
+          fi
+          printf 'keep_databases=%s\n' "${value}" >> "${GITHUB_OUTPUT}"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - name: Configure encrypted TLS
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          POSTGRES_CA_FILE: ${{ runner.temp }}/comet-postgres-ca.pem
+        run: |
+          echo "COMET_TEST_POSTGRES_CONTAINER=${POSTGRES_CONTAINER}" >> "${GITHUB_ENV}"
+          echo "COMET_DB_CA_FILE=${POSTGRES_CA_FILE}" >> "${GITHUB_ENV}"
+          scripts/configure-test-postgres-tls.sh "${POSTGRES_CONTAINER}" "${POSTGRES_CA_FILE}"
+          postgres_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "${POSTGRES_CONTAINER}")
+          echo "COMET_TEST_POSTGRES_PORT=${postgres_port}" >> "${GITHUB_ENV}"
+      - name: Run PostgreSQL test profile
+        env:
+          TEST_KEYWORD: ${{ inputs.test_keyword }}
+          COMET_TEST_KEEP_DATABASES: ${{ steps.read-postgres-retention.outputs.keep_databases }}
+        run: |
+          command=(uv run --locked --extra dev pytest -m postgres --junitxml=postgres-junit.xml)
+          if [[ -n "${TEST_KEYWORD:-}" ]]; then
+            command+=(-k "${TEST_KEYWORD}")
+          fi
+          "${command[@]}"
+      - name: Run Grafana PostgreSQL validation
+        env:
+          COMET_TEST_KEEP_DATABASES: ${{ steps.read-postgres-retention.outputs.keep_databases }}
+        run: |
+          export COMET_TEST_POSTGRES_DSN="postgresql://${COMET_POSTGRES_USER}:${COMET_POSTGRES_PASSWORD}@${COMET_TEST_POSTGRES_HOST}:${COMET_TEST_POSTGRES_PORT}/${COMET_POSTGRES_DB}"
+          uv run --locked --extra dev pytest tests/test_grafana_provisioning.py::test_expanded_grafana_queries_execute_on_postgresql_17_tls --junitxml=grafana-postgres-junit.xml
+      - name: Validate PostgreSQL test evidence
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          TEST_KEYWORD: ${{ inputs.test_keyword }}
+        run: |
+          python3 -I - <<'PY'
+          import json
+          import os
+          import re
+          import stat
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          def read(name, limit):
+              path = Path(name)
+              if not stat.S_ISREG(path.lstat().st_mode) or path.stat().st_size > limit:
+                  raise ValueError
+              with path.open("rb") as stream:
+                  data = stream.read(limit + 1)
+              if len(data) > limit:
+                  raise ValueError
+              return data
+
+          def counts(node):
+              result = {}
+              for name in ("tests", "failures", "errors", "skipped"):
+                  value = node.get(name, "")
+                  if re.fullmatch(r"[0-9]+", value) is None:
+                      raise ValueError
+                  result[name] = int(value)
+              return result
+
+          def validate_report(name):
+              data = read(name, 64 * 1024 * 1024).decode("utf-8-sig")
+              if "<!DOCTYPE" in data or "<!ENTITY" in data:
+                  raise ValueError
+              root = ET.fromstring(data)
+              if root.tag == "testsuite":
+                  suites = [root]
+              elif root.tag == "testsuites" and all(child.tag == "testsuite" for child in root):
+                  suites = list(root)
+              else:
+                  raise ValueError
+              if len(list(root.iter("testsuite"))) != len(suites):
+                  raise ValueError
+              for outcome in ("failure", "error", "skipped"):
+                  direct = sum(len(case.findall(outcome)) for case in root.iter("testcase"))
+                  if len(list(root.iter(outcome))) != direct:
+                      raise ValueError
+              totals = dict.fromkeys(("tests", "failures", "errors", "skipped"), 0)
+              for suite in suites:
+                  declared = counts(suite)
+                  cases = suite.findall("testcase")
+                  if any(child.tag not in {"testcase", "properties", "system-out", "system-err"} for child in suite):
+                      raise ValueError
+                  if len(cases) != declared["tests"] or len(list(suite.iter("testcase"))) != len(cases):
+                      raise ValueError
+                  skipped = 0
+                  for case in cases:
+                      if not case.get("name") or list(case.iter("failure")) or list(case.iter("error")) or len(list(case.iter("skipped"))) > 1:
+                          raise ValueError
+                      if any(child.tag not in {"skipped", "properties", "system-out", "system-err"} for child in case):
+                          raise ValueError
+                      skipped += len(case.findall("skipped"))
+                  if declared["failures"] or declared["errors"] or skipped != declared["skipped"]:
+                      raise ValueError
+                  for key in totals:
+                      totals[key] += declared[key]
+              if totals["tests"] <= totals["skipped"]:
+                  raise ValueError
+              if root.tag == "testsuites":
+                  for key, value in totals.items():
+                      if key in root.attrib and root.get(key) != str(value):
+                          raise ValueError
+
+          try:
+              source, workflow = os.environ["SOURCE_SHA"], os.environ["WORKFLOW_SHA"]
+              if any(re.fullmatch(r"[0-9a-f]{40}", value) is None for value in (source, workflow)):
+                  raise ValueError
+              if read("postgres-source.txt", 1024) != f"workflow_sha={workflow}\ntested_sha={source}\n".encode():
+                  raise ValueError
+              keyword = os.environ.get("TEST_KEYWORD", "")
+              postgres = ["uv", "run", "--locked", "--extra", "dev", "pytest", "-m", "postgres",
+                          "--junitxml=postgres-junit.xml"] + (["-k", keyword] if keyword else [])
+              grafana = ["uv", "run", "--locked", "--extra", "dev", "pytest",
+                         "tests/test_grafana_provisioning.py::test_expanded_grafana_queries_execute_on_postgresql_17_tls",
+                         "--junitxml=grafana-postgres-junit.xml"]
+              expected = {"schema_version": 1, "scope": "focused" if keyword else "full",
+                          "selector": keyword, "postgres_argv": postgres, "grafana_argv": grafana,
+                          "workflow_sha": workflow, "tested_sha": source}
+              scope = json.loads(read("postgres-scope.json", 8192))
+              if scope != expected or type(scope["schema_version"]) is not int:
+                  raise ValueError
+              for name in ("postgres-junit.xml", "grafana-postgres-junit.xml"):
+                  validate_report(name)
+          except (OSError, ValueError, KeyError, TypeError, ET.ParseError):
+              raise SystemExit("PostgreSQL test evidence is not valid.") from None
+          PY
+      - name: Summarize PostgreSQL test durations
+        if: ${{ always() }}
+        run: |
+          if [[ -f postgres-junit.xml ]]; then
+            python scripts/ci/summarize-test-durations.py \
+              postgres-junit.xml --output postgres-duration-summary.json
+          fi
+          if [[ -f grafana-postgres-junit.xml ]]; then
+            python scripts/ci/summarize-test-durations.py \
+              grafana-postgres-junit.xml --output grafana-postgres-duration-summary.json
+          fi
+      - name: Upload PostgreSQL test evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.test_keyword && 'postgres-focused-test-evidence' || 'postgres-test-evidence' }}
+          path: |
+            postgres-source.txt
+            postgres-scope.json
+            postgres-junit.xml
+            postgres-duration-summary.json
+            grafana-postgres-junit.xml
+            grafana-postgres-duration-summary.json
+          if-no-files-found: warn
+      - name: Emit sanitized PostgreSQL failure diagnostics
+        if: failure()
+        run: scripts/diagnose-test-postgres.sh "${COMET_TEST_POSTGRES_CONTAINER}"

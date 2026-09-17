@@ -1,0 +1,292 @@
+{
+  "base": "c6e763f52180fdbae6bf6c42e7bb02de930054df",
+  "changed_paths": [
+    "docs/process/lifecycle.md",
+    "scripts/ci/check_pr_commit_provenance.py",
+    "tests/test_ci_workflows.py"
+  ],
+  "changes": [
+    [
+      "M",
+      "docs/process/lifecycle.md"
+    ],
+    [
+      "M",
+      "scripts/ci/check_pr_commit_provenance.py"
+    ],
+    [
+      "M",
+      "tests/test_ci_workflows.py"
+    ]
+  ],
+  "commit": "5232ef57e729a6aa563f13d18e4dcba878bacd64",
+  "entries": [
+    {
+      "git_blob_sha": "14de280cbdda23a47fe71d6dfa749367bab1a942",
+      "mode": "100644",
+      "path": ".gitattributes",
+      "sha256": "5a131fa6e6c16945dd1eb1dbc15327f37d2d88e2a5a2ccc179fa98877e98ef53",
+      "size": 115
+    },
+    {
+      "git_blob_sha": "c73ae2176604d8927e252c726eae2fbdef125154",
+      "mode": "100644",
+      "path": ".github/workflows/build-image.yml",
+      "sha256": "6228063a65fea97c2fd0b2fa7fbd52ea3dbad86a3bfa10b2b0698482b4a089d8",
+      "size": 2671
+    },
+    {
+      "git_blob_sha": "5dc3e6a07f205cc9f4aed750e6b700c3480b4a00",
+      "mode": "100644",
+      "path": ".github/workflows/ci.yml",
+      "sha256": "dd58fdbbd4c474a79e37dfe61943a0bc304bc414510a2a0e1d131b25068e61e5",
+      "size": 13973
+    },
+    {
+      "git_blob_sha": "20ecc08e715852002933b5c48c32ddd8f3c72aa7",
+      "mode": "100644",
+      "path": ".github/workflows/contracts.yml",
+      "sha256": "15a346621af79282ea3cc45710880473094b42025622edbb26685570c0c5b967",
+      "size": 1463
+    },
+    {
+      "git_blob_sha": "d9653708e496f8ea473683f5df62dbd43e709fad",
+      "mode": "100644",
+      "path": ".github/workflows/docs-check.yml",
+      "sha256": "c60633e2091f84f77c6dec0f3a4d8c1de9c4cad16688dafc1dc3aaab5eb9c00c",
+      "size": 1494
+    },
+    {
+      "git_blob_sha": "812ad8b21b0910c8b698d53326427561f6ee4d17",
+      "mode": "100644",
+      "path": ".github/workflows/docs.yml",
+      "sha256": "bf39ffcce95ef80637e599da94b6a4a400f09e0eef0a9b9463d86f88288b897e",
+      "size": 4631
+    },
+    {
+      "git_blob_sha": "924651c8d2b0c8565917654cd02f779d590b5b6a",
+      "mode": "100644",
+      "path": ".github/workflows/hosted-scope-qualification.yml",
+      "sha256": "7f12756f46a55ddb76eb002500b2b1097efe898123cd252daeb09cb4f42013a5",
+      "size": 29817
+    },
+    {
+      "git_blob_sha": "feea0d6a1b2c50b4ca217cc23f2fb4c42bca4c8d",
+      "mode": "100644",
+      "path": ".github/workflows/nightly.yml",
+      "sha256": "19d1cf92dd38ea185bb31ae9a8c2c0b339e556320b24ecb9cfa527418dfeb8f7",
+      "size": 2982
+    },
+    {
+      "git_blob_sha": "dc48f011343d739f84e0c4f77344e8d8e9414c9e",
+      "mode": "100644",
+      "path": ".github/workflows/postgres-rootless-validation.yml",
+      "sha256": "fd8899fb2bb6dec479b84db06ed7ce2ba33624af341e0e77f2b34cc4b99a20d3",
+      "size": 3338
+    },
+    {
+      "git_blob_sha": "3bc8d7c9cb913ca0ee81b6977b52d24adc119201",
+      "mode": "100644",
+      "path": ".github/workflows/postgres-tests.yml",
+      "sha256": "1d6d1393dc21e5c81cc7349e77972d6d4636fcb225b22a68231e282fc4120dff",
+      "size": 20109
+    },
+    {
+      "git_blob_sha": "6b15fac71ebdb8d741432854d311aa14cfd4390b",
+      "mode": "100644",
+      "path": ".github/workflows/pr-provenance.yml",
+      "sha256": "fbcdd76eb7ca7929fab07547bbcfd3eef36934d0197ea4a97f46371b0a00626c",
+      "size": 865
+    },
+    {
+      "git_blob_sha": "f4bfe82700267386f4902db025260ad1b708d93c",
+      "mode": "100644",
+      "path": ".github/workflows/secrets.yml",
+      "sha256": "2f24b66fdf6702ee428bddf98cdb3e63809d34e0d8404976d0e271a2f8bad98c",
+      "size": 653
+    },
+    {
+      "git_blob_sha": "1542c39ec57e352df9297ecf6f3b8e32993cc902",
+      "mode": "100644",
+      "path": ".github/workflows/test-profile.yml",
+      "sha256": "e32b3d9885bda27809fd49f76d5672fc3b20f1a6960d0e8106ed22a3dcc027d1",
+      "size": 174617
+    },
+    {
+      "git_blob_sha": "d695900cf56bae675420df05ab6caf899a661a41",
+      "mode": "100644",
+      "path": ".gitignore",
+      "sha256": "2298d7a98f3b4af111a89978100944da391af885416d890d846708b6aff8a764",
+      "size": 129
+    },
+    {
+      "git_blob_sha": "dce3d3ec8471fd55f8d30e7062901df71f9b083b",
+      "mode": "100644",
+      "path": ".gitleaks.toml",
+      "sha256": "f3418debc7d7fce627ea418ccec8d558dbb820ec3b9b05380e546f1e475e22e7",
+      "size": 1296
+    },
+    {
+      "git_blob_sha": "71389a791a1d5bfd3af6c05976eee5b66558bf44",
+      "mode": "100644",
+      "path": ".pre-commit-config.yaml",
+      "sha256": "f16904c2c97994df95afa0b763b2dc24c1d0ccfdd12732eaa8317f30e2fd9ede",
+      "size": 1054
+    },
+    {
+      "git_blob_sha": "e4fba2183587225f216eeada4c78dfab6b2e65f5",
+      "mode": "100644",
+      "path": ".python-version",
+      "sha256": "7b55f8e67b5623c4bef3fa691288da9437d79d3aba156de48d481db32ac7d16d",
+      "size": 5
+    },
+    {
+      "git_blob_sha": "1c878a1e0cae891a2399da5107add9313570cfe9",
+      "mode": "100644",
+      "path": "deployment/deployed-inputs.yaml",
+      "sha256": "ef4ce03a2cd7a3a8cb96db2d5813b1c21a28e48fb0d52bba97a18be3e46c5db1",
+      "size": 9139
+    },
+    {
+      "git_blob_sha": "39eacfa03cf3f06a949e291db89f56000bacf4a4",
+      "mode": "100644",
+      "path": "mkdocs.yml",
+      "sha256": "02ddba21a8ad7c0aa34638d48910984b5f76c4b1d8c552650d0d2eaaed33749f",
+      "size": 4147
+    },
+    {
+      "git_blob_sha": "aae0f0a897af10a35ab791dcfd21abb101b71198",
+      "mode": "100644",
+      "path": "pyproject.toml",
+      "sha256": "6f2c39177653ce91e36dbdbe69e1246f2a0257a8c335fa3dbc3e624ba4f88da2",
+      "size": 4527
+    },
+    {
+      "git_blob_sha": "46f1d9ed80c83348c2b3389b2465dfc386ec4846",
+      "mode": "100644",
+      "path": "runtime/k2-config/pyproject.toml",
+      "sha256": "f021bc5c5d374c6947969b23b0038fb71c286f6add864e9cbf659877bd6c385f",
+      "size": 604
+    },
+    {
+      "git_blob_sha": "b4fce72fdb6d3a87728462d8b61753841c118276",
+      "mode": "100644",
+      "path": "scripts/check-recycling-coverage.py",
+      "sha256": "eff1c0f35e7b60e9aea87f79510b6e379091835f78cbe2cb829728d58d2b6d3e",
+      "size": 2444
+    },
+    {
+      "git_blob_sha": "44100810c890964e1302da3243d63561949233c9",
+      "mode": "100644",
+      "path": "scripts/check_deployed_inputs.py",
+      "sha256": "1299899fa31c7f8f6fff6a5c4eb1dbe188553ed98341b8aaadba321f7efcba1f",
+      "size": 34914
+    },
+    {
+      "git_blob_sha": "81e4300f91765b2ba589219d65e56e7c0a018818",
+      "mode": "100644",
+      "path": "scripts/ci/postgres_test_runtime.py",
+      "sha256": "3034c609612ef54fc8926f66829b61801154da64977085ef912e6d62169172a5",
+      "size": 1762
+    },
+    {
+      "git_blob_sha": "76b4957b6d1f79753ef831e0ab7836ce77a8b1ba",
+      "mode": "100755",
+      "path": "scripts/ci/run-gitleaks.sh",
+      "sha256": "a0bdbdeec6a43e6c5c5fe1dea9272a51ea482d761c2b43e04f0077aea69cff5b",
+      "size": 1282
+    },
+    {
+      "git_blob_sha": "ff5cddbd07b773714c40ea03dbfb3d44e971a8ee",
+      "mode": "100644",
+      "path": "scripts/ci/run-test-tier.py",
+      "sha256": "f18964418c2106a397dd664f8b33299016102123ea63f1786a5bfb4e528e996b",
+      "size": 10052
+    },
+    {
+      "git_blob_sha": "7ec6cfa1168234dc2c8b346932ea049fa86f2df2",
+      "mode": "100644",
+      "path": "scripts/ci/summarize-test-durations.py",
+      "sha256": "e7d70e746a7bc7f9e8d3269e7f3d523159fd9104dc99fec40ff71bdf72ea3df1",
+      "size": 3185
+    },
+    {
+      "git_blob_sha": "ced32d2938b50ab4cda3a281cbe583d65b55ce67",
+      "mode": "100755",
+      "path": "scripts/configure-test-postgres-tls.sh",
+      "sha256": "76981b93c1fd4b2312ac1a5730ded470a4bc2a594a1126eeeac2d91cb5f3392c",
+      "size": 4728
+    },
+    {
+      "git_blob_sha": "7a8c4722d3b1bf9ae6f250b58ca6b6b0037fdf04",
+      "mode": "100644",
+      "path": "scripts/deployed_artifact_validators.py",
+      "sha256": "4ba97a989e158fe7b95c9b4d22fcb3bb987d467d73260562d36fad9f8a31b0d2",
+      "size": 112457
+    },
+    {
+      "git_blob_sha": "20683894e5763a70ffb15fdedb172a42e9d680c3",
+      "mode": "100755",
+      "path": "scripts/diagnose-test-postgres.sh",
+      "sha256": "832844bc5cf5166c808e5a25d6dc61831eb48912911a302bff8a7581d5ae2350",
+      "size": 4132
+    },
+    {
+      "git_blob_sha": "2062f613d6f7d7613792f5d2d20f74185cd6734b",
+      "mode": "100644",
+      "path": "scripts/smg_wheelhouse.py",
+      "sha256": "2451ffbd103cc94b0b89592f5d40c02450e63a2f3460f3e859e2c813e8092962",
+      "size": 10612
+    },
+    {
+      "git_blob_sha": "2207fb752325e8d27eace5c883fe67676509bf35",
+      "mode": "100755",
+      "path": "scripts/validate-pr-policy.sh",
+      "sha256": "a97e6d553bc1660d82d4d48ce4a1fb3cd104586b2b9d79994def1670604fb73d",
+      "size": 7469
+    },
+    {
+      "git_blob_sha": "ce25ddcce769839c1a13e1af5dbb885be4657cac",
+      "mode": "100644",
+      "path": "tests/__init__.py",
+      "sha256": "c47ef25cccfe8a923c3128211b40f2b5374ca6bd1da337cf40dc576299556065",
+      "size": 34
+    },
+    {
+      "git_blob_sha": "111263cd1d3e572ec42bd1bb99ffb724a1c4123e",
+      "mode": "100644",
+      "path": "tests/conftest.py",
+      "sha256": "be099d4741ccba74ffb721f59a914a8f46cba77264f112cf1228bb5aee22c8b7",
+      "size": 2108
+    },
+    {
+      "git_blob_sha": "c35226a75aa23d947640b8a49b31791b1ebef196",
+      "mode": "100644",
+      "path": "tests/deployment_context_helpers.py",
+      "sha256": "796dcc1542f14e102e9b42bc4e2e67675d76c692d98960bbe7d9cea6f24e77a7",
+      "size": 12088
+    },
+    {
+      "git_blob_sha": "78b6e5dce75b787ac86c855fa326d04e36856605",
+      "mode": "100644",
+      "path": "tests/release_effect_guard.py",
+      "sha256": "d55dcd37e09092c4822d58b719792a54b26ba5a34e2ca14b694e60277ac0bc1d",
+      "size": 3494
+    },
+    {
+      "git_blob_sha": "082fb3f12133b26bbea7e0661eb5ef1055ce28f7",
+      "mode": "100644",
+      "path": "tests/test-tiers.yaml",
+      "sha256": "6e402e1ab1668049ba38407c7a8c4bde4c92020c8ad13a9f49211f7b839ffd26",
+      "size": 7459
+    },
+    {
+      "git_blob_sha": "48baae024d37ac6fe675a52a616b382badbf23ad",
+      "mode": "100644",
+      "path": "uv.lock",
+      "sha256": "df261ef8e5ddca3317594213e12140b4fbfb750cb09298006e22a530c9c97da2",
+      "size": 121280
+    }
+  ],
+  "merge": "0d2cd45ecc5bbbbea5ec2e0f3414772e50242c0a"
+}

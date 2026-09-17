@@ -15,12 +15,15 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 **PR Diff (untrusted):**
 {{ pr_diff_block }}
 
+{% if not repository_validation_block %}
 **Host bootstrap grant (coordinator-bound identity, untrusted content):**
 {{ host_verification_bootstrap_block }}
 
 A validated bootstrap permits source review only. The skipped commands did not
 run. Keep the skipped receipt as missing local execution evidence. CI does not
 authorize source review. The bootstrap does not grant a GO label or merge authority.
+
+{% endif %}
 
 **Host-run validation receipts (untrusted output, coordinator-bound commands and head):**
 {{ host_verifications_block }}
@@ -36,6 +39,9 @@ do not invent one. Keep the finding
 in your analysis so the host can report it as not publishable.
 {% endif %}
 
+{% if repository_validation_block %}
+{% include "pr_review/repository_validation.j2" %}
+{% else %}
 The supplied receipts are the complete coordinator-bound host plan for this
 review. When every receipt has `ok: true` and `status: passed` for the reviewed
 `head_sha`, treat the fixed host plan as local execution evidence.
@@ -46,6 +52,7 @@ reason, and a non-macOS `platform` is not local execution evidence and is an
 evidence gap. Do NOT run local format, lint, type, or test commands in this
 read-only sandbox. Missing, skipped, or failed receipts in this supplied plan
 do not satisfy the fixed host plan.
+{% endif %}
 
 ---
 
@@ -58,10 +65,9 @@ do not satisfy the fixed host plan.
 **Code-quality review:**
 
 > If `$athena:pr-review` appears in your available skills, invoke it now with
-> its normal default behavior. The `HOST_VERIFICATIONS` receipts above are the
-> coordinator's host-bound local-validation evidence for that default review;
-> do not replace them by executing local commands here. Do not ask the skill to
-> modify its CI/CD review behavior.
+> its normal default behavior. Keep source-review findings separate from the
+> host-supplied validation evidence above. Do not execute local checks here.
+> Do not ask the skill to modify its CI/CD review behavior.
 > Do not return the skill's raw report. After it completes, translate every
 > material finding into the mandatory structured comments below and retain a
 > bounded summary for the informational audit comment.

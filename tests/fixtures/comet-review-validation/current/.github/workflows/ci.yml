@@ -1,0 +1,348 @@
+name: CI
+
+on:
+  push:
+    branches: [main, prod]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  promotion_policy:
+    name: promotion-policy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ (github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'prod' && github.event.pull_request.head.repo.full_name == github.repository) && github.sha || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Fetch promotion history
+        if: >-
+          (github.event_name == 'pull_request' && github.base_ref == 'prod') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/prod')
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --quiet --force origin \
+            "+refs/heads/prod:refs/remotes/origin/prod" \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/tags/prod-bootstrap:refs/tags/prod-bootstrap"
+
+          resolved_prod="$(git rev-parse refs/remotes/origin/prod)"
+          resolved_main="$(git rev-parse refs/remotes/origin/main)"
+          echo "CURRENT_PROD_SHA=${resolved_prod}" >> "${GITHUB_ENV}"
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            if [[ "${resolved_prod}" != "${BASE_SHA}" ]]; then
+              echo "::error::Fetched prod does not match the pull request base SHA." >&2
+              exit 1
+            fi
+            if [[ "${resolved_main}" != "${HEAD_SHA}" ]]; then
+              echo "::error::Fetched origin/main does not match the pull request head SHA." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Validate production promotion policy
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          MERGE_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          scripts/validate-pr-policy.sh \
+            "$EVENT_NAME" "$HEAD_REF" "$BASE_REF" "$ACTOR" \
+            "$BASE_SHA" "$HEAD_SHA" "$MERGE_SHA" \
+            "$HEAD_REPOSITORY" "$REPOSITORY" "${CURRENT_PROD_SHA:-$HEAD_SHA}"
+      - name: Validate production commit provenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PUSH_SHA: ${{ github.sha }}
+        run: python3 scripts/ci/check_pr_commit_provenance.py
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - run: uv run --locked --extra dev ruff format --check .
+      - run: uv run --locked --extra dev ruff check .
+      - run: uv run --locked --extra dev pre-commit run --all-files
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - run: uv run --locked --extra dev ty check
+
+  test:
+    name: test (${{ matrix.python-version }})
+    needs: promotion_policy
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - name: Install Bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap
+      - name: Run the ordinary pull-request profile
+        if: >-
+          (github.event_name == 'pull_request' &&
+          !(github.head_ref == 'main' && github.base_ref == 'prod' &&
+          github.event.pull_request.head.repo.full_name == github.repository)) ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        run: uv run --locked --extra dev python scripts/ci/run-test-tier.py pr
+      - name: Run the promotion profile
+        if: >-
+          (github.event_name == 'pull_request' && github.head_ref == 'main' &&
+          github.base_ref == 'prod' && github.event.pull_request.head.repo.full_name == github.repository) ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/prod')
+        run: >-
+          uv run --locked --extra dev --python ${{ matrix.python-version }}
+          python scripts/ci/run-test-tier.py promotion
+
+  postgres-integration:
+    name: postgres-integration
+    if: >-
+      (github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'prod' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/prod')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/postgres-tests.yml
+
+  postgres:
+    name: postgres
+    needs: postgres-integration
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the promotion PostgreSQL result
+        if: >-
+          (github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'prod' && github.event.pull_request.head.repo.full_name == github.repository) ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/prod')
+        env:
+          INTEGRATION_RESULT: ${{ needs.postgres-integration.result }}
+        run: test "${INTEGRATION_RESULT}" = success
+      - name: Record scheduled PostgreSQL coverage
+        if: >-
+          !((github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'prod' && github.event.pull_request.head.repo.full_name == github.repository) ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/prod'))
+        run: echo "PostgreSQL tests run in nightly CI."
+
+  recycling-coverage:
+    name: recycling-coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - name: Require 85% line coverage for rolling recycling
+        run: >-
+          uv run --locked --extra dev pytest
+          tests/test_recycling.py tests/test_gateway_client.py
+          --cov=comet.recycling --cov=comet.supervisor
+          --cov-report=term-missing --cov-report=json:recycling-coverage.json
+      - name: Check recycling implementation coverage
+        run: >-
+          uv run --locked python scripts/check-recycling-coverage.py
+          recycling-coverage.json --fail-under 85
+
+  deployment_policy:
+    name: deployment-policy
+    needs: promotion_policy
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_matrix: ${{ steps.classify.outputs.artifact_matrix || steps.defaults.outputs.artifact_matrix }}
+      contract_matrix: ${{ steps.classify.outputs.contract_matrix || steps.defaults.outputs.contract_matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - id: defaults
+        name: Initialize safe downstream selections
+        run: |
+          echo 'artifact_matrix={"include":[{"id":"noop","check_name":"artifact-noop","engine":"none","kind":"noop"}]}' >> "${GITHUB_OUTPUT}"
+          echo 'contract_matrix={"include":[{"id":"noop","check_name":"contract-noop","kind":"noop"}]}' >> "${GITHUB_OUTPUT}"
+      - name: Collect immutable changed-path records
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CHANGES0: ${{ runner.temp }}/deployed-input-changes0
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            git diff --name-status --no-renames -z \
+              "${BASE_SHA}...${HEAD_SHA}" > "${CHANGES0}"
+          elif [[ -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            git diff-tree --no-commit-id --name-status --no-renames \
+              -r -z "${BEFORE_SHA}" "${HEAD_SHA}" > "${CHANGES0}"
+          else
+            git ls-files -z \
+              | while IFS= read -r -d '' changed_path; do
+                  printf 'M\0%s\0' "${changed_path}"
+                done > "${CHANGES0}"
+          fi
+      - id: classify
+        name: Validate inventory and classify inputs
+        env:
+          CHANGES0: ${{ runner.temp }}/deployed-input-changes0
+          SELECTION: ${{ ((github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'prod' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'push' && github.ref == 'refs/heads/prod')) && 'all' || 'changed' }}
+        run: >-
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py classify
+          --changes0 "${CHANGES0}"
+          --selection "${SELECTION}"
+          --github-output "${GITHUB_OUTPUT}"
+
+  secrets:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/secrets.yml
+
+  docs:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docs-check.yml
+    with:
+      run_strict_build: true
+      upload_site: false
+
+  contracts:
+    needs: deployment_policy
+    if: needs.deployment_policy.result == 'success'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/contracts.yml
+    with:
+      matrix: ${{ needs.deployment_policy.outputs.contract_matrix }}
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  artifacts:
+    needs: deployment_policy
+    if: needs.deployment_policy.result == 'success'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-image.yml
+    with:
+      matrix: ${{ needs.deployment_policy.outputs.artifact_matrix }}
+
+  # Keep the legacy required context until branch rules use only the aggregate.
+  build:
+    name: build
+    needs: artifacts
+    if: ${{ always() }}
+    permissions: {}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Report artifact gate result
+        env:
+          UPSTREAM_RESULT: ${{ needs.artifacts.result }}
+        run: |
+          if [ "${UPSTREAM_RESULT}" != "success" ]; then
+            echo "Artifact gate result is ${UPSTREAM_RESULT}." >&2
+            exit 1
+          fi
+          echo "Artifact gate passed."
+
+  # This compatibility context does not deploy from a pull request.
+  deploy:
+    name: deploy
+    needs: docs
+    if: ${{ always() }}
+    permissions: {}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Report documentation gate result
+        env:
+          UPSTREAM_RESULT: ${{ needs.docs.result }}
+        run: |
+          if [ "${UPSTREAM_RESULT}" != "success" ]; then
+            echo "Documentation gate result is ${UPSTREAM_RESULT}." >&2
+            exit 1
+          fi
+          echo "Documentation gate passed."
+
+  # Umbrella aggregator. Branch protection requires THIS single stable check
+  # name, so the matrix and individual jobs above can be reshaped freely
+  # without ever editing the protection rules. See docs/process/lifecycle.md.
+  lint-typecheck-test:
+    name: lint-typecheck-test
+    if: ${{ always() }}
+    needs:
+      - promotion_policy
+      - lint
+      - typecheck
+      - test
+      - postgres
+      - recycling-coverage
+      - deployment_policy
+      - contracts
+      - secrets
+      - docs
+      - artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Require all upstream jobs to have succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: >-
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py aggregate
+          --needs-json "${NEEDS_JSON}"
+          --required-job promotion_policy
+          --required-job lint
+          --required-job typecheck
+          --required-job test
+          --required-job postgres
+          --required-job recycling-coverage
+          --required-job deployment_policy
+          --required-job contracts
+          --required-job secrets
+          --required-job docs
+          --required-job artifacts

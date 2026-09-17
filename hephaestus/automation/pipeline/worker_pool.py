@@ -85,6 +85,7 @@ from hephaestus.agents.workspace import (
     WorkspaceBinding,
     WorkspaceBindingError,
     WorkspaceKind,
+    validate_workspace_binding,
 )
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
@@ -150,6 +151,7 @@ from hephaestus.automation.pipeline.jobs import (
     ProcessFailureMetadata,
     RemediationPretestInput,
     remediation_pretest_result_digest,
+    validate_build_test_repository_validation,
     validate_job_workspace,
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
@@ -172,6 +174,15 @@ from hephaestus.automation.pipeline.repository_lock import (
     RepositoryOperationLock,
     repo_lock_path,
 )
+from hephaestus.automation.pipeline.repository_validation import (
+    RepositoryValidationGap,
+    RepositoryValidationLocalRead,
+    RepositoryValidationReceipt,
+)
+from hephaestus.automation.pipeline.repository_validation_runtime import (
+    AdmittedRuntime,
+    admit_execution_runtime,
+)
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
 from hephaestus.automation.pipeline.tool_scopes import (
@@ -179,6 +190,7 @@ from hephaestus.automation.pipeline.tool_scopes import (
     ToolScope,
     tool_scope_for,
 )
+from hephaestus.automation.pipeline_github_review_validation import comet_plan_for_workspace
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
 from hephaestus.automation.pyxis_artifact_io import (
@@ -2242,7 +2254,125 @@ def _prepare_immutable_git_metadata(
     return metadata
 
 
-def _prepare_host_output_aliases(source: Path, scratch: Path) -> None:
+def _immutable_host_result(job: BuildTestJob, result: JobResult) -> JobResult:
+    """Attach the source proof after the immutable host check returns."""
+    return replace(
+        result,
+        value={
+            "head_sha": job.expected_head_sha,
+            "immutable_source": True,
+            "failure_kind": (
+                result.value.get("failure_kind", "runner")
+                if isinstance(result.value, dict)
+                else "runner"
+            ),
+            "platform": sys.platform,
+            "status": "passed" if result.ok else "failed",
+        },
+    )
+
+
+def _repository_validation_timeout(timeout_s: int) -> float:
+    """Return the finite time that remains for this validation job."""
+    remaining = git_utils.remaining_operation_timeout(timeout_s)
+    if remaining is None:
+        raise ValueError("The validation deadline is missing.")
+    return float(remaining)
+
+
+def _repository_validation_executable(
+    job: BuildTestJob, runtime: AdmittedRuntime | None
+) -> str | None:
+    """Select the sealed tool when repository metadata is present."""
+    if runtime is not None:
+        return str(runtime.root / "environment/bin/uv")
+    return (
+        _trusted_uv_executable()
+        if job.argv[0] == "uv"
+        else _trusted_executable(job.argv[0], path=os.defpath)
+    )
+
+
+def _repository_validation_host_environment(cwd: Path, runtime: AdmittedRuntime | None) -> Path:
+    """Select the existing host environment or the admitted Comet environment."""
+    if runtime is None:
+        return _verifier_owned_runtime_environment(cwd)
+    return runtime.root / "environment"
+
+
+def _repository_validation_binding(
+    runtime: AdmittedRuntime | None, bindings: ExitStack
+) -> CrossNodePathBinding | None:
+    """Retain the shared runtime path until the Pyxis command returns."""
+    if runtime is None:
+        return None
+    binding = bind_cross_node_root(runtime.root.parent)
+    bindings.callback(binding.close)
+    binding.bind_path(runtime.root, kind="directory", require_read_only=True)
+    return binding
+
+
+def _repository_validation_argv(
+    argv: tuple[str, ...], runtime: AdmittedRuntime | None
+) -> tuple[str, ...]:
+    """Keep legacy commands or select the sealed Comet launcher."""
+    if runtime is None:
+        return argv
+    return (str(runtime.root / "environment/bin/uv"), *argv[1:])
+
+
+def _repository_validation_host_root() -> Path:
+    """Select the capability root from this host package."""
+    return Path(__file__).resolve().parents[3]
+
+
+def _repository_validation_output(source: Path, scratch: Path) -> None:
+    """Put documentation output in the bounded writable directory."""
+    alias = source / "site"
+    if alias.exists() or alias.is_symlink():
+        raise _HostVerificationBoundaryError("repository_validation_output_conflict")
+    target = scratch / "site"
+    target.mkdir(mode=0o700)
+    alias.symlink_to(target, target_is_directory=True)
+
+
+def _repository_validation_environment(
+    environment: dict[str, str], source: Path, runtime: AdmittedRuntime | None
+) -> dict[str, str]:
+    """Select sealed tools and source imports after generic environment settings."""
+    if runtime is None:
+        return environment
+    sealed = runtime.root / "environment"
+    return {
+        **environment,
+        "PATH": os.pathsep.join((str(sealed / "bin"), os.defpath)),
+        "UV_PROJECT_ENVIRONMENT": str(sealed),
+        "UV_OFFLINE": "1",
+        "UV_NO_SYNC": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": os.pathsep.join((str(source / "src"), str(source))),
+    }
+
+
+def _repository_validation_mount(
+    command: tuple[str, ...], runtime: AdmittedRuntime | None
+) -> tuple[str, ...]:
+    """Add the sealed runtime to the existing read-only Pyxis mounts."""
+    if runtime is None:
+        return command
+    path = str(runtime.root / "environment")
+    if any(character in path for character in (",", ":", "\n", "\r")):
+        raise _HostVerificationBoundaryError("repository_validation_runtime_path_invalid")
+    indices = [index for index, arg in enumerate(command) if arg.startswith("--container-mounts=")]
+    if len(indices) != 1:
+        raise _HostVerificationBoundaryError("repository_validation_mount_unavailable")
+    index = indices[0]
+    return (*command[:index], command[index] + f",{path}:{path}:ro", *command[index + 1 :])
+
+
+def _prepare_host_output_aliases(
+    source: Path, scratch: Path, *, repository_runtime: AdmittedRuntime | None = None
+) -> None:
     """Route the generic ignored build output into bounded scratch.
 
     Pi smoke tests deliberately reject symlinked artifact roots.  Their
@@ -2267,6 +2397,9 @@ def _prepare_host_output_aliases(source: Path, scratch: Path) -> None:
         coverage_alias.symlink_to(coverage_target)
     except OSError as exc:
         raise _HostVerificationBoundaryError("host_verification_output_alias_failed") from exc
+
+    if repository_runtime is not None:
+        _repository_validation_output(source, scratch)
 
 
 def _scratch_usage_exceeds_limit(scratch: Path) -> bool:
@@ -6044,6 +6177,8 @@ class WorkerPool:
 
     def _execute_build_test(self, job: BuildTestJob) -> JobResult:
         """Run a build/test job with the current deadline and cancellation event."""
+        if job.repository_validation is not None:
+            return self._run_repository_validation(job)
         if job.immutable_source:
             if not _is_full_commit_sha(job.expected_head_sha):
                 return JobResult(ok=False, error="immutable_source_requires_full_head_sha")
@@ -6086,14 +6221,171 @@ class WorkerPool:
         except InterruptedError:
             return JobResult(ok=False, error="interrupted", interrupted=True)
 
-    def _run_immutable_build_test(self, job: BuildTestJob) -> JobResult:
+    def _run_repository_validation(self, job: BuildTestJob) -> JobResult:
+        """Admit the runtime before source reads and retain request identity."""
+        try:
+            validate_build_test_repository_validation(job)
+        except (AttributeError, TypeError, ValueError):
+            return JobResult(ok=False, error="repository_validation_metadata_invalid")
+        execution = job.repository_validation
+        if execution is None:
+            return JobResult(ok=False, error="repository_validation_metadata_invalid")
+        plan = execution.plan
+
+        def gap(reason: str, error: str, raw: JobResult | None = None) -> JobResult:
+            return replace(
+                raw if raw is not None else JobResult(ok=False),
+                ok=False,
+                error=error,
+                value=RepositoryValidationLocalRead(
+                    execution, gap=RepositoryValidationGap(execution.check_id, reason)
+                ),
+            )
+
+        try:
+            runtime = admit_execution_runtime(
+                execution,
+                trusted_root=_repository_validation_host_root(),
+                timeout_s=_repository_validation_timeout(job.timeout_s),
+                shutdown=self._shutdown,
+            )
+        except (OSError, ValueError, subprocess.TimeoutExpired, InterruptedError):
+            return gap("local_runtime_unavailable", "repository_validation_runtime_unavailable")
+        try:
+            cwd = validate_workspace_binding(
+                plan.source_workspace,
+                allowed_tools="Read,Glob,Grep",
+                remaining_timeout=lambda: _repository_validation_timeout(job.timeout_s),
+                shutdown=self._shutdown,
+            )
+            if cwd != job.cwd:
+                raise ValueError("The workspace path changed.")
+            observed = comet_plan_for_workspace(
+                plan.source_workspace,
+                issue_number=plan.issue_number,
+                pr_number=plan.pr_number,
+                reviewed_base=plan.reviewed_base,
+                timeout_s=_repository_validation_timeout(job.timeout_s),
+                shutdown=self._shutdown,
+            )
+            if observed != plan:
+                raise ValueError("The source validation plan changed.")
+        except (
+            OSError,
+            ValueError,
+            WorkspaceBindingError,
+            subprocess.TimeoutExpired,
+            InterruptedError,
+        ):
+            return gap("local_source_unavailable", "repository_validation_source_unavailable")
+        try:
+            result = self._run_immutable_build_test(job, repository_runtime=runtime)
+        except InterruptedError:
+            return gap(
+                "local_execution_unavailable", "interrupted", JobResult(ok=False, interrupted=True)
+            )
+        value = result.value
+        if (
+            result.interrupted
+            or not isinstance(value, dict)
+            or value.get("immutable_source") is not True
+            or value.get("head_sha") != plan.reviewed_head
+            or value.get("status") != ("passed" if result.ok else "failed")
+            or value.get("failure_kind")
+            not in ({"none", "validation"} if result.ok else {"validation"})
+        ):
+            return gap(
+                "local_execution_unavailable",
+                result.error or "repository_validation_result_invalid",
+                result,
+            )
+        check = next(check for check in plan.checks if check.check_id == execution.check_id)
+        receipt = RepositoryValidationReceipt(
+            repository=plan.repository,
+            pr_number=plan.pr_number,
+            plan_id=plan.plan_id,
+            check_id=check.check_id,
+            reviewed_head=plan.reviewed_head,
+            reviewed_base=plan.reviewed_base,
+            argv=check.argv,
+            source_digests=check.source_digests,
+            evidence_kind="local",
+            status="success" if result.ok else "failed",
+        )
+        return replace(result, value=RepositoryValidationLocalRead(execution, receipt=receipt))
+
+    def _recheck_repository_runtime(self, job: BuildTestJob, runtime: AdmittedRuntime) -> None:
+        """Recheck the complete runtime immediately before process launch."""
+        try:
+            validate_build_test_repository_validation(job)
+            execution = job.repository_validation
+            if execution is None:
+                raise ValueError("The execution metadata is missing.")
+            observed = admit_execution_runtime(
+                execution,
+                trusted_root=_repository_validation_host_root(),
+                timeout_s=_repository_validation_timeout(job.timeout_s),
+                shutdown=self._shutdown,
+            )
+            if observed != runtime:
+                raise ValueError("The runtime identity changed.")
+        except (OSError, TypeError, ValueError) as exc:
+            raise _HostVerificationBoundaryError("repository_validation_runtime_changed") from exc
+
+    def _repository_darwin_launch_options(
+        self,
+        job: BuildTestJob,
+        runtime: AdmittedRuntime | None,
+        *,
+        source: Path,
+        scratch: Path,
+        executable: str,
+        runtime_environment: Path,
+        git_executable: str,
+    ) -> dict[str, Any]:
+        """Prepare the scrubbed environment and the optional runtime recheck."""
+        environment = _host_verification_env(
+            scratch, executable, runtime_environment, git_executable
+        )
+        options: dict[str, Any] = {"environment": environment}
+        if runtime is not None:
+            options["environment"] = _repository_validation_environment(
+                environment, source, runtime
+            )
+            options["pre_launch"] = lambda: self._recheck_repository_runtime(job, runtime)
+        return options
+
+    def _repository_pyxis_revalidate(
+        self,
+        job: BuildTestJob,
+        runtime: AdmittedRuntime | None,
+        runtime_binding: CrossNodePathBinding | None,
+        quota_binding: CrossNodePathBinding,
+        run_binding: CrossNodePathBinding,
+        shared_binding: CrossNodePathBinding,
+    ) -> None:
+        """Recheck all shared execution paths before the Slurm command starts."""
+        if runtime is not None:
+            if runtime_binding is None:
+                raise _HostVerificationBoundaryError(
+                    "repository_validation_runtime_binding_missing"
+                )
+            runtime_binding.revalidate()
+            self._recheck_repository_runtime(job, runtime)
+        quota_binding.revalidate()
+        run_binding.revalidate()
+        shared_binding.revalidate()
+
+    def _run_immutable_build_test(
+        self, job: BuildTestJob, *, repository_runtime: AdmittedRuntime | None = None
+    ) -> JobResult:
         """Run a fixed host check in an archive of the proven review commit."""
         checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
         if checkout_error is not None:
             return JobResult(ok=False, error=checkout_error)
 
         if sys.platform == "linux":
-            return self._run_linux_immutable_build_test(job)
+            return self._run_linux_immutable_build_test(job, repository_runtime=repository_runtime)
         if sys.platform != "darwin":
             return JobResult(
                 ok=False,
@@ -6107,11 +6399,7 @@ class WorkerPool:
                 },
             )
 
-        executable = (
-            _trusted_uv_executable()
-            if job.argv[0] == "uv"
-            else _trusted_executable(job.argv[0], path=os.defpath)
-        )
+        executable = _repository_validation_executable(job, repository_runtime)
         if executable is None:
             return JobResult(ok=False, error="host_verification_executable_unavailable")
         try:
@@ -6124,7 +6412,9 @@ class WorkerPool:
         bound_argv = bind_verified_runner_git_executable(job.argv, launcher_git_executable)
         argv = (executable, *bound_argv[1:])
         try:
-            runtime_environment = _verifier_owned_runtime_environment(job.cwd)
+            runtime_environment = _repository_validation_host_environment(
+                job.cwd, repository_runtime
+            )
         except _HostVerificationBoundaryError as exc:
             return JobResult(ok=False, error=str(exc))
 
@@ -6145,7 +6435,18 @@ class WorkerPool:
                 )
                 with _quota_backed_scratch(root) as scratch:
                     with _quota_backed_pi_smoke_logs(root, source) as pi_smoke_logs:
-                        _prepare_host_output_aliases(source, scratch)
+                        _prepare_host_output_aliases(
+                            source, scratch, repository_runtime=repository_runtime
+                        )
+                        launch_options = self._repository_darwin_launch_options(
+                            job,
+                            repository_runtime,
+                            source=source,
+                            scratch=scratch,
+                            executable=executable,
+                            runtime_environment=runtime_environment,
+                            git_executable=launcher_git_executable,
+                        )
                         command = _host_verification_command(
                             argv=argv,
                             source=source,
@@ -6163,14 +6464,9 @@ class WorkerPool:
                             source=source,
                             scratch=scratch,
                             additional_writable_paths=(pi_smoke_logs,),
-                            environment=_host_verification_env(
-                                scratch,
-                                executable,
-                                runtime_environment,
-                                launcher_git_executable,
-                            ),
                             timeout_s=job.timeout_s,
                             shutdown=self._shutdown,
+                            **launch_options,
                         )
                 checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
                 if checkout_error is not None:
@@ -6180,20 +6476,7 @@ class WorkerPool:
                         stdout_tail=result.stdout_tail,
                         stderr_tail=result.stderr_tail,
                     )
-                return replace(
-                    result,
-                    value={
-                        "head_sha": job.expected_head_sha,
-                        "immutable_source": True,
-                        "failure_kind": (
-                            result.value.get("failure_kind", "runner")
-                            if isinstance(result.value, dict)
-                            else "runner"
-                        ),
-                        "platform": sys.platform,
-                        "status": "passed" if result.ok else "failed",
-                    },
-                )
+                return _immutable_host_result(job, result)
         except _HostVerificationBoundaryError as exc:
             return JobResult(ok=False, error=str(exc))
         except subprocess.TimeoutExpired as exc:
@@ -6206,7 +6489,9 @@ class WorkerPool:
         except OSError as exc:
             return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
 
-    def _run_linux_immutable_build_test(self, job: BuildTestJob) -> JobResult:
+    def _run_linux_immutable_build_test(
+        self, job: BuildTestJob, *, repository_runtime: AdmittedRuntime | None = None
+    ) -> JobResult:
         """Run one fixed check in the local, read-only Pyxis CI image."""
         if not _pyxis_runtime_available(shutdown=self._shutdown):
             return JobResult(
@@ -6254,6 +6539,7 @@ class WorkerPool:
             return JobResult(ok=False, error="host_verification_git_unavailable")
         try:
             with ExitStack() as bindings:
+                runtime_binding = _repository_validation_binding(repository_runtime, bindings)
                 quota_binding = (
                     quota_value
                     if isinstance(quota_value, CrossNodePathBinding)
@@ -6298,7 +6584,9 @@ class WorkerPool:
                                 pi_smoke_logs = quota_run / "pi-smoke-logs"
                                 pi_smoke_logs.mkdir(mode=0o700)
                                 (source / "pi-smoke-logs").mkdir()
-                                _prepare_host_output_aliases(source, scratch)
+                                _prepare_host_output_aliases(
+                                    source, scratch, repository_runtime=repository_runtime
+                                )
                                 _seal_host_runtime(source)
                                 shared_binding.bind_path(
                                     source,
@@ -6316,22 +6604,28 @@ class WorkerPool:
                                 environment = _build_pyxis_environment(
                                     source=source, scratch=scratch
                                 )
+                                environment = _repository_validation_environment(
+                                    environment, source, repository_runtime
+                                )
+                                validation_argv = _repository_validation_argv(
+                                    job.argv, repository_runtime
+                                )
                                 command = _build_pyxis_srun_command(
                                     image=staged_image,
                                     source=source,
                                     git_metadata=git_metadata,
                                     scratch=scratch,
                                     pi_smoke_logs=pi_smoke_logs,
-                                    argv=job.argv,
+                                    argv=validation_argv,
                                     environment=environment,
                                     timeout_s=job.timeout_s,
                                     placement=self._host_verification_pyxis_placement,
                                 )
 
-                                def revalidate_launch_paths() -> None:
-                                    quota_binding.revalidate()
-                                    run_binding.revalidate()
-                                    shared_binding.revalidate()
+                                if repository_runtime is not None:
+                                    command = _repository_validation_mount(
+                                        command, repository_runtime
+                                    )
 
                                 result = _run_bounded_host_command(
                                     _linux_resource_limited_command(
@@ -6344,7 +6638,14 @@ class WorkerPool:
                                     environment=environment,
                                     timeout_s=job.timeout_s,
                                     shutdown=self._shutdown,
-                                    pre_launch=revalidate_launch_paths,
+                                    pre_launch=lambda: self._repository_pyxis_revalidate(
+                                        job,
+                                        repository_runtime,
+                                        runtime_binding,
+                                        quota_binding,
+                                        run_binding,
+                                        shared_binding,
+                                    ),
                                 )
                 checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
                 if checkout_error is not None:
@@ -11690,29 +11991,48 @@ class WorkerPool:
         # deleted source and added destination.  The NUL-delimited manifest
         # preserves paths containing whitespace or newlines without parsing
         # the human-oriented ``diff --git`` header.
-        changed_paths_output = git_utils.run(
-            [
+        change_output = _run_bounded_git_output(
+            (
                 "git",
+                "--no-replace-objects",
                 "diff",
+                "--no-ext-diff",
+                "--no-textconv",
                 "--no-renames",
-                "--name-only",
+                "--name-status",
                 "-z",
-                f"{base}...{head}",
-            ],
+                base,
+                head,
+                "--",
+            ),
             cwd=worktree,
             timeout=job.timeout_s,
-        ).stdout
-        if not isinstance(changed_paths_output, str):
-            return JobResult(ok=False, error="review checkout path manifest unavailable")
-        changed_paths = [path for path in changed_paths_output.split("\0") if path]
+            max_bytes=8 * 1024 * 1024,
+            retain_text=True,
+            shutdown=self._shutdown,
+        ).text
+        if change_output and not change_output.endswith("\0"):
+            return JobResult(ok=False, error="review checkout change manifest is incomplete")
+        fields = change_output[:-1].split("\0") if change_output else []
+        if len(fields) % 2 or len(fields) > 8192:
+            return JobResult(ok=False, error="review checkout change manifest exceeds its limit")
+        change_records = list(zip(fields[::2], fields[1::2], strict=True))
+        if any(status not in {"A", "M", "D", "T"} or not path for status, path in change_records):
+            return JobResult(ok=False, error="review checkout change manifest is invalid")
+        changed_paths = [path for _, path in change_records]
+        if len(set(changed_paths)) != len(changed_paths):
+            return JobResult(ok=False, error="review checkout change manifest repeats a path")
         return JobResult(
             ok=True,
             value={
                 "ready": True,
                 "head": head,
                 "base": base,
+                "diff_base_sha": base,
+                "target_base_sha": expected_base,
                 "diff": diff,
                 "changed_paths": changed_paths,
+                "change_records": change_records,
             },
         )
 

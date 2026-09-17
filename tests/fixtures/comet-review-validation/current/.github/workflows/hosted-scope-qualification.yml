@@ -1,0 +1,629 @@
+name: Comet hosted scope qualification
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Run fixed host-only probe
+        shell: bash
+        run: |
+          python3 -I - <<'PY'
+          """Probe hosted sudo close-from and cgroup v2 support without repository input."""
+
+          from __future__ import annotations
+
+          import json
+          import os
+          import stat
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          ROOT_PROBE = r"""
+          from __future__ import annotations
+
+          import argparse
+          import fcntl
+          import json
+          import os
+          import re
+          import stat
+          import time
+          from pathlib import Path
+
+
+          def fail(reason: str, **fields: object) -> int:
+              print(json.dumps({"ok": False, "reason": reason, **fields}, sort_keys=True))
+              return 1
+
+
+          class ProbeFailure(ValueError):
+              def __init__(self, reason: str, **fields: object) -> None:
+                  super().__init__(reason)
+                  self.reason = reason
+                  self.fields = fields
+
+
+          def decode_mount(value: str) -> str:
+              return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+          def read_text(path: Path) -> str:
+              return path.read_text(encoding="ascii").strip()
+
+
+          def members(path: Path) -> list[int]:
+              value = read_text(path / "cgroup.procs")
+              return [] if not value else [int(item) for item in value.split()]
+
+
+          def identity(path: Path) -> dict[str, int]:
+              value = path.lstat()
+              return {
+                  "file_type": stat.S_IFMT(value.st_mode),
+                  "device": value.st_dev,
+                  "inode": value.st_ino,
+                  "uid": value.st_uid,
+                  "gid": value.st_gid,
+                  "mode": stat.S_IMODE(value.st_mode),
+              }
+
+
+          def require_root_private(path: Path, expected_type: int) -> dict[str, int]:
+              value = identity(path)
+              if (
+                  value["file_type"] != expected_type
+                  or value["uid"] != 0
+                  or value["gid"] != 0
+                  or value["mode"] & 0o022
+              ):
+                  raise ValueError(f"unsafe cgroup entry: {path}")
+              return value
+
+
+          def child_directories(path: Path) -> list[str]:
+              names = []
+              for child in path.iterdir():
+                  value = child.lstat()
+                  if stat.S_ISLNK(value.st_mode):
+                      raise ValueError(f"symlink in cgroup scope: {child}")
+                  if stat.S_ISDIR(value.st_mode):
+                      names.append(child.name)
+              return sorted(names)
+
+
+          def controls(path: Path, names: tuple[str, ...]) -> dict[str, dict[str, int]]:
+              result = {}
+              for name in names:
+                  result[name] = require_root_private(path / name, stat.S_IFREG)
+              return result
+
+
+          def cleanup_scopes(
+              source: Path,
+              parent: Path,
+              target: Path,
+              source_identity: dict[str, int] | None,
+              source_controls: dict[str, dict[str, int]] | None,
+              parent_identity: dict[str, int] | None,
+              parent_controls_identity: dict[str, dict[str, int]] | None,
+              target_identity: dict[str, int] | None,
+              target_controls_identity: dict[str, dict[str, int]] | None,
+              entered: bool,
+          ) -> dict[str, object]:
+              state: dict[str, object] = {
+                  "target_removed": False,
+                  "parent_removed": False,
+                  "entered": entered,
+              }
+
+              def preserve(reason: str, **fields: object) -> dict[str, object]:
+                  state["failure"] = {"reason": reason, **fields}
+                  state["preserved"] = [str(path) for path in (target, parent)]
+                  return state
+
+              def present(path: Path) -> bool | None:
+                  try:
+                      path.lstat()
+                  except FileNotFoundError:
+                      return False
+                  except OSError:
+                      return None
+                  return True
+
+              def check_source() -> None:
+                  if source_identity is None or source_controls is None:
+                      raise ValueError("source identity was not recorded")
+                  if require_root_private(source, stat.S_IFDIR) != source_identity:
+                      raise ValueError("source identity changed during cleanup")
+                  if controls(
+                      source, ("cgroup.controllers", "cgroup.procs", "cgroup.subtree_control")
+                  ) != source_controls:
+                      raise ValueError("source controls changed during cleanup")
+
+              def check_parent(*, target_present: bool) -> None:
+                  if parent_identity is None or parent_controls_identity is None:
+                      raise ValueError("parent identity or controls were not recorded")
+                  if require_root_private(parent, stat.S_IFDIR) != parent_identity:
+                      raise ValueError("parent identity changed during cleanup")
+                  if parent.parent != source:
+                      raise ValueError("parent ancestry changed during cleanup")
+                  if controls(
+                      parent, ("cgroup.controllers", "cgroup.procs", "cgroup.subtree_control")
+                  ) != parent_controls_identity:
+                      raise ValueError("parent controls changed during cleanup")
+                  children = child_directories(parent)
+                  expected_children = [target.name] if target_present else []
+                  if children != expected_children or members(parent):
+                      raise ValueError("parent is not empty during cleanup")
+
+              def check_target() -> None:
+                  if target_identity is None or target_controls_identity is None:
+                      raise ValueError("target identity or controls were not recorded")
+                  if require_root_private(target, stat.S_IFDIR) != target_identity:
+                      raise ValueError("target identity changed during cleanup")
+                  if target.parent != parent:
+                      raise ValueError("target ancestry changed during cleanup")
+                  if controls(
+                      target, ("cgroup.controllers", "cgroup.procs", "cgroup.subtree_control", "pids.max")
+                  ) != target_controls_identity:
+                      raise ValueError("target controls changed during cleanup")
+                  if child_directories(target) or members(target):
+                      raise ValueError("target is not empty during cleanup")
+
+              if entered:
+                  try:
+                      check_source()
+                      (source / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+                      state["entered"] = False
+                      if target_identity is not None and members(target):
+                          return preserve("target_not_empty_after_return")
+                  except (OSError, ValueError) as error:
+                      return preserve("source_return", error=type(error).__name__)
+
+              target_present = present(target)
+              parent_present = present(parent)
+              if target_present is None:
+                  return preserve("target_presence_unknown")
+              if parent_present is None:
+                  return preserve("parent_presence_unknown")
+              if target_identity is None and target_present:
+                  return preserve("target_identity_missing")
+              if parent_identity is None and parent_present:
+                  return preserve("parent_identity_missing")
+              if target_identity is not None and parent_identity is None:
+                  return preserve("parent_identity_missing_for_target")
+
+              if target_identity is not None:
+                  try:
+                      check_source()
+                      check_parent(target_present=True)
+                      check_target()
+                      state["before_target_remove"] = {
+                          "target_identity": target_identity,
+                          "target_controls": target_controls_identity,
+                          "target_children": [],
+                          "target_members": [],
+                          "target_ancestry": {"parent": str(parent), "direct": target.parent == parent},
+                      }
+                      target.rmdir()
+                      try:
+                          target.lstat()
+                      except FileNotFoundError:
+                          state["target_removed"] = True
+                      else:
+                          return preserve("target_remove_state")
+                  except (OSError, ValueError) as error:
+                      return preserve("target_cleanup", error=type(error).__name__)
+
+              if parent_identity is not None:
+                  try:
+                      check_source()
+                      check_parent(target_present=False)
+                      state["before_parent_remove"] = {
+                          "parent_identity": parent_identity,
+                          "parent_controls": parent_controls_identity,
+                          "parent_children": [],
+                          "parent_members": [],
+                          "parent_ancestry": {
+                              "parent": str(parent.parent),
+                              "source": str(source),
+                              "direct": parent.parent == source,
+                          },
+                      }
+                      parent.rmdir()
+                      try:
+                          parent.lstat()
+                      except FileNotFoundError:
+                          state["parent_removed"] = True
+                      else:
+                          return preserve("parent_remove_state")
+                  except (OSError, ValueError) as error:
+                      return preserve("parent_cleanup", error=type(error).__name__)
+              return state
+
+
+          def map_cgroup_source(
+              mount_point: str, mount_root: str, entry: str
+          ) -> tuple[Path, str, str]:
+              if (
+                  not mount_point.startswith("/")
+                  or not mount_root.startswith("/")
+                  or not entry.startswith("/")
+              ):
+                  raise ValueError("non-absolute cgroup path")
+              mount_root = mount_root.rstrip("/") or "/"
+              if entry == "/":
+                  relative = ""
+                  rule = "namespace-root"
+              elif mount_root != "/" and (entry == mount_root or entry.startswith(mount_root + "/")):
+                  relative = entry[len(mount_root):].lstrip("/")
+                  rule = "entry-under-mount-root"
+              else:
+                  relative = entry.lstrip("/")
+                  rule = "entry-relative-to-mounted-root"
+              components = tuple(part for part in relative.split("/") if part)
+              if any(part in {".", ".."} for part in components) or "//" in relative:
+                  raise ValueError("unsafe cgroup path")
+              source = Path(mount_point)
+              for component in components:
+                  source /= component
+                  if source.is_symlink():
+                      raise ValueError("symlink in cgroup path")
+              source.relative_to(Path(mount_point))
+              return source, "/".join(components), rule
+
+
+          def scope_state(
+              source: Path,
+              parent: Path,
+              target: Path,
+              parent_identity: dict[str, int],
+              target_identity: dict[str, int],
+          ) -> dict[str, object]:
+              current_parent = require_root_private(parent, stat.S_IFDIR)
+              current_target = require_root_private(target, stat.S_IFDIR)
+              if current_parent != parent_identity or current_target != target_identity:
+                  raise ValueError("cgroup identity changed")
+              if parent.parent != source or target.parent != parent:
+                  raise ValueError("cgroup ancestry changed")
+              return {
+                  "parent_identity": current_parent,
+                  "target_identity": current_target,
+                  "parent_controls": controls(
+                      parent, ("cgroup.controllers", "cgroup.procs", "cgroup.subtree_control")
+                  ),
+                  "target_controls": controls(
+                      target, ("cgroup.controllers", "cgroup.procs", "cgroup.subtree_control", "pids.max")
+                  ),
+                  "parent_children": child_directories(parent),
+                  "target_children": child_directories(target),
+                  "parent_members": members(parent),
+                  "target_members": members(target),
+              }
+
+
+          def main() -> int:
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--fd", type=int, required=True)
+              parser.add_argument("--expected", required=True)
+              args = parser.parse_args()
+              expected = json.loads(args.expected)
+              if os.getuid() != 0 or args.fd < 3:
+                  return fail("root_or_fd")
+              try:
+                  descriptor_names = sorted(
+                      int(name) for name in os.listdir("/proc/self/fd") if name.isdigit()
+                  )
+              except OSError as error:
+                  return fail("fd_list", error=type(error).__name__)
+              if descriptor_names != [0, 1, 2, args.fd]:
+                  return fail("unexpected_inherited_fds", descriptors=descriptor_names)
+              try:
+                  descriptor_stat = os.fstat(args.fd)
+                  flags = fcntl.fcntl(args.fd, fcntl.F_GETFL)
+                  fd_flags = fcntl.fcntl(args.fd, fcntl.F_GETFD)
+              except OSError as error:
+                  return fail("descriptor_inspection", error=type(error).__name__)
+              expected_identity = expected["identity"]
+              actual_identity = {
+                  "device": descriptor_stat.st_dev,
+                  "inode": descriptor_stat.st_ino,
+                  "uid": descriptor_stat.st_uid,
+                  "gid": descriptor_stat.st_gid,
+                  "mode": stat.S_IMODE(descriptor_stat.st_mode),
+              }
+              if actual_identity != expected_identity:
+                  return fail("descriptor_identity", expected=expected_identity, actual=actual_identity)
+              if flags & os.O_ACCMODE != os.O_RDONLY or fd_flags & fcntl.FD_CLOEXEC:
+                  return fail("descriptor_flags", access=flags & os.O_ACCMODE, fd_flags=fd_flags)
+
+              mount_records: list[tuple[str, str]] = []
+              for line in Path("/proc/self/mountinfo").read_text(encoding="ascii").splitlines():
+                  before, separator, after = line.partition(" - ")
+                  if separator and after.split()[0] == "cgroup2":
+                      fields = before.split()
+                      mount_records.append((decode_mount(fields[4]), decode_mount(fields[3])))
+              if len(mount_records) != 1:
+                  return fail("cgroup2_mount_count", count=len(mount_records))
+              mount_point, mount_root = mount_records[0]
+              mount_path = Path(mount_point)
+              if not mount_path.is_dir() or mount_path.is_symlink():
+                  return fail("cgroup2_mount_identity")
+              entries = []
+              for line in Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines():
+                  fields = line.split(":", 2)
+                  if len(fields) == 3 and fields[0] == "0":
+                      entries.append(fields[2])
+              if len(entries) != 1 or not entries[0].startswith("/"):
+                  return fail("source_cgroup_entry")
+              try:
+                  source, source_relative, mapping_rule = map_cgroup_source(
+                      mount_point, mount_root, entries[0]
+                  )
+                  source.relative_to(mount_path)
+              except ValueError as error:
+                  return fail("source_cgroup_mapping", error=str(error))
+              if entries[0] == "/" or not source.is_dir() or source.is_symlink():
+                  return fail("source_cgroup_identity")
+              try:
+                  source_identity = require_root_private(source, stat.S_IFDIR)
+                  source_controls = controls(
+                      source, ("cgroup.controllers", "cgroup.procs", "cgroup.subtree_control")
+                  )
+                  source_members_before = members(source)
+              except (OSError, ValueError) as error:
+                  return fail("source_cgroup_controls", error=type(error).__name__)
+              if os.getpid() not in source_members_before:
+                  return fail("source_membership", source=source_identity)
+              controllers = set(read_text(source / "cgroup.controllers").split())
+              subtree = set(read_text(source / "cgroup.subtree_control").split())
+              if "pids" not in controllers or "pids" not in subtree:
+                  return fail("pids_unavailable", controllers=sorted(controllers), subtree=sorted(subtree))
+
+              prefix = f"comet-scope-qualification-{os.getpid()}-{time.monotonic_ns()}"
+              parent = source / f"{prefix}-parent"
+              target = parent / f"{prefix}-target"
+              entered = False
+              parent_identity: dict[str, int] | None = None
+              parent_controls_identity: dict[str, dict[str, int]] | None = None
+              target_identity: dict[str, int] | None = None
+              target_controls_identity: dict[str, dict[str, int]] | None = None
+              pre_entry_state: dict[str, object] | None = None
+              post_entry_state: dict[str, object] | None = None
+              post_return_state: dict[str, object] | None = None
+              cleanup_state: dict[str, object] = {}
+              probe_error: dict[str, object] | None = None
+              try:
+                  os.mkdir(parent, 0o700)
+                  parent_identity = require_root_private(parent, stat.S_IFDIR)
+                  if parent.parent != source or child_directories(parent) or members(parent):
+                      raise ProbeFailure("private_parent_state", parent=parent_identity)
+                  parent_controllers = set(read_text(parent / "cgroup.controllers").split())
+                  if "pids" not in parent_controllers:
+                      raise ProbeFailure("private_parent_pids", controllers=sorted(parent_controllers))
+                  (parent / "cgroup.subtree_control").write_text("+pids\n", encoding="ascii")
+                  if "pids" not in set(read_text(parent / "cgroup.subtree_control").split()):
+                      raise ProbeFailure("private_parent_subtree")
+                  parent_controls_identity = controls(
+                      parent, ("cgroup.controllers", "cgroup.procs", "cgroup.subtree_control")
+                  )
+                  os.mkdir(target, 0o700)
+                  target_identity = require_root_private(target, stat.S_IFDIR)
+                  if target.parent != parent or child_directories(target) or members(target):
+                      raise ProbeFailure("target_state", target=target_identity)
+                  target_controls_identity = controls(
+                      target, ("cgroup.controllers", "cgroup.procs", "cgroup.subtree_control", "pids.max")
+                  )
+                  (target / "pids.max").write_text("32\n", encoding="ascii")
+                  if read_text(target / "pids.max") != "32":
+                      raise ProbeFailure("pids_max")
+                  pre_entry_state = scope_state(source, parent, target, parent_identity, target_identity)
+                  (target / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+                  entered = True
+                  if members(target) != [os.getpid()]:
+                      raise ProbeFailure("target_membership", members=members(target))
+                  post_entry_state = scope_state(source, parent, target, parent_identity, target_identity)
+                  if (
+                      post_entry_state["parent_controls"] != pre_entry_state["parent_controls"]
+                      or post_entry_state["target_controls"] != pre_entry_state["target_controls"]
+                  ):
+                      raise ProbeFailure("scope_controls_changed_after_entry")
+                  (source / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+                  entered = False
+                  if members(target):
+                      raise ProbeFailure("target_not_empty", members=members(target))
+                  post_return_state = scope_state(source, parent, target, parent_identity, target_identity)
+                  if (
+                      post_return_state["parent_controls"] != pre_entry_state["parent_controls"]
+                      or post_return_state["target_controls"] != pre_entry_state["target_controls"]
+                  ):
+                      raise ProbeFailure("scope_controls_changed_after_return")
+                  if os.getpid() not in members(source):
+                      raise ProbeFailure("source_return_membership")
+                  if require_root_private(source, stat.S_IFDIR) != source_identity:
+                      raise ProbeFailure("source_identity_before_cleanup")
+                  if (
+                      controls(source, ("cgroup.controllers", "cgroup.procs", "cgroup.subtree_control"))
+                      != source_controls
+                  ):
+                      raise ProbeFailure("source_controls_changed")
+              except (OSError, ValueError) as error:
+                  probe_error = {
+                      "reason": "cgroup_operation",
+                      "error": type(error).__name__,
+                      "errno": getattr(error, "errno", None),
+                  }
+                  if isinstance(error, ProbeFailure):
+                      probe_error = {"reason": error.reason, **error.fields}
+              finally:
+                  cleanup_state = cleanup_scopes(
+                      source,
+                      parent,
+                      target,
+                      source_identity,
+                      source_controls,
+                      parent_identity,
+                      parent_controls_identity,
+                      target_identity,
+                      target_controls_identity,
+                      entered,
+                  )
+              if probe_error is not None:
+                  return fail("cgroup_operation", probe=probe_error, cleanup=cleanup_state)
+              if "failure" in cleanup_state:
+                  return fail("cleanup", cleanup=cleanup_state)
+              print(json.dumps({
+                  "ok": True,
+                  "descriptor": {
+                      "number": args.fd,
+                      "identity": actual_identity,
+                      "inherited": descriptor_names,
+                      "read_only": True,
+                      "cloexec": False,
+                  },
+                  "cgroup": {
+                      "mount_point": mount_point,
+                      "mount_root": mount_root,
+                      "mount_identity": identity(mount_path),
+                      "source_entry": entries[0],
+                      "source_relative": source_relative,
+                      "mapping_rule": mapping_rule,
+                      "source": str(source),
+                      "source_identity": source_identity,
+                      "source_controls": source_controls,
+                      "source_members_before": source_members_before,
+                      "source_members_after": members(source),
+                      "controllers": sorted(controllers),
+                      "subtree_control": sorted(subtree),
+                      "pids_max": 32,
+                      "private_parent": str(parent),
+                      "private_parent_identity": parent_identity,
+                      "private_parent_controls_identity": parent_controls_identity,
+                      "target": str(target),
+                      "target_identity": target_identity,
+                      "target_controls_identity": target_controls_identity,
+                      "pre_entry": pre_entry_state,
+                      "post_entry": post_entry_state,
+                      "post_return": post_return_state,
+                      "cleanup": cleanup_state,
+                  },
+                  "git": False,
+                  "auth": False,
+                  "pr_input": False,
+              }, sort_keys=True))
+              return 0
+
+
+          raise SystemExit(main())
+          """
+
+
+          def main() -> int:
+              """Run the fixed host-only qualification probe."""
+              descriptor_fd, descriptor_name = tempfile.mkstemp(prefix="comet-scope-descriptor-")
+              os.close(descriptor_fd)
+              descriptor_path = Path(descriptor_name)
+              descriptor_path.write_bytes(b"comet-scope-qualification-v1\n")
+              descriptor_path.chmod(0o600)
+              fd = os.open(descriptor_path, os.O_RDONLY | os.O_CLOEXEC)
+              try:
+                  if fd != 3:
+                      os.dup2(fd, 3, inheritable=False)
+                      os.close(fd)
+                      fd = 3
+                  os.set_inheritable(fd, True)
+                  value = os.fstat(fd)
+                  expected = {
+                      "identity": {
+                          "device": value.st_dev,
+                          "inode": value.st_ino,
+                          "uid": value.st_uid,
+                          "gid": value.st_gid,
+                          "mode": stat.S_IMODE(value.st_mode),
+                      }
+                  }
+                  try:
+                      completed = subprocess.run(
+                          [
+                              "sudo",
+                              "-n",
+                              "-C",
+                              "4",
+                              "--",
+                              "/usr/bin/python3",
+                              "-I",
+                              "-c",
+                              ROOT_PROBE,
+                              "--fd",
+                              "3",
+                              "--expected",
+                              json.dumps(expected, separators=(",", ":")),
+                          ],
+                          close_fds=True,
+                          pass_fds=(fd,),
+                          env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                          capture_output=True,
+                          text=True,
+                          timeout=30,
+                          check=False,
+                      )
+                  except subprocess.TimeoutExpired as error:
+                      print(
+                          json.dumps(
+                              {
+                                  "schema": "comet-pr1513-hosted-scope-qualification-v1",
+                                  "sudo_closefrom_argv": ["sudo", "-n", "-C", "4", "--"],
+                                  "sudo_returncode": None,
+                                  "timeout": True,
+                                  "stderr": str(error),
+                                  "git": False,
+                                  "auth": False,
+                                  "pr_input": False,
+                              },
+                              sort_keys=True,
+                          )
+                      )
+                      return 1
+                  result = {
+                      "schema": "comet-pr1513-hosted-scope-qualification-v1",
+                      "sudo_closefrom_argv": ["sudo", "-n", "-C", "4", "--"],
+                      "sudo_returncode": completed.returncode,
+                      "stderr": completed.stderr,
+                      "git": False,
+                      "auth": False,
+                      "pr_input": False,
+                  }
+                  try:
+                      root_result = json.loads(completed.stdout)
+                  except json.JSONDecodeError:
+                      root_result = None
+                  if isinstance(root_result, dict):
+                      result["root_probe"] = root_result
+                      if root_result.get("ok") is True:
+                          result.update(root_result)
+                      else:
+                          result["root_probe_stdout"] = completed.stdout
+                  else:
+                      result["root_probe_stdout"] = completed.stdout
+                  print(json.dumps(result, sort_keys=True))
+                  return (
+                      0
+                      if completed.returncode == 0
+                      and isinstance(root_result, dict)
+                      and root_result.get("ok") is True
+                      else 1
+                  )
+              finally:
+                  os.close(fd)
+                  descriptor_path.unlink(missing_ok=True)
+
+
+          raise SystemExit(main())
+          PY

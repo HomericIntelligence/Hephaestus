@@ -71,7 +71,13 @@ from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..events import StageEvent
-from ..github_jobs import GitHubJob, ImplementationReplyProgress, MergeQueueReconciliation
+from ..github_jobs import (
+    GitHubJob,
+    ImplementationReplyProgress,
+    MergeQueueReconciliation,
+    ReadRepositoryValidationCIRequest,
+    RepositoryValidationCIRead,
+)
 from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
 from ..merge_wait_admission import VerifiedRepositoryDefaultBranch
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
@@ -237,6 +243,12 @@ class StageGitHub(Protocol):
         self, deadline_s: float, *, shutdown: threading.Event | None = None
     ) -> AbstractContextManager[None]:
         """Apply one deadline and cancellation signal to a service operation."""
+        ...
+
+    def read_repository_validation_ci(
+        self, request: ReadRepositoryValidationCIRequest
+    ) -> RepositoryValidationCIRead:
+        """Collect bound Comet CI evidence through the GitHub worker."""
         ...
 
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
+from concurrent.futures import CancelledError
 from dataclasses import asdict, dataclass
 from threading import Event
 from typing import Any, Literal, assert_never
@@ -32,6 +34,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     RateBudgetRead,
     ReadCurrentPlanScopeRequest,
     ReadRateBudgetRequest,
+    ReadRepositoryValidationCIRequest,
     RebaseConflictInspected,
     RebaseReviewInspected,
     RebaseReviewPublished,
@@ -43,6 +46,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     RemediationReplyJournalRecovered,
     ReplyJournalAppended,
     ReplyJournalRecovered,
+    RepositoryValidationCIRead,
     RunMergeWaitCycleRequest,
     ScopeExpansionChildrenEnsured,
     ScopeExpansionDependenciesReconciled,
@@ -57,6 +61,7 @@ from hephaestus.automation.pipeline.reply_handoff import (
     journaled_implementation_remediation_reply_handoff,
     journaled_implementation_reply_handoff,
 )
+from hephaestus.automation.pipeline.repository_validation import RepositoryValidationGap
 from hephaestus.automation.pipeline.scope_retraction import normalize_scope_retraction_paths
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
@@ -101,6 +106,7 @@ class PipelineGitHubJobRunner:
                 InspectRebaseReviewRequest,
                 InspectAdoptedRemediationPrStateRequest,
                 ReadCurrentPlanScopeRequest,
+                ReadRepositoryValidationCIRequest,
             ),
         ) and (job.request.repository.casefold() != f"{self.org}/{job.repo}".casefold()):
             raise ValueError("dirty direct request repository does not match the runner")
@@ -123,6 +129,7 @@ class PipelineGitHubJobRunner:
                     RecoverPendingReviewFindingsRequest,
                     ReadRateBudgetRequest,
                     ReadCurrentPlanScopeRequest,
+                    ReadRepositoryValidationCIRequest,
                     RunMergeWaitCycleRequest,
                 ),
             )
@@ -132,8 +139,20 @@ class PipelineGitHubJobRunner:
         for bound in (deadline_s, request_deadline_s):
             if bound is not None:
                 operation_deadline_s = min(operation_deadline_s, bound)
-        with github.operation_deadline(operation_deadline_s, shutdown=shutdown):
-            return self._run_request(job, github)
+        try:
+            with github.operation_deadline(operation_deadline_s, shutdown=shutdown):
+                return self._run_request(job, github)
+        except (subprocess.TimeoutExpired, CancelledError) as error:
+            if not isinstance(job.request, ReadRepositoryValidationCIRequest):
+                raise
+            reason = (
+                "ci_request_deadline"
+                if isinstance(error, subprocess.TimeoutExpired)
+                else "ci_request_cancelled"
+            )
+            return RepositoryValidationCIRead(
+                job.request, gaps=(RepositoryValidationGap("*", reason),)
+            )
 
     @staticmethod
     def _inspect_rebase_conflict(
@@ -248,6 +267,8 @@ class PipelineGitHubJobRunner:
                 return self._inspect_rebase_review(job.request, github)
             case ReadCurrentPlanScopeRequest():
                 return self._read_current_plan_scope(job.request, github)
+            case ReadRepositoryValidationCIRequest():
+                return github.read_repository_validation_ci(job.request)
             case ReadRateBudgetRequest():
                 facts = rate_limit_remaining(call=github._deadline_gh_call)
                 return RateBudgetRead(

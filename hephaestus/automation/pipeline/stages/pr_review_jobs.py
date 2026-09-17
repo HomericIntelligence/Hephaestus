@@ -1,6 +1,9 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
 import json
+import subprocess
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -10,8 +13,13 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.operation_deadlines import operation_deadline_after
+from hephaestus.automation.pipeline_github_review_validation import (
+    comet_ci_check_ids,
+    comet_local_check_ids,
+    comet_plan_for_workspace,
+)
 from hephaestus.automation.prompts.pr_review import (
     build_bounded_pr_review_analysis_prompt,
     build_bounded_review_anchor_correction_prompt,
@@ -36,8 +44,20 @@ from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
     FrozenJson,
     GitHubJob,
+    ReadRepositoryValidationCIRequest,
     ReconcilePrReviewRequest,
+    RepositoryValidationCIRead,
 )
+from ..repository_validation import (
+    RepositoryValidationAttempt,
+    RepositoryValidationExecution,
+    RepositoryValidationGap,
+    RepositoryValidationInvocation,
+    RepositoryValidationLocalRead,
+    begin_validation_request,
+    consume_validation_result,
+)
+from ..repository_validation_runtime import admit_runtime
 from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
 from .pr_review_diagnostics import publish_host_verification_failure
@@ -59,10 +79,45 @@ from .pr_review_recovery import (
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 from .pr_review_threads import POST_APPLY
-from .pr_review_verification import _review_changed_paths
+from .pr_review_verification import (
+    _repository_validation_coverage,
+    _repository_validation_prompt_json,
+    _review_change_records,
+    _review_changed_paths,
+)
 
 _ANCHOR_CORRECTION_JOB_PENDING = "review_anchor_correction_job_pending"
 _ANCHOR_CORRECTION_RESULT = "review_anchor_correction_result"
+
+
+def _store_review_source_manifest(
+    item: WorkItem, value: dict[str, object], paths: tuple[str, ...]
+) -> bool:
+    """Retain status records only when both base identities agree."""
+    records = _review_change_records(value.get("change_records"), paths)
+    diff_base = value.get("diff_base_sha")
+    target_base = value.get("target_base_sha")
+    head = value.get("head")
+    if (
+        records is None
+        or not is_full_commit_sha(head)
+        or head != item.payload.get("review_checkout_expected_head")
+        or not is_full_commit_sha(diff_base)
+        or diff_base != value.get("base")
+        or not is_full_commit_sha(target_base)
+        or target_base != item.payload.get("pr_base_sha")
+    ):
+        return False
+    if item.repo.casefold() == "comet":
+        try:
+            for _, path in records:
+                path.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return False
+    item.payload["review_change_records"] = records
+    item.payload["review_diff_base_sha"] = diff_base
+    item.payload["review_target_base_sha"] = target_base
+    return True
 
 
 class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
@@ -79,6 +134,13 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
 
         The counter resets once per implementation pass.
         """
+        for key in (
+            "repository_validation_attempt",
+            "repository_validation_ci_request",
+            "repository_validation_local_request",
+            "repository_validation_failure",
+        ):
+            item.payload.pop(key, None)
         if item.pr is not None:
             item.payload.pop("reviewed_pr_head_sha", None)
             item.payload.pop("reviewed_pr_node_id", None)
@@ -332,9 +394,13 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
             prior_generation = 0
         item.payload["reviewed_pr_proof_generation"] = prior_generation + 1
         try:
-            source_workspace_binding(item, ctx, SourceLane.REVIEW, revision=expected_head)
+            workspace = source_workspace_binding(
+                item, ctx, SourceLane.REVIEW, revision=expected_head
+            )
         except (RuntimeError, SourceWorkspaceError):
             return StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
+        if ctx.org.casefold() == "llm360" and item.repo.casefold() == "comet":
+            return self._start_repository_validation(item, ctx, workspace)
         verifications = _prepare_host_checks(item.payload, _worktree_path(item, ctx), expected_head)
         if verifications:
             logger.info(
@@ -345,6 +411,191 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
             item.payload["host_verification_receipts"] = []
             return self._submit_host_verification(item, ctx, verifications[0])
         return self._route_threads_before_broad_review(item, ctx)
+
+    def _start_repository_validation(
+        self, item: WorkItem, ctx: StageContext, workspace: WorkspaceBinding
+    ) -> StepResult:
+        """Create one bound attempt before requesting any Comet CI evidence."""
+        deadline = operation_deadline_after(
+            min(120, stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
+        )
+        try:
+            plan = comet_plan_for_workspace(
+                workspace,
+                issue_number=item.issue,
+                pr_number=cast(int, item.pr),
+                reviewed_base=str(item.payload.get("pr_base_sha") or ""),
+                timeout_s=max(0.0, deadline - time.monotonic()),
+                shutdown=ctx.cancellation,
+            )
+            paths = _review_changed_paths(item.payload.get("review_changed_paths"))
+            records = _review_change_records(item.payload.get("review_change_records"), paths or ())
+            if (
+                records != plan.changes
+                or item.payload.get("review_diff_base_sha") != plan.diff_base_sha
+                or item.payload.get("review_target_base_sha") != plan.reviewed_base
+            ):
+                raise ValueError("The source plan does not match the checkout manifest.")
+            attempt = RepositoryValidationAttempt(
+                plan, int(item.payload["reviewed_pr_proof_generation"]), secrets.token_hex(16)
+            )
+            item.payload["repository_validation_attempt"] = attempt
+            item.payload["reviewed_pr_base_sha"] = plan.reviewed_base
+            if not plan.execution_allowed:
+                return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_profile_gap")
+            checks = comet_ci_check_ids(plan.checks)
+            if not checks:
+                return self._repository_validation_ci_wait(item, ctx)
+            attempt, invocation = begin_validation_request(attempt, "ci", checks)
+            request = ReadRepositoryValidationCIRequest(
+                invocation, str(item.payload.get("pr_head_branch") or ""), deadline
+            )
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            item.payload["repository_validation_failure"] = "validation_source_plan_invalid"
+            return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_source_gap")
+        item.payload["repository_validation_attempt"] = attempt
+        item.payload["repository_validation_ci_request"] = request
+        return JobRequest(
+            GitHubJob(
+                item.repo, Path(ctx.paths.repo_root), request, "review_repository_validation_ci"
+            ),
+            on_done_state=REPOSITORY_VALIDATION_CI_WAIT,
+        )
+
+    def _repository_validation_ci_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Complete coverage or submit one uncovered locally eligible check."""
+        coverage = _repository_validation_coverage(item)
+        if coverage.status == "complete":
+            return self._route_threads_before_broad_review(item, ctx)
+        if any(gap.reason != "validation_check_uncovered" for gap in coverage.gaps):
+            return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_incomplete")
+        attempt = item.payload.get("repository_validation_attempt")
+        if type(attempt) is not RepositoryValidationAttempt or not coverage.uncovered_check_ids:
+            return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_incomplete")
+        eligible = comet_local_check_ids(attempt.plan.checks)
+        if not set(coverage.uncovered_check_ids) <= set(eligible):
+            item.payload["repository_validation_failure"] = "local_check_ineligible"
+            return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_local_unavailable")
+        return self._submit_repository_validation_local(
+            item, ctx, attempt, coverage.uncovered_check_ids[0]
+        )
+
+    @staticmethod
+    def _submit_repository_validation_local(
+        item: WorkItem, ctx: StageContext, attempt: RepositoryValidationAttempt, check_id: str
+    ) -> StepResult:
+        """Bind an admitted runtime and pending request before job submission."""
+        plan = attempt.plan
+        check = next(check for check in plan.checks if check.check_id == check_id)
+        sources = {path: digest for path, _, digest in check.source_digests}
+        try:
+            runtime = admit_runtime(
+                Path(__file__).resolve().parents[4],
+                pyproject_sha256=sources["pyproject.toml"],
+                uv_lock_sha256=sources["uv.lock"],
+                timeout_s=min(120, stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S)),
+                shutdown=ctx.cancellation,
+            )
+            attempt, _ = begin_validation_request(attempt, "local", (check_id,))
+            execution = RepositoryValidationExecution(
+                plan,
+                check_id,
+                attempt.generation,
+                attempt.request_nonce,
+                runtime.root,
+                runtime.manifest.manifest_sha256,
+                runtime.manifest.tree_sha256,
+            )
+            job = BuildTestJob(
+                repo=item.repo,
+                cwd=plan.source_workspace.cwd,
+                argv=check.argv,
+                timeout_s=HOST_VERIFICATION_TIMEOUT_S,
+                expected_head_sha=plan.reviewed_head,
+                immutable_source=True,
+                descr="review_repository_validation_local",
+                repository_validation=execution,
+            )
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            item.payload["repository_validation_failure"] = "local_runtime_unavailable"
+            return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_local_unavailable")
+        item.payload["repository_validation_attempt"] = attempt
+        item.payload["repository_validation_local_request"] = execution
+        return JobRequest(job, on_done_state=REPOSITORY_VALIDATION_CI_WAIT)
+
+    @staticmethod
+    def _consume_repository_validation_local_result(item: WorkItem, result: JobResult) -> bool:
+        """Consume local evidence before state assignment and retain terminal gaps."""
+        pending = item.payload.get("repository_validation_local_request")
+        value = result.value
+        if pending is None and not isinstance(value, RepositoryValidationLocalRead):
+            return False
+        attempt = item.payload.get("repository_validation_attempt")
+        if type(attempt) is not RepositoryValidationAttempt:
+            item.payload["repository_validation_failure"] = "validation_attempt_missing"
+            return True
+        try:
+            if type(value) is not RepositoryValidationLocalRead or replace(value) != value:
+                raise ValueError("The local callback is invalid.")
+            if pending is not None and (
+                type(pending) is not RepositoryValidationExecution or value.execution != pending
+            ):
+                raise ValueError("The local callback does not match the pending request.")
+            execution = value.execution
+            invocation = RepositoryValidationInvocation(
+                execution.plan,
+                execution.attempt_generation,
+                execution.request_nonce,
+                "local",
+                (execution.check_id,),
+            )
+            if result.interrupted or (
+                not result.ok and value.receipt is not None and value.receipt.status == "success"
+            ):
+                raise ValueError("The local job did not establish successful execution.")
+            attempt = consume_validation_result(
+                attempt,
+                invocation,
+                (value.receipt,) if value.receipt is not None else (),
+                (value.gap,) if value.gap is not None else (),
+            )
+        except (AttributeError, TypeError, ValueError):
+            attempt = consume_validation_result(attempt, None, ())
+        item.payload["repository_validation_attempt"] = attempt
+        if attempt.pending is None:
+            item.payload.pop("repository_validation_local_request", None)
+        return True
+
+    @staticmethod
+    def _consume_repository_validation_ci_result(item: WorkItem, result: JobResult) -> bool:
+        """Consume owned CI callbacks before the coordinator assigns a state."""
+        pending = item.payload.get("repository_validation_ci_request")
+        receipt = result.value
+        if pending is None and not isinstance(receipt, RepositoryValidationCIRead):
+            return False
+        attempt = item.payload.get("repository_validation_attempt")
+        if type(attempt) is not RepositoryValidationAttempt:
+            item.payload["repository_validation_failure"] = "validation_attempt_missing"
+            return True
+        if type(pending) is ReadRepositoryValidationCIRequest and (
+            not result.ok or type(receipt) is not RepositoryValidationCIRead
+        ):
+            reason = "ci_callback_job_failed" if not result.ok else "ci_callback_result_missing"
+            attempt = consume_validation_result(
+                attempt, pending.invocation, (), (RepositoryValidationGap("*", reason),)
+            )
+        elif type(receipt) is RepositoryValidationCIRead and (
+            pending is None or receipt.request == pending
+        ):
+            attempt = consume_validation_result(
+                attempt, receipt.request.invocation, receipt.receipts, receipt.gaps
+            )
+        else:
+            attempt = consume_validation_result(attempt, None, ())
+        item.payload["repository_validation_attempt"] = attempt
+        if attempt.pending is None:
+            item.payload.pop("repository_validation_ci_request", None)
+        return True
 
     @staticmethod
     def _submit_host_verification(
@@ -430,6 +681,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
                 "issue_body": item.payload.get("issue_body", ""),
                 "pr_description": item.payload.get("pr_description", ""),
                 "advise_findings": item.payload.get("advise_findings", ""),
+                "repository_validation_json": _repository_validation_prompt_json(
+                    item, ctx.config.org
+                ),
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
@@ -624,6 +878,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
                 "diff_text": item.payload.get("pr_diff", ""),
                 "pr_title": pr_title,
                 "pr_description": pr_description,
+                "repository_validation_json": _repository_validation_prompt_json(
+                    item, ctx.config.org
+                ),
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
@@ -1060,6 +1317,10 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
         self, item: WorkItem, result: JobResult, ctx: StageContext
     ) -> None:
         """Store one completed job result for the current review wait state."""
+        if self._consume_repository_validation_ci_result(item, result):
+            return
+        if self._consume_repository_validation_local_result(item, result):
+            return
         if self._consume_scope_expansion_result(item, result):
             return
         if self._consume_review_worktree_cleanup_result(item, result):
@@ -1123,6 +1384,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
         """Store the review checkout barrier result when one is pending."""
         if not item.payload.pop("review_checkout_pending", None):
             return False
+        item.payload["review_checkout_ready"] = False
+        for key in ("review_change_records", "review_diff_base_sha", "review_target_base_sha"):
+            item.payload.pop(key, None)
         if not result.ok:
             item.payload["review_checkout_error"] = result.error or "checkout job failed"
             return True
@@ -1140,6 +1404,17 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
                 "checkout job returned no bound path manifest"
                 if changed_paths is None
                 else "checkout job returned an invalid path manifest"
+            )
+            ready = False
+        if (
+            ready
+            and normalized_paths is not None
+            and isinstance(value, dict)
+            and ("change_records" in value or item.repo.casefold() == "comet")
+            and not _store_review_source_manifest(item, value, normalized_paths)
+        ):
+            item.payload["review_checkout_error"] = (
+                "checkout job returned an invalid source manifest"
             )
             ready = False
         if ready and normalized_paths is not None:

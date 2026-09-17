@@ -17,12 +17,16 @@ PR diff:
 Host validation receipts:
 {{ host_verifications_block }}
 
+{% if repository_validation_block %}
+{% include "pr_review/repository_validation.j2" %}
+{% else %}
 The supplied receipts are the complete coordinator-bound host plan. A receipt
 is local evidence only when it has `ok: true`, `status: passed`, and the
 reviewed `head_sha`. Do not require an additional coordinator-bound receipt
 outside this supplied plan. Missing, skipped, or failed receipts in this
 supplied plan are evidence gaps. Do not run local checks in this read-only
 review.
+{% endif %}
 
 Find correctness, security, architecture, scope, and false-green test defects.
 Inspect every changed path and its full source from the current checkout.
