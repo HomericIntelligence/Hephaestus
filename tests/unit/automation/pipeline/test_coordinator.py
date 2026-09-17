@@ -70,7 +70,14 @@ from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkI
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
+from hephaestus.automation.review_journal import (
+    CommentJournalReadError,
+    IssueComment,
+    render_current_plan,
+    render_pending_review,
+)
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED, STATE_PLAN_GO
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -306,6 +313,7 @@ def make_coordinator(
     github: FakeStageGitHub | None = None,
     github_job_runner: Any | None = None,
     enable_learn: bool = True,
+    agent: str = "claude",
 ) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
     """Build a Coordinator wired to fakes, with seeding scripted per pass."""
     config = PipelineConfig(
@@ -318,6 +326,7 @@ def make_coordinator(
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         enable_learn=enable_learn,
+        agent=agent,
         projects_dir=tmp_path,
         rate_guard_enabled=False,
     )
@@ -328,6 +337,130 @@ def make_coordinator(
     )
     script_source_passes(coordinator, monkeypatch, seed_entries or [[]])
     return coordinator, pool, gh
+
+
+@pytest.mark.parametrize("failure", ["audit_write", "label_confirmation"])
+def test_restart_scope_rejection_retries_publication_without_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """A restart retries scope publication failures without a reviewer job."""
+
+    class FailFirstPublicationGitHub(FakeStageGitHub):
+        edit_count = 0
+        audit_count = 0
+
+        def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+            self.edit_count += 1
+            if failure == "label_confirmation" and self.edit_count == 1:
+                labels = self._issue_labels(issue_number)
+                labels.update(add)
+                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+                return
+            super().edit_labels(issue_number, add=add, remove=remove)
+
+        def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+            self.audit_count += 1
+            if failure == "audit_write" and self.audit_count == 1:
+                raise OSError("audit write failed")
+            super().upsert_issue_comment(*args, **kwargs)
+
+    github = FailFirstPublicationGitHub(labels=[STATE_PLAN_GO])
+    github.comments[41] = [
+        render_current_plan("## Exact file scope and ownership\n- `tests/unit/one.py`"),
+        render_pending_review(revision=1),
+    ]
+    coordinator, pool, _ = make_coordinator(
+        tmp_path,
+        monkeypatch,
+        github=github,
+        agent="codex",
+    )
+    item = _issue_item(41, StageName.PLAN_REVIEW)
+
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=True)
+    coordinator._drain_queues()
+
+    assert item.state == "EVAL"
+    expected_labels = (
+        {STATE_PLAN_GO, STATE_PLAN_BLOCKED}
+        if failure == "label_confirmation"
+        else {STATE_PLAN_BLOCKED}
+    )
+    assert github.labels[41] == expected_labels
+    assert len(coordinator.timers) == 1
+    assert pool.submitted == []
+
+    _deadline, sequence, parked_item = coordinator.timers[0]
+    coordinator.timers[0] = (0.0, sequence, parked_item)
+    coordinator._wake_timers()
+    coordinator._drain_queues()
+
+    assert item.result is not None
+    assert item.result.reason == "blocked: plan scope is invalid"
+    assert github.labels[41] == {STATE_PLAN_BLOCKED}
+    assert github.comments[41][-1].endswith(STATE_PLAN_BLOCKED)
+    assert "plan_scope_invalid" in github.comments[41][-1]
+    assert pool.submitted == []
+
+
+def test_restart_scope_rejection_retries_second_journal_read_without_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retry a failed identity read without losing the scope rejection."""
+
+    class FailSecondReadGitHub(FakeStageGitHub):
+        read_count = 0
+
+        def issue_comments(self, issue_number: int) -> list[IssueComment]:
+            self.read_count += 1
+            if self.read_count == 2:
+                raise CommentJournalReadError("temporary journal read failure")
+            return super().issue_comments(issue_number)
+
+    github = FailSecondReadGitHub(labels=[STATE_PLAN_GO])
+    plan_body = render_current_plan("## Exact file scope and ownership\n- `tests/unit/one.py`")
+    github.comments[41] = [plan_body, render_pending_review(revision=1)]
+    coordinator, pool, _ = make_coordinator(
+        tmp_path,
+        monkeypatch,
+        github=github,
+        agent="codex",
+    )
+    item = _issue_item(41, StageName.PLAN_REVIEW)
+
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=True)
+    coordinator._drain_queues()
+
+    assert github.read_count == 2
+    assert item.result is None
+    assert item.state == "EVAL"
+    assert len(coordinator.timers) == 1
+    assert github.labels[41] == {STATE_PLAN_GO}
+    assert github.mutation_log == []
+    assert pool.submitted == []
+    assert item.attempts.get("plan_review_iter", 0) == 0
+    assert item.payload.get("review_round", 0) == 0
+
+    _deadline, sequence, parked_item = coordinator.timers[0]
+    coordinator.timers[0] = (0.0, sequence, parked_item)
+    coordinator._wake_timers()
+    coordinator._drain_queues()
+
+    assert item.result is not None
+    assert item.result.reason == "blocked: plan scope is invalid"
+    assert github.labels[41] == {STATE_PLAN_BLOCKED}
+    assert github.comments[41][0] == plan_body
+    audit = github.comments[41][-1]
+    assert audit.endswith(STATE_PLAN_BLOCKED)
+    assert "plan_scope_invalid" in audit
+    assert "## Files to Modify" in audit
+    assert [entry[0] for entry in github.mutation_log] == [
+        "edit_labels",
+        "gh_issue_upsert_comment",
+    ]
+    assert pool.submitted == []
+    assert item.attempts.get("plan_review_iter", 0) == 0
+    assert item.payload.get("review_round", 0) == 0
 
 
 def _issue_item(
@@ -1739,6 +1872,23 @@ class TestFailBackRouting:
 
         assert item.stage is StageName.IMPLEMENTATION
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
+
+    def test_changed_plan_fail_back_forces_a_new_planning_epoch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The coordinator keeps plan drift through the planning handoff."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(4, StageName.PLAN_REVIEW)
+        coordinator._push_item(item, StageName.PLAN_REVIEW, enter=False)
+
+        coordinator._route(
+            claim_test_item(coordinator, item),
+            StageOutcome(Disposition.FAIL_BACK, "plan_changed"),
+        )
+
+        assert item.stage is StageName.PLANNING
+        assert len(coordinator.queues[StageName.PLANNING]) == 1
+        assert item.payload["update_plan_required"] is True
 
     def test_empty_pr_diff_routes_to_substantive_implementation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
