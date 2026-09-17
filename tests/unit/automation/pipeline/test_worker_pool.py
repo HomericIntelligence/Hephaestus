@@ -12065,7 +12065,7 @@ class TestGitOps:
         )
         assert result.ok is True
 
-    @pytest.mark.parametrize("mode", ["fresh", "adopted", "review"])
+    @pytest.mark.parametrize("mode", ["fresh", "adopted", "remote_adopted", "review"])
     def test_create_worktree_claims_an_intake_sibling_writer(
         self,
         pool: WorkerPool,
@@ -12078,14 +12078,26 @@ class TestGitOps:
 
         caller, remote = _make_repository(tmp_path)
         intake = _manager(caller, remote).prepare()
-        if mode != "fresh":
+        expected_head = intake.revision
+        if mode == "remote_adopted":
+            producer = tmp_path / "producer"
+            _run_git(tmp_path, "clone", str(remote), str(producer))
+            _run_git(producer, "config", "user.name", "Test User")
+            _run_git(producer, "config", "user.email", "test@example.invalid")
+            (producer / "adopted.txt").write_text("remote change\n", encoding="utf-8")
+            _run_git(producer, "add", "adopted.txt")
+            _run_git(producer, "commit", "-m", "remote change")
+            expected_head = _run_git(producer, "rev-parse", "HEAD").stdout.strip()
+            _run_git(producer, "push", str(remote), "HEAD:refs/heads/602-auto")
+            assert _run_git(caller, "cat-file", "-e", expected_head, check=False).returncode != 0
+        elif mode != "fresh":
             _run_git(caller, "push", str(remote), "HEAD:refs/heads/602-auto")
         if mode == "review":
             _run_git(caller, "remote", "set-url", "origin", str(remote))
         extra: dict[str, Any] = {}
-        if mode == "adopted":
+        if mode in {"adopted", "remote_adopted"}:
             extra.update(
-                sync_to_remote=True, pr_number=603, implementation_adoption_head=intake.revision
+                sync_to_remote=True, pr_number=603, implementation_adoption_head=expected_head
             )
         elif mode == "review":
             extra.update(isolated=True, pr_number=603)
@@ -12114,12 +12126,12 @@ class TestGitOps:
         lane = "review" if mode == "review" else "impl"
         writer = intake.state_root / "build" / ".worktrees" / f"auto-602-{lane}"
         assert result.value["path"] == str(writer)
-        assert _run_git(writer, "rev-parse", "HEAD").stdout.strip() == intake.revision
+        assert _run_git(writer, "rev-parse", "HEAD").stdout.strip() == expected_head
         if mode == "review":
             assert _run_git(writer, "branch", "--show-current").stdout.strip() == ""
         else:
             assert result.value["source_receipt"]["path"] == str(writer)
-            assert result.value["impl_source_revision"] == intake.revision
+            assert result.value["impl_source_revision"] == expected_head
             assert _run_git(writer, "branch", "--show-current").stdout.strip() == "602-auto"
         if mode == "fresh":
             from tests.unit.automation.test_remediation_recovery import (
@@ -12130,6 +12142,135 @@ class TestGitOps:
         assert _run_git(intake.path, "status", "--porcelain").stdout == ""
         _run_git(caller, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
         assert _manager(caller, remote).prepare().path == intake.path
+
+    @pytest.mark.parametrize("failure", ["validation", "transport"])
+    def test_adopted_head_fetch_failure_precedes_writer_transition(
+        self, pool: WorkerPool, completion_q: CompletionQueue, tmp_path: Path, failure: str
+    ) -> None:
+        """A failed fetch preserves source state and identifies the failed check."""
+        from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
+
+        caller, remote = _make_repository(tmp_path)
+        intake = _manager(caller, remote).prepare()
+        if failure == "validation":
+            _run_git(caller, "push", str(remote), "HEAD:refs/heads/602-auto")
+        job = GitJob(
+            repo="acme/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 602,
+                "branch_name": "602-auto",
+                "repo_root": str(intake.path),
+                "source_lane": "impl",
+                "sync_to_remote": True,
+                "pr_number": 603,
+                "implementation_adoption_head": "f" * 40,
+            },
+        )
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(
+                    {},
+                    ("-c", f"url.{remote}.insteadOf=https://github.com/acme/repo.git"),
+                ),
+            ),
+            patch.object(
+                SourceWorkspaceManager,
+                "authorize_adopted_implementation_writer_transition",
+                side_effect=AssertionError("authorization must follow a verified fetch"),
+            ) as authorize,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=30)
+        assert not result.ok
+        assert result.error == f"adopted_head_{failure}_failed"
+        assert result.value["failure_kind"] == "adopted_head_fetch"
+        assert result.value["source_workspace_creation_failure"] == "remote_refresh"
+        authorize.assert_not_called()
+        writer = intake.state_root / "build" / ".worktrees" / "auto-602-impl"
+        assert not writer.exists()
+        state = caller / ".git" / "hephaestus-source-workspaces"
+        assert not list(state.glob("*.json"))
+        assert _run_git(intake.path, "status", "--porcelain").stdout == ""
+        assert _run_git(intake.path, "rev-parse", "HEAD").stdout.strip() == intake.revision
+
+    def test_adopted_head_move_between_fetches_preserves_writer_transition(
+        self, pool: WorkerPool, completion_q: CompletionQueue, tmp_path: Path
+    ) -> None:
+        """A late remote change preserves the owned writer and recovery records."""
+        from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
+
+        caller, remote = _make_repository(tmp_path)
+        intake = _manager(caller, remote).prepare()
+        _run_git(caller, "push", str(remote), "HEAD:refs/heads/602-auto")
+
+        def submit(head: str) -> JobResult:
+            pool.submit(
+                GitJob(
+                    repo="acme/repo",
+                    op="create_worktree",
+                    timeout_s=60,
+                    kwargs={
+                        "issue_number": 602,
+                        "branch_name": "602-auto",
+                        "repo_root": str(intake.path),
+                        "source_lane": "impl",
+                        "sync_to_remote": True,
+                        "pr_number": 603,
+                        "implementation_adoption_head": head,
+                    },
+                ),
+                StageName.IMPLEMENTATION,
+            )
+            return completion_q.get(timeout=30)[1]
+
+        with patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ("-c", f"url.{remote}.insteadOf=https://github.com/acme/repo.git")),
+        ):
+            first = submit(intake.revision)
+            assert first.ok, first.error
+            writer = Path(first.value["path"])
+            state = caller / ".git" / "hephaestus-source-workspaces"
+            receipt = state / "602-impl.json"
+            old_receipt = receipt.read_bytes()
+            producer = tmp_path / "producer"
+            _run_git(tmp_path, "clone", str(remote), str(producer))
+            _run_git(producer, "config", "user.name", "Test User")
+            _run_git(producer, "config", "user.email", "test@example.invalid")
+            (producer / "tracked.txt").write_text("expected change\n", encoding="utf-8")
+            _run_git(producer, "commit", "-am", "expected change")
+            expected_head = _run_git(producer, "rev-parse", "HEAD").stdout.strip()
+            _run_git(producer, "push", str(remote), "HEAD:refs/heads/602-auto")
+            fetch_head = WorktreeManager.fetch_adopted_implementation_head
+            fetched: list[str] = []
+
+            def move_remote(manager: WorktreeManager, **kwargs: Any) -> None:
+                fetched.append(kwargs["expected_head"])
+                fetch_head(manager, **kwargs)
+                if len(fetched) == 1:
+                    (producer / "tracked.txt").write_text("later change\n", encoding="utf-8")
+                    _run_git(producer, "commit", "-am", "later change")
+                    _run_git(producer, "push", str(remote), "HEAD:refs/heads/602-auto")
+
+            with patch.object(WorktreeManager, "fetch_adopted_implementation_head", move_remote):
+                result = submit(expected_head)
+
+        assert fetched == [expected_head, expected_head]
+        assert not result.ok
+        assert result.error == "source_workspace_terminal"
+        assert result.value["failure_kind"] == "source_workspace_terminal"
+        assert result.value["source_workspace_creation_failure"] == "writer_receipt"
+        assert _run_git(writer, "rev-parse", "HEAD").stdout.strip() == intake.revision
+        assert (writer / "tracked.txt").read_text(encoding="utf-8") == "base\n"
+        assert receipt.read_bytes() == old_receipt
+        assert (state / "602-impl-transition.json").is_file()
+        assert (state / "602-impl-terminal.json").is_file()
+        assert _run_git(intake.path, "status", "--porcelain").stdout == ""
 
     @pytest.mark.parametrize("operation", ["inspect", "stash"])
     def test_intake_sibling_writer_inspection_and_recovery(

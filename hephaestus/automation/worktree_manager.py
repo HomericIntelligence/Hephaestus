@@ -105,6 +105,9 @@ class WorktreeCreationReceiptError(RuntimeError):
 
 
 BRANCH_WORKTREE_OWNED = "branch_worktree_owned"
+ADOPTED_HEAD_VALIDATION_FAILED = "adopted_head_validation_failed"
+ADOPTED_HEAD_TRANSPORT_FAILED = "adopted_head_transport_failed"
+ADOPTED_HEAD_FAILURES = frozenset({ADOPTED_HEAD_VALIDATION_FAILED, ADOPTED_HEAD_TRANSPORT_FAILED})
 
 
 class BranchWorktreeOwnedError(RuntimeError):
@@ -1576,23 +1579,10 @@ class WorktreeManager:
         except Exception as e:
             logger.debug("git worktree prune failed: %s", e)
 
-    def _add_authenticated_adopted_implementation_writer(  # noqa: C901
-        self,
-        *,
-        issue_number: int,
-        branch_name: str,
-        worktree_path: Path,
-        expected_head: str,
-        timeout: int | None,
-        implementation_writer_handoff: ImplementationWriterHandoff | None = None,
+    def fetch_adopted_implementation_head(
+        self, *, branch_name: str, expected_head: str, timeout: int | None
     ) -> None:
-        """Create one writer from the authenticated, exact adopted PR head.
-
-        This is the only exception to the normal implementation-lane rule
-        that rejects an existing branch. The worker supplies trusted Git
-        transport configuration and an exact head it obtained before create.
-        Check all remote facts before replacing a clean deterministic path.
-        """
+        """Fetch and verify the exact adopted head before writer changes."""
         if self._remote_git_env is None or not self._remote_git_config:
             raise WorktreeCreationReceiptError("implementation writer adoption transport is absent")
         remote_ref = f"refs/remotes/origin/{branch_name}"
@@ -1617,6 +1607,27 @@ class WorktreeManager:
         ).stdout.strip()
         if fetched_head != expected_head:
             raise WorktreeCreationReceiptError("implementation writer adoption head changed")
+
+    def _add_authenticated_adopted_implementation_writer(
+        self,
+        *,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        expected_head: str,
+        timeout: int | None,
+        implementation_writer_handoff: ImplementationWriterHandoff | None = None,
+    ) -> None:
+        """Create one writer from the authenticated, exact adopted PR head.
+
+        This is the only exception to the normal implementation-lane rule
+        that rejects an existing branch. The worker supplies trusted Git
+        transport configuration and an exact head it obtained before create.
+        Check all remote facts before replacing a clean deterministic path.
+        """
+        self.fetch_adopted_implementation_head(
+            branch_name=branch_name, expected_head=expected_head, timeout=timeout
+        )
         holder = self._worktree_holding_branch(branch_name, timeout=timeout)
         if holder is not None and holder.resolve() != worktree_path.resolve():
             raise BranchWorktreeOwnedError(branch_name, holder)
