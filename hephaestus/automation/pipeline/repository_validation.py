@@ -427,6 +427,11 @@ def _checked_invocation(invocation: RepositoryValidationInvocation) -> None:
     _require(invocation.request_id == _digest(invocation, "request_id"), "The invocation changed.")
 
 
+def validate_repository_validation_invocation(invocation: RepositoryValidationInvocation) -> None:
+    """Check the complete identity of an existing validation invocation."""
+    _checked_invocation(invocation)
+
+
 def _validate_terminal_gap(gap: RepositoryValidationGap, plan: RepositoryValidationPlan) -> None:
     _require(type(gap) is RepositoryValidationGap, "The terminal gap type is invalid.")
     _require(

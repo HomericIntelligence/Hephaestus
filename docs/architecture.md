@@ -1330,8 +1330,13 @@ PR #3006 bootstrap is retired. There is no target-specific grant, comment
 selector, or skip-to-pass path. Generic host receipts remain in
 [`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
 
-For `LLM360/comet`, the host first binds the detached source workspace, then
-builds an exact source-profile plan. No bootstrap grant is necessary. The plan
+For `LLM360/comet`, the coordinator first binds the detached source workspace.
+A closed `prepare_repository_validation` Git job then builds the exact
+source-profile plan on a worker. The worker holds the repository locks and
+the current review-lane lease. This read operation does not receive writer
+authority. The request binds the complete checkout manifest, both base
+identities, head, workspace, generation, and nonce. No bootstrap grant is
+necessary. The plan
 keeps applicable checks separate from the checks eligible for ordinary PR CI
 or offline local execution. Unknown or mixed control versions fail admission.
 See [ADR-0054](adr/0054-comet-review-validation.md) for profile and receipt rules.
@@ -1348,9 +1353,29 @@ and command steps must agree. `on_job_done()` consumes the result before the
 coordinator assigns `REPOSITORY_VALIDATION_CI_WAIT`. That wait handler evaluates
 coverage. Complete CI coverage proceeds without a local runtime lookup.
 
-Otherwise, each uncovered eligible check uses one `BuildTestJob` with
-repository-validation metadata. Its callback is also consumed before state
-assignment. The wait handler then selects the next check or proceeds to review.
+Otherwise, the coordinator reserves one local invocation. A separate
+`BuildTestJob` first admits the fixed runtime on a worker. Its preparation
+field is mutually exclusive with execution metadata. Admission returns only
+bound runtime metadata, not a validation receipt. The coordinator then submits
+the existing execution job with that metadata and the same invocation.
+Execution retains source inspection, isolation, runtime admission, and the
+immediate pre-launch recheck. The wait handler selects the next uncovered
+check or proceeds to review.
+
+Both preparation operations have a maximum 120-second budget. Their absolute
+deadlines include queue time, lock waits, and nested work. An expired budget
+cannot be renewed. The coordinator checks callback ownership and live identity
+before acceptance and again before the next job. A failed runtime admission
+creates a terminal gap. A foreign callback cannot replace an active request.
+
+The pure contracts are in
+[`repository_validation_preparation.py`](../hephaestus/automation/pipeline/repository_validation_preparation.py).
+The stage owner is
+[`pr_review_repository_validation.py`](../hephaestus/automation/pipeline/stages/pr_review_repository_validation.py).
+Pure coverage and prompt summaries are in
+[`pr_review_repository_validation_state.py`](../hephaestus/automation/pipeline/stages/pr_review_repository_validation_state.py).
+The effectful runtime adapter is outside the pure pipeline, in
+[`repository_validation_runtime.py`](../hephaestus/automation/repository_validation_runtime.py).
 
 Local Comet execution uses the existing isolation backend and a separately
 admitted sealed runtime at the fixed host capability path. Unlike the host's
@@ -1361,7 +1386,8 @@ install dependencies or use an unsandboxed fallback.
 
 The coordinator stores pending ownership before submission and consumes each
 callback before changing state. Invalid or failed evidence remains a gap.
-Restart clears the attempt. CI and local receipts can jointly cover the plan,
+Restart clears the attempt and preparation state. It starts again with source
+admission. CI and local receipts can jointly cover the plan,
 but source review remains separate. Both reviewer prompts receive a fenced
 summary that preserves the evidence kind. Clean evaluation, audit persistence,
 and implementation GO each require complete current coverage. Production
@@ -1406,8 +1432,12 @@ stateDiagram-v2
     ThreadGate --> Checkout: explicit operator broad review; preserve inherited threads
     Checkout --> Review: broad audit entry and clean snapshot matches H
     Checkout --> Validate: comment-validation entry and clean snapshot matches H
-    Checkout --> RepositoryValidation: Comet source binding and exact profile plan
-    RepositoryValidation --> RepositoryValidation: uncovered eligible local check
+    Checkout --> SourcePreparation: Comet bound checkout manifest
+    SourcePreparation --> RepositoryValidation: worker admits exact source plan
+    RepositoryValidation --> RuntimePreparation: uncovered eligible local check
+    RuntimePreparation --> RepositoryValidation: worker admits runtime; separate check execution
+    SourcePreparation --> Failed: stale ownership or invalid source plan
+    RuntimePreparation --> Failed: unavailable runtime or stale callback
     RepositoryValidation --> Review: complete coverage; broad audit
     RepositoryValidation --> Validate: complete coverage; comment validation
     RepositoryValidation --> Failed: invalid evidence or unavailable required capability
