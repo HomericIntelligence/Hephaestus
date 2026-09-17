@@ -261,12 +261,18 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
         checks = comet_ci_check_ids(plan.checks)
         if not checks:
             return self._repository_validation_ci_wait(item, ctx)
-        attempt, invocation = begin_validation_request(attempt, "ci", checks)
-        request = ReadRepositoryValidationCIRequest(
-            invocation,
-            str(item.payload.get("pr_head_branch") or ""),
-            operation_deadline_after(min(120, stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))),
-        )
+        try:
+            attempt, invocation = begin_validation_request(attempt, "ci", checks)
+            request = ReadRepositoryValidationCIRequest(
+                invocation,
+                item.branch,
+                operation_deadline_after(
+                    min(120, stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
+                ),
+            )
+        except (TypeError, ValueError):
+            item.payload["repository_validation_failure"] = "validation_preparation_invalid"
+            return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_source_gap")
         item.payload["repository_validation_attempt"] = attempt
         item.payload["repository_validation_ci_request"] = request
         return JobRequest(

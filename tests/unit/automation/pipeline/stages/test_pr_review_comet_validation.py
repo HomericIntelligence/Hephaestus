@@ -62,8 +62,9 @@ def _comet_checkout(root: Path) -> tuple[str, str]:
     return base, head
 
 
+@pytest.mark.parametrize("branch_case", ["admitted", "missing", "invalid"])
 def test_comet_empty_bootstrap_submits_bound_validation_before_review(
-    tmp_path: Path, make_ctx: Any, make_work_item: Any
+    tmp_path: Path, make_ctx: Any, make_work_item: Any, branch_case: str
 ) -> None:
     """Start validation after source binding without a bootstrap grant."""
     from hephaestus.automation.pipeline.jobs import GitJob, JobResult
@@ -94,7 +95,6 @@ def test_comet_empty_bootstrap_submits_bound_validation_before_review(
             "pr_head_sha": head,
             "pr_base_sha": base,
             "pr_base_branch": "main",
-            "pr_head_branch": "codex/comet-fixture",
             "reviewed_pr_base_sha": base,
             "review_target_base_sha": base,
             "review_diff_base_sha": base,
@@ -107,6 +107,12 @@ def test_comet_empty_bootstrap_submits_bound_validation_before_review(
     ctx = make_ctx(org="LLM360")
 
     stage = PrReviewStage()
+    with patch.object(ctx.github, "get_pr_head_branch", return_value="codex/comet-fixture"):
+        adoption = stage._adopt_direct_pr_worktree(item, ctx)
+    assert isinstance(adoption, JobRequest)
+    assert item.branch == "codex/comet-fixture"
+    stage.on_job_done(item, JobResult(ok=True, value={"path": str(root), "dirty": False}), ctx)
+    assert "pr_head_branch" not in item.payload
     with patch.object(
         pr_review_repository_validation, "source_workspace_binding", return_value=workspace
     ) as bind:
@@ -128,13 +134,23 @@ def test_comet_empty_bootstrap_submits_bound_validation_before_review(
     )
     assert "repository_validation_attempt" not in item.payload
     item.state = result.on_done_state
-    result = stage._repository_validation_source_wait(item, ctx)
+    if branch_case != "admitted":
+        item.branch = "" if branch_case == "missing" else "invalid\nbranch"
+    result = stage.step(item, ctx)
+    if branch_case != "admitted":
+        from hephaestus.automation.pipeline.stages.base import Disposition, StageOutcome
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "repository_validation_source_gap")
+        assert "repository_validation_ci_request" not in item.payload
+        assert ctx.github.mutation_log == []
+        return
     assert isinstance(result, JobRequest)
     assert isinstance(result.job, GitHubJob), (
         "Comet must collect bound validation before it starts source review."
     )
     assert result.on_done_state == "REPOSITORY_VALIDATION_CI_WAIT"
     assert isinstance(result.job.request, ReadRepositoryValidationCIRequest)
+    assert result.job.request.head_branch == "codex/comet-fixture"
     plan = result.job.request.plan
     assert isinstance(plan, RepositoryValidationPlan)
     assert plan.source_workspace == workspace
@@ -359,6 +375,7 @@ def _pending_ci_item(
     item = make_work_item(
         repo="comet", issue=plan.issue_number, pr=plan.pr_number, state=REVIEW_CHECKOUT_WAIT
     )
+    item.branch = "codex/repair"
     item.worktree = str(tmp_path)
     item.payload.update(
         {
@@ -368,7 +385,6 @@ def _pending_ci_item(
             "pr_head_sha": plan.reviewed_head,
             "reviewed_pr_base_sha": plan.reviewed_base,
             "pr_base_sha": plan.reviewed_base,
-            "pr_head_branch": "codex/repair",
             "reviewed_pr_proof_generation": 1,
         }
     )
