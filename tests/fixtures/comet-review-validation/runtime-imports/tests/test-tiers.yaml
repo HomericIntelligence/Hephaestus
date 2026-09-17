@@ -1,0 +1,6 @@
+version: 1
+baseline: {}
+pr_modules:
+  - tests/test_import_source.py
+nightly_modules:
+  - tests/test_nightly_placeholder.py

@@ -4,6 +4,10 @@ from hephaestus.automation.review_audit import is_clean_go_review
 
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
+from .pr_review_verification import (
+    _repository_validation_complete,
+    _repository_validation_required,
+)
 
 
 class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
@@ -36,6 +40,8 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
             # in-memory audit. A malformed payload is an agent failure, not
             # a NOGO result that can burn the review budget or write a label.
             return self._handle_error_verdict(item, audit)
+        if is_clean_go_review(audit) and not _repository_validation_complete(item, ctx.org):
+            return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_incomplete")
         correction_retry = bool(payload.pop(_ANCHOR_CORRECTION_RETRY, False))
         if not item.payload.get("reviewed_pr_head_sha"):
             # Addressing a finding or pushing a new commit clears the prior
@@ -374,9 +380,9 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         return None
 
     def _write_go(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        return self.write_go(item, ctx.github)
+        return self.write_go(item, ctx.github, org=ctx.org)
 
-    def write_go(self, item: WorkItem, github: Any) -> StepResult:  # noqa: C901 - proof gate
+    def write_go(self, item: WorkItem, github: Any, *, org: str | None = None) -> StepResult:  # noqa: C901 - proof gate
         """Atomically perform the reviewed-head GO proof and readback.
 
         This is the sole pipeline call site for the mechanical GO mutation.
@@ -385,6 +391,8 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        if not _repository_validation_complete(item, org):
+            return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_incomplete")
         pr_number = item.pr
         try:
             if github.list_unresolved_review_threads(pr_number):
@@ -402,6 +410,11 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item.payload.pop("reviewed_pr_head_sha", None)
                 item.payload.pop("reviewed_pr_node_id", None)
                 return Continue(next_state=REVIEW_WAIT)
+            if _repository_validation_required(item, org) and state.get(
+                "baseRefOid"
+            ) != item.payload.get("reviewed_pr_base_sha"):
+                item.payload["repository_validation_failure"] = "validation_base_changed"
+                return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_base_changed")
             github.mark_pr_implementation_go(pr_number)
             state = github.gh_pr_state(pr_number)
             if state is None:
@@ -415,6 +428,11 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item.payload.pop("reviewed_pr_head_sha", None)
                 item.payload.pop("reviewed_pr_node_id", None)
                 return Continue(next_state=REVIEW_WAIT)
+            if _repository_validation_required(item, org) and state.get(
+                "baseRefOid"
+            ) != item.payload.get("reviewed_pr_base_sha"):
+                item.payload["repository_validation_failure"] = "validation_base_changed"
+                return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_base_changed")
             if github.list_unresolved_review_threads(pr_number):
                 return StageOutcome(Disposition.FINISH_FAIL, "review_activity_changed")
             has_go, has_no_go = github.pr_has_implementation_state_label(pr_number)

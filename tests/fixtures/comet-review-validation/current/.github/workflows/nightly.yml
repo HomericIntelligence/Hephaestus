@@ -1,0 +1,93 @@
+name: nightly-tests
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-tests
+  cancel-in-progress: true
+
+jobs:
+  nightly:
+    name: nightly-tests
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record the tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "${actual_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::The checked-out commit does not match the workflow commit." >&2
+            exit 1
+          fi
+          printf 'commit_sha=%s\n' "${actual_sha}" > nightly-source.txt
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - name: Run the nightly test profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --locked --extra dev python scripts/ci/run-test-tier.py nightly \
+            -- --junitxml=nightly-junit.xml | tee nightly-duration.txt
+      - name: Upload nightly test evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-test-evidence
+          path: |
+            nightly-junit.xml
+            nightly-duration.txt
+            nightly-source.txt
+          if-no-files-found: warn
+
+  postgres:
+    needs: nightly
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/postgres-tests.yml
+
+  contract-selection:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      contract_matrix: ${{ steps.classify.outputs.contract_matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - id: classify
+        name: Select nightly contracts
+        env:
+          CHANGES0: ${{ runner.temp }}/deployed-input-changes0
+        run: |
+          : > "${CHANGES0}"
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py classify --changes0 "${CHANGES0}" --profile nightly --github-output "${GITHUB_OUTPUT}"
+
+  contracts:
+    needs: contract-selection
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/contracts.yml
+    with:
+      matrix: ${{ needs.contract-selection.outputs.contract_matrix }}
+      ref: ${{ github.sha }}

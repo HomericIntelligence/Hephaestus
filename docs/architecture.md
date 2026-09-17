@@ -1316,10 +1316,41 @@ failed receipt. It cannot become a passing skip. Other platforms remain
 fail-closed until a separately reviewed isolation backend exists. There is no
 unsandboxed fallback.
 
-Every PR uses the normal host-verification boundary. The completed PR #3006
-bootstrap is retired. There is no target-specific grant, comment selector, or
-skip-to-pass path. Generic host receipts remain in
+The Hephaestus profile uses the host-verification boundary above. The completed
+PR #3006 bootstrap is retired. There is no target-specific grant, comment
+selector, or skip-to-pass path. Generic host receipts remain in
 [`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
+
+For `LLM360/comet`, the host first binds the detached source workspace, then
+builds an exact source-profile plan. No bootstrap grant is necessary. The plan
+keeps applicable checks separate from the checks eligible for ordinary PR CI
+or offline local execution. Unknown or mixed control versions fail admission.
+See [ADR-0054](adr/0054-comet-review-validation.md) for profile and receipt rules.
+
+The submitted GitHub job collects two agreeing CI observations. The retained
+PR identity, reviewed head, target base, immutable merge parents, control bytes,
+and command steps must agree. `on_job_done()` consumes the result before the
+coordinator assigns `REPOSITORY_VALIDATION_CI_WAIT`. That wait handler evaluates
+coverage. Complete CI coverage proceeds without a local runtime lookup.
+
+Otherwise, each uncovered eligible check uses one `BuildTestJob` with
+repository-validation metadata. Its callback is also consumed before state
+assignment. The wait handler then selects the next check or proceeds to review.
+
+Local Comet execution uses the existing isolation backend and a separately
+admitted sealed runtime at the fixed host capability path. Unlike the host's
+working virtual environment, this runtime is explicitly bound and read-only.
+The reviewed source precedes installed packages for the main and nested Python
+processes. Permitted output uses bounded scratch storage; review does not
+install dependencies or use an unsandboxed fallback.
+
+The coordinator stores pending ownership before submission and consumes each
+callback before changing state. Invalid or failed evidence remains a gap.
+Restart clears the attempt. CI and local receipts can jointly cover the plan,
+but source review remains separate. Both reviewer prompts receive a fenced
+summary that preserves the evidence kind. Clean evaluation, audit persistence,
+and implementation GO each require complete current coverage. Production
+operations and repository merge gates retain their separate requirements.
 
 Every host-verification failure also upserts an automation-owned diagnostic on
 the pull request after the exact-head NOGO label is read back. The comment is
@@ -1360,7 +1391,12 @@ stateDiagram-v2
     ThreadGate --> Checkout: explicit operator broad review; preserve inherited threads
     Checkout --> Review: broad audit entry and clean snapshot matches H
     Checkout --> Validate: comment-validation entry and clean snapshot matches H
-    Checkout --> HostVerification: clean checkout matches snapshot head and fixed check is required
+    Checkout --> RepositoryValidation: Comet source binding and exact profile plan
+    RepositoryValidation --> RepositoryValidation: uncovered eligible local check
+    RepositoryValidation --> Review: complete coverage; broad audit
+    RepositoryValidation --> Validate: complete coverage; comment validation
+    RepositoryValidation --> Failed: invalid evidence or unavailable required capability
+    Checkout --> HostVerification: Hephaestus fixed check is required
     HostVerification --> Review: immutable snapshot verification passed
     HostVerification --> Implementation: confirmed test failure, after durable no-go, diagnostic, and checkout cleanup
     HostVerification --> Failed: boundary/setup failure, after durable no-go diagnostic and checkout cleanup

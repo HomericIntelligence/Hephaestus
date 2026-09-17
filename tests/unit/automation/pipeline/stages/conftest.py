@@ -29,7 +29,11 @@ from hephaestus.automation.implementation_go_audit_receipt import (
 )
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.events import StageEvent
-from hephaestus.automation.pipeline.github_jobs import MergeQueueReconciliation
+from hephaestus.automation.pipeline.github_jobs import (
+    MergeQueueReconciliation,
+    ReadRepositoryValidationCIRequest,
+    RepositoryValidationCIRead,
+)
 from hephaestus.automation.pipeline.merge_wait_admission import (
     VerifiedRepositoryDefaultBranch,
 )
@@ -222,6 +226,12 @@ class FakeStageGitHub(FakeGitHub):
         if shutdown is not None and shutdown.is_set():
             raise InterruptedError("test GitHub operation cancelled")
         yield
+
+    def read_repository_validation_ci(
+        self, request: ReadRepositoryValidationCIRequest
+    ) -> RepositoryValidationCIRead:
+        """Require each test to supply its own CI evidence."""
+        raise NotImplementedError("The test must supply CI evidence.")
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""

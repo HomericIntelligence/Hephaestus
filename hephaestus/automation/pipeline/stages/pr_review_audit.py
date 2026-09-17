@@ -11,13 +11,14 @@ from hephaestus.automation.review_finding_history import (
 )
 
 from .pr_review_threads import *
+from .pr_review_verification import _repository_validation_complete
 
 
 class PrReviewAudit:
     """Persist and publish clean-review audits without repeating review work."""
 
     @staticmethod
-    def _require_current_audit(item: WorkItem) -> Continue | None:
+    def _require_current_audit(item: WorkItem, ctx: StageContext) -> Continue | None:
         """Require active review evidence before a publication retry can advance."""
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = item.payload.get("pending_implementation_go_audit_head")
@@ -40,6 +41,7 @@ class PrReviewAudit:
             and is_full_commit_sha(head_sha)
             and item.payload.get("reviewed_pr_head_sha") == head_sha
             and records_are_valid
+            and _repository_validation_complete(item, ctx.org)
         ):
             return None
         # Keep the durable record. A new review can replace or reconcile it,
@@ -60,6 +62,8 @@ class PrReviewAudit:
         """Enter the durable audit receipt state after a clean structural proof."""
         if item.pr is None or item.issue is None:
             return self._fail_back_agent_error(item)  # type: ignore[attr-defined,no-any-return]
+        if not _repository_validation_complete(item, ctx.org):
+            return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_incomplete")
         logger.info(
             "pr_review:%d: clean structural audit; advancing PR #%d to merge wait",
             item.issue,
@@ -125,7 +129,7 @@ class PrReviewAudit:
 
     def _go_audit_receipt(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Persist the exact-head audit before applying the GO label."""
-        if recovery := self._require_current_audit(item):
+        if recovery := self._require_current_audit(item, ctx):
             return recovery
         if item.pr is None or item.issue is None:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
@@ -171,7 +175,7 @@ class PrReviewAudit:
 
     def _go_audit_publish(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Reconcile the public audit without repeating review or label writes."""
-        if recovery := self._require_current_audit(item):
+        if recovery := self._require_current_audit(item, ctx):
             return recovery
         if item.pr is None or item.issue is None:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")

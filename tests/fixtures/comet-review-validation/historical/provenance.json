@@ -1,0 +1,22 @@
+{
+  "attempt": 1,
+  "base": "c6e763f52180fdbae6bf6c42e7bb02de930054df",
+  "head": "5232ef57e729a6aa563f13d18e4dcba878bacd64",
+  "inputs": [
+    {
+      "path": "3088-plan-refresh/ci-provider-example.json",
+      "sha256": "4a90f9e4e181db433e1510bfd2f1dbcad37ab39419ce67201ca960e977ffc432"
+    },
+    {
+      "path": "3088-plan-refresh/ci-provider-example-jobs.json",
+      "sha256": "9639f66924c22ea61e40615983dbd2a62152edf6da926fa77c623ca767054a97"
+    },
+    {
+      "path": "pr1719-formal-review/evidence.json",
+      "sha256": "b2248ab42a8ef0043f3e1098ce180f0e9ab6a3b53d9638b8073de87b479fd65d"
+    }
+  ],
+  "normalization": "The PR state, number, branch names, and revisions are from the retained pre-merge GraphQL record. Repository objects are from the retained run at that source head. This is a normalized fixture, not an original REST pull-response capture. Immutable source trees and control blobs were read from the local Git object database. The merge witness is the retained GitHub commit response.",
+  "run": 35159405169,
+  "schema": "comet-historical-provider-fixture-v1"
+}

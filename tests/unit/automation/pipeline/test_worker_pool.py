@@ -11865,9 +11865,11 @@ class TestGitOps:
                     MagicMock(stdout=""),
                     MagicMock(stdout="d" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for stale base"),
-                    MagicMock(stdout="stale.py\0"),
                 ],
             ) as mock_run,
+            patch(
+                f"{_WP}._run_bounded_git_output", return_value=MagicMock(text="M\0stale.py\0")
+            ) as bounded,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -11877,8 +11879,11 @@ class TestGitOps:
             "ready": True,
             "head": "a" * 40,
             "base": "d" * 40,
+            "diff_base_sha": "d" * 40,
+            "target_base_sha": "c" * 40,
             "diff": "checkout diff for stale base",
             "changed_paths": ["stale.py"],
+            "change_records": [("M", "stale.py")],
         }
         assert mock_run.call_args_list[1].args[0] == [
             "git",
@@ -11901,6 +11906,8 @@ class TestGitOps:
             "main",
         ]
         assert mock_run.call_args_list[1].kwargs["env"] == controlled_env
+
+        assert bounded.call_args.kwargs["max_bytes"] == 8 * 1024 * 1024
 
     def test_verify_pr_review_checkout_returns_diff_bound_to_verified_head(
         self,
@@ -11932,9 +11939,12 @@ class TestGitOps:
                     MagicMock(stdout=""),
                     MagicMock(stdout="b" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for A"),
-                    MagicMock(stdout="old.py\0new.py\0"),
                 ],
             ) as mock_run,
+            patch(
+                f"{_WP}._run_bounded_git_output",
+                return_value=MagicMock(text="D\0old.py\0A\0new.py\0"),
+            ) as bounded,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -11944,8 +11954,11 @@ class TestGitOps:
             "ready": True,
             "head": "a" * 40,
             "base": "b" * 40,
+            "diff_base_sha": "b" * 40,
+            "target_base_sha": "b" * 40,
             "diff": "checkout diff for A",
             "changed_paths": ["old.py", "new.py"],
+            "change_records": [("D", "old.py"), ("A", "new.py")],
         }
         mock_sync.assert_called_once()
         assert mock_sync.call_args.args == (tmp_path, "70-existing")
@@ -11964,14 +11977,20 @@ class TestGitOps:
             "--binary",
             f"{'b' * 40}...{'a' * 40}",
         ]
-        assert mock_run.call_args_list[4].args[0] == [
+        assert bounded.call_args.args[0] == (
             "git",
+            "--no-replace-objects",
             "diff",
+            "--no-ext-diff",
+            "--no-textconv",
             "--no-renames",
-            "--name-only",
+            "--name-status",
             "-z",
-            f"{'b' * 40}...{'a' * 40}",
-        ]
+            "b" * 40,
+            "a" * 40,
+            "--",
+        )
+        assert bounded.call_args.kwargs["shutdown"] is pool._shutdown
 
     def test_verify_pr_review_checkout_reports_sync_failure(
         self,
@@ -25074,3 +25093,402 @@ def test_first_intake_preparation_releases_lease_when_retention_fails(
         pool._git_prepare_intake(job)
 
     assert events == ["enter", "exit"]
+
+
+def test_review_checkout_preserves_change_statuses_and_distinct_bases(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """Keep actual status records and both immutable base identities."""
+    repo, _, branchpoint = _worker_repository(tmp_path)
+    (repo / "added.py").write_text("VALUE = 1\n")
+    (repo / "tracked.txt").unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "change reviewed files")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "--detach", branchpoint)
+    (repo / "target.txt").write_text("target only\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "advance target")
+    target = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "--detach", head)
+    with (
+        patch.object(pool, "_sync_worktree_to_remote_branch"),
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+    ):
+        result = pool._git_verify_pr_review_checkout(
+            GitJob(
+                repo="comet",
+                op="verify_pr_review_checkout",
+                timeout_s=60,
+                kwargs={
+                    "worktree_path": str(repo),
+                    "branch": "main",
+                    "expected_head_sha": head,
+                    "expected_base_sha": target,
+                    "base_branch": "main",
+                    "pr_number": 77,
+                },
+            )
+        )
+    assert result.ok is True
+    assert result.value["changed_paths"] == ["added.py", "tracked.txt"]
+    assert result.value.get("change_records") == [("A", "added.py"), ("D", "tracked.txt")]
+    assert result.value.get("diff_base_sha") == branchpoint
+    assert result.value.get("target_base_sha") == target != branchpoint
+    assert result.value["base"] == branchpoint
+
+
+@pytest.mark.parametrize(
+    ("manifest", "accepted"),
+    [
+        ("", True),
+        ("T\0tracked.txt\0", True),
+        ("M\0tracked.txt", False),
+        ("M\0", False),
+        ("R100\0tracked.txt\0", False),
+        ("M\0tracked.txt\0A\0tracked.txt\0", False),
+        ("".join(f"A\0file-{index}.py\0" for index in range(4096)), True),
+        ("".join(f"A\0file-{index}.py\0" for index in range(4097)), False),
+    ],
+    ids=[
+        "empty",
+        "type-change",
+        "no-terminator",
+        "odd-fields",
+        "rename",
+        "duplicate",
+        "limit",
+        "over-limit",
+    ],
+)
+def test_review_checkout_bounds_status_manifest(
+    pool: WorkerPool, tmp_path: Path, manifest: str, accepted: bool
+) -> None:
+    """Keep bounded status records and reject incomplete or duplicate records."""
+    repo, _, head = _worker_repository(tmp_path)
+    with (
+        patch.object(pool, "_sync_worktree_to_remote_branch"),
+        patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
+        patch(f"{_WP}._run_bounded_git_output", return_value=MagicMock(text=manifest)),
+    ):
+        result = pool._git_verify_pr_review_checkout(
+            GitJob(
+                repo="Hephaestus",
+                op="verify_pr_review_checkout",
+                timeout_s=60,
+                kwargs={
+                    "worktree_path": str(repo),
+                    "branch": "main",
+                    "expected_head_sha": head,
+                    "expected_base_sha": head,
+                    "base_branch": "main",
+                    "pr_number": 77,
+                },
+            )
+        )
+    assert result.ok is accepted
+    if accepted:
+        assert len(result.value["changed_paths"]) == len(result.value["change_records"])
+    else:
+        assert result.value is None
+        assert result.error is not None
+        assert "manifest" in result.error
+
+
+def test_repository_validation_worker_rejects_runtime_before_subprocess(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """Reject an unavailable capability before source checks or legacy execution."""
+    from tests.unit.automation.pipeline.test_jobs import (
+        _repository_build_job,
+        _repository_execution,
+    )
+
+    job = _repository_build_job(_repository_execution(tmp_path))
+    with (
+        patch("subprocess.Popen", side_effect=AssertionError("No subprocess is allowed.")),
+        patch.object(
+            pool,
+            "_run_immutable_build_test",
+            side_effect=AssertionError("No legacy execution is allowed."),
+        ),
+    ):
+        result = pool._run_build_test(job)
+    assert not result.ok
+    assert result.error == "repository_validation_runtime_unavailable"
+    assert result.value.execution == job.repository_validation
+    assert result.value.gap.reason == "local_runtime_unavailable"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("argv", ("echo", "other")),
+        ("cwd", Path("/other")),
+        ("repo", "other"),
+        ("expected_head_sha", "0" * 40),
+        ("immutable_source", False),
+    ],
+)
+def test_repository_validation_worker_rechecks_frozen_job(
+    pool: WorkerPool, tmp_path: Path, field: str, value: Any
+) -> None:
+    """Reject a changed job even if its constructor already accepted metadata."""
+    from tests.unit.automation.pipeline.test_jobs import (
+        _repository_build_job,
+        _repository_execution,
+    )
+
+    job = _repository_build_job(_repository_execution(tmp_path))
+    object.__setattr__(job, field, value)
+    with (
+        patch("subprocess.Popen", side_effect=AssertionError("No subprocess is allowed.")),
+        patch.object(
+            pool,
+            "_run_immutable_build_test",
+            side_effect=AssertionError("No legacy execution is allowed."),
+        ),
+    ):
+        result = pool._run_build_test(job)
+    assert not result.ok
+    assert result.error == "repository_validation_metadata_invalid"
+
+
+@pytest.mark.parametrize(
+    "status", ["success", "failed", "runner_gap", "wrong_head", "no_source_proof"]
+)
+def test_repository_validation_worker_returns_attempt_bound_evidence(
+    pool: WorkerPool, tmp_path: Path, status: str
+) -> None:
+    """Correlate local evidence with the frozen attempt and actual isolation proof."""
+    from tests.unit.automation.pipeline.test_jobs import _repository_build_job
+    from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
+
+    trusted, execution = _execution_runtime(tmp_path)
+    job = _repository_build_job(execution)
+    value = {
+        "immutable_source": status != "no_source_proof",
+        "head_sha": "0" * 40 if status == "wrong_head" else execution.plan.reviewed_head,
+        "failure_kind": "runner" if status == "runner_gap" else "validation",
+        "status": "passed" if status == "success" else "failed",
+    }
+    raw = JobResult(
+        ok=status == "success", error=None if status == "success" else "rc=1", value=value
+    )
+    with (
+        patch(f"{_WP}._repository_validation_host_root", return_value=trusted, create=True),
+        patch(f"{_WP}.validate_workspace_binding", return_value=job.cwd, create=True) as source,
+        patch(
+            f"{_WP}.comet_plan_for_workspace", return_value=execution.plan, create=True
+        ) as controls,
+        patch.object(pool, "_run_immutable_build_test", return_value=raw) as runner,
+        patch("subprocess.Popen", side_effect=AssertionError("The test controls execution.")),
+    ):
+        result = pool._run_build_test(job)
+    source.assert_called_once()
+    controls.assert_called_once()
+    assert runner.call_args.kwargs["repository_runtime"].root == execution.runtime_root
+    assert result.value.execution == execution
+    if status in {"success", "failed"}:
+        assert result.value.receipt.status == status
+        assert result.value.receipt.evidence_kind == "local"
+        assert result.value.receipt.plan_id == execution.plan.plan_id
+        assert result.value.gap is None
+    else:
+        assert result.value.receipt is None
+        assert result.value.gap is not None
+        assert not result.ok
+
+
+@pytest.mark.parametrize("fault", ["workspace", "changed_plan"])
+def test_repository_validation_worker_rejects_source_before_execution(
+    pool: WorkerPool, tmp_path: Path, fault: str
+) -> None:
+    """Recheck workspace authority and complete immutable source controls."""
+    from hephaestus.agents.workspace import WorkspaceBindingError
+    from tests.unit.automation.pipeline.test_jobs import _repository_build_job
+    from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
+
+    trusted, execution = _execution_runtime(tmp_path)
+    job = _repository_build_job(execution)
+    changed = replace(execution.plan, reviewed_base="c" * 40)
+    with (
+        patch(f"{_WP}._repository_validation_host_root", return_value=trusted, create=True),
+        patch(
+            f"{_WP}.validate_workspace_binding",
+            side_effect=WorkspaceBindingError("changed") if fault == "workspace" else None,
+            return_value=job.cwd,
+            create=True,
+        ),
+        patch(f"{_WP}.comet_plan_for_workspace", return_value=changed, create=True),
+        patch.object(
+            pool,
+            "_run_immutable_build_test",
+            side_effect=AssertionError("No execution is allowed."),
+        ),
+        patch("subprocess.Popen", side_effect=AssertionError("No subprocess is allowed.")),
+    ):
+        result = pool._run_build_test(job)
+    assert not result.ok
+    assert result.value.receipt is None
+    assert result.value.gap.reason == "local_source_unavailable"
+
+
+@pytest.mark.parametrize("site_input", ["absent", "file", "symlink"])
+def test_repository_validation_darwin_uses_sealed_runtime_and_reviewed_imports(
+    pool: WorkerPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, site_input: str
+) -> None:
+    """Use the admitted tools, source imports, and bounded documentation output."""
+    from hephaestus.automation.pipeline.repository_validation_runtime import admit_execution_runtime
+    from tests.unit.automation.pipeline.test_jobs import _repository_build_job
+    from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
+
+    trusted, execution = _execution_runtime(tmp_path)
+    runtime = admit_execution_runtime(execution, trusted_root=trusted)
+    job = _repository_build_job(execution)
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-inherit")
+    monkeypatch.setenv("PYTHONPATH", "/stale/source")
+
+    @contextmanager
+    def scratch_space(root: Path, *args: Any) -> Iterator[Path]:
+        scratch = root / ("logs-fixture" if args else "scratch-fixture")
+        scratch.mkdir()
+        yield scratch
+
+    def extract(archive: Any, source: Path) -> None:
+        (source / "src").mkdir()
+        if site_input == "file":
+            (source / "site").write_text("tracked input", encoding="utf-8")
+        elif site_input == "symlink":
+            (source / "site").symlink_to(tmp_path / "outside")
+
+    def run(command: tuple[str, ...], **kwargs: Any) -> JobResult:
+        source, scratch, environment = kwargs["source"], kwargs["scratch"], kwargs["environment"]
+        assert command[1] == str(runtime.root / "environment/bin/uv")
+        assert environment["UV_PROJECT_ENVIRONMENT"] == str(runtime.root / "environment")
+        assert environment["PYTHONPATH"] == os.pathsep.join((str(source / "src"), str(source)))
+        assert environment["PYTHONNOUSERSITE"] == "1"
+        assert environment["UV_OFFLINE"] == environment["UV_NO_SYNC"] == "1"
+        assert "GITHUB_TOKEN" not in environment
+        assert environment["PATH"].split(os.pathsep)[0] == str(runtime.root / "environment/bin")
+        assert (source / "site").resolve() == (scratch / "site").resolve()
+        kwargs["pre_launch"]()
+        return JobResult(ok=True, value={"failure_kind": "none"})
+
+    with (
+        patch(f"{_WP}.sys.platform", "darwin"),
+        patch(f"{_WP}._repository_validation_host_root", return_value=trusted, create=True),
+        patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+        patch(
+            f"{_WP}._trusted_uv_executable", side_effect=AssertionError("No ambient uv is allowed.")
+        ),
+        patch(
+            f"{_WP}._verifier_owned_runtime_environment",
+            side_effect=AssertionError("No ambient runtime is allowed."),
+        ),
+        patch(
+            f"{_WP}._validated_git_exec_path",
+            return_value=("/usr/bin/git", Path("/usr/libexec/git-core"), Path("/dev/null")),
+        ),
+        patch(f"{_WP}._trusted_git_executable", return_value="/usr/bin/git"),
+        patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
+        patch(f"{_WP}._extract_immutable_archive", side_effect=extract),
+        patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "git-metadata"),
+        patch(f"{_WP}._quota_backed_scratch", side_effect=scratch_space),
+        patch(f"{_WP}._quota_backed_pi_smoke_logs", side_effect=scratch_space),
+        patch(
+            f"{_WP}._host_verification_command", side_effect=lambda **kw: ("sandbox", *kw["argv"])
+        ),
+        patch(f"{_WP}._run_bounded_host_command", side_effect=run) as runner,
+    ):
+        result = pool._run_immutable_build_test(job, repository_runtime=runtime)
+    if site_input == "absent":
+        assert result.ok and result.value["immutable_source"] is True
+        runner.assert_called_once()
+    else:
+        assert not result.ok
+        assert result.error == "repository_validation_output_conflict"
+        runner.assert_not_called()
+
+
+def test_repository_validation_linux_mounts_runtime_read_only(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """Use the existing Pyxis boundary with the admitted runtime and source imports."""
+    from hephaestus.automation.pipeline.repository_validation_runtime import admit_execution_runtime
+    from tests.unit.automation.pipeline.test_jobs import _repository_build_job
+    from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
+
+    trusted, execution = _execution_runtime(tmp_path)
+    runtime = admit_execution_runtime(execution, trusted_root=trusted)
+    job = _repository_build_job(execution)
+    metadata = PyxisImageMetadata(
+        path=(tmp_path / "image.sqsh").resolve(),
+        sha256="b" * 64,
+        container_image_id="sha256:" + "c" * 64,
+        container_image_reference="podman://sha256:" + "c" * 64,
+        containerfile_sha256="d" * 64,
+        source_revision="a" * 40,
+        launch_binding=MagicMock(),
+    )
+    pool._host_verification_pyxis_quota_root = tmp_path
+
+    def run(command: tuple[str, ...], **kwargs: Any) -> JobResult:
+        environment, source, scratch = kwargs["environment"], kwargs["source"], kwargs["scratch"]
+        mounts = next(arg for arg in command if arg.startswith("--container-mounts="))
+        runtime_path = runtime.root / "environment"
+        assert f"{runtime_path}:{runtime_path}:ro" in mounts.split("=", 1)[1].split(",")
+        assert str(runtime_path / "bin/uv") in command
+        assert environment["UV_PROJECT_ENVIRONMENT"] == str(runtime_path)
+        assert environment["PYTHONPATH"] == os.pathsep.join((str(source / "src"), str(source)))
+        assert environment["PYTHONNOUSERSITE"] == "1"
+        assert (source / "site").resolve() == (scratch / "site").resolve()
+        kwargs["pre_launch"]()
+        return JobResult(ok=True, value={"failure_kind": "none"})
+
+    with (
+        patch(f"{_WP}.sys.platform", "linux"),
+        patch(f"{_WP}._repository_validation_host_root", return_value=trusted, create=True),
+        patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+        patch(f"{_WP}._pyxis_runtime_available", return_value=True),
+        patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
+        patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
+        patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata),
+        patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
+        patch(f"{_WP}._extract_immutable_archive"),
+        patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata"),
+        patch(f"{_WP}._run_bounded_host_command", side_effect=run) as runner,
+    ):
+        result = pool._run_immutable_build_test(job, repository_runtime=runtime)
+    assert result.ok and result.value["immutable_source"] is True
+    runner.assert_called_once()
+
+
+@pytest.mark.parametrize("fault", ["content", "job"])
+def test_repository_validation_rechecks_runtime_before_launch(
+    pool: WorkerPool, tmp_path: Path, fault: str
+) -> None:
+    """Reject a runtime or job change after initial admission and before launch."""
+    from hephaestus.automation.pipeline.repository_validation_runtime import admit_execution_runtime
+    from tests.unit.automation.pipeline.test_jobs import _repository_build_job
+    from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
+
+    trusted, execution = _execution_runtime(tmp_path)
+    runtime = admit_execution_runtime(execution, trusted_root=trusted)
+    job = _repository_build_job(execution)
+    if fault == "content":
+        program = runtime.root / "environment/bin/uv"
+        program.chmod(0o755)
+        program.write_bytes(b"changed")
+        program.chmod(0o555)
+    else:
+        object.__setattr__(job, "argv", ("echo", "other"))
+    with (
+        patch(f"{_WP}._repository_validation_host_root", return_value=trusted),
+        patch("subprocess.Popen", side_effect=AssertionError("No subprocess is allowed.")),
+        pytest.raises(
+            worker_pool_module._HostVerificationBoundaryError,
+            match="repository_validation_runtime_changed",
+        ),
+    ):
+        pool._recheck_repository_runtime(job, runtime)

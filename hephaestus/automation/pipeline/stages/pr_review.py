@@ -48,7 +48,7 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate, Stage):
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
             return self._fail_back_agent_error(item)
         if item.state == ENTER and item.payload.get("pending_implementation_go_audit"):
-            return self._require_current_audit(item) or Continue(next_state=GO_AUDIT_RECEIPT)
+            return self._require_current_audit(item, ctx) or Continue(next_state=GO_AUDIT_RECEIPT)
         if (
             item.state == "ENTER"
             and item.payload.pop("scope_dependency_entry_reconciled", False)
@@ -69,9 +69,14 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate, Stage):
             # an existing PR review.
             return self._adopt_direct_pr_worktree(item, ctx)
 
-        if item.state in {"VALIDATE_WAIT", "EVAL", "POST", "POST_APPLY", "GO_AUDIT_RECEIPT"} and (
-            terminal := _reviewed_terminal_pr_outcome(item, ctx)
-        ):
+        if item.state in {
+            "REPOSITORY_VALIDATION_CI_WAIT",
+            "VALIDATE_WAIT",
+            "EVAL",
+            "POST",
+            "POST_APPLY",
+            "GO_AUDIT_RECEIPT",
+        } and (terminal := _reviewed_terminal_pr_outcome(item, ctx)):
             return terminal
         handler_name = _STEP_HANDLER_NAMES.get(item.state)
         if handler_name is not None:

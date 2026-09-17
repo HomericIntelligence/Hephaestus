@@ -29,6 +29,10 @@ from hephaestus.agents.workspace import (
 
 from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
 from .job_results import JobHandle, JobResult, ProcessFailureMetadata
+from .repository_validation import (
+    RepositoryValidationExecution,
+    validate_repository_validation_execution,
+)
 
 if TYPE_CHECKING:
     from hephaestus.agents.codex_isolation import CodexIsolationRequestV1
@@ -287,6 +291,8 @@ class BuildTestJob:
     Security: ``argv`` MUST NOT carry untrusted (issue-body-derived) strings.
     It is executed directly as a subprocess argument vector, so only the
     coordinator may construct these jobs, from vetted command templates.
+    Optional repository validation metadata binds one immutable check and its
+    sealed runtime. A job without that metadata keeps the legacy execution path.
     """
 
     repo: str
@@ -302,12 +308,35 @@ class BuildTestJob:
     # descriptor snapshot launcher. An empty value keeps fallback untrusted.
     verified_runner_source_revision: str | None = None
     descr: str = ""
+    repository_validation: RepositoryValidationExecution | None = None
 
     def __post_init__(self) -> None:
         """Normalize argv to a tuple so the job is deeply immutable/hashable."""
         if not isinstance(self.argv, tuple):
             # frozen dataclass: bypass the frozen __setattr__ for normalization
             object.__setattr__(self, "argv", tuple(self.argv))
+        validate_build_test_repository_validation(self)
+
+
+def validate_build_test_repository_validation(job: BuildTestJob) -> None:
+    """Reject job fields that conflict with repository validation metadata."""
+    execution = job.repository_validation
+    if execution is None:
+        return
+    check = validate_repository_validation_execution(execution)
+    plan = execution.plan
+    if (
+        type(job.repo) is not str
+        or job.repo.casefold() not in {plan.repository.casefold(), "comet"}
+        or job.cwd != plan.source_workspace.cwd
+        or job.argv != check.argv
+        or job.expected_head_sha != plan.reviewed_head
+        or job.immutable_source is not True
+        or job.verified_runner_source_revision is not None
+        or type(job.timeout_s) is not int
+        or job.timeout_s <= 0
+    ):
+        raise ValueError("The build job does not match its repository validation metadata.")
 
 
 @dataclass(frozen=True)
