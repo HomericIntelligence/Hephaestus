@@ -161,10 +161,8 @@ class RemediationReviewInput:
             raise ValueError("repository must be one canonical lowercase OWNER/REPOSITORY")
         _positive_identifier(self.issue_number, "issue_number")
         _positive_identifier(self.pr_number, "pr_number")
-        repo_root = _absolute_canonical_path(self.repo_root, "repo_root")
-        worktree = _absolute_canonical_path(self.worktree_path, "worktree_path")
-        if worktree != repo_root and repo_root not in worktree.parents:
-            raise ValueError("worktree_path must be inside repo_root")
+        _absolute_canonical_path(self.repo_root, "repo_root")
+        _absolute_canonical_path(self.worktree_path, "worktree_path")
         if (
             not isinstance(self.branch, str)
             or not self.branch

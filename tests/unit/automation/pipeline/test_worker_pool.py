@@ -5989,7 +5989,9 @@ class TestGitOps:
         )
         instance = MagicMock()
         instance.create_worktree.return_value = writer
+        select_base = WorktreeManager.default_base_dir
         with patch(f"{_WP}.WorktreeManager", return_value=instance) as mock_manager:
+            mock_manager.default_base_dir.side_effect = select_base
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -9905,6 +9907,7 @@ class TestGitOps:
         remote_env = {"GIT_TERMINAL_PROMPT": "0"}
         remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
 
+        select_base = WorktreeManager.default_base_dir
         with (
             patch.object(
                 pool,
@@ -9913,6 +9916,7 @@ class TestGitOps:
             ) as authenticate,
             patch(f"{_WP}.WorktreeManager", return_value=manager) as manager_type,
         ):
+            manager_type.default_base_dir.side_effect = select_base
             result = pool._git_create_worktree(job)
 
         assert result.ok is True
@@ -11043,8 +11047,9 @@ class TestGitOps:
                 "source_lane": "impl",
             },
         )
+        select_base = WorktreeManager.default_base_dir
         with (
-            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager) as manager_type,
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
             patch.object(
                 pool,
@@ -11052,6 +11057,7 @@ class TestGitOps:
                 return_value=({}, ("-c", "credential.helper=")),
             ),
         ):
+            manager_type.default_base_dir.side_effect = select_base
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -11102,8 +11108,9 @@ class TestGitOps:
                 "source_lane": "impl",
             },
         )
+        select_base = WorktreeManager.default_base_dir
         with (
-            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager) as manager_type,
             patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
             patch.object(
                 pool,
@@ -11111,6 +11118,7 @@ class TestGitOps:
                 return_value=({}, ("-c", "credential.helper=")),
             ) as authentication,
         ):
+            manager_type.default_base_dir.side_effect = select_base
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -11417,6 +11425,7 @@ class TestGitOps:
         worktree_manager = MagicMock()
         worktree_manager.create_worktree.return_value = writer_path
         source_manager = MagicMock()
+        source_manager.path_for.return_value = writer_path
         source_manager.claim_implementation_writer.side_effect = SourceWorkspaceError("mismatch")
         with (
             patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
@@ -12041,10 +12050,12 @@ class TestGitOps:
         instance = MagicMock()
         ambient_root, writer, _head = self._inspection_writer(tmp_path, "7-auto")
         instance.create_worktree.return_value = writer
+        select_base = WorktreeManager.default_base_dir
         with (
             patch(f"{_WP}.WorktreeManager", return_value=instance) as mock_manager,
             patch(f"{_WP}.get_repo_root", return_value=ambient_root),
         ):
+            mock_manager.default_base_dir.side_effect = select_base
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -12053,6 +12064,123 @@ class TestGitOps:
             repo_root=ambient_root,
         )
         assert result.ok is True
+
+    @pytest.mark.parametrize("mode", ["fresh", "adopted", "review"])
+    def test_create_worktree_claims_an_intake_sibling_writer(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        mode: str,
+    ) -> None:
+        """The worker claims its verified path without changing intake files."""
+        from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
+
+        caller, remote = _make_repository(tmp_path)
+        intake = _manager(caller, remote).prepare()
+        if mode != "fresh":
+            _run_git(caller, "push", str(remote), "HEAD:refs/heads/602-auto")
+        if mode == "review":
+            _run_git(caller, "remote", "set-url", "origin", str(remote))
+        extra: dict[str, Any] = {}
+        if mode == "adopted":
+            extra.update(
+                sync_to_remote=True, pr_number=603, implementation_adoption_head=intake.revision
+            )
+        elif mode == "review":
+            extra.update(isolated=True, pr_number=603)
+        job = GitJob(
+            repo="acme/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 602,
+                "branch_name": "602-auto",
+                "repo_root": str(intake.path),
+                "source_lane": "review" if mode == "review" else "impl",
+                **extra,
+            },
+        )
+        with patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ("-c", f"url.{remote}.insteadOf=https://github.com/acme/repo.git")),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=30)
+
+        assert result.ok, result.error
+        assert isinstance(result.value, dict)
+        lane = "review" if mode == "review" else "impl"
+        writer = intake.state_root / "build" / ".worktrees" / f"auto-602-{lane}"
+        assert result.value["path"] == str(writer)
+        assert _run_git(writer, "rev-parse", "HEAD").stdout.strip() == intake.revision
+        if mode == "review":
+            assert _run_git(writer, "branch", "--show-current").stdout.strip() == ""
+        else:
+            assert result.value["source_receipt"]["path"] == str(writer)
+            assert result.value["impl_source_revision"] == intake.revision
+            assert _run_git(writer, "branch", "--show-current").stdout.strip() == "602-auto"
+        if mode == "fresh":
+            from tests.unit.automation.test_remediation_recovery import (
+                _assert_sibling_remediation_records,
+            )
+
+            _assert_sibling_remediation_records(intake.path, result.value["source_receipt"])
+        assert _run_git(intake.path, "status", "--porcelain").stdout == ""
+        _run_git(caller, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+        assert _manager(caller, remote).prepare().path == intake.path
+
+    @pytest.mark.parametrize("operation", ["inspect", "stash"])
+    def test_intake_sibling_writer_inspection_and_recovery(
+        self, pool: WorkerPool, tmp_path: Path, operation: str
+    ) -> None:
+        """Inspection and recovery use the same verified sibling writer."""
+        from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
+
+        caller, remote = _make_repository(tmp_path)
+        intake = _manager(caller, remote).prepare()
+        writer = intake.state_root / "build" / ".worktrees" / "auto-602-impl"
+        _run_git(intake.path, "worktree", "add", "-b", "602-auto", str(writer), intake.revision)
+        (writer / "tracked.txt").write_text("changed\n", encoding="utf-8")
+        kwargs: dict[str, Any] = {
+            "repo_root": str(intake.path),
+            "worktree_path": str(writer),
+            "branch": "602-auto",
+            "issue_number": 602,
+        }
+        if operation == "inspect":
+            kwargs["expected_head"] = intake.revision
+            result = pool._git_inspect_implementation_worktree(
+                GitJob(
+                    repo="acme/repo",
+                    op="inspect_implementation_worktree",
+                    timeout_s=60,
+                    kwargs=kwargs,
+                )
+            )
+            assert result.ok, result.error
+            assert result.value["outcome"] == "dirty"
+            assert (writer / "tracked.txt").read_text(encoding="utf-8") == "changed\n"
+        else:
+            kwargs.update(
+                action="STASH",
+                pre_action_head=intake.revision,
+                expected_remote_head=intake.revision,
+                status=_run_git(writer, "status", "--short").stdout,
+                diff=_run_git(writer, "diff").stdout,
+                content_snapshot=_dirty_worktree_content_snapshot(writer, timeout=60),
+            )
+            with patch.object(pool, "_read_remote_branch_head", return_value=intake.revision):
+                result = pool._git_recover_dirty_worktree(
+                    GitJob(
+                        repo="acme/repo", op="recover_dirty_worktree", timeout_s=60, kwargs=kwargs
+                    )
+                )
+            assert result.ok, result.error
+            assert result.value["stash_object"]
+            assert _run_git(writer, "status", "--porcelain").stdout == ""
+        assert _run_git(intake.path, "status", "--porcelain").stdout == ""
 
     def test_create_worktree_escaped_repo_root_fails(
         self,

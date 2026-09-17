@@ -220,7 +220,11 @@ from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
-from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
+from hephaestus.automation.repo_intake import (
+    RepoIntakeError,
+    RepoIntakeManager,
+    repository_worker_path_is_valid,
+)
 from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
@@ -6981,8 +6985,12 @@ class WorkerPool:
                 or resolved_root != repo_root
                 or resolved_checkout != checkout
                 or (
-                    resolved_checkout != resolved_root
-                    and resolved_root not in resolved_checkout.parents
+                    not repository_worker_path_is_valid(
+                        resolved_root,
+                        resolved_checkout,
+                        repository=review_input.repository,
+                        item_number=review_input.issue_number,
+                    )
                 )
                 or review_input.repository != job.transport_repository.casefold()
             ):
@@ -11676,7 +11684,21 @@ class WorkerPool:
                 )
             return JobResult(ok=False, error="worktree manager returned no worktree")
         worktree_path = Path(created)
-        if repo_root not in worktree_path.parents and worktree_path != repo_root:
+        valid_path = repository_worker_path_is_valid(
+            repo_root,
+            worktree_path,
+            repository=source_repository or repo,
+            item_number=item_number if isinstance(item_number, int) else None,
+            lane=source_lane if isinstance(source_lane, str) else "",
+        )
+        if source_lane == "impl" and source_manager is not None:
+            valid_path = valid_path and (
+                isinstance(item_number, int)
+                and not isinstance(item_number, bool)
+                and worktree_path == source_manager.path_for(item_number, SourceLane.IMPLEMENTATION)
+                and worktree_path.resolve(strict=False) == worktree_path
+            )
+        if not valid_path:
             error = (
                 f"worktree {worktree_path} escaped resolved repo root {repo_root} "
                 f"for job.repo={repo!r}"
@@ -12079,6 +12101,13 @@ class WorkerPool:
                 _portable_path_identity(worktree, directory=True)
             confined_root = repo_root.resolve(strict=True)
             confined_worktree = worktree.resolve(strict=True)
+            raw_item = job.kwargs.get("issue_number")
+            valid_worker_path = repository_worker_path_is_valid(
+                repo_root,
+                worktree,
+                repository=job.repo or job.transport_repository,
+                item_number=raw_item if isinstance(raw_item, int) else None,
+            )
         except (OSError, RuntimeError) as exc:
             return fail("worktree_unavailable", str(exc))
         if (
@@ -12089,7 +12118,7 @@ class WorkerPool:
             or not confined_worktree.is_dir()
             or not (confined_worktree / ".git").exists()
             or confined_worktree == confined_root
-            or confined_root not in confined_worktree.parents
+            or not valid_worker_path
         ):
             return fail("worktree_unconfined", "worktree is outside the repository root")
         try:
@@ -12199,18 +12228,21 @@ class WorkerPool:
                 "recovery requires action, branch, issue, and exact heads",
             )
         try:
-            confined_root = repo_root.resolve(strict=True)
+            repo_root.resolve(strict=True)
             confined_worktree = worktree.resolve(strict=True)
-        except OSError as exc:
+            valid_worker_path = repository_worker_path_is_valid(
+                repo_root,
+                worktree,
+                repository=job.repo or job.transport_repository,
+                item_number=issue_number,
+            )
+        except (OSError, RuntimeError) as exc:
             return fail("worktree_unavailable", str(exc))
         if (
             worktree.is_symlink()
             or not confined_worktree.is_dir()
             or not (confined_worktree / ".git").exists()
-            or (
-                confined_worktree != confined_root
-                and confined_root not in confined_worktree.parents
-            )
+            or not valid_worker_path
         ):
             return fail("worktree_unconfined", "worktree is outside the repository root")
         worktree = confined_worktree

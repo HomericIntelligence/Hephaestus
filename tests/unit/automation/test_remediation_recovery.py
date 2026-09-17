@@ -1611,3 +1611,122 @@ def test_unchanged_head_progress_rejects_invalid_alternate_thread_id(alternate: 
     body = marker + "\n<!-- " + json.dumps(payload) + " -->"
     with pytest.raises(ValueError, match="unchanged-head reply journal progress is invalid"):
         _read_unchanged_head_batch(body)
+
+
+@pytest.mark.precommit
+def test_recovery_input_decodes_sibling_paths_without_filesystem_access(tmp_path: Path) -> None:
+    """Canonical source identities can name separate intake and worker trees."""
+    root = tmp_path / "absent" / "worktree"
+    writer = root.parent / "build" / ".worktrees" / "auto-3009-impl"
+    value = _review_input(repo_root=str(root), worktree_path=str(writer))
+
+    assert value.repo_root == str(root)
+    assert value.worktree_path == str(writer)
+    assert not root.parent.exists()
+
+
+def _assert_sibling_remediation_records(repo_root: Path, raw_source: object) -> None:
+    """Round-trip records for a writer that the worker has already claimed."""
+    from hephaestus.automation import remediation_prepublication as store
+    from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
+
+    assert isinstance(raw_source, dict)
+    source = SourceWorkspaceReceipt.from_dict(raw_source)
+    assert source.branch is not None
+    raw = source.to_dict()
+    payload = _pretest_payload(repo_root)
+    payload.update(
+        repository=source.repository,
+        issue_number=source.item_number,
+        pr_number=603,
+        worktree_path=str(source.path),
+        branch=source.branch,
+        expected_remote_sha=source.revision,
+        source_receipt=raw,
+        source_receipt_sha256=hashlib.sha256(
+            json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        source_repository_identity=source.repository_identity,
+        source_ownership_key=source.ownership_key,
+        source_generation=source.generation,
+    )
+    candidate = store.RemediationPretestCandidate.from_dict(payload)
+    store.save_pretest_candidate(repo_root=repo_root, candidate=candidate)
+    assert store.load_pretest_candidate(repo_root=repo_root, pr_number=603) == candidate
+    review_input = _review_input(
+        repository=source.repository,
+        issue_number=source.item_number,
+        pr_number=603,
+        repo_root=str(repo_root),
+        worktree_path=str(source.path),
+        branch=source.branch,
+        reviewed_parent_sha=source.revision,
+    )
+    receipt = _recovery_receipt(review_input)
+    binding: dict[str, Any] = {
+        "repo_root": repo_root,
+        "repository": source.repository,
+        "issue_number": source.item_number,
+        "pr_number": 603,
+        "branch": source.branch,
+        "expected_remote_sha": source.revision,
+        "thread_snapshot_json": review_input.thread_snapshot_json,
+    }
+    store.save_prepublication_intent(
+        **binding,
+        worktree_path=source.path,
+        candidate_tree_sha=review_input.candidate_tree_sha,
+        add_paths=receipt.add_paths,
+        update_paths=receipt.update_paths,
+        committed_diff_sha256=review_input.committed_diff_sha256,
+        committed_diff=review_input.committed_diff,
+        failure_diagnostic=review_input.failure_diagnostic,
+        content_snapshot=receipt.content_snapshot,
+        batch_nonce="4" * 32,
+    )
+    intent = store.load_prepublication_intent(**binding)
+    assert intent is not None and intent.worktree_path == str(source.path)
+    store.save_prepublication_receipt(repo_root=repo_root, receipt=receipt, batch_nonce="4" * 32)
+    assert store.load_prepublication_receipt(**binding) == (receipt, "4" * 32, False)
+
+
+@pytest.mark.precommit
+@pytest.mark.parametrize("kind", ["intent", "pretest"])
+def test_host_record_save_rejects_source_root_as_writer(tmp_path: Path, kind: str) -> None:
+    """Intent and pretest writes retain their strict worker-path boundary."""
+    from hephaestus.automation import remediation_prepublication as store
+
+    if kind == "pretest":
+        payload = _pretest_payload(tmp_path)
+        payload["worktree_path"] = str(tmp_path)
+        raw = payload["source_receipt"]
+        raw["path"] = str(tmp_path)
+        payload["source_receipt_sha256"] = hashlib.sha256(
+            json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        candidate = store.RemediationPretestCandidate.from_dict(payload)
+        with pytest.raises(ValueError, match="worker path"):
+            store.save_pretest_candidate(repo_root=tmp_path, candidate=candidate)
+    else:
+        review_input = _review_input(repo_root=str(tmp_path), worktree_path=str(tmp_path))
+        receipt = _recovery_receipt(review_input)
+        with pytest.raises(ValueError, match="worker path"):
+            store.save_prepublication_intent(
+                repo_root=tmp_path,
+                repository=review_input.repository,
+                issue_number=review_input.issue_number,
+                pr_number=review_input.pr_number,
+                worktree_path=tmp_path,
+                branch=review_input.branch,
+                expected_remote_sha=review_input.reviewed_parent_sha,
+                candidate_tree_sha=review_input.candidate_tree_sha,
+                add_paths=receipt.add_paths,
+                update_paths=receipt.update_paths,
+                committed_diff_sha256=review_input.committed_diff_sha256,
+                committed_diff=review_input.committed_diff,
+                failure_diagnostic=review_input.failure_diagnostic,
+                thread_snapshot_json=review_input.thread_snapshot_json,
+                content_snapshot=receipt.content_snapshot,
+                batch_nonce="4" * 32,
+            )
+    assert not (tmp_path / DEFAULT_STATE_DIR).exists()

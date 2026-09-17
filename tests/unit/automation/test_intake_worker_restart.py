@@ -75,3 +75,106 @@ def test_intake_fixture_does_not_use_the_hook_index(
 
     assert index.read_bytes() == before
     assert config.read_bytes() == config_before
+
+
+@pytest.mark.precommit
+def test_intake_remediation_store_preserves_clean_source(tmp_path: Path) -> None:
+    """Host remediation records must not change the intake source tree."""
+    from hephaestus.automation.remediation_prepublication import prepublication_private_git_dir
+
+    caller, remote = _make_repository(tmp_path)
+    intake = _manager(caller, remote).prepare()
+    store = prepublication_private_git_dir(repo_root=intake.path, pr_number=603, create=True)
+
+    assert store.is_relative_to(intake.state_root)
+    assert not store.is_relative_to(intake.path)
+    assert _run_git(intake.path, "status", "--porcelain").stdout == ""
+    assert _manager(caller, remote).prepare().path == intake.path
+
+
+@pytest.mark.precommit
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "review",
+        "nested",
+        "wrong-item",
+        "foreign-git",
+        "symlink-root",
+        "missing-item",
+        "symlink-worker",
+    ],
+)
+def test_intake_worker_host_path_authority(tmp_path: Path, case: str) -> None:
+    """Only the verified item path and Git identity supply worker authority."""
+    from hephaestus.automation.repo_intake import repository_worker_path_is_valid
+
+    caller, remote = _make_repository(tmp_path)
+    intake = _manager(caller, remote).prepare()
+    root = intake.path
+    worker = intake.state_root / "build" / ".worktrees" / "auto-602-impl"
+    if case == "review":
+        worker = worker.with_name("auto-602-review")
+    if case == "nested":
+        worker = root / "build" / ".worktrees" / "auto-602-impl"
+    if case == "foreign-git":
+        worker.mkdir(parents=True)
+        _run_git(worker, "init", "--initial-branch=master")
+    else:
+        _run_git(root, "worktree", "add", "-b", "worker", str(worker), intake.revision)
+    if case == "symlink-root":
+        root = tmp_path / "root-link"
+        root.symlink_to(intake.path, target_is_directory=True)
+    if case == "symlink-worker":
+        alias = worker.with_name("auto-603-impl")
+        alias.symlink_to(worker, target_is_directory=True)
+        worker = alias
+
+    admitted = repository_worker_path_is_valid(
+        root,
+        worker,
+        repository="acme/repo",
+        item_number=None
+        if case == "missing-item"
+        else 603
+        if case in {"wrong-item", "symlink-worker"}
+        else 602,
+        lane="review" if case == "review" else "impl",
+    )
+
+    assert admitted is (case in {"valid", "review"})
+
+
+@pytest.mark.precommit
+def test_intake_worker_host_path_requires_its_receipt(tmp_path: Path) -> None:
+    """Nested paths must not bypass missing intake ownership evidence."""
+    from hephaestus.automation.repo_intake import repository_worker_path_is_valid
+
+    caller, remote = _make_repository(tmp_path)
+    intake = _manager(caller, remote).prepare()
+    (intake.state_root / "receipt.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(RepoIntakeError):
+        repository_worker_path_is_valid(
+            intake.path, intake.path / "nested", repository="acme/repo", item_number=602
+        )
+
+
+@pytest.mark.precommit
+def test_intake_remediation_preserves_legacy_store(tmp_path: Path) -> None:
+    """A legacy record requires explicit recovery before new storage is used."""
+    from hephaestus.automation.models import DEFAULT_STATE_DIR
+    from hephaestus.automation.remediation_prepublication import prepublication_private_git_dir
+
+    caller, remote = _make_repository(tmp_path)
+    intake = _manager(caller, remote).prepare()
+    legacy = intake.path / DEFAULT_STATE_DIR
+    legacy.mkdir(parents=True)
+    record = legacy / "preserve.json"
+    record.write_text("legacy evidence\n", encoding="utf-8")
+
+    with pytest.raises(RepoIntakeError, match="legacy"):
+        prepublication_private_git_dir(repo_root=intake.path, pr_number=603, create=True)
+
+    assert record.read_text(encoding="utf-8") == "legacy evidence\n"
