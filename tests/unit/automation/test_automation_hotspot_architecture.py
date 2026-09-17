@@ -348,6 +348,57 @@ def test_merge_policy_value_dependencies_remain_pure() -> None:
     assert violations == []
 
 
+def _publication_data_import_violations(source: str) -> tuple[str, ...]:
+    """Find imports that add dependencies to fixed diagnostic data."""
+    violations: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            violations.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if (
+                node.level == 0
+                and node.module == "__future__"
+                and all(alias.name == "annotations" for alias in node.names)
+            ):
+                continue
+            violations.append(f"{node.level}:{node.module}")
+    return tuple(violations)
+
+
+def test_publication_data_dependencies_remain_pure() -> None:
+    """Keep fixed diagnostic nodes independent of runtime execution."""
+    path = (
+        _ROOT / "hephaestus/automation/pipeline/stages/pr_review_verification_publication_specs.py"
+    )
+    assert _publication_data_import_violations(path.read_text(encoding="utf-8")) == ()
+
+
+def test_publication_data_guard_accepts_annotations_and_literal_data() -> None:
+    """Future annotations and fixed data require no runtime dependency."""
+    source = 'from __future__ import annotations\nNODES: tuple[str, ...] = ("node",)\n'
+    assert _publication_data_import_violations(source) == ()
+
+
+def test_publication_data_guard_rejects_runtime_imports() -> None:
+    """Reject runtime, stage, transport, and process dependencies."""
+    sources = (
+        "import hephaestus.agents.runtime",
+        "from hephaestus.agents import runtime",
+        "import hephaestus.automation.pipeline.stages.pr_review",
+        "from .pr_review import PrReviewStage",
+        "from . import pr_review",
+        "import hephaestus.automation.pipeline_github_transport",
+        "from hephaestus.automation import pipeline_github_transport",
+        "import subprocess",
+        "from subprocess import run",
+        "if True:\n    import subprocess",
+        "def load():\n    from subprocess import run",
+        "from __future__ import annotations, division",
+    )
+    for source in sources:
+        assert _publication_data_import_violations(source), source
+
+
 def test_coordinator_namespace_composition_is_explicit() -> None:
     """Keep coordinator collaborators on explicit imports and direct seams."""
     violations: list[str] = []

@@ -2668,6 +2668,10 @@ collections. Both modules have no transport or logging dependency.
 `pr_review_verification_specs.py` owns the common host checks and configuration
 paths. `pr_review_verification_paths.py` owns the checks that changed paths
 select.
+`pr_review_verification_publication_specs.py` owns the fixed publication
+diagnostic node data. `pr_review_verification_paths.py` imports these data
+through a one-way dependency. The data module has no runtime dependencies.
+Architecture tests enforce this boundary and its 150-line source cap.
 `github_api.diff` keeps its compatibility exports and emits transport diagnostics.
 The review stage uses the value modules directly. `pr_review_findings.py` builds
 finding records and applies ordinary review receipts. `pr_review_history.py`
