@@ -70,7 +70,12 @@ from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkI
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
-from hephaestus.automation.review_journal import render_current_plan, render_pending_review
+from hephaestus.automation.review_journal import (
+    CommentJournalReadError,
+    IssueComment,
+    render_current_plan,
+    render_pending_review,
+)
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED, STATE_PLAN_GO
 from hephaestus.resilience import (
@@ -396,6 +401,66 @@ def test_restart_scope_rejection_retries_publication_without_worker(
     assert github.comments[41][-1].endswith(STATE_PLAN_BLOCKED)
     assert "plan_scope_invalid" in github.comments[41][-1]
     assert pool.submitted == []
+
+
+def test_restart_scope_rejection_retries_second_journal_read_without_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retry a failed identity read without losing the scope rejection."""
+
+    class FailSecondReadGitHub(FakeStageGitHub):
+        read_count = 0
+
+        def issue_comments(self, issue_number: int) -> list[IssueComment]:
+            self.read_count += 1
+            if self.read_count == 2:
+                raise CommentJournalReadError("temporary journal read failure")
+            return super().issue_comments(issue_number)
+
+    github = FailSecondReadGitHub(labels=[STATE_PLAN_GO])
+    plan_body = render_current_plan("## Exact file scope and ownership\n- `tests/unit/one.py`")
+    github.comments[41] = [plan_body, render_pending_review(revision=1)]
+    coordinator, pool, _ = make_coordinator(
+        tmp_path,
+        monkeypatch,
+        github=github,
+        agent="codex",
+    )
+    item = _issue_item(41, StageName.PLAN_REVIEW)
+
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=True)
+    coordinator._drain_queues()
+
+    assert github.read_count == 2
+    assert item.result is None
+    assert item.state == "EVAL"
+    assert len(coordinator.timers) == 1
+    assert github.labels[41] == {STATE_PLAN_GO}
+    assert github.mutation_log == []
+    assert pool.submitted == []
+    assert item.attempts.get("plan_review_iter", 0) == 0
+    assert item.payload.get("review_round", 0) == 0
+
+    _deadline, sequence, parked_item = coordinator.timers[0]
+    coordinator.timers[0] = (0.0, sequence, parked_item)
+    coordinator._wake_timers()
+    coordinator._drain_queues()
+
+    assert item.result is not None
+    assert item.result.reason == "blocked: plan scope is invalid"
+    assert github.labels[41] == {STATE_PLAN_BLOCKED}
+    assert github.comments[41][0] == plan_body
+    audit = github.comments[41][-1]
+    assert audit.endswith(STATE_PLAN_BLOCKED)
+    assert "plan_scope_invalid" in audit
+    assert "## Files to Modify" in audit
+    assert [entry[0] for entry in github.mutation_log] == [
+        "edit_labels",
+        "gh_issue_upsert_comment",
+    ]
+    assert pool.submitted == []
+    assert item.attempts.get("plan_review_iter", 0) == 0
+    assert item.payload.get("review_round", 0) == 0
 
 
 def _issue_item(

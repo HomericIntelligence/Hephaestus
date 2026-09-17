@@ -744,13 +744,6 @@ class PlanReviewStage(Stage):
 
             if is_exclusive_plan_state(labels, STATE_PLAN_GO):
                 if reason := _plan_scope_admission_failure(snapshot.current_plan_body, ctx):
-                    admission_snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
-                    if (
-                        not admission_snapshot.current_plan
-                        or admission_snapshot.revision != snapshot.revision
-                        or admission_snapshot.current_plan_body != snapshot.current_plan_body
-                    ):
-                        return StageOutcome(Disposition.FAIL_BACK, "plan_changed")
                     expected_review = _AcceptedPlanReview(
                         verdict=_plan_scope_blocked_verdict(),
                         revision=snapshot.revision,

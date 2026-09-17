@@ -40,7 +40,7 @@ from hephaestus.automation.review_journal import (
     render_pending_review,
 )
 from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
-from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.automation.state_labels import STATE_NEEDS_PLAN, STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import (
     FakeWorkerPool,
     claim_test_item,
@@ -107,19 +107,25 @@ def test_changed_restart_plan_cannot_reuse_stale_plan_go(
         return next(reads, replacement_comments)
 
     monkeypatch.setattr(github, "issue_comments", sequenced_comments)
-    ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+    ctx = make_ctx(github=github, config_overrides={"agent": "codex", "no_advise": False})
     item = make_work_item(issue=1, stage=StageName.PLAN_REVIEW, state="ENTER")
-    original_payload = dict(item.payload)
     original_attempts = dict(item.attempts)
 
-    review_outcome = PlanReviewStage().on_enter(item, ctx)
-
-    assert review_outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
-    assert ROUTES[StageName.PLAN_REVIEW].fail_routes["*"] is StageName.PLANNING
-    assert github.labels[1] == {STATE_PLAN_GO}
+    stage = PlanReviewStage()
+    assert stage.on_enter(item, ctx) is None
+    assert item.state == "EVAL"
     assert github.mutation_log == []
-    assert item.payload == original_payload
+    assert item.payload["plan_text"] == original_plan
+    assert item.payload["plan_revision"] == 1
+    review_outcome = stage.step(item, ctx)
+
+    reason = "plan_changed" if replacement_plan is not None else "plan_missing"
+    assert review_outcome == StageOutcome(Disposition.FAIL_BACK, reason)
+    assert ROUTES[StageName.PLAN_REVIEW].fail_routes["*"] is StageName.PLANNING
+    assert github.labels[1] == {STATE_NEEDS_PLAN}
+    assert [entry[0] for entry in github.mutation_log] == ["edit_labels"]
     assert item.attempts == original_attempts
+    assert item.payload.get("review_round", 0) == 0
 
     coordinator = Coordinator(
         PipelineConfig(
@@ -136,13 +142,16 @@ def test_changed_restart_plan_cannot_reuse_stale_plan_go(
     coordinator._route(claim_test_item(coordinator, item), review_outcome)
 
     assert item.stage is StageName.PLANNING
-    assert item.payload["update_plan_required"] is True
+    assert item.payload.get("update_plan_required", False) is (replacement_plan is not None)
     assert PlanningStage().on_enter(item, ctx) is None
     assert item.stage is StageName.PLANNING
     assert STATE_PLAN_GO not in github.labels[1]
-    assert item.payload["planning_main_refresh_pending"] is True
+    assert item.payload.get("planning_main_refresh_pending", False) is (
+        replacement_plan is not None
+    )
     assert "update_plan_required" not in item.payload
-    assert PlanningStage().step(item, ctx) == Continue(next_state="FETCH_MAIN_WAIT")
+    next_state = "FETCH_MAIN_WAIT" if replacement_plan is not None else "ADVISE_WAIT"
+    assert PlanningStage().step(item, ctx) == Continue(next_state=next_state)
 
 
 def test_missing_restart_plan_cannot_reuse_stale_plan_go(
