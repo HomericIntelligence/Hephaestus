@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools==80.10.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comet-k2-config"
+version = "0.1.0"
+description = "Installed K2 configuration for vLLM"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = ["transformers==5.16.1", "huggingface-hub==1.30.0"]
+
+[project.entry-points."vllm.general_plugins"]
+comet_k2_config = "comet_k2_config:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["comet_k2_config"]
+
+[tool.setuptools.data-files]
+"share/comet-k2-config" = ["provenance.json"]

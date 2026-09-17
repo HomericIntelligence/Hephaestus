@@ -74,6 +74,7 @@ jobs:
               docs/runbooks/no-silent-failures.md) continue ;;
               # Preserve fixed external source controls.
               tests/fixtures/comet-review-validation/current/*) continue ;;
+              tests/fixtures/comet-review-validation/fe5a67d/*) continue ;;
               tests/fixtures/comet-review-validation/historical/controls/*) continue ;;
             esac
             scan_files+=("$f")

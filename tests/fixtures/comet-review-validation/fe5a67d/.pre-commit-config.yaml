@@ -1,0 +1,36 @@
+# Pre-commit runs format, lint, file, secret, and type checks.
+# Install the hooks with pre-commit install.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff-format
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      # Keep exact patch and certificate bytes.
+      - id: trailing-whitespace
+        exclude_types: [diff, pem]
+      - id: end-of-file-fixer
+        exclude_types: [diff, pem]
+      - id: check-yaml
+        # The strict MkDocs build validates this configuration in CI.
+        exclude: ^mkdocs\.yml$
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+
+  # Type check with ty (Astral). Run through uv so it uses the project env.
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty check
+        entry: uv run ty check
+        language: system
+        types: [python]
+        pass_filenames: false

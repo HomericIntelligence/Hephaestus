@@ -1,0 +1,48 @@
+name: contracts
+
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        description: JSON matrix of selected repository contracts
+        required: true
+        type: string
+      ref:
+        description: Immutable commit to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: ${{ matrix.check_name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.ref }}"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Install Bubblewrap
+        if: matrix.id == 'workflow-contracts'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap
+      - name: Successful no-op
+        if: matrix.id == 'noop'
+        run: echo "No contract validator applies to this change."
+      - name: Validate selected contract
+        if: matrix.id != 'noop'
+        env:
+          VALIDATOR: ${{ matrix.id }}
+        run: >-
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py validate
+          --validator "${VALIDATOR}"
+          --container-engine none

@@ -202,13 +202,17 @@ def test_deletion_of_a_forbidden_path_is_not_an_admission_error() -> None:
     assert api.comet_validation_checks(profile, (("D", ".gitmodules"),)) == ()
 
 
-@pytest.mark.parametrize("version", ["current", "historical"])
+@pytest.mark.parametrize("version", ["current", "historical", "fe5a67d"])
 def test_contract_selection_matches_the_frozen_repository_selector(version: str) -> None:
     """Compare tracked paths and policy edges with each frozen source selector."""
     api = _api()
-    controls = _controls() if version == "current" else _historical_controls()[0]
+    controls = {
+        "current": _controls,
+        "historical": lambda: _historical_controls()[0],
+        "fe5a67d": _fe5a67d_controls,
+    }[version]()
     profile = api.admit_comet_controls(controls, CONTROL_PATHS)
-    root = FIXTURES / ("current" if version == "current" else "historical/controls")
+    root = FIXTURES / ("historical/controls" if version == "historical" else version)
     source = runpy.run_path(str(root / "scripts/check_deployed_inputs.py"))
     inventory = yaml.safe_load((root / "deployment/deployed-inputs.yaml").read_text())
     contracts = {
@@ -1406,3 +1410,116 @@ def test_historical_profile_identity_covers_its_frozen_policy() -> None:
     for path, _, size, digest in records:
         assert len(controls[path][1]) == size
         assert hashlib.sha256(controls[path][1]).hexdigest() == digest
+
+
+def _fe5a67d_controls() -> dict[str, tuple[int, bytes]]:
+    manifest = json.loads((FIXTURES / "fe5a67d-manifest.json").read_text())
+    return {
+        row["path"]: (int(row["mode"], 8), (FIXTURES / "fe5a67d" / row["path"]).read_bytes())
+        for row in manifest["entries"]
+    }
+
+
+def test_admit_fe5a67d_complete_source_controls() -> None:
+    """Admit the current source and select the added support script contract."""
+    api = _api()
+    paths = tuple(json.loads((FIXTURES / "fe5a67d-paths.json").read_text()))
+    profile = api.admit_comet_controls(_fe5a67d_controls(), paths)
+    assert profile == "comet-fe5a67d-v1"
+    checks = api.comet_validation_checks(
+        profile, (("M", "scripts/build_public_access_application.py"),)
+    )
+    assert {check.check_id for check in checks} == {
+        "comet.python.ruff-format",
+        "comet.python.ruff-check",
+        "comet.python.ty-check",
+        "comet.python.pr-tests",
+        "comet.contract.control-deployment-contracts",
+    }
+
+    assert "comet.contract.control-deployment-contracts" not in api.comet_ci_check_ids(checks)
+
+
+@pytest.mark.parametrize("path", CONTROL_PATHS)
+@pytest.mark.parametrize("mutation", ["bytes", "mode", "missing"])
+def test_fe5a67d_rejects_changed_controls(path: str, mutation: str) -> None:
+    """Reject changed bytes, modes, and missing controls."""
+    controls = _fe5a67d_controls()
+    mode, data = controls[path]
+    if mutation == "bytes":
+        controls[path] = (mode, data + b"\n")
+    elif mutation == "mode":
+        controls[path] = (mode ^ 0o111, data)
+    else:
+        del controls[path]
+    with pytest.raises(ValueError, match="control"):
+        _api().admit_comet_controls(controls, CONTROL_PATHS)
+
+
+def test_fe5a67d_rejects_unknown_control() -> None:
+    """Reject a new control in the source inventory."""
+    with pytest.raises(ValueError, match="control"):
+        _api().admit_comet_controls(_fe5a67d_controls(), (*CONTROL_PATHS, "ruff.toml"))
+
+
+@pytest.mark.parametrize(
+    "tier,modules",
+    [
+        (
+            "pr_modules",
+            {
+                "tests/test_admin_root_locator_cli.py",
+                "tests/test_context_migration.py",
+                "tests/test_public_access.py",
+                "tests/test_public_access_installation.py",
+                "tests/test_public_context.py",
+                "tests/test_root_locator_publication.py",
+                "tests/test_root_operations.py",
+                "tests/test_root_operator_service.py",
+            },
+        ),
+        ("nightly_modules", {"tests/test_domain_drain.py", "tests/test_root_locator.py"}),
+    ],
+)
+def test_fe5a67d_tier_additions(tier: str, modules: set[str]) -> None:
+    """Keep the new PR and nightly test modules in their source tiers."""
+    previous = yaml.safe_load(_controls()["tests/test-tiers.yaml"][1])
+    current = yaml.safe_load(_fe5a67d_controls()["tests/test-tiers.yaml"][1])
+    assert set(current[tier]) - set(previous[tier]) == modules
+    assert not set(previous[tier]) - set(current[tier])
+
+
+def test_fe5a67d_profile_identity_matches_source_policy() -> None:
+    """Bind all control bytes and source selection to the profile digest."""
+    import hashlib
+
+    controls = _fe5a67d_controls()
+    manifest = json.loads((FIXTURES / "fe5a67d-manifest.json").read_text())
+    root = FIXTURES / "fe5a67d"
+    source = runpy.run_path(str(root / "scripts/check_deployed_inputs.py"))
+    inventory = yaml.safe_load(controls["deployment/deployed-inputs.yaml"][1])
+    selection = {
+        "candidates": inventory["production_candidates"],
+        "policies": inventory["policies"],
+        "contracts": {
+            row["id"]: row.get("tier", "pr")
+            for row in inventory["validators"]
+            if row["kind"] == "repository-contract"
+        },
+        "ci_policies": source["CI_POLICIES"],
+        "forbidden": tuple(sorted(source["CI_FORBIDDEN_PATHS"])),
+        "retired": source["RETIRED_REPOSITORY_PATHS"],
+    }
+    records = [
+        (row["path"], int(row["mode"], 8), row["size"], row["sha256"])
+        for row in manifest["entries"]
+    ]
+    for path, _, size, digest in records:
+        assert len(controls[path][1]) == size
+        assert hashlib.sha256(controls[path][1]).hexdigest() == digest
+    canonical = json.dumps(
+        {"controls": records, "selection": selection}, sort_keys=True, separators=(",", ":")
+    )
+    api = _api()
+    profile = api.admit_comet_controls(controls, CONTROL_PATHS)
+    assert api.comet_profile_digest(profile) == hashlib.sha256(canonical.encode()).hexdigest()

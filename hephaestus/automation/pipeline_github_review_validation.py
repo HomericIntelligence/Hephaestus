@@ -734,8 +734,58 @@ _HISTORICAL_SELECTION = {
         if p["id"] != "sglang-glm53-image-contracts"
     ),
 }
-# The historical digest covers canonical JSON controls and selection.
+# This profile binds the public-root test controls and support-script policy.
+_FE5A67D_CONTROL_CHANGES = {
+    "deployment/deployed-inputs.yaml": (
+        33188,
+        9653,
+        "ea21437f33f5f850eb3b3eae2da48f0d2de5fa4e93774be9826541485f84f0ec",
+    ),
+    "tests/deployment_context_helpers.py": (
+        33188,
+        13420,
+        "6d3e00f4e53908810d9c6422597824d132db9f5a63072869da7cbca36b8b1bbc",
+    ),
+    "tests/test-tiers.yaml": (
+        33188,
+        7855,
+        "116d5703e9363e3603d1ee90cc50991ed43292cf9291aa1968d605dc6022203f",
+    ),
+}
+_FE5A67D_CONTROLS = tuple(
+    (path, *_FE5A67D_CONTROL_CHANGES.get(path, (mode, size, digest)))
+    for path, mode, size, digest in _CONTROLS
+)
+_FE5A67D_SELECTION = {
+    **_SELECTION,
+    "policies": [
+        {
+            **policy,
+            "include": [
+                "deployment/control-build-constraints.in",
+                "deployment/control-build-constraints.txt",
+                "scripts/build_public_access_application.py",
+                "scripts/hot-swap-gpu-monitors.sh",
+                "scripts/install-control-venv.sh",
+                "scripts/repair-core-permissions.py",
+                "scripts/probe_slurm_identity.py",
+                "scripts/pull-to-cluster.sh",
+                "scripts/chaos_pass.py",
+                "scripts/setup-engine-venvs.sh",
+            ],
+        }
+        if policy["id"] == "control-deployment"
+        else policy
+        for policy in _SELECTION["policies"]
+    ],
+}
+# Profile digests cover canonical JSON controls and selection.
 _PROFILES = {
+    "comet-fe5a67d-v1": (
+        "e225e80e95bcdb376e599b6cd3d735ecebfef6f65b1de2fdfcecc8e09878aed2",
+        _FE5A67D_CONTROLS,
+        _FE5A67D_SELECTION,
+    ),
     COMET_PROFILE_ID: (COMET_PROFILE_DIGEST, _CONTROLS, _SELECTION),
     "comet-5232ef5-v1": (
         "3fec7b1cdfc51c16e8fc89029cf8df857ebfe3927753b5f2a794d93c16aa7c21",

@@ -1327,6 +1327,12 @@ keeps applicable checks separate from the checks eligible for ordinary PR CI
 or offline local execution. Unknown or mixed control versions fail admission.
 See [ADR-0054](adr/0054-comet-review-validation.md) for profile and receipt rules.
 
+The admitted profiles are `comet-5232ef5-v1`, `comet-d19d3dd-v1`, and
+`comet-fe5a67d-v1`. The last profile binds the public-root test controls and
+adds `scripts/build_public_access_application.py` to the control-deployment
+policy. Its deployment contract remains a nightly check. Profile admission
+does not prove that a validation command passed.
+
 The submitted GitHub job collects two agreeing CI observations. The retained
 PR identity, reviewed head, target base, immutable merge parents, control bytes,
 and command steps must agree. `on_job_done()` consumes the result before the
