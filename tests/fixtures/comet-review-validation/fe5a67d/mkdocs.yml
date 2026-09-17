@@ -1,0 +1,86 @@
+site_url: https://docs.llm360.ai/comet/
+site_dir: site/comet
+site_name: comet
+site_description: Per-cluster shared inference service and data-gen infra for LLM360.
+repo_url: https://github.com/LLM360/comet
+repo_name: LLM360/comet
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+nav:
+  - Home: index.md
+  - Onboarding: onboarding.md
+  - Getting started: getting-started.md
+  - Operations: operations.md
+  - Service health and bottlenecks: service-health.md
+  - Slurm identity evidence: slurm-identity.md
+  - Service path ownership: service-path-ownership.md
+  - Operator bridge: operator-bridge.md
+  - Fast-start donor setup: fast-start-new-model.md
+  - K2-Horizon family: k2-horizon-family.md
+  - K2-Horizon 0.9B qualification: k2-horizon-0p9b-qualification.md
+  - Dataset registry: registry.md
+  - Process:
+      - The lifecycle: process/lifecycle.md
+      - Technical writing: process/technical-writing.md
+      - RFCs and decision records: process/decision-records.md
+  - Architecture:
+      - L1 Context: architecture/context.md
+      - L2 Containers: architecture/containers.md
+      - L3 Components: architecture/components.md
+      - Deployment context layout: architecture/deployment-layout.md
+      - Interface contracts: architecture/interfaces.md
+      - GPU-resident fast-start: architecture/fast-start.md
+  - Decisions:
+      - ADR log: adr/index.md
+      - ADR template: adr/0000-template.md
+      - ADR-0001 Record decisions: adr/0001-record-architecture-decisions.md
+      - ADR-0002 Engine-agnostic cookbooks: adr/0002-engine-agnostic-cookbooks.md
+      - ADR-0003 Proxy in front of SMG: adr/0003-proxy-in-front-of-smg.md
+      - ADR-0004 Batch resume by output rescan: adr/0004-batch-resume-by-output-rescan.md
+      - ADR-0005 Shared rl-infra Postgres: adr/0005-shared-rl-infra-postgres.md
+      - ADR-0006 HTTP ingest bridge: adr/0006-http-ingest-over-private-rds.md
+      - ADR-0007 Path-based batch intake: adr/0007-path-based-batch-intake.md
+      - ADR-0017 Pack partial-node replicas: adr/0017-pack-partial-node-replicas-as-independent-jobs.md
+      - ADR-0018 Bounded owner-run operator bridge: adr/0018-bounded-owner-run-operator-bridge.md
+      - ADR-0019 ASD-STE100 technical writing: adr/0019-use-asd-ste100-for-technical-writing.md
+      - ADR-0021 Production branch promotion: adr/0021-production-branch-promotion.md
+      - ADR-0022 Fenced runner and service domains: adr/0022-fenced-runner-and-service-domains.md
+      - ADR-0023 Separated credentials and audited promotion: adr/0023-separated-credentials-and-audited-promotion.md
+      - ADR-0024 Scheduler-owned allocations and bounded daemons: adr/0024-scheduler-owned-allocations-and-bounded-daemons.md
+      - ADR-0025 Immutable service artifacts and root dedup: adr/0025-immutable-service-artifacts-and-root-dedup.md
+      - ADR-0026 PostgreSQL server identity: adr/0026-postgres-server-identity-verification.md
+      - ADR-0027 Verified Slurm identity: adr/0027-verified-slurm-identity.md
+      - ADR-0028 Explicit deployment context: adr/0028-explicit-deployment-context-layout.md
+      - ADR-0031 Typed release contract boundary: adr/0031-typed-release-contract-boundary.md
+      - ADR-0032 Signed probe receipt contract: adr/0032-signed-probe-receipt-contract.md
+      - ADR-0033 Packed fast-launch admission and recovery: adr/0033-packed-fast-launch-admission-and-recovery.md
+      - ADR-0034 Run pytest only in CI/CD: adr/0034-run-pytest-only-in-ci-cd.md
+      - ADR-0035 Require signatures without DCO enforcement: adr/0035-require-signatures-without-dco-enforcement.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - tables
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format

@@ -203,6 +203,7 @@ exclude = ["hephaestus/_version.py"]
 force-exclude = true
 extend-exclude = [
     "tests/fixtures/comet-review-validation/current",
+    "tests/fixtures/comet-review-validation/fe5a67d",
     "tests/fixtures/comet-review-validation/historical/controls",
 ]
 

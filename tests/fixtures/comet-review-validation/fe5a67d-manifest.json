@@ -1,0 +1,1248 @@
+{
+  "schema": "comet-control-closure-inspection-v1",
+  "repository": "LLM360/comet",
+  "commit": "fe5a67dcfb6d6db97a19f5a61274f78478b39bd5",
+  "tree": "a50c093bd25ce62be99669ef1378bf8a2bdc02d3",
+  "status": "source-map-complete-with-explicit-payload-boundary; not runtime-admission-proof",
+  "entries": [
+    {
+      "path": ".gitattributes",
+      "mode": "100644",
+      "git_blob_sha": "14de280cbdda23a47fe71d6dfa749367bab1a942",
+      "sha256": "5a131fa6e6c16945dd1eb1dbc15327f37d2d88e2a5a2ccc179fa98877e98ef53",
+      "size": 115,
+      "reason": "Source archive and Git path semantics; current rules only whitespace."
+    },
+    {
+      "path": ".github/workflows/build-image.yml",
+      "mode": "100644",
+      "git_blob_sha": "c73ae2176604d8927e252c726eae2fbdef125154",
+      "sha256": "6228063a65fea97c2fd0b2fa7fbd52ea3dbad86a3bfa10b2b0698482b4a089d8",
+      "size": 2671,
+      "reason": "Local reusable witness and separate artifact gate; not repository-contract evidence."
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "git_blob_sha": "5dc3e6a07f205cc9f4aed750e6b700c3480b4a00",
+      "sha256": "dd58fdbbd4c474a79e37dfe61943a0bc304bc414510a2a0e1d131b25068e61e5",
+      "size": 13973,
+      "reason": "Root source, selected job commands, checkout derivation, classifier and local uses graph."
+    },
+    {
+      "path": ".github/workflows/contracts.yml",
+      "mode": "100644",
+      "git_blob_sha": "20ecc08e715852002933b5c48c32ddd8f3c72aa7",
+      "sha256": "15a346621af79282ea3cc45710880473094b42025622edbb26685570c0c5b967",
+      "size": 1463,
+      "reason": "Selected matrix, checkout input and verification, validator command."
+    },
+    {
+      "path": ".github/workflows/docs-check.yml",
+      "mode": "100644",
+      "git_blob_sha": "d9653708e496f8ea473683f5df62dbd43e709fad",
+      "sha256": "c60633e2091f84f77c6dec0f3a4d8c1de9c4cad16688dafc1dc3aaab5eb9c00c",
+      "size": 1494,
+      "reason": "Strict build input, command and checkout; upload excluded by fixed input."
+    },
+    {
+      "path": ".github/workflows/docs.yml",
+      "mode": "100644",
+      "git_blob_sha": "812ad8b21b0910c8b698d53326427561f6ee4d17",
+      "sha256": "bf39ffcce95ef80637e599da94b6a4a400f09e0eef0a9b9463d86f88288b897e",
+      "size": 4631,
+      "reason": "Existing workflow or nested tool configuration in the complete path inventory; bind it before admission."
+    },
+    {
+      "path": ".github/workflows/hosted-scope-qualification.yml",
+      "mode": "100644",
+      "git_blob_sha": "924651c8d2b0c8565917654cd02f779d590b5b6a",
+      "sha256": "7f12756f46a55ddb76eb002500b2b1097efe898123cd252daeb09cb4f42013a5",
+      "size": 29817,
+      "reason": "Existing workflow or nested tool configuration in the complete path inventory; bind it before admission."
+    },
+    {
+      "path": ".github/workflows/nightly.yml",
+      "mode": "100644",
+      "git_blob_sha": "feea0d6a1b2c50b4ca217cc23f2fb4c42bca4c8d",
+      "sha256": "19d1cf92dd38ea185bb31ae9a8c2c0b339e556320b24ecb9cfa527418dfeb8f7",
+      "size": 2982,
+      "reason": "Existing workflow or nested tool configuration in the complete path inventory; bind it before admission."
+    },
+    {
+      "path": ".github/workflows/postgres-rootless-validation.yml",
+      "mode": "100644",
+      "git_blob_sha": "dc48f011343d739f84e0c4f77344e8d8e9414c9e",
+      "sha256": "fd8899fb2bb6dec479b84db06ed7ce2ba33624af341e0e77f2b34cc4b99a20d3",
+      "size": 3338,
+      "reason": "Existing workflow or nested tool configuration in the complete path inventory; bind it before admission."
+    },
+    {
+      "path": ".github/workflows/postgres-tests.yml",
+      "mode": "100644",
+      "git_blob_sha": "3bc8d7c9cb913ca0ee81b6977b52d24adc119201",
+      "sha256": "1d6d1393dc21e5c81cc7349e77972d6d4636fcb225b22a68231e282fc4120dff",
+      "size": 20109,
+      "reason": "Local reusable witness; ordinary PR call excluded by root condition."
+    },
+    {
+      "path": ".github/workflows/pr-provenance.yml",
+      "mode": "100644",
+      "git_blob_sha": "6b15fac71ebdb8d741432854d311aa14cfd4390b",
+      "sha256": "fbcdd76eb7ca7929fab07547bbcfd3eef36934d0197ea4a97f46371b0a00626c",
+      "size": 865,
+      "reason": "Existing workflow or nested tool configuration in the complete path inventory; bind it before admission."
+    },
+    {
+      "path": ".github/workflows/secrets.yml",
+      "mode": "100644",
+      "git_blob_sha": "f4bfe82700267386f4902db025260ad1b708d93c",
+      "sha256": "2f24b66fdf6702ee428bddf98cdb3e63809d34e0d8404976d0e271a2f8bad98c",
+      "size": 653,
+      "reason": "Local reusable witness and ancillary gate; not selected validation evidence."
+    },
+    {
+      "path": ".github/workflows/test-profile.yml",
+      "mode": "100644",
+      "git_blob_sha": "1542c39ec57e352df9297ecf6f3b8e32993cc902",
+      "sha256": "e32b3d9885bda27809fd49f76d5672fc3b20f1a6960d0e8106ed22a3dcc027d1",
+      "size": 174617,
+      "reason": "Existing workflow or nested tool configuration in the complete path inventory; bind it before admission."
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "git_blob_sha": "d695900cf56bae675420df05ab6caf899a661a41",
+      "sha256": "2298d7a98f3b4af111a89978100944da391af885416d890d846708b6aff8a764",
+      "size": 129,
+      "reason": "Ruff and ty default file discovery exclusions."
+    },
+    {
+      "path": ".gitleaks.toml",
+      "mode": "100644",
+      "git_blob_sha": "dce3d3ec8471fd55f8d30e7062901df71f9b083b",
+      "sha256": "f3418debc7d7fce627ea418ccec8d558dbb820ec3b9b05380e546f1e475e22e7",
+      "size": 1296,
+      "reason": "Ancillary secret scan settings."
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "mode": "100644",
+      "git_blob_sha": "71389a791a1d5bfd3af6c05976eee5b66558bf44",
+      "sha256": "f16904c2c97994df95afa0b763b2dc24c1d0ccfdd12732eaa8317f30e2fd9ede",
+      "size": 1054,
+      "reason": "Later lint-job step and local ty hook; separate from selected Ruff steps."
+    },
+    {
+      "path": ".python-version",
+      "mode": "100644",
+      "git_blob_sha": "e4fba2183587225f216eeada4c78dfab6b2e65f5",
+      "sha256": "7b55f8e67b5623c4bef3fa691288da9437d79d3aba156de48d481db32ac7d16d",
+      "size": 5,
+      "reason": "Interpreter selection."
+    },
+    {
+      "path": "deployment/deployed-inputs.yaml",
+      "mode": "100644",
+      "git_blob_sha": "573cc99d1d4d270dc6b22f157c7276d159c2d1f1",
+      "sha256": "ea21437f33f5f850eb3b3eae2da48f0d2de5fa4e93774be9826541485f84f0ec",
+      "size": 9653,
+      "reason": "Selection inventory, validator IDs, tiers and production policies."
+    },
+    {
+      "path": "mkdocs.yml",
+      "mode": "100644",
+      "git_blob_sha": "39eacfa03cf3f06a949e291db89f56000bacf4a4",
+      "sha256": "02ddba21a8ad7c0aa34638d48910984b5f76c4b1d8c552650d0d2eaaed33749f",
+      "size": 4147,
+      "reason": "Docs inputs, extensions, external formatter and site/comet output."
+    },
+    {
+      "path": "pyproject.toml",
+      "mode": "100644",
+      "git_blob_sha": "aae0f0a897af10a35ab791dcfd21abb101b71198",
+      "sha256": "6f2c39177653ce91e36dbdbe69e1246f2a0257a8c335fa3dbc3e624ba4f88da2",
+      "size": 4527,
+      "reason": "Dependency/build configuration; Ruff, ty, pytest settings and src layout."
+    },
+    {
+      "path": "runtime/k2-config/pyproject.toml",
+      "mode": "100644",
+      "git_blob_sha": "46f1d9ed80c83348c2b3389b2465dfc386ec4846",
+      "sha256": "f021bc5c5d374c6947969b23b0038fb71c286f6add864e9cbf659877bd6c385f",
+      "size": 604,
+      "reason": "Existing workflow or nested tool configuration in the complete path inventory; bind it before admission."
+    },
+    {
+      "path": "scripts/check-recycling-coverage.py",
+      "mode": "100644",
+      "git_blob_sha": "b4fce72fdb6d3a87728462d8b61753841c118276",
+      "sha256": "eff1c0f35e7b60e9aea87f79510b6e379091835f78cbe2cb829728d58d2b6d3e",
+      "size": 2444,
+      "reason": "Separate root coverage gate; not a selected registry command."
+    },
+    {
+      "path": "scripts/check_deployed_inputs.py",
+      "mode": "100644",
+      "git_blob_sha": "bc8f74b33143dcf154ef90ca28061456a2d5cfe5",
+      "sha256": "cdeb209b19eab5d383776662c46049abdffed751e7f428d89a9dfa30d5909583",
+      "size": 35437,
+      "reason": "Code-owned CI policy selection, manifest validation, dispatch and matrix."
+    },
+    {
+      "path": "scripts/ci/postgres_test_runtime.py",
+      "mode": "100644",
+      "git_blob_sha": "81e4300f91765b2ba589219d65e56e7c0a018818",
+      "sha256": "3034c609612ef54fc8926f66829b61801154da64977085ef912e6d62169172a5",
+      "size": 1762,
+      "reason": "Local helper called by both PostgreSQL shell scripts."
+    },
+    {
+      "path": "scripts/ci/run-gitleaks.sh",
+      "mode": "100755",
+      "git_blob_sha": "76b4957b6d1f79753ef831e0ab7836ce77a8b1ba",
+      "sha256": "a0bdbdeec6a43e6c5c5fe1dea9272a51ea482d761c2b43e04f0077aea69cff5b",
+      "size": 1282,
+      "reason": "Ancillary secrets runner and fixed download digest."
+    },
+    {
+      "path": "scripts/ci/run-test-tier.py",
+      "mode": "100644",
+      "git_blob_sha": "ff5cddbd07b773714c40ea03dbfb3d44e971a8ee",
+      "sha256": "f18964418c2106a397dd664f8b33299016102123ea63f1786a5bfb4e528e996b",
+      "size": 10052,
+      "reason": "PR module selection, pytest invocation, nonzero count and exit handling."
+    },
+    {
+      "path": "scripts/ci/summarize-test-durations.py",
+      "mode": "100644",
+      "git_blob_sha": "7ec6cfa1168234dc2c8b346932ea049fa86f2df2",
+      "sha256": "e7d70e746a7bc7f9e8d3269e7f3d523159fd9104dc99fec40ff71bdf72ea3df1",
+      "size": 3185,
+      "reason": "Excluded PostgreSQL job report helper."
+    },
+    {
+      "path": "scripts/configure-test-postgres-tls.sh",
+      "mode": "100755",
+      "git_blob_sha": "ced32d2938b50ab4cda3a281cbe583d65b55ce67",
+      "sha256": "76981b93c1fd4b2312ac1a5730ded470a4bc2a594a1126eeeac2d91cb5f3392c",
+      "size": 4728,
+      "reason": "Excluded PostgreSQL job helper; explicit inventory of local call graph."
+    },
+    {
+      "path": "scripts/deployed_artifact_validators.py",
+      "mode": "100644",
+      "git_blob_sha": "da7ee76f32f06dd5095f63f58cf805dbdba7643f",
+      "sha256": "b9fe94001aae5a279c4ef965ecb9d39db947d76df4e357971c21bf2e3085e14f",
+      "size": 112865,
+      "reason": "Fixed repository-validator command lists and kind/engine dispatch."
+    },
+    {
+      "path": "scripts/diagnose-test-postgres.sh",
+      "mode": "100755",
+      "git_blob_sha": "20683894e5763a70ffb15fdedb172a42e9d680c3",
+      "sha256": "832844bc5cf5166c808e5a25d6dc61831eb48912911a302bff8a7581d5ae2350",
+      "size": 4132,
+      "reason": "Excluded PostgreSQL job failure helper."
+    },
+    {
+      "path": "scripts/smg_wheelhouse.py",
+      "mode": "100644",
+      "git_blob_sha": "2062f613d6f7d7613792f5d2d20f74185cd6734b",
+      "sha256": "2451ffbd103cc94b0b89592f5d40c02450e63a2f3460f3e859e2c813e8092962",
+      "size": 10612,
+      "reason": "Module-load local import of validator owner; standard-library imports only."
+    },
+    {
+      "path": "scripts/validate-pr-policy.sh",
+      "mode": "100755",
+      "git_blob_sha": "2207fb752325e8d27eace5c883fe67676509bf35",
+      "sha256": "a97e6d553bc1660d82d4d48ce4a1fb3cd104586b2b9d79994def1670604fb73d",
+      "size": 7469,
+      "reason": "Root promotion-policy predecessor; ordinary PR validation branch."
+    },
+    {
+      "path": "tests/__init__.py",
+      "mode": "100644",
+      "git_blob_sha": "ce25ddcce769839c1a13e1af5dbb885be4657cac",
+      "sha256": "c47ef25cccfe8a923c3128211b40f2b5374ca6bd1da337cf40dc576299556065",
+      "size": 34,
+      "reason": "Test support package initialization before explicit plugin and fixture-helper imports; current content is one docstring."
+    },
+    {
+      "path": "tests/conftest.py",
+      "mode": "100644",
+      "git_blob_sha": "111263cd1d3e572ec42bd1bb99ffb724a1c4123e",
+      "sha256": "be099d4741ccba74ffb721f59a914a8f46cba77264f112cf1228bb5aee22c8b7",
+      "size": 2108,
+      "reason": "Shared autouse fixtures and explicit pytest plugin registration."
+    },
+    {
+      "path": "tests/deployment_context_helpers.py",
+      "mode": "100644",
+      "git_blob_sha": "2d762666ec2fc3e0218dd4461581f200c9ebd580",
+      "sha256": "6d3e00f4e53908810d9c6422597824d132db9f5a63072869da7cbca36b8b1bbc",
+      "size": 13420,
+      "reason": "Imported by root conftest; fixture support with application-import boundary."
+    },
+    {
+      "path": "tests/release_effect_guard.py",
+      "mode": "100644",
+      "git_blob_sha": "78b6e5dce75b787ac86c855fa326d04e36856605",
+      "sha256": "d55dcd37e09092c4822d58b719792a54b26ba5a34e2ca14b694e60277ac0bc1d",
+      "size": 3494,
+      "reason": "Explicit root pytest plugin; optional third-party imports are lock-bound."
+    },
+    {
+      "path": "tests/test-tiers.yaml",
+      "mode": "100644",
+      "git_blob_sha": "2ed690a912173753e677802ebe706f3112771bbc",
+      "sha256": "116d5703e9363e3603d1ee90cc50991ed43292cf9291aa1968d605dc6022203f",
+      "size": 7855,
+      "reason": "Complete PR/nightly root module partition."
+    },
+    {
+      "path": "uv.lock",
+      "mode": "100644",
+      "git_blob_sha": "48baae024d37ac6fe675a52a616b382badbf23ad",
+      "sha256": "df261ef8e5ddca3317594213e12140b4fbfb750cb09298006e22a530c9c97da2",
+      "size": 121280,
+      "reason": "Locked external tool and dependency resolution."
+    }
+  ],
+  "local_uses": [
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 147,
+      "target": "./.github/workflows/postgres-tests.yml",
+      "local": true
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 243,
+      "target": "./.github/workflows/secrets.yml",
+      "local": true
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 248,
+      "target": "./.github/workflows/docs-check.yml",
+      "local": true
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 258,
+      "target": "./.github/workflows/contracts.yml",
+      "local": true
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 268,
+      "target": "./.github/workflows/build-image.yml",
+      "local": true
+    }
+  ],
+  "external_uses": [
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 19,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 83,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 86,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 97,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 100,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 114,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 117,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 172,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 175,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 197,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 201,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 328,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/ci.yml",
+      "line": 331,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/docs-check.yml",
+      "line": 24,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/docs-check.yml",
+      "line": 27,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/docs-check.yml",
+      "line": 36,
+      "target": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/docs-check.yml",
+      "line": 43,
+      "target": "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/contracts.yml",
+      "line": 26,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/contracts.yml",
+      "line": 32,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/secrets.yml",
+      "line": 19,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/postgres-tests.yml",
+      "line": 81,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/postgres-tests.yml",
+      "line": 282,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/postgres-tests.yml",
+      "line": 423,
+      "target": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/build-image.yml",
+      "line": 36,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/build-image.yml",
+      "line": 40,
+      "target": "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/build-image.yml",
+      "line": 74,
+      "target": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/build-image.yml",
+      "line": 78,
+      "target": "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e",
+      "local": false
+    },
+    {
+      "source": ".github/workflows/build-image.yml",
+      "line": 80,
+      "target": "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+      "local": false
+    }
+  ],
+  "python_imports": {
+    "scripts/ci/run-test-tier.py": [
+      {
+        "line": 4,
+        "module": "__future__",
+        "level": 0
+      },
+      {
+        "line": 6,
+        "module": "argparse",
+        "level": 0
+      },
+      {
+        "line": 7,
+        "module": "os",
+        "level": 0
+      },
+      {
+        "line": 8,
+        "module": "sys",
+        "level": 0
+      },
+      {
+        "line": 9,
+        "module": "time",
+        "level": 0
+      },
+      {
+        "line": 10,
+        "module": "pathlib",
+        "level": 0
+      },
+      {
+        "line": 11,
+        "module": "typing",
+        "level": 0
+      },
+      {
+        "line": 13,
+        "module": "pytest",
+        "level": 0
+      },
+      {
+        "line": 14,
+        "module": "yaml",
+        "level": 0
+      },
+      {
+        "line": 17,
+        "module": "collections.abc",
+        "level": 0
+      },
+      {
+        "line": 18,
+        "module": "typing",
+        "level": 0
+      }
+    ],
+    "scripts/check_deployed_inputs.py": [
+      {
+        "line": 19,
+        "module": "__future__",
+        "level": 0
+      },
+      {
+        "line": 21,
+        "module": "argparse",
+        "level": 0
+      },
+      {
+        "line": 22,
+        "module": "errno",
+        "level": 0
+      },
+      {
+        "line": 23,
+        "module": "json",
+        "level": 0
+      },
+      {
+        "line": 24,
+        "module": "os",
+        "level": 0
+      },
+      {
+        "line": 25,
+        "module": "re",
+        "level": 0
+      },
+      {
+        "line": 26,
+        "module": "stat",
+        "level": 0
+      },
+      {
+        "line": 27,
+        "module": "subprocess",
+        "level": 0
+      },
+      {
+        "line": 28,
+        "module": "sys",
+        "level": 0
+      },
+      {
+        "line": 29,
+        "module": "dataclasses",
+        "level": 0
+      },
+      {
+        "line": 30,
+        "module": "pathlib",
+        "level": 0
+      },
+      {
+        "line": 31,
+        "module": "typing",
+        "level": 0
+      },
+      {
+        "line": 33,
+        "module": "yaml",
+        "level": 0
+      },
+      {
+        "line": 835,
+        "module": "deployed_artifact_validators",
+        "level": 0
+      }
+    ],
+    "scripts/deployed_artifact_validators.py": [
+      {
+        "line": 14,
+        "module": "__future__",
+        "level": 0
+      },
+      {
+        "line": 16,
+        "module": "argparse",
+        "level": 0
+      },
+      {
+        "line": 17,
+        "module": "hashlib",
+        "level": 0
+      },
+      {
+        "line": 18,
+        "module": "io",
+        "level": 0
+      },
+      {
+        "line": 19,
+        "module": "json",
+        "level": 0
+      },
+      {
+        "line": 20,
+        "module": "os",
+        "level": 0
+      },
+      {
+        "line": 21,
+        "module": "platform",
+        "level": 0
+      },
+      {
+        "line": 22,
+        "module": "re",
+        "level": 0
+      },
+      {
+        "line": 23,
+        "module": "shutil",
+        "level": 0
+      },
+      {
+        "line": 24,
+        "module": "stat",
+        "level": 0
+      },
+      {
+        "line": 25,
+        "module": "subprocess",
+        "level": 0
+      },
+      {
+        "line": 26,
+        "module": "sys",
+        "level": 0
+      },
+      {
+        "line": 27,
+        "module": "tarfile",
+        "level": 0
+      },
+      {
+        "line": 28,
+        "module": "tempfile",
+        "level": 0
+      },
+      {
+        "line": 29,
+        "module": "urllib.request",
+        "level": 0
+      },
+      {
+        "line": 30,
+        "module": "zipfile",
+        "level": 0
+      },
+      {
+        "line": 31,
+        "module": "contextlib",
+        "level": 0
+      },
+      {
+        "line": 32,
+        "module": "pathlib",
+        "level": 0
+      },
+      {
+        "line": 33,
+        "module": "typing",
+        "level": 0
+      },
+      {
+        "line": 35,
+        "module": "smg_wheelhouse",
+        "level": 0
+      },
+      {
+        "line": 38,
+        "module": "smg_wheelhouse",
+        "level": 0
+      }
+    ],
+    "scripts/smg_wheelhouse.py": [
+      {
+        "line": 4,
+        "module": "__future__",
+        "level": 0
+      },
+      {
+        "line": 6,
+        "module": "argparse",
+        "level": 0
+      },
+      {
+        "line": 7,
+        "module": "hashlib",
+        "level": 0
+      },
+      {
+        "line": 8,
+        "module": "io",
+        "level": 0
+      },
+      {
+        "line": 9,
+        "module": "json",
+        "level": 0
+      },
+      {
+        "line": 10,
+        "module": "os",
+        "level": 0
+      },
+      {
+        "line": 11,
+        "module": "re",
+        "level": 0
+      },
+      {
+        "line": 12,
+        "module": "urllib.parse",
+        "level": 0
+      },
+      {
+        "line": 13,
+        "module": "urllib.request",
+        "level": 0
+      },
+      {
+        "line": 14,
+        "module": "zipfile",
+        "level": 0
+      },
+      {
+        "line": 15,
+        "module": "dataclasses",
+        "level": 0
+      },
+      {
+        "line": 16,
+        "module": "email.parser",
+        "level": 0
+      },
+      {
+        "line": 17,
+        "module": "email.policy",
+        "level": 0
+      },
+      {
+        "line": 18,
+        "module": "pathlib",
+        "level": 0
+      },
+      {
+        "line": 19,
+        "module": "typing",
+        "level": 0
+      }
+    ],
+    "tests/conftest.py": [
+      {
+        "line": 3,
+        "module": "grp",
+        "level": 0
+      },
+      {
+        "line": 4,
+        "module": "os",
+        "level": 0
+      },
+      {
+        "line": 5,
+        "module": "types",
+        "level": 0
+      },
+      {
+        "line": 7,
+        "module": "pytest",
+        "level": 0
+      },
+      {
+        "line": 9,
+        "module": "comet.service_paths",
+        "level": 0
+      },
+      {
+        "line": 10,
+        "module": "tests.deployment_context_helpers",
+        "level": 0
+      }
+    ],
+    "tests/release_effect_guard.py": [
+      {
+        "line": 4,
+        "module": "__future__",
+        "level": 0
+      },
+      {
+        "line": 6,
+        "module": "builtins",
+        "level": 0
+      },
+      {
+        "line": 7,
+        "module": "importlib",
+        "level": 0
+      },
+      {
+        "line": 8,
+        "module": "socket",
+        "level": 0
+      },
+      {
+        "line": 9,
+        "module": "subprocess",
+        "level": 0
+      },
+      {
+        "line": 10,
+        "module": "os",
+        "level": 0
+      },
+      {
+        "line": 11,
+        "module": "pathlib",
+        "level": 0
+      },
+      {
+        "line": 12,
+        "module": "typing",
+        "level": 0
+      },
+      {
+        "line": 14,
+        "module": "pytest",
+        "level": 0
+      },
+      {
+        "line": 93,
+        "module": "asyncpg",
+        "level": 0
+      },
+      {
+        "line": 100,
+        "module": "httpx",
+        "level": 0
+      }
+    ],
+    "tests/deployment_context_helpers.py": [
+      {
+        "line": 3,
+        "module": "__future__",
+        "level": 0
+      },
+      {
+        "line": 5,
+        "module": "hashlib",
+        "level": 0
+      },
+      {
+        "line": 6,
+        "module": "pathlib",
+        "level": 0
+      },
+      {
+        "line": 7,
+        "module": "typing",
+        "level": 0
+      },
+      {
+        "line": 14,
+        "module": "comet.config",
+        "level": 0
+      },
+      {
+        "line": 23,
+        "module": "comet.context_transition",
+        "level": 0
+      },
+      {
+        "line": 24,
+        "module": "comet.deployment_context",
+        "level": 0
+      },
+      {
+        "line": 29,
+        "module": "comet.paths",
+        "level": 0
+      },
+      {
+        "line": 30,
+        "module": "comet.root_locator",
+        "level": 0
+      },
+      {
+        "line": 31,
+        "module": "comet.runtime_artifact",
+        "level": 0
+      },
+      {
+        "line": 32,
+        "module": "comet.scheduler_identity",
+        "level": 0
+      },
+      {
+        "line": 33,
+        "module": "comet.stack_release",
+        "level": 0
+      },
+      {
+        "line": 34,
+        "module": "comet.stack_runtime",
+        "level": 0
+      },
+      {
+        "line": 10,
+        "module": "collections.abc",
+        "level": 0
+      },
+      {
+        "line": 12,
+        "module": "_pytest.monkeypatch",
+        "level": 0
+      }
+    ],
+    "scripts/check-recycling-coverage.py": [
+      {
+        "line": 4,
+        "module": "__future__",
+        "level": 0
+      },
+      {
+        "line": 6,
+        "module": "argparse",
+        "level": 0
+      },
+      {
+        "line": 7,
+        "module": "ast",
+        "level": 0
+      },
+      {
+        "line": 8,
+        "module": "json",
+        "level": 0
+      },
+      {
+        "line": 9,
+        "module": "pathlib",
+        "level": 0
+      }
+    ],
+    "scripts/ci/postgres_test_runtime.py": [
+      {
+        "line": 3,
+        "module": "__future__",
+        "level": 0
+      },
+      {
+        "line": 5,
+        "module": "os",
+        "level": 0
+      },
+      {
+        "line": 6,
+        "module": "subprocess",
+        "level": 0
+      },
+      {
+        "line": 7,
+        "module": "sys",
+        "level": 0
+      }
+    ],
+    "scripts/ci/summarize-test-durations.py": [
+      {
+        "line": 4,
+        "module": "__future__",
+        "level": 0
+      },
+      {
+        "line": 6,
+        "module": "argparse",
+        "level": 0
+      },
+      {
+        "line": 7,
+        "module": "json",
+        "level": 0
+      },
+      {
+        "line": 8,
+        "module": "math",
+        "level": 0
+      },
+      {
+        "line": 9,
+        "module": "xml.etree.ElementTree",
+        "level": 0
+      },
+      {
+        "line": 10,
+        "module": "collections",
+        "level": 0
+      },
+      {
+        "line": 11,
+        "module": "pathlib",
+        "level": 0
+      },
+      {
+        "line": 12,
+        "module": "typing",
+        "level": 0
+      }
+    ]
+  },
+  "repository_validator_commands": {
+    "sglang-glm53-image-contracts": [
+      [
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "dev",
+        "pytest",
+        "-q",
+        "tests/test_glm53_image.py",
+        "tests/test_runtime_artifact.py",
+        "tests/test_sglang_redaction_images.py"
+      ]
+    ],
+    "sglang-k2-contracts": [
+      [
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "dev",
+        "pytest",
+        "-q",
+        "tests/test_k2_sglang_image.py"
+      ]
+    ],
+    "schema-contracts": [
+      [
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "dev",
+        "pytest",
+        "-q",
+        "tests/test_schema_export.py",
+        "tests/test_config.py",
+        "tests/test_deployment_context.py",
+        "tests/test_deployment_context_env.py",
+        "tests/test_deployment_context_inventory.py",
+        "tests/test_data_paths.py",
+        "tests/test_docs_deployment_layout.py",
+        "tests/test_image_probe_contract.py"
+      ]
+    ],
+    "control-deployment-contracts": [
+      [
+        "bash",
+        "-n",
+        "scripts/install-control-venv.sh"
+      ],
+      [
+        "bash",
+        "-n",
+        "scripts/pull-to-cluster.sh"
+      ],
+      [
+        "bash",
+        "-n",
+        "scripts/setup-engine-venvs.sh"
+      ],
+      [
+        "bash",
+        "-n",
+        "scripts/hot-swap-gpu-monitors.sh"
+      ],
+      [
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "dev",
+        "pytest",
+        "-q",
+        "tests/test_atomic_deploy.py",
+        "tests/test_slurm_identity_probe.py"
+      ]
+    ],
+    "viewer-deployment-contracts": [
+      [
+        "bash",
+        "-n",
+        "scripts/pull-to-viewer.sh"
+      ],
+      [
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "dev",
+        "pytest",
+        "-q",
+        "tests/test_atomic_deploy.py",
+        "tests/test_grafana_provisioning.py",
+        "tests/test_telemetry_rollup_backfill.py",
+        "tests/test_secondary_dashboard_rollups.py",
+        "tests/test_ingest.py"
+      ]
+    ],
+    "workflow-contracts": [
+      [
+        "actionlint",
+        "-no-color",
+        "-shellcheck=",
+        "-pyflakes="
+      ],
+      [
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "dev",
+        "pytest",
+        "-q",
+        "tests/test_ci_workflows.py",
+        "tests/test_gitleaks_policy.py"
+      ]
+    ],
+    "deployed-input-contracts": [
+      [
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "dev",
+        "pytest",
+        "-q",
+        "tests/test_deployed_inputs.py",
+        "tests/test_deployed_artifacts.py"
+      ]
+    ]
+  },
+  "discovered_config_candidates": [
+    "tests/conftest.py",
+    "tests/postgres/conftest.py"
+  ],
+  "absent_root_controls": [
+    "uv.toml",
+    "ruff.toml",
+    ".ruff.toml",
+    "ty.toml",
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "setup.cfg",
+    "conftest.py",
+    "sitecustomize.py",
+    "usercustomize.py"
+  ],
+  "payload_boundary": [
+    "src/comet/**",
+    "tests/test_*.py",
+    "tests/postgres/**",
+    "docs/**",
+    "schema/**",
+    "clusters/**",
+    "cookbooks/**",
+    "deployment/contexts/**"
+  ],
+  "payload_boundary_note": "Except explicitly listed controls. Reviewed payload is immutable head-bound, not frozen to this profile; imports and test behavior require source review. New orchestration/config/collection hooks require profile admission, not payload classification."
+}
