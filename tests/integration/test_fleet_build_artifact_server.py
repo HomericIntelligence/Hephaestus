@@ -6,6 +6,7 @@ import http.client
 import importlib.metadata
 import ipaddress
 import json
+import os
 import selectors
 import signal
 import socket
@@ -30,7 +31,14 @@ from hephaestus.automation import fleet_build_artifact_server
 from hephaestus.automation.fleet_build_artifact_server import BuildArtifactServer
 from tests.unit.automation.test_fleet_build_artifacts import private_file, retained_bundle, sha
 
-pytestmark = [pytest.mark.integration, pytest.mark.precommit]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.precommit,
+    pytest.mark.requires_posix,
+    pytest.mark.skipif(
+        os.name != "posix", reason="Private inputs require POSIX descriptor operations."
+    ),
+]
 
 COMMAND = "hephaestus-fleet-build-artifacts"
 FIXTURE_BEARER = "artifact-fixture-read-only"
@@ -138,7 +146,7 @@ def running_command(config: Path) -> Iterator[dict[str, Any]]:
         if process.poll() is None:
             process.terminate()
         try:
-            _, error = process.communicate(timeout=3)
+            terminal, error = process.communicate(timeout=3)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate(timeout=3)
@@ -147,6 +155,9 @@ def running_command(config: Path) -> Iterator[dict[str, Any]]:
             assert process.returncode == 0, (
                 f"The service shutdown failed: exit {process.returncode}; {error.decode()}"
             )
+            assert [json.loads(line) for line in terminal.splitlines()] == [
+                {"status": "ok", "exit_code": 0}
+            ]
 
 
 def read_page(
@@ -412,28 +423,34 @@ def test_connection_capacity_deadline_and_shutdown(
 
 
 @pytest.mark.parametrize("field", ["service.json", "certificate.pem", "private-key.pem", "bearer"])
+@pytest.mark.parametrize("use_json", [False, True])
 def test_installed_command_rejects_nonprivate_input_without_readiness(
-    tmp_path: Path, field: str
+    tmp_path: Path, field: str, use_json: bool
 ) -> None:
     """Fail startup without exposing the rejected input or reporting readiness."""
     config, _ = service_config(tmp_path)
     (tmp_path / field).chmod(0o644)
     result = subprocess.run(
-        [str(installed_command()), "--config", str(config), "--json"],
+        [str(installed_command()), "--config", str(config), *(["--json"] if use_json else [])],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         timeout=5,
         check=False,
     )
     assert result.returncode == 1
-    assert result.stdout == b""
+    if use_json:
+        assert json.loads(result.stdout) == {"status": "error", "exit_code": 1}
+    else:
+        assert result.stdout == b""
     assert result.stderr == b"The private build-log service failed.\n"
 
 
+@pytest.mark.parametrize("use_json", [False, True])
 def test_shutdown_failure_has_fixed_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
+    use_json: bool,
 ) -> None:
     """Return a nonzero result without exposing a private shutdown exception."""
 
@@ -451,7 +468,15 @@ def test_shutdown_failure_has_fixed_diagnostic(
             raise ValueError("private fixture detail must not be printed")
 
     monkeypatch.setattr(fleet_build_artifact_server, "BuildArtifactServer", FailingStop)
-    assert fleet_build_artifact_server.main(["--config", str(tmp_path / "unused"), "--json"]) == 1
+    arguments = ["--config", str(tmp_path / "unused"), *(["--json"] if use_json else [])]
+    assert fleet_build_artifact_server.main(arguments) == 1
     output = capsys.readouterr()
     assert output.err == "The private build-log service failed.\n"
     assert "private fixture detail" not in output.out
+    if use_json:
+        assert [json.loads(line) for line in output.out.splitlines()] == [
+            {"status": "ready", "host": "127.0.0.1", "port": 12345},
+            {"status": "error", "exit_code": 1},
+        ]
+    else:
+        assert output.out == "Private build-log service ready.\n"

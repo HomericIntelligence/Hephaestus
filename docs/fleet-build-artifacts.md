@@ -195,6 +195,9 @@ time; log hashing avoids a full escaped copy of both streams.
    waits for its threads. Start a new process to load the new inputs. A trust
    anchor change also requires a coordinated private client configuration
    update and Agamemnon restart. Readiness does not prove client trust.
+   With `--json`, a separate final object reports `status: ok` and
+   `exit_code: 0`, or `status: error` and a nonzero `exit_code`. Startup failure
+   emits only the error object. Fixed failure diagnostics also go to stderr.
 6. To disable or roll back, stop the service, remove the controller's backend
    selection, and restart the controller. Preserve retained bundles. No work
    state migration is required. Startup and shutdown failures have nonzero

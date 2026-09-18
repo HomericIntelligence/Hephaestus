@@ -13,7 +13,13 @@ import pytest
 
 from hephaestus.automation.fleet_build_artifacts import ArtifactCatalog, ArtifactRequestError
 
-pytestmark = pytest.mark.precommit
+pytestmark = [
+    pytest.mark.precommit,
+    pytest.mark.requires_posix,
+    pytest.mark.skipif(
+        os.name != "posix", reason="Private inputs require POSIX descriptor operations."
+    ),
+]
 
 
 def canonical(value: object) -> bytes:
