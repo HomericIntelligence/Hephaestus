@@ -36,7 +36,9 @@ from hephaestus.automation.state_labels import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-REAL_CARRIER = REPO_ROOT / "tests" / "fixtures" / "review-exchange" / "scylla-2093-state-carrier.md"
+REAL_CARRIER = (
+    REPO_ROOT / "tests" / "fixtures" / "review-exchange" / "scylla-2093-state-carrier.txt"
+)
 
 REPOSITORY = "HomericIntelligence/Scylla"
 PR_NUMBER = 2093
