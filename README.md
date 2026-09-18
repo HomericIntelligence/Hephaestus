@@ -438,7 +438,7 @@ sync (#993).
 | `hephaestus-gh` | Run `gh` through Hephaestus retry, circuit-breaker, and throttle handling |
 | `hephaestus-github-stats` | GitHub contribution statistics via the `gh` CLI |
 | `hephaestus-label-severity` | Reconcile the `severity:*` label for a GitHub issue from its issue-form Severity answer |
-| `hephaestus-tidy` | Single-repo gh-tidy wrapper with Myrmidon swarm for conflict resolution |
+| `hephaestus-tidy` | Clean merged branches; `--rebase-all` enables rebases and agent conflict resolution |
 | `hephaestus-prepare-worktree` | Safely create an isolated worktree at an attested start point |
 | `hephaestus-audit-worktrees` | Emit a read-only inventory of registered worktrees |
 | `hephaestus-remove-worktree` | Remove one approved, clean registered worktree at its audited HEAD |
