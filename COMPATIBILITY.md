@@ -91,7 +91,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-The 55 console scripts registered in `[project.scripts]` are classified into one
+The 56 console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
 The installed script inventory is `[project.scripts]` in `pyproject.toml`.
@@ -125,6 +125,7 @@ inventory or table before commit.
 | `hephaestus-implement-issues` | Provisional | Queue scope: implementation, PR review, and merge wait |
 | `hephaestus-review-prs` | Provisional | Queue scope: PR review |
 | `hephaestus-ensure-state-labels` | Internal | Used by this repo's CI label bootstrap |
+| `hephaestus-reconcile-implementation-labels` | Provisional | One-way reconciliation of a stale `state:implementation-go` label against the current-head verdict |
 | `hephaestus-gh` | Provisional | Shell-facing wrapper around the shared `gh_call` adapter |
 | `hephaestus-fleet-sync` | Provisional | Fleet-wide repo sync helper |
 | `hephaestus-tidy` | Provisional | Local-branch rebase + cleanup helper |

@@ -43,6 +43,7 @@ _PRECOMMIT_TEST_FILES = {
     "tests/unit/automation/test_agent_config.py",
     "tests/unit/automation/test_pipeline_cli.py",
     "tests/unit/automation/test_protocol.py",
+    "tests/unit/automation/test_reconcile_implementation_labels.py",
     "tests/unit/automation/test_state_labels.py",
     "tests/unit/ci/test_precommit.py",
     "tests/unit/ci/test_pytest_control_options.py",
