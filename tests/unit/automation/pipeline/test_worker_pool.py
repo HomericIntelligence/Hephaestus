@@ -23054,6 +23054,7 @@ def test_writer_creation_category_crosses_worker_boundary(
     manager = MagicMock()
     manager.create_worktree.return_value = writer
     source = MagicMock()
+    source.path_for.return_value = writer
     clean = MagicMock(return_value=True)
     _configure_writer_creation_failure(boundary, manager, source, clean, private)
     kwargs: dict[str, object] = {
@@ -23095,6 +23096,10 @@ def test_writer_creation_category_crosses_worker_boundary(
     for sentinel in ("credential-probe", "ENV_PROBE", "/private/probe"):
         assert sentinel not in json.dumps(result.value) + (result.error or "") + caplog.text
     assert result.value.get("source_workspace_creation_failure") == expected
+    if boundary == "post_create":
+        clean.assert_called_once()
+    if boundary == "claim":
+        source.claim_implementation_writer.assert_called_once()
     if boundary in {"transition_process", "transition_oserror"}:
         from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
         from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_BASE_SHA_KEY
@@ -25464,6 +25469,102 @@ def test_review_checkout_bounds_status_manifest(
         assert "manifest" in result.error
 
 
+@pytest.mark.parametrize(
+    "case", ["valid", "changed_argv", "changed_timeout", "expired", "cancelled"]
+)
+def test_repository_validation_runtime_preparation_is_not_execution(
+    pool: WorkerPool, tmp_path: Path, case: str
+) -> None:
+    """Admit runtime metadata without execution, and reject stale job authority."""
+    import time
+
+    from hephaestus.automation.pipeline.repository_validation import RepositoryValidationInvocation
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationRuntimeRead,
+        RepositoryValidationRuntimeRequest,
+    )
+    from tests.unit.automation.pipeline.test_jobs import _repository_build_job
+    from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
+
+    trusted, execution = _execution_runtime(tmp_path)
+    request = RepositoryValidationRuntimeRequest(
+        RepositoryValidationInvocation(
+            execution.plan,
+            execution.attempt_generation,
+            execution.request_nonce,
+            "local",
+            (execution.check_id,),
+        ),
+        time.monotonic() + (-1 if case == "expired" else 60),
+    )
+    job = _repository_build_job(
+        execution, repository_validation=None, repository_validation_preparation=request
+    )
+    if case == "changed_argv":
+        object.__setattr__(job, "argv", ("echo", "not-admitted"))
+    if case == "changed_timeout":
+        object.__setattr__(job, "timeout_s", "invalid")
+    if case == "cancelled":
+        pool._shutdown.set()
+    with (
+        patch(f"{_WP}._repository_validation_host_root", return_value=trusted) as host_root,
+        patch.object(
+            pool,
+            "_run_immutable_build_test",
+            side_effect=AssertionError("Admission must not execute the check."),
+        ),
+        patch(
+            "subprocess.Popen", side_effect=AssertionError("Admission must not start a process.")
+        ),
+    ):
+        result = pool._run_build_test(job)
+    assert result.ok is (case == "valid")
+    if case == "valid":
+        assert type(result.value) is RepositoryValidationRuntimeRead
+        assert result.value.request == request
+        assert result.value.execution == execution
+        assert not hasattr(result.value, "receipt")
+    else:
+        host_root.assert_not_called()
+        assert result.error is not None
+
+
+def test_repository_validation_runtime_preparation_keeps_lookup_in_deadline(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """Time used to locate the runtime cannot extend its admission budget."""
+    from hephaestus.automation.pipeline.repository_validation import RepositoryValidationInvocation
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationRuntimeRequest,
+    )
+    from tests.unit.automation.pipeline.test_jobs import (
+        _repository_build_job,
+        _repository_execution,
+    )
+
+    execution = _repository_execution(tmp_path)
+    request = RepositoryValidationRuntimeRequest(
+        RepositoryValidationInvocation(execution.plan, 1, "f" * 32, "local", (execution.check_id,)),
+        160.0,
+    )
+    job = _repository_build_job(
+        execution, repository_validation=None, repository_validation_preparation=request
+    )
+    now = [100.0]
+
+    def locate() -> Path:
+        now[0] = 161.0
+        return tmp_path
+
+    with (
+        patch(f"{_WP}.time.monotonic", side_effect=lambda: now[0]),
+        patch(f"{_WP}._repository_validation_host_root", side_effect=locate),
+        patch(f"{_WP}.admit_runtime", side_effect=AssertionError("The deadline already expired.")),
+    ):
+        result = pool._run_build_test(job)
+    assert not result.ok
+
+
 def test_repository_validation_worker_rejects_runtime_before_subprocess(
     pool: WorkerPool, tmp_path: Path
 ) -> None:
@@ -25608,7 +25709,7 @@ def test_repository_validation_darwin_uses_sealed_runtime_and_reviewed_imports(
     pool: WorkerPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, site_input: str
 ) -> None:
     """Use the admitted tools, source imports, and bounded documentation output."""
-    from hephaestus.automation.pipeline.repository_validation_runtime import admit_execution_runtime
+    from hephaestus.automation.repository_validation_runtime import admit_execution_runtime
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
@@ -25684,7 +25785,7 @@ def test_repository_validation_linux_mounts_runtime_read_only(
     pool: WorkerPool, tmp_path: Path
 ) -> None:
     """Use the existing Pyxis boundary with the admitted runtime and source imports."""
-    from hephaestus.automation.pipeline.repository_validation_runtime import admit_execution_runtime
+    from hephaestus.automation.repository_validation_runtime import admit_execution_runtime
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
@@ -25701,6 +25802,11 @@ def test_repository_validation_linux_mounts_runtime_read_only(
         launch_binding=MagicMock(),
     )
     pool._host_verification_pyxis_quota_root = tmp_path
+
+    def fixture_ancestry(path: Path) -> None:
+        # Supply only host ancestry trust. Keep descriptor and runtime checks real.
+        assert path == path.resolve(strict=True)
+        assert path.is_relative_to(tmp_path)
 
     def run(command: tuple[str, ...], **kwargs: Any) -> JobResult:
         environment, source, scratch = kwargs["environment"], kwargs["source"], kwargs["scratch"]
@@ -25722,6 +25828,10 @@ def test_repository_validation_linux_mounts_runtime_read_only(
         patch(f"{_WP}._pyxis_runtime_available", return_value=True),
         patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
         patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
+        patch(
+            "hephaestus.automation.pyxis_artifact_io._require_trusted_ancestry",
+            side_effect=fixture_ancestry,
+        ),
         patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata),
         patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
         patch(f"{_WP}._extract_immutable_archive"),
@@ -25738,7 +25848,7 @@ def test_repository_validation_rechecks_runtime_before_launch(
     pool: WorkerPool, tmp_path: Path, fault: str
 ) -> None:
     """Reject a runtime or job change after initial admission and before launch."""
-    from hephaestus.automation.pipeline.repository_validation_runtime import admit_execution_runtime
+    from hephaestus.automation.repository_validation_runtime import admit_execution_runtime
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 

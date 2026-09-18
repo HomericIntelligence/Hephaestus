@@ -12,8 +12,9 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, ReadRepositoryValidationCIRequest
+from hephaestus.automation.pipeline.jobs import BuildTestJob, GitJob
 from hephaestus.automation.pipeline.repository_validation import RepositoryValidationPlan
-from hephaestus.automation.pipeline.stages import pr_review_jobs
+from hephaestus.automation.pipeline.stages import pr_review_jobs, pr_review_repository_validation
 from hephaestus.automation.pipeline.stages.base import JobRequest
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
 from hephaestus.automation.pipeline.stages.pr_review_threads import REVIEW_CHECKOUT_WAIT
@@ -61,10 +62,17 @@ def _comet_checkout(root: Path) -> tuple[str, str]:
     return base, head
 
 
+@pytest.mark.parametrize("branch_case", ["admitted", "missing", "invalid"])
 def test_comet_empty_bootstrap_submits_bound_validation_before_review(
-    tmp_path: Path, make_ctx: Any, make_work_item: Any
+    tmp_path: Path, make_ctx: Any, make_work_item: Any, branch_case: str
 ) -> None:
     """Start validation after source binding without a bootstrap grant."""
+    from hephaestus.automation.pipeline.jobs import GitJob, JobResult
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationSourceRead,
+    )
+    from hephaestus.automation.pipeline_github_review_validation import comet_plan_for_workspace
+
     root = tmp_path / "source"
     base, head = _comet_checkout(root)
     workspace = WorkspaceBinding.source(
@@ -87,7 +95,6 @@ def test_comet_empty_bootstrap_submits_bound_validation_before_review(
             "pr_head_sha": head,
             "pr_base_sha": base,
             "pr_base_branch": "main",
-            "pr_head_branch": "codex/comet-fixture",
             "reviewed_pr_base_sha": base,
             "review_target_base_sha": base,
             "review_diff_base_sha": base,
@@ -99,19 +106,51 @@ def test_comet_empty_bootstrap_submits_bound_validation_before_review(
     )
     ctx = make_ctx(org="LLM360")
 
-    with patch.object(pr_review_jobs, "source_workspace_binding", return_value=workspace) as bind:
-        result = PrReviewStage().step(item, ctx)
+    stage = PrReviewStage()
+    with patch.object(ctx.github, "get_pr_head_branch", return_value="codex/comet-fixture"):
+        adoption = stage._adopt_direct_pr_worktree(item, ctx)
+    assert isinstance(adoption, JobRequest)
+    assert item.branch == "codex/comet-fixture"
+    stage.on_job_done(item, JobResult(ok=True, value={"path": str(root), "dirty": False}), ctx)
+    assert "pr_head_branch" not in item.payload
+    with patch.object(
+        pr_review_repository_validation, "source_workspace_binding", return_value=workspace
+    ) as bind:
+        result = stage.step(item, ctx)
 
     assert bind.called, result
     assert bind.call_args_list[0].args == (item, ctx, SourceLane.REVIEW)
     assert bind.call_args_list[0].kwargs == {"revision": head}
     assert item.payload["host_verification_bootstrap_json"] == ""
     assert isinstance(result, JobRequest)
+    assert isinstance(result.job, GitJob)
+    request = result.job.repository_validation_preparation
+    assert request is not None
+    plan = comet_plan_for_workspace(
+        workspace, issue_number=1200, pr_number=1200, reviewed_base=base, timeout_s=30
+    )
+    stage.on_job_done(
+        item, JobResult(ok=True, value=RepositoryValidationSourceRead(request, plan)), ctx
+    )
+    assert "repository_validation_attempt" not in item.payload
+    item.state = result.on_done_state
+    if branch_case != "admitted":
+        item.branch = "" if branch_case == "missing" else "invalid\nbranch"
+    result = stage.step(item, ctx)
+    if branch_case != "admitted":
+        from hephaestus.automation.pipeline.stages.base import Disposition, StageOutcome
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "repository_validation_source_gap")
+        assert "repository_validation_ci_request" not in item.payload
+        assert ctx.github.mutation_log == []
+        return
+    assert isinstance(result, JobRequest)
     assert isinstance(result.job, GitHubJob), (
         "Comet must collect bound validation before it starts source review."
     )
     assert result.on_done_state == "REPOSITORY_VALIDATION_CI_WAIT"
     assert isinstance(result.job.request, ReadRepositoryValidationCIRequest)
+    assert result.job.request.head_branch == "codex/comet-fixture"
     plan = result.job.request.plan
     assert isinstance(plan, RepositoryValidationPlan)
     assert plan.source_workspace == workspace
@@ -164,6 +203,68 @@ def test_checkout_callback_retains_actual_change_records(make_work_item: Any) ->
     assert len(item.payload["review_change_records"]) == 2
 
 
+def test_repository_validation_source_preparation_does_not_run_on_coordinator(
+    tmp_path: Path, make_work_item: Any, make_ctx: Any
+) -> None:
+    """Submit source inspection without doing Git work on the coordinator."""
+    from hephaestus.automation.pipeline.jobs import GitJob
+
+    item, request, _ = _pending_ci_item(tmp_path, make_work_item)
+    plan = request.plan
+    item.payload.pop("repository_validation_attempt")
+    item.payload.pop("repository_validation_ci_request")
+    item.payload.update(
+        review_change_records=plan.changes,
+        review_changed_paths=[path for _, path in plan.changes],
+        review_target_base_sha=plan.reviewed_base,
+        review_diff_base_sha=plan.diff_base_sha,
+    )
+    with patch.object(
+        pr_review_repository_validation,
+        "comet_plan_for_workspace",
+        side_effect=AssertionError("Source inspection ran on the coordinator."),
+        create=True,
+    ):
+        result = PrReviewStage()._start_repository_validation(
+            item, make_ctx(org="LLM360"), plan.source_workspace
+        )
+    assert isinstance(result, JobRequest)
+    assert isinstance(result.job, GitJob)
+    assert result.job.op == "prepare_repository_validation"
+    assert result.job.workspace == plan.source_workspace
+    assert item.payload.get("repository_validation_source_request") is not None
+    assert "repository_validation_attempt" not in item.payload
+
+
+def test_repository_validation_runtime_preparation_does_not_run_on_coordinator(
+    tmp_path: Path, make_work_item: Any, make_ctx: Any
+) -> None:
+    """Reserve one local request and let a worker inspect its runtime."""
+    from dataclasses import replace
+
+    from hephaestus.automation.pipeline.jobs import BuildTestJob, JobResult
+
+    item, _, receipt = _pending_ci_item(tmp_path, make_work_item)
+    stage = PrReviewStage()
+    ctx = make_ctx(org="LLM360")
+    stage.on_job_done(item, JobResult(ok=True, value=replace(receipt, receipts=())), ctx)
+    with patch.object(
+        pr_review_repository_validation,
+        "admit_runtime",
+        side_effect=AssertionError("Runtime inspection ran on the coordinator."),
+        create=True,
+    ):
+        result = stage._repository_validation_ci_wait(item, ctx)
+    assert isinstance(result, JobRequest)
+    assert isinstance(result.job, BuildTestJob)
+    assert result.job.repository_validation is None
+    assert item.payload.get("repository_validation_runtime_request") is not None
+    attempt = item.payload["repository_validation_attempt"]
+    assert attempt.pending is not None
+    assert attempt.pending.evidence_kind == "local"
+    assert not attempt.receipts
+
+
 def test_new_round_discards_old_change_records(make_work_item: Any) -> None:
     """Discard source status evidence before another review round."""
     from hephaestus.automation.pipeline.stages.pr_review_round_state import (
@@ -177,10 +278,18 @@ def test_new_round_discards_old_change_records(make_work_item: Any) -> None:
             "review_diff_base_sha": "a" * 40,
             "review_target_base_sha": "b" * 40,
             "repository_validation_local_request": object(),
+            "repository_validation_source_request": object(),
+            "repository_validation_runtime_request": object(),
+            "repository_validation_source_result": object(),
+            "repository_validation_runtime_result": object(),
         }
     )
     _clear_round_review_state(item)
     assert "repository_validation_local_request" not in item.payload
+    assert "repository_validation_source_request" not in item.payload
+    assert "repository_validation_runtime_request" not in item.payload
+    assert "repository_validation_source_result" not in item.payload
+    assert "repository_validation_runtime_result" not in item.payload
     for key in ("review_change_records", "review_diff_base_sha", "review_target_base_sha"):
         assert key not in item.payload
 
@@ -266,6 +375,7 @@ def _pending_ci_item(
     item = make_work_item(
         repo="comet", issue=plan.issue_number, pr=plan.pr_number, state=REVIEW_CHECKOUT_WAIT
     )
+    item.branch = "codex/repair"
     item.worktree = str(tmp_path)
     item.payload.update(
         {
@@ -295,6 +405,168 @@ def _pending_ci_item(
         if check.check_id in invocation.check_ids
     )
     return item, request, RepositoryValidationCIRead(request, receipts)
+
+
+def _preparation_callback(
+    tmp_path: Path, make_work_item: Any, make_ctx: Any, phase: str
+) -> tuple[Any, Any, Any, Any, str]:
+    """Submit one preparation request and construct its external worker result."""
+    from dataclasses import replace
+
+    from hephaestus.automation.pipeline.jobs import JobResult
+    from hephaestus.automation.pipeline.repository_validation import RepositoryValidationExecution
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationRuntimeRead,
+        RepositoryValidationSourceRead,
+    )
+
+    item, ci_request, ci = _pending_ci_item(tmp_path, make_work_item)
+    stage, ctx = PrReviewStage(), make_ctx(org="LLM360")
+    plan = ci_request.plan
+    value: RepositoryValidationSourceRead | RepositoryValidationRuntimeRead
+    if phase == "source":
+        item.payload.pop("repository_validation_attempt")
+        item.payload.pop("repository_validation_ci_request")
+        item.payload.update(
+            review_change_records=plan.changes,
+            review_changed_paths=[path for _, path in plan.changes],
+            review_diff_base_sha=plan.diff_base_sha,
+            review_target_base_sha=plan.reviewed_base,
+        )
+        submitted = stage._start_repository_validation(item, ctx, plan.source_workspace)
+        assert isinstance(submitted, JobRequest)
+        assert isinstance(submitted.job, GitJob)
+        request = submitted.job.repository_validation_preparation
+        assert request is not None
+        value = RepositoryValidationSourceRead(request, plan)
+    else:
+        stage.on_job_done(item, JobResult(ok=True, value=replace(ci, receipts=())), ctx)
+        submitted = stage._repository_validation_ci_wait(item, ctx)
+        assert isinstance(submitted, JobRequest)
+        assert isinstance(submitted.job, BuildTestJob)
+        runtime_request = submitted.job.repository_validation_preparation
+        assert runtime_request is not None
+        runtime = _runtime_for_stage_plan(plan)
+        invocation = runtime_request.invocation
+        execution = RepositoryValidationExecution(
+            plan,
+            invocation.check_ids[0],
+            invocation.generation,
+            invocation.request_nonce,
+            runtime.root,
+            runtime.manifest.manifest_sha256,
+            runtime.manifest.tree_sha256,
+        )
+        value = RepositoryValidationRuntimeRead(runtime_request, execution)
+    return item, stage, ctx, value, submitted.on_done_state
+
+
+@pytest.mark.parametrize("phase", ["source", "runtime"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "nonce",
+        "generation",
+        "missing",
+        "failed",
+        "interrupted",
+        "duplicate",
+        "unowned",
+        "live_head",
+        "live_workspace",
+    ],
+)
+def test_repository_validation_preparation_rejects_invalid_callbacks(
+    tmp_path: Path, make_work_item: Any, make_ctx: Any, phase: str, fault: str
+) -> None:
+    """A foreign or failed callback cannot replace current pending ownership."""
+    from dataclasses import replace
+
+    from hephaestus.automation.pipeline.jobs import JobResult
+    from hephaestus.automation.pipeline.stages.base import StageOutcome
+
+    item, stage, ctx, value, state = _preparation_callback(
+        tmp_path, make_work_item, make_ctx, phase
+    )
+    key = f"repository_validation_{phase}_request"
+    pending = item.payload[key]
+    invalid = value
+    if fault in {"nonce", "generation"}:
+        changes = {"request_nonce": "e" * 32} if fault == "nonce" else {"generation": 2}
+        if phase == "source":
+            invalid = replace(value, request=replace(pending, **changes))
+        else:
+            invocation = replace(pending.invocation, **changes)
+            execution_changes = (
+                {"request_nonce": "e" * 32} if fault == "nonce" else {"attempt_generation": 2}
+            )
+            invalid = replace(
+                value,
+                request=replace(pending, invocation=invocation),
+                execution=replace(value.execution, **execution_changes),
+            )
+    elif fault == "duplicate":
+        stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+    elif fault == "unowned":
+        item.payload.pop(key)
+    elif fault == "live_head":
+        item.payload["pr_head_sha"] = "e" * 40
+    elif fault == "live_workspace":
+        item.worktree = str(tmp_path / "other")
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=fault != "failed",
+            interrupted=fault == "interrupted",
+            value=None if fault == "missing" else invalid,
+        ),
+        ctx,
+    )
+    assert item.payload.get("repository_validation_failure")
+    if fault not in {"duplicate", "unowned"}:
+        assert item.payload[key] == pending
+    stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+    item.state = state
+    assert isinstance(
+        getattr(stage, f"_repository_validation_{phase}_wait")(item, ctx), StageOutcome
+    )
+    assert ctx.github.mutation_log == []
+
+
+@pytest.mark.parametrize("phase", ["source", "runtime"])
+def test_repository_validation_preparation_rechecks_identity_before_next_job(
+    tmp_path: Path, make_work_item: Any, make_ctx: Any, phase: str
+) -> None:
+    """A later head change must block an already accepted preparation result."""
+    from hephaestus.automation.pipeline.jobs import JobResult
+    from hephaestus.automation.pipeline.stages.base import StageOutcome
+
+    item, stage, ctx, value, _ = _preparation_callback(tmp_path, make_work_item, make_ctx, phase)
+    stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+    assert "repository_validation_failure" not in item.payload
+    item.payload["pr_head_sha"] = "e" * 40
+    result = getattr(stage, f"_repository_validation_{phase}_wait")(item, ctx)
+    assert isinstance(result, StageOutcome)
+    assert item.payload.get("repository_validation_failure")
+
+
+def test_repository_validation_runtime_failure_consumes_a_terminal_gap(
+    tmp_path: Path, make_work_item: Any, make_ctx: Any
+) -> None:
+    """A failed owned admission must not leave a reusable local invocation."""
+    from dataclasses import replace
+
+    from hephaestus.automation.pipeline.jobs import JobResult
+
+    item, stage, ctx, value, _ = _preparation_callback(
+        tmp_path, make_work_item, make_ctx, "runtime"
+    )
+    failed = replace(value, execution=None, failure="runtime_preparation_failed")
+    stage.on_job_done(item, JobResult(ok=False, value=failed), ctx)
+    attempt = item.payload["repository_validation_attempt"]
+    assert attempt.pending is None
+    assert any(gap.reason == "local_runtime_unavailable" for gap in attempt.gaps)
+    assert "repository_validation_runtime_request" not in item.payload
 
 
 def test_ci_callback_is_consumed_before_the_coordinator_changes_state(
@@ -339,8 +611,8 @@ def test_complete_ci_routes_to_review_without_a_host_runtime_lookup(
     with (
         patch.object(stage, "_route_threads_before_broad_review", return_value=expected) as route,
         patch.object(
-            pr_review_jobs,
-            "admit_runtime",
+            stage,
+            "_submit_repository_validation_local",
             side_effect=AssertionError("Unexpected local runtime lookup"),
         ),
         patch(
@@ -558,16 +830,23 @@ def test_review_entry_discards_prior_validation_attempt(
         stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
     item.payload["repository_validation_failure"] = "previous_failure"
     item.payload["repository_validation_local_request"] = object()
+    preparation_keys = [
+        f"repository_validation_{phase}_{kind}"
+        for phase in ("source", "runtime")
+        for kind in ("request", "result")
+    ]
+    item.payload.update({key: object() for key in preparation_keys})
     stage.on_enter(item, ctx)
     assert "repository_validation_attempt" not in item.payload
     assert "repository_validation_ci_request" not in item.payload
     assert "repository_validation_failure" not in item.payload
     assert "repository_validation_local_request" not in item.payload
+    assert all(key not in item.payload for key in preparation_keys)
 
 
 def _runtime_for_stage_plan(plan: Any) -> Any:
     """Supply admitted metadata without claiming an executable runtime."""
-    from hephaestus.automation.pipeline.repository_validation_runtime import (
+    from hephaestus.automation.repository_validation_runtime import (
         AdmittedRuntime,
         parse_runtime_manifest,
     )
@@ -582,6 +861,41 @@ def _runtime_for_stage_plan(plan: Any) -> Any:
     )
     root = Path(pr_review_jobs.__file__).resolve().parents[4]
     return AdmittedRuntime(root / "build/hephaestus-review-validation/comet" / lock, manifest)
+
+
+def _complete_runtime_preparation(stage: Any, item: Any, ctx: Any, submitted: Any) -> Any:
+    """Supply worker metadata without treating admission as check evidence."""
+    from hephaestus.automation.pipeline.jobs import JobResult
+    from hephaestus.automation.pipeline.repository_validation import RepositoryValidationExecution
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationRuntimeRead,
+        RepositoryValidationRuntimeRequest,
+    )
+
+    request = submitted.job.repository_validation_preparation
+    assert type(request) is RepositoryValidationRuntimeRequest
+    assert submitted.job.repository_validation is None
+    invocation = request.invocation
+    runtime = _runtime_for_stage_plan(invocation.plan)
+    execution = RepositoryValidationExecution(
+        invocation.plan,
+        invocation.check_ids[0],
+        invocation.generation,
+        invocation.request_nonce,
+        runtime.root,
+        runtime.manifest.manifest_sha256,
+        runtime.manifest.tree_sha256,
+    )
+    receipts = item.payload["repository_validation_attempt"].receipts
+    previous_state = item.state
+    stage.on_job_done(
+        item, JobResult(ok=True, value=RepositoryValidationRuntimeRead(request, execution)), ctx
+    )
+    assert item.state == previous_state
+    assert item.payload["repository_validation_attempt"].pending == invocation
+    assert item.payload["repository_validation_attempt"].receipts == receipts
+    item.state = submitted.on_done_state
+    return stage._repository_validation_runtime_wait(item, ctx)
 
 
 @pytest.mark.parametrize("ci_count", [0, 2])
@@ -605,12 +919,6 @@ def test_local_stage_completes_only_the_uncovered_checks(
     expected = Continue(next_state="VALIDATE_WAIT")
     selected = []
     with (
-        patch.object(
-            pr_review_jobs,
-            "admit_runtime",
-            return_value=_runtime_for_stage_plan(ci.request.plan),
-            create=True,
-        ),
         patch.object(stage, "_route_threads_before_broad_review", return_value=expected) as route,
         patch(
             "hephaestus.automation.pipeline.stages.pr_review._reviewed_terminal_pr_outcome",
@@ -620,6 +928,7 @@ def test_local_stage_completes_only_the_uncovered_checks(
         for receipt in ci.receipts[ci_count:]:
             submitted = stage.step(item, ctx)
             assert isinstance(submitted, JobRequest)
+            submitted = _complete_runtime_preparation(stage, item, ctx, submitted)
             assert isinstance(submitted.job, BuildTestJob)
             execution = submitted.job.repository_validation
             assert execution is not None
@@ -681,13 +990,8 @@ def test_local_stage_retains_callback_failures(
     stage, ctx = PrReviewStage(), make_ctx(org="LLM360")
     stage.on_job_done(item, JobResult(ok=True, value=replace(ci, receipts=())), ctx)
     item.state = "REPOSITORY_VALIDATION_CI_WAIT"
-    with patch.object(
-        pr_review_jobs,
-        "admit_runtime",
-        return_value=_runtime_for_stage_plan(ci.request.plan),
-        create=True,
-    ):
-        submitted = stage._repository_validation_ci_wait(item, ctx)
+    submitted = stage._repository_validation_ci_wait(item, ctx)
+    submitted = _complete_runtime_preparation(stage, item, ctx, submitted)
     assert isinstance(submitted, JobRequest)
     execution = submitted.job.repository_validation
     receipt = replace(ci.receipts[0], evidence_kind="local")
@@ -711,10 +1015,9 @@ def test_local_stage_retains_callback_failures(
     )
     stage.on_job_done(item, JobResult(ok=True, value=valid), ctx)
     with patch.object(
-        pr_review_jobs,
-        "admit_runtime",
+        stage,
+        "_submit_repository_validation_local",
         side_effect=AssertionError("No retry is allowed."),
-        create=True,
     ):
         assert isinstance(stage._repository_validation_ci_wait(item, ctx), StageOutcome)
     assert ctx.github.mutation_log == []
@@ -727,18 +1030,30 @@ def test_local_stage_records_missing_runtime_as_a_terminal_gap(
     from dataclasses import replace
 
     from hephaestus.automation.pipeline.jobs import JobResult
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationRuntimeRead,
+    )
     from hephaestus.automation.pipeline.stages.base import StageOutcome
 
     item, _, ci = _pending_ci_item(tmp_path, make_work_item)
     stage, ctx = PrReviewStage(), make_ctx(org="LLM360")
     stage.on_job_done(item, JobResult(ok=True, value=replace(ci, receipts=())), ctx)
-    with patch.object(
-        pr_review_jobs, "admit_runtime", side_effect=ValueError("Missing runtime."), create=True
-    ) as admit:
-        assert isinstance(stage._repository_validation_ci_wait(item, ctx), StageOutcome)
-        assert item.payload.get("repository_validation_failure")
-        assert isinstance(stage._repository_validation_ci_wait(item, ctx), StageOutcome)
-    admit.assert_called_once()
+    submitted = stage._repository_validation_ci_wait(item, ctx)
+    assert isinstance(submitted, JobRequest)
+    assert isinstance(submitted.job, BuildTestJob)
+    request = submitted.job.repository_validation_preparation
+    assert request is not None
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=False,
+            value=RepositoryValidationRuntimeRead(request, failure="runtime_preparation_failed"),
+        ),
+        ctx,
+    )
+    assert isinstance(stage._repository_validation_runtime_wait(item, ctx), StageOutcome)
+    assert item.payload.get("repository_validation_failure")
+    assert isinstance(stage._repository_validation_ci_wait(item, ctx), StageOutcome)
 
 
 @pytest.mark.parametrize(
@@ -777,15 +1092,10 @@ def test_local_stage_preserves_ci_and_local_eligibility(
     covered = {receipt.check_id for receipt in receipts}
     uncovered = [check for check in plan.checks if check.check_id not in covered]
     expected = Continue(next_state="VALIDATE_WAIT")
-    with (
-        patch.object(
-            pr_review_jobs, "admit_runtime", return_value=_runtime_for_stage_plan(plan)
-        ) as admit,
-        patch.object(stage, "_route_threads_before_broad_review", return_value=expected) as route,
-    ):
+    with patch.object(stage, "_route_threads_before_broad_review", return_value=expected) as route:
         if path == "tests/test_ci_workflows.py" and not workflow_ci:
             assert isinstance(stage._repository_validation_ci_wait(item, ctx), StageOutcome)
-            admit.assert_not_called()
+            assert "repository_validation_runtime_request" not in item.payload
             route.assert_not_called()
             assert item.payload["repository_validation_failure"] == "local_check_ineligible"
             return
@@ -797,6 +1107,7 @@ def test_local_stage_preserves_ci_and_local_eligibility(
         for check in uncovered:
             submitted = stage._repository_validation_ci_wait(item, ctx)
             assert isinstance(submitted, JobRequest)
+            submitted = _complete_runtime_preparation(stage, item, ctx, submitted)
             execution = submitted.job.repository_validation
             assert execution is not None
             assert execution.check_id == check.check_id != workflow
@@ -835,7 +1146,9 @@ def test_terminal_ci_failure_prevents_local_retry(
     failed = replace(ci.receipts[0], status="failed")
     stage.on_job_done(item, JobResult(ok=True, value=replace(ci, receipts=(failed,))), ctx)
     with patch.object(
-        pr_review_jobs, "admit_runtime", side_effect=AssertionError("No retry is allowed.")
+        stage,
+        "_submit_repository_validation_local",
+        side_effect=AssertionError("No retry is allowed."),
     ):
         assert isinstance(stage._repository_validation_ci_wait(item, ctx), StageOutcome)
 

@@ -23,7 +23,7 @@ from hephaestus.automation.pipeline.routing import StageName
 class TestGitJobValidation:
     """Tests for GitJob op validation."""
 
-    @pytest.mark.parametrize("op", sorted(GIT_OPS))
+    @pytest.mark.parametrize("op", sorted(GIT_OPS - {"prepare_repository_validation"}))
     def test_valid_ops_construct(self, op: str) -> None:
         job = GitJob(repo="test/repo", op=op, timeout_s=60)
         assert job.op == op
@@ -443,6 +443,88 @@ def _repository_build_job(execution: Any, **overrides: Any) -> BuildTestJob:
     return BuildTestJob(**values)
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("argv", ("echo", "other")),
+        ("cwd", Path("/other")),
+        ("repo", "other"),
+        ("expected_head_sha", "0" * 40),
+        ("immutable_source", False),
+        ("timeout_s", 121),
+        ("verified_runner_source_revision", "a" * 40),
+    ],
+)
+def test_repository_validation_runtime_preparation_rejects_conflicting_job(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    """Keep runtime admission bound to its one immutable command."""
+    from hephaestus.automation.pipeline.repository_validation import RepositoryValidationInvocation
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationRuntimeRequest,
+    )
+
+    execution = _repository_execution(tmp_path)
+    request = RepositoryValidationRuntimeRequest(
+        RepositoryValidationInvocation(execution.plan, 1, "f" * 32, "local", (execution.check_id,)),
+        123.0,
+    )
+    with pytest.raises(ValueError):
+        _repository_build_job(
+            execution,
+            repository_validation=None,
+            repository_validation_preparation=request,
+            **{field: value},
+        )
+    with pytest.raises(ValueError):
+        _repository_build_job(execution, repository_validation_preparation=request)
+
+
+def test_repository_validation_source_preparation_requires_closed_request(tmp_path: Path) -> None:
+    """Reject absent requests and arbitrary source-preparation arguments."""
+    from dataclasses import replace
+
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationSourceRequest,
+    )
+
+    plan = _repository_execution(tmp_path).plan
+    request = RepositoryValidationSourceRequest(
+        plan.repository,
+        plan.issue_number,
+        plan.pr_number,
+        plan.source_workspace,
+        plan.reviewed_head,
+        plan.reviewed_base,
+        plan.diff_base_sha,
+        plan.changes,
+        1,
+        "f" * 32,
+        123.0,
+    )
+    job = GitJob(
+        "comet",
+        "prepare_repository_validation",
+        60,
+        expected_repository=plan.repository,
+        deadline_s=request.deadline_s,
+        workspace=plan.source_workspace,
+        repository_validation_preparation=request,
+    )
+    assert job.repository_validation_preparation == request
+    for changes in (
+        {"kwargs": {"argv": ("echo", "other")}},
+        {"op": "fetch_main"},
+        {"workspace": None},
+        {"repo": "other"},
+        {"deadline_s": 124.0},
+        {"timeout_s": 121},
+        {"repository_validation_preparation": None},
+    ):
+        with pytest.raises(ValueError):
+            replace(job, **changes)
+
+
 def test_repository_execution_preserves_build_job_compatibility(tmp_path: Path) -> None:
     """Append one frozen execution value without changing legacy positional fields."""
     from dataclasses import fields
@@ -472,11 +554,14 @@ def test_repository_execution_preserves_build_job_compatibility(tmp_path: Path) 
         "verified_runner_source_revision",
         "descr",
         "repository_validation",
+        "repository_validation_preparation",
     )
     with pytest.raises(FrozenInstanceError):
         execution.request_nonce = "e" * 32  # type: ignore[misc]
     legacy = BuildTestJob("legacy", tmp_path, ("pytest",), 30, "", False, None, "Legacy check.")
     assert legacy.repository_validation is None
+    assert legacy.repository_validation_preparation is None
+    assert job.repository_validation_preparation is None
     assert legacy.descr == "Legacy check."
 
 

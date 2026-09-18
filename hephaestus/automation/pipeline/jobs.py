@@ -15,7 +15,7 @@ import math
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +33,7 @@ from .repository_validation import (
     RepositoryValidationExecution,
     validate_repository_validation_execution,
 )
+from .repository_validation_preparation import RepositoryValidationRuntimeRequest
 
 if TYPE_CHECKING:
     from hephaestus.agents.codex_isolation import CodexIsolationRequestV1
@@ -309,6 +310,7 @@ class BuildTestJob:
     verified_runner_source_revision: str | None = None
     descr: str = ""
     repository_validation: RepositoryValidationExecution | None = None
+    repository_validation_preparation: RepositoryValidationRuntimeRequest | None = None
 
     def __post_init__(self) -> None:
         """Normalize argv to a tuple so the job is deeply immutable/hashable."""
@@ -321,10 +323,22 @@ class BuildTestJob:
 def validate_build_test_repository_validation(job: BuildTestJob) -> None:
     """Reject job fields that conflict with repository validation metadata."""
     execution = job.repository_validation
-    if execution is None:
+    preparation = job.repository_validation_preparation
+    if preparation is not None:
+        if execution is not None or type(preparation) is not RepositoryValidationRuntimeRequest:
+            raise ValueError("Runtime preparation and execution must be separate jobs.")
+        replace(preparation)
+        plan = preparation.invocation.plan
+        check = next(
+            check for check in plan.checks if check.check_id == preparation.invocation.check_ids[0]
+        )
+        if type(job.timeout_s) is not int or not 0 < job.timeout_s <= 120:
+            raise ValueError("The runtime preparation timeout is invalid.")
+    elif execution is not None:
+        check = validate_repository_validation_execution(execution)
+        plan = execution.plan
+    else:
         return
-    check = validate_repository_validation_execution(execution)
-    plan = execution.plan
     if (
         type(job.repo) is not str
         or job.repo.casefold() not in {plan.repository.casefold(), "comet"}

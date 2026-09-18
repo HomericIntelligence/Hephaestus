@@ -162,9 +162,10 @@ def test_worker_routes_distinct_threads_and_metadata_only_events(worker):
 
 def test_worker_sends_singleton_environment_on_each_provider_start(worker):
     """Bind actual fixture RPCs to the admitted session's sole tool container."""
-    from hephaestus.automation.fleet_environments import EnvironmentLease, EnvironmentRegistry
+    from hephaestus.automation.fleet_environments import EnvironmentRegistry
+    from tests.fixtures.fleet_environment import environment_lease
 
-    item = EnvironmentLease(
+    item = environment_lease(
         worker_id="worker-a",
         session_id="session-1",
         generation=1,
@@ -172,7 +173,10 @@ def test_worker_sends_singleton_environment_on_each_provider_start(worker):
         container_id="1" * 64,
         image_digest="sha256:" + "a" * 64,
         workspace=worker.workspace_root / "one",
-        engine_program=Path("/usr/bin/podman"),
+        attachment_program=Path(sys.executable),
+        execution_id="session-1-exec",
+        socket_path=worker.journal.directory / "a.sock",
+        lease_id="1" * 32,
     )
     registry = EnvironmentRegistry(worker.codex_home, [item])
     registry.write_configuration()
@@ -188,6 +192,16 @@ def test_worker_sends_singleton_environment_on_each_provider_start(worker):
     ]
     parameters = worker.provider.request("fixture/last-request", {"method": "thread/start"})
     assert parameters.get("environments") == expected
+    assert parameters["cwd"] == "/workspace"
+    assert parameters["runtimeWorkspaceRoots"] == ["/workspace"]
+    assert parameters["config"]["permissions"]["fleet"]["filesystem"] == {
+        ":minimal": "read",
+        "/workspace": "write",
+    }
+    assert parameters["config"]["shell_environment_policy"]["set"]["HOME"] == (
+        "/workspace/.fleet-runtime/home"
+    )
+    assert str(worker.workspace_root) not in json.dumps(parameters)
     assert (
         worker.handle(command("input", number=2, payload={"text": "tool"}))["status"] == "completed"
     )
@@ -201,9 +215,10 @@ def test_worker_sends_singleton_environment_on_each_provider_start(worker):
 
 def test_worker_cannot_cold_resume_an_unreconciled_remote_environment(worker):
     """Do not send an unsupported selection field or infer ownership on resume."""
-    from hephaestus.automation.fleet_environments import EnvironmentLease, EnvironmentRegistry
+    from hephaestus.automation.fleet_environments import EnvironmentRegistry
+    from tests.fixtures.fleet_environment import environment_lease
 
-    item = EnvironmentLease(
+    item = environment_lease(
         worker_id="worker-a",
         session_id="session-1",
         generation=1,
@@ -211,7 +226,10 @@ def test_worker_cannot_cold_resume_an_unreconciled_remote_environment(worker):
         container_id="1" * 64,
         image_digest="sha256:" + "a" * 64,
         workspace=worker.workspace_root / "one",
-        engine_program=Path("/usr/bin/podman"),
+        attachment_program=Path(sys.executable),
+        execution_id="session-1-exec",
+        socket_path=worker.journal.directory / "a.sock",
+        lease_id="1" * 32,
     )
     registry = EnvironmentRegistry(worker.codex_home, [item])
     registry.write_configuration()
@@ -221,7 +239,9 @@ def test_worker_cannot_cold_resume_an_unreconciled_remote_environment(worker):
         worker.handle(command("input", number=2, payload={"text": "tool"}))["status"] == "completed"
     )
     assert worker.handle(command("interrupt", number=3))["status"] == "accepted"
-    wait_state(worker, "session-1", "idle")
+    session = wait_state(worker, "session-1", "unknown")
+    assert session["admissionReserved"] is True
+    assert session["providerOutcome"] == "interrupted"
     result = worker.handle(command("resume", number=4))
     assert result["status"] == "failed"
     assert result["receipt"]["error"] == "environment_resume_requires_reconciliation"

@@ -627,3 +627,77 @@ def test_local_result_rejects_conflicting_evidence(tmp_path: Path, fault: str) -
         arguments = {"receipt": receipt}
     with pytest.raises(ValueError):
         api.RepositoryValidationLocalRead(execution, **arguments)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("repository", "other/project"),
+        ("generation", 0),
+        ("request_nonce", "short"),
+        ("deadline_s", 0),
+        ("deadline_s", float("inf")),
+        ("deadline_s", True),
+        ("changes", [("M", "src/comet/proxy/app.py")]),
+        ("changes", (("M", "../outside"),)),
+    ],
+)
+def test_source_preparation_request_rejects_incomplete_identity(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    """Keep source preparation finite, immutable, and bound to the review."""
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationSourceRead,
+        RepositoryValidationSourceRequest,
+    )
+
+    plan = _plan(_api(), tmp_path)
+    request = RepositoryValidationSourceRequest(
+        plan.repository,
+        plan.issue_number,
+        plan.pr_number,
+        plan.source_workspace,
+        plan.reviewed_head,
+        plan.reviewed_base,
+        plan.diff_base_sha,
+        plan.changes,
+        1,
+        "f" * 32,
+        123.0,
+    )
+    assert RepositoryValidationSourceRead(request, plan).plan == plan
+    with pytest.raises(ValueError):
+        replace(request, **{field: value})
+    with pytest.raises(ValueError):
+        RepositoryValidationSourceRead(request, replace(plan, reviewed_base="e" * 40))
+
+
+@pytest.mark.parametrize("fault", ["ci", "multiple", "deadline", "foreign_execution"])
+def test_runtime_preparation_rejects_incomplete_invocation(tmp_path: Path, fault: str) -> None:
+    """A runtime result cannot change the reserved local invocation."""
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationRuntimeRead,
+        RepositoryValidationRuntimeRequest,
+    )
+    from tests.unit.automation.pipeline.test_jobs import _repository_execution
+
+    api = _api()
+    execution = _repository_execution(tmp_path)
+    invocation = api.RepositoryValidationInvocation(
+        execution.plan, 1, "f" * 32, "local", (execution.check_id,)
+    )
+    request = RepositoryValidationRuntimeRequest(invocation, 123.0)
+    if fault == "foreign_execution":
+        with pytest.raises(ValueError):
+            RepositoryValidationRuntimeRead(request, replace(execution, request_nonce="e" * 32))
+        return
+    if fault == "ci":
+        invocation = replace(invocation, evidence_kind="ci")
+    elif fault == "multiple":
+        invocation = replace(
+            invocation, check_ids=tuple(check.check_id for check in execution.plan.checks)
+        )
+    with pytest.raises(ValueError):
+        RepositoryValidationRuntimeRequest(
+            invocation, float("nan") if fault == "deadline" else 123.0
+        )

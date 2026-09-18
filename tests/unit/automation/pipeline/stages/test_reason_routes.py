@@ -47,7 +47,7 @@ _STAGE_REASON_MODULES: dict[StageName, tuple[ModuleType, ...]] = {
 #: Reasons each stage is EXPECTED to emit (lock: additions must edit this).
 _EXPECTED_REASONS: dict[StageName, set[str]] = {
     StageName.PLANNING: set(),
-    StageName.PLAN_REVIEW: {"nogo", "plan_missing", "plan_cycles_exhausted"},
+    StageName.PLAN_REVIEW: {"nogo", "plan_changed", "plan_missing", "plan_cycles_exhausted"},
     StageName.IMPLEMENTATION: {
         "plan_not_go",
         "already_implementation_go_pr",
@@ -124,6 +124,8 @@ def test_scan_is_not_vacuous() -> None:
 
 def test_named_reasons_route_where_the_doc_says() -> None:
     """The doc's key cross-stage arrows hold for the emitted vocabulary."""
+    plan_review_routes = ROUTES[StageName.PLAN_REVIEW].fail_routes
+    assert plan_review_routes.get("plan_changed", plan_review_routes["*"]) == StageName.PLANNING
     assert ROUTES[StageName.PR_REVIEW].fail_routes["agent_error"] == StageName.IMPLEMENTATION
     assert ROUTES[StageName.PR_REVIEW].fail_routes["empty_pr_diff"] == StageName.IMPLEMENTATION
     assert ROUTES[StageName.IMPLEMENTATION].fail_routes["plan_not_go"] == StageName.PLAN_REVIEW

@@ -114,6 +114,7 @@ from hephaestus.automation.pipeline.git_jobs import (
     IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+    validate_git_repository_validation,
 )
 from hephaestus.automation.pipeline.github_jobs import (
     AdoptedRemediationPrStateRead,
@@ -175,13 +176,14 @@ from hephaestus.automation.pipeline.repository_lock import (
     repo_lock_path,
 )
 from hephaestus.automation.pipeline.repository_validation import (
+    RepositoryValidationExecution,
     RepositoryValidationGap,
     RepositoryValidationLocalRead,
     RepositoryValidationReceipt,
 )
-from hephaestus.automation.pipeline.repository_validation_runtime import (
-    AdmittedRuntime,
-    admit_execution_runtime,
+from hephaestus.automation.pipeline.repository_validation_preparation import (
+    RepositoryValidationRuntimeRead,
+    RepositoryValidationSourceRead,
 )
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
@@ -190,7 +192,12 @@ from hephaestus.automation.pipeline.tool_scopes import (
     ToolScope,
     tool_scope_for,
 )
-from hephaestus.automation.pipeline_github_review_validation import comet_plan_for_workspace
+from hephaestus.automation.pipeline_github_review_validation import (
+    comet_local_check_ids,
+    comet_plan_for_workspace,
+    comet_profile_digest,
+    comet_validation_checks,
+)
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
 from hephaestus.automation.pyxis_artifact_io import (
@@ -224,6 +231,11 @@ from hephaestus.automation.repo_intake import (
     RepoIntakeError,
     RepoIntakeManager,
     repository_worker_path_is_valid,
+)
+from hephaestus.automation.repository_validation_runtime import (
+    AdmittedRuntime,
+    admit_execution_runtime,
+    admit_runtime,
 )
 from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 from hephaestus.automation.review_journal import (
@@ -6176,13 +6188,21 @@ class WorkerPool:
 
     def _run_build_test(self, job: BuildTestJob) -> JobResult:
         """Keep runtime preparation within this build job's deadline."""
-        with git_utils.operation_deadline(
-            time.monotonic() + job.timeout_s, shutdown=self._shutdown
-        ):
+        if job.repository_validation_preparation is not None:
+            try:
+                validate_build_test_repository_validation(job)
+            except (AttributeError, TypeError, ValueError):
+                return JobResult(ok=False, error="repository_validation_metadata_invalid")
+        deadline = time.monotonic() + job.timeout_s
+        if job.repository_validation_preparation is not None:
+            deadline = min(deadline, job.repository_validation_preparation.deadline_s)
+        with git_utils.operation_deadline(deadline, shutdown=self._shutdown):
             return self._execute_build_test(job)
 
     def _execute_build_test(self, job: BuildTestJob) -> JobResult:
         """Run a build/test job with the current deadline and cancellation event."""
+        if job.repository_validation_preparation is not None:
+            return self._prepare_repository_validation_runtime(job)
         if job.repository_validation is not None:
             return self._run_repository_validation(job)
         if job.immutable_source:
@@ -6226,6 +6246,63 @@ class WorkerPool:
             )
         except InterruptedError:
             return JobResult(ok=False, error="interrupted", interrupted=True)
+
+    def _prepare_repository_validation_runtime(self, job: BuildTestJob) -> JobResult:
+        """Admit the fixed runtime without source execution or a passing receipt."""
+        request = job.repository_validation_preparation
+        if request is None:
+            return JobResult(ok=False, error="repository_validation_metadata_invalid")
+        try:
+            validate_build_test_repository_validation(job)
+            _repository_validation_timeout(job.timeout_s)
+            if self._shutdown.is_set():
+                raise InterruptedError("Runtime preparation was cancelled.")
+            invocation = request.invocation
+            plan = invocation.plan
+            check = next(
+                check for check in plan.checks if check.check_id == invocation.check_ids[0]
+            )
+            if (
+                plan.profile_digest != comet_profile_digest(plan.profile_id)
+                or plan.checks != comet_validation_checks(plan.profile_id, plan.changes)
+                or check.check_id not in comet_local_check_ids(plan.checks)
+            ):
+                raise ValueError("The runtime request does not match the fixed profile.")
+            sources = {path: digest for path, _, digest in check.source_digests}
+            runtime = admit_runtime(
+                _repository_validation_host_root(),
+                pyproject_sha256=sources["pyproject.toml"],
+                uv_lock_sha256=sources["uv.lock"],
+                timeout_s=_repository_validation_timeout(job.timeout_s),
+                shutdown=self._shutdown,
+            )
+            _repository_validation_timeout(job.timeout_s)
+            execution = RepositoryValidationExecution(
+                plan,
+                check.check_id,
+                invocation.generation,
+                invocation.request_nonce,
+                runtime.root,
+                runtime.manifest.manifest_sha256,
+                runtime.manifest.tree_sha256,
+            )
+            return JobResult(ok=True, value=RepositoryValidationRuntimeRead(request, execution))
+        except (
+            AttributeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            OSError,
+            subprocess.SubprocessError,
+        ) as exc:
+            return JobResult(
+                ok=False,
+                error="repository_validation_runtime_unavailable",
+                interrupted=isinstance(exc, InterruptedError),
+                value=RepositoryValidationRuntimeRead(
+                    request, failure="runtime_preparation_failed"
+                ),
+            )
 
     def _run_repository_validation(self, job: BuildTestJob) -> JobResult:
         """Admit the runtime before source reads and retain request identity."""
@@ -6699,6 +6776,14 @@ class WorkerPool:
         Intake validates caller state before lock admission can create the
         caller's state directory.
         """
+        try:
+            validate_git_repository_validation(job)
+        except (AttributeError, TypeError, ValueError):
+            return JobResult(ok=False, error="repository_validation_metadata_invalid")
+        return self._run_validated_git(job)
+
+    def _run_validated_git(self, job: GitJob) -> JobResult:
+        """Run validated Git metadata through the existing lock and error paths."""
         lock_attempt_started_s = time.monotonic()
         start_failure = _git_start_failure(
             job,
@@ -6880,7 +6965,11 @@ class WorkerPool:
         if job.op == "publish_remediation_recovery":
             return self._prepare_remediation_recovery_locks(job)
         if job.workspace is not None:
-            binding = self._source_git_binding(job)
+            binding = (
+                self._review_validation_binding(job)
+                if job.op == "prepare_repository_validation"
+                else self._source_git_binding(job)
+            )
             try:
                 lock_path = WorktreeManager.git_metadata_lock_path(binding.cwd)
                 lock_path = lock_path.parent.resolve(strict=True) / lock_path.name
@@ -7149,7 +7238,11 @@ class WorkerPool:
             ),
             held_common_lock,
         ):
-            if prepared.authoritative_checkout is not None and prepared.intake_manager is None:
+            if (
+                prepared.authoritative_checkout is not None
+                and prepared.intake_manager is None
+                and timed_job.op != "prepare_repository_validation"
+            ):
                 self._authenticated_remote_git_configuration(
                     cwd=prepared.authoritative_checkout,
                     expected_repo=prepared.validated_repository,
@@ -7180,6 +7273,8 @@ class WorkerPool:
 
     def _dispatch_locked_git(self, job: GitJob) -> JobResult:
         """Dispatch one Git job while both repository locks are held."""
+        if job.op == "prepare_repository_validation":
+            return self._prepare_repository_validation_source(job)
         if job.op in {
             "inspect_implementation_worktree",
             "recover_dirty_worktree",
@@ -7287,6 +7382,70 @@ class WorkerPool:
             stdout_tail=stdout_tail,
             stderr_tail=stderr_tail,
         )
+
+    @staticmethod
+    def _review_validation_binding(job: GitJob) -> WorkspaceBinding:
+        """Admit only a detached review binding for the closed source read."""
+        validate_git_repository_validation(job)
+        request = job.repository_validation_preparation
+        if request is None:
+            raise SourceWorkspaceError("The source preparation request is missing.")
+        binding = request.workspace
+        if binding.reusable_root is None:
+            raise SourceWorkspaceError("The review source root is missing.")
+        try:
+            root = binding.reusable_root.resolve(strict=True)
+            cwd = binding.cwd.resolve(strict=True)
+            common = WorktreeManager.git_metadata_lock_path(root).parent.resolve(strict=True)
+            checkout_common = WorktreeManager.git_metadata_lock_path(cwd).parent.resolve(
+                strict=True
+            )
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            raise SourceWorkspaceError("The review source path is unavailable.") from exc
+        identity = f"{binding.repository}:{hashlib.sha256(str(common).encode()).hexdigest()[:16]}"
+        owner = f"{identity}:{binding.item_number}:{SourceLane.REVIEW.value}"
+        if (
+            root != binding.reusable_root
+            or cwd != binding.cwd
+            or common != checkout_common
+            or binding.ownership_key != owner
+        ):
+            raise SourceWorkspaceError("The review source ownership changed.")
+        return binding
+
+    def _prepare_repository_validation_source(self, job: GitJob) -> JobResult:
+        """Inspect immutable source while the repository locks and review lease are held."""
+        request = job.repository_validation_preparation
+        if request is None:
+            return JobResult(ok=False, error="repository_validation_metadata_invalid")
+        try:
+            binding = self._review_validation_binding(job)
+            if binding.reusable_root is None or binding.repository is None:
+                raise SourceWorkspaceError("The review source identity is incomplete.")
+            manager = SourceWorkspaceManager(
+                binding.reusable_root, repository=binding.repository, base_dir=binding.cwd.parent
+            )
+            deadline = _PreparationDeadline(
+                cast(float, job.deadline_s), time.monotonic, self._shutdown
+            )
+            with manager.acquire(binding, allowed_tools="Read,Glob,Grep", deadline=deadline):
+                plan = comet_plan_for_workspace(
+                    binding,
+                    issue_number=request.issue_number,
+                    pr_number=request.pr_number,
+                    reviewed_base=request.reviewed_base,
+                    timeout_s=deadline.remaining(),
+                    shutdown=self._shutdown,
+                )
+                deadline.remaining()
+                return JobResult(ok=True, value=RepositoryValidationSourceRead(request, plan))
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            return JobResult(
+                ok=False,
+                error="repository_validation_source_unavailable",
+                interrupted=isinstance(exc, InterruptedError),
+                value=RepositoryValidationSourceRead(request, failure="source_preparation_failed"),
+            )
 
     @staticmethod
     def _source_git_binding(job: GitJob) -> WorkspaceBinding:
