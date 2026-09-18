@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Single-repo gh-tidy wrapper with agent conflict resolution.
 
-Runs `gh tidy --rebase-all --auto-delete-merged --trunk <default_branch>`, then
-spawns the selected coding agent per branch that gh-tidy failed to rebase.
+Runs `gh tidy --auto-delete-merged --trunk <default_branch>` for cleanup.
+Only `--rebase-all` enables rebases and agent conflict resolution.
 
 The swarm is constrained: it MUST NOT delete any branch or any worktree that
 existed before the run.
 
 Usage:
-    hephaestus-tidy [--dry-run] [--trunk BRANCH] [--no-swarm] [--max-concurrent N]
+    hephaestus-tidy [--dry-run] [--trunk BRANCH] [--rebase-all] [--no-swarm]
 """
 
 from __future__ import annotations
@@ -750,7 +750,7 @@ def parse_problem_branches(output: str) -> list[str]:
     return branches
 
 
-def _run_gh_tidy(trunk: str, dry_run: bool) -> tuple[int, str]:
+def _run_gh_tidy(trunk: str, dry_run: bool, *, rebase_all: bool = False) -> tuple[int, str]:
     """Run gh tidy with unattended merged-branch cleanup.
 
     Returns (exit_code, combined_output_buffer).
@@ -759,18 +759,23 @@ def _run_gh_tidy(trunk: str, dry_run: bool) -> tuple[int, str]:
     cmd = [
         "gh",
         "tidy",
-        "--rebase-all",
         "--auto-delete-merged",
         "--trunk",
         trunk,
         "--skip-gc",
     ]
+    if rebase_all:
+        cmd.append("--rebase-all")
     if dry_run:
         logger.info("[dry-run] Would run: %s", " ".join(cmd))
         return 0, ""
 
     logger.info("Running: %s", " ".join(cmd))
     buf: list[str] = []
+
+    child_env = build_gh_child_env()
+    # Ambient extension settings must not enable an unrequested rebase.
+    child_env["GH_TIDY_REBASE_ALL"] = "true" if rebase_all else "false"
 
     # Use Popen so output can be tee'd to the terminal and retained for parsing.
     # Intentionally NOT routed through hephaestus.github.client.gh_call: that
@@ -782,7 +787,7 @@ def _run_gh_tidy(trunk: str, dry_run: bool) -> tuple[int, str]:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        env=build_gh_child_env(),
+        env=child_env,
     ) as proc:
         assert proc.stdout is not None  # noqa: S101 — Popen with PIPE always sets this
         for line in proc.stdout:
@@ -965,9 +970,7 @@ async def _run_claude_rebase_agent(
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = create_parser(
         prog_name="hephaestus-tidy",
-        description=(
-            "Tidy the current repo's branches and fix failed rebases with a Myrmidon swarm"
-        ),
+        description=("Clean merged branches; use --rebase-all to rebase other branches"),
         epilog=None,
     )
     parser.add_argument(
@@ -975,7 +978,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=text("Print actions without executing"),
     )
-    parser.add_argument(
+    operations = parser.add_mutually_exclusive_group()
+    operations.add_argument(
+        "--rebase-all",
+        action="store_true",
+        help=text("Rebase all branches and enable agent conflict resolution"),
+    )
+    operations.add_argument(
         "--cleanup-stale-worktrees",
         action="store_true",
         help=(
@@ -1109,15 +1118,21 @@ class TidyExecutionError(RuntimeError):
         self.exit_code = exit_code
 
 
-def _run_tidy_and_find_problem_branches(trunk: str, dry_run: bool) -> list[str]:
-    exit_code, output = _run_gh_tidy(trunk, dry_run)
+def _run_tidy_and_find_problem_branches(
+    trunk: str, dry_run: bool, *, rebase_all: bool = False
+) -> list[str]:
+    exit_code, output = (
+        _run_gh_tidy(trunk, dry_run, rebase_all=True)
+        if rebase_all
+        else _run_gh_tidy(trunk, dry_run)
+    )
     if exit_code != 0 and not dry_run:
         raise TidyExecutionError(exit_code)
     return parse_problem_branches(output)
 
 
 def _handle_no_problem_branches(json_output: bool) -> int:
-    logger.info("\nAll branches rebased cleanly — no swarm needed.")
+    logger.info("\ngh tidy completed without branch failures.")
     if json_output:
         emit_json_status(0, problem_branches=0)
     return 0
@@ -1176,10 +1191,16 @@ def _handle_problem_branches(
     agent: str,
 ) -> int:
     logger.info(
-        "\ngh tidy could not rebase %d branch(es): %s",
+        "\ngh tidy reported failures for %d branch(es): %s",
         len(problem_branches),
         ", ".join(problem_branches),
     )
+
+    if not args.rebase_all:
+        logger.error("Cleanup reported branch failures. No rebase agent will run.")
+        if args.json:
+            emit_json_status(1, problem_branches=problem_branches, swarm="skipped")
+        return 1
 
     if args.no_swarm:
         return _handle_no_swarm(problem_branches, trunk, args.json)
@@ -1250,7 +1271,9 @@ def main() -> int:
             return 1
 
     try:
-        problem_branches = _run_tidy_and_find_problem_branches(trunk, args.dry_run)
+        problem_branches = _run_tidy_and_find_problem_branches(
+            trunk, args.dry_run, rebase_all=args.rebase_all
+        )
     except TidyExecutionError as error:
         logger.error(
             "gh tidy failed with exit code %d — cleanup state is unknown; "
