@@ -317,56 +317,44 @@ concise failure evidence, the affected tests or checks, and a first-stage
 root-cause analysis. The subagent must not fix a failure unless it receives a
 separate direction to do so.
 
-For a manual contribution, use this final-rebase sequence:
+For a manual contribution, use this verification sequence:
 
-1. Use a test-only subagent to run focused tests during implementation.
-2. Configure `upstream` with the canonical
-   `https://github.com/HomericIntelligence/Hephaestus.git` URL. Verify the URL.
-   Then run these commands:
-
-   ```bash
-   test "$(git remote get-url upstream)" = "https://github.com/HomericIntelligence/Hephaestus.git"
-   git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
-   ```
-
-   If a command fails, stop.
-3. Use Bash strict mode to run the signed rebase. Then verify the signature of
-   each new commit:
-
-   ```bash
-   set -euo pipefail
-   git rebase -S upstream/main
-   git rev-list --reverse upstream/main..HEAD | while IFS= read -r commit; do
-       git verify-commit "$commit" || exit 1
-   done
-   ```
-
-   Strict mode stops the sequence if the rebase, revision enumeration, or a
-   signature check fails.
-
-4. If the rebase or conflict resolution changes a file, use a test-only
-   subagent to run each affected test again.
+1. Run focused tests during implementation. Agents must use test-only
+   subagents for these checks.
+2. Verify the canonical target remote and fetch its current `main` branch.
+   Record the feature branch start commit as the local review base. A later
+   target-branch advance does not change that recorded base.
+3. Rebase only for an actual conflict, a necessary dependency, or an explicit
+   request. If a rebase is necessary, use `git rebase -S <verified-target>`.
+   Keep unrelated branches and worktrees unchanged.
+4. Commit with `git commit -s -S`. Verify every contribution commit with
+   `git verify-commit <commit>`. Require exactly one final `Signed-off-by`
+   trailer that matches the commit author. A rebase must preserve these checks.
 5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
    Record `git rev-parse HEAD`.
-6. Use a test-only subagent to run focused checks on this head. Select tests
-   for the affected behavior and each new or changed test. Use locked pytest
-   commands with explicit paths or node IDs and `--override-ini="addopts="` so
-   the default fast marker does not hide a selected test. Require nonempty
-   collection and success. For documentation-only changes, run the applicable
-   existing documentation checks. Do not require a complete local suite.
-
+6. Run focused checks on this head. Select tests for the affected behavior and
+   each new or changed test. Use locked pytest commands with explicit paths or
+   node IDs and `--override-ini="addopts="`. Confirm nonempty collection and
+   success. For documentation-only changes, use applicable existing
+   documentation checks. Do not require a complete local suite.
 7. Record `git rev-parse HEAD` again. Require the same value and an empty
-   `git status --porcelain=v1 --untracked-files=all` result. Record the command,
-   result, and test summary.
-8. If the branch changes after this verification, repeat the final-rebase
-   sequence and focused checks for the resulting change.
+   `git status --porcelain=v1 --untracked-files=all` result. Record each command,
+   source revision, result, and test summary.
+8. After a source change, repeat the affected checks and signature and DCO
+   verification for the resulting head. Do not require another rebase solely
+   because a check ran or the target branch advanced.
+
+Historical results retain their original executed revision. Do not report
+those results as a new run on the current head. Any use of historical evidence
+requires an explicit compatibility basis for the relevant inputs. Required CI
+must still pass for the merge candidate under the current merge policy.
 
 A hook result can supply focused evidence only when it collected and passed
 the selected tests on the final head and recorded the command and result.
 Keep the test-only and no-edit requirements for all delegated runs.
 Installed hooks retain the shared fast selection. Required PR checks provide
 head-bound merge evidence. Nightly CI/CD owns full suites and coverage; a fast
-PR result is not full-suite evidence. See ADR-0053.
+PR result is not full-suite evidence. See ADR-0053 and ADR-0055.
 
 Source review is separate from test execution. The reviewer inspects source
 and recorded evidence; it does not need to run tests or prepare a local review
@@ -536,12 +524,12 @@ All utility functions must include comprehensive test coverage:
 3. **Edge Cases**: Test boundary conditions and error scenarios
 4. **Cross-platform**: Ensure compatibility across supported environments
 
-Before an agent creates a pull request, it MUST follow the final-rebase sequence
+Before an agent creates a pull request, it MUST follow the verification sequence
 in [Delegated Verification](#delegated-verification). The environment setup
 commands below prepare a new environment. They do not supply change-verification
 evidence. Required CI/CD supplies separate head-bound evidence.
 
-The manual sequence uses ADR-0053. The automation loop uses the rebase policy
+The manual sequence uses ADR-0053 and ADR-0055. The automation loop uses the rebase policy
 in ADR-0048. It prepares the branch before implementation and does not do a
 routine final rebase. An operator can request the explicit `--rebase` path.
 
@@ -597,7 +585,7 @@ uv run mypy hephaestus/ scripts/ tests/
 ### Pre-commit Hooks
 
 Pre-commit hooks automatically check code quality and run the shared fast test
-selection. Use the delegated final-rebase sequence for focused change evidence.
+selection. Use the delegated verification sequence for focused change evidence.
 Required CI/CD supplies separate test evidence for the pushed head. Nightly
 CI/CD owns the full-suite and coverage results.
 
