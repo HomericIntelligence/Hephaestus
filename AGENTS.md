@@ -389,7 +389,7 @@ repository-local source of truth for which skill plugins are enabled.
 | `athena:repo-analyze-strict-full` | — | Strict audit with full file coverage (swarm per section) |
 | `athena:pr-review` | — | Athena full-coverage pull-request review |
 | `athena:worktree-cleanup` | `"<optional: --dry-run>"` | Audit + prune git worktrees (never deletes branches) |
-| `athena:tidy` | `"<optional: --dry-run \| --no-swarm \| --trunk BRANCH \| --max-concurrent N>"` | Rebase all local branches with swarm conflict resolution |
+| `athena:tidy` | `"<optional: --dry-run \| --no-swarm \| --trunk BRANCH \| --max-concurrent N>"` | Clean merged branches; select rebases only through an explicit operation |
 | `athena:create-reusable-utilities` | — | Port/generalize utility scripts for cross-project reuse |
 | `athena:github-actions-python-cicd` | — | Set up a Python GitHub Actions CI/CD pipeline |
 | `athena:python-repo-modernization` | `<path to Python repo to modernize>` | Bring a Python repo to production-grade quality |
