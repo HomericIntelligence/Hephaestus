@@ -110,6 +110,7 @@ automation = [
 default-groups = ["dev", "automation"]
 
 [project.scripts]
+hephaestus-fleet-build-artifacts = "hephaestus.automation.fleet_build_artifact_server:main"
 hephaestus-fleet-worker = "hephaestus.automation.fleet_worker_cli:main"
 hephaestus-automation-loop = "hephaestus.automation.loop_runner:main"
 hephaestus-install-pi-plugins = "hephaestus.agents.pi_plugins:main"
