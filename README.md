@@ -317,7 +317,7 @@ remaining narrowly approved runtime variables and the deny-by-default policy.
 
 Run any command with `--help` to see full usage.
 
-The 55 console scripts are declared in `[project.scripts]` in
+The 56 console scripts are declared in `[project.scripts]` in
 [`pyproject.toml`](pyproject.toml).
 
 ### Automation
@@ -338,6 +338,7 @@ evidence and never falls back after failure. See
 | `hephaestus-review-prs` | Run the `pr_review` scope through the same coordinator |
 | `hephaestus-install-pi-plugins` | Install and check the pinned Pi packages; provider admission remains required |
 | `hephaestus-ensure-state-labels` | Create the required planning and repository labels |
+| `hephaestus-reconcile-implementation-labels` | Clear a stale `state:implementation-go` label when the current-head verdict is `NO-GO` |
 
 The [Fleet worker contract](docs/fleet-worker.md) describes the separate
 app-server adapter, private attachment, and recovery limits. Fleet does not

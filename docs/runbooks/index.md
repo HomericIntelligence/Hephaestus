@@ -11,6 +11,7 @@ needs operator action.
 | [Automation loop crashed mid-issue](automation-loop-crash.md) | The `hephaestus-automation-loop` process died or a phase timed out and you need to resume safely. |
 | [Recover a corrupted worktree state](corrupted-worktree.md) | An issue's `build/.worktrees/issue-<N>` worktree is dirty, abandoned, or blocking a clean re-run. |
 | [Queue merge stall](ci-driver-stall.md) | A PR with loop-owned `state:implementation-go` remains blocked. |
+| [Stale implementation label](stale-implementation-label.md) | A PR carries `state:implementation-go` while the verdict bound to its current head is `NO-GO`. |
 | [Claude quota exhausted (429)](claude-quota-exhausted.md) | A stage reports a 429 quota/session-limit infrastructure failure and the issue remains unlabeled. |
 | [Reviving a state:skip-labeled issue](state-skip-revival.md) | An issue was labeled `state:skip` after automation already started work on it (planned or opened a PR) and you want to resume driving it. |
 | [Recovering an implementation-blocked issue](implementation-blocked-recovery.md) | An implementation run produced no commit and a human must choose the next action. |
