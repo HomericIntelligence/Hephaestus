@@ -8,7 +8,8 @@ import json
 import os
 import re
 import stat
-from contextlib import ExitStack
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,15 @@ def _fingerprint(value: os.stat_result) -> tuple[int, ...]:
     )
 
 
+@contextmanager
+def _open_descriptor(path: str, flags: int, *, dir_fd: int | None = None) -> Iterator[int]:
+    descriptor = os.open(path, flags, dir_fd=dir_fd)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
 def read_private_file(path: Path, maximum: int) -> bytes:
     """Read one bounded owner-only regular file through no-follow descriptors."""
     if not path.is_absolute() or ".." in path.parts or len(path.parts) < 3:
@@ -112,21 +122,20 @@ def read_private_file(path: Path, maximum: int) -> bytes:
         raise ValueError("Private descriptor reads are unavailable.")
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     with ExitStack() as owned:
-        parent = os.open(path.anchor, directory_flags)
-        owned.callback(os.close, parent)
+        parent = owned.enter_context(_open_descriptor(path.anchor, directory_flags))
         bindings: list[tuple[int, str, int]] = []
         for part in path.parts[1:-1]:
-            child = os.open(part, directory_flags, dir_fd=parent)
-            owned.callback(os.close, child)
+            child = owned.enter_context(_open_descriptor(part, directory_flags, dir_fd=parent))
             bindings.append((parent, part, child))
             parent = child
         metadata = os.fstat(parent)
         if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) not in (0o500, 0o700):
             raise ValueError("The private input directory is not owner-only.")
-        descriptor = os.open(
-            path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent
+        descriptor = owned.enter_context(
+            _open_descriptor(
+                path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent
+            )
         )
-        owned.callback(os.close, descriptor)
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)

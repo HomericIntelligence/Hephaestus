@@ -161,6 +161,7 @@ def read_page(
 ) -> tuple[int, dict[str, Any]]:
     """Use verified local TLS and the exact Agamemnon backend request form."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_verify_locations(cafile=str(certificate))
     connection = http.client.HTTPSConnection(
         ready["host"], ready["port"], context=context, timeout=2
@@ -211,6 +212,7 @@ def test_installed_service_returns_authenticated_retained_log_pages(
 def trusted_socket(ready: dict[str, Any], certificate: Path) -> ssl.SSLSocket:
     """Connect to the test-owned listener with its explicit trust certificate."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_verify_locations(cafile=str(certificate))
     raw = socket.create_connection((ready["host"], ready["port"]), timeout=2)
     try:
@@ -331,6 +333,7 @@ def test_tls_requires_explicit_trust_and_ignores_ambient_key_log(
     monkeypatch.setenv("SSLKEYLOGFILE", str(key_log))
     with direct_service(config) as (_, ready):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         with socket.create_connection((ready["host"], ready["port"]), timeout=2) as raw:
             with pytest.raises(ssl.SSLCertVerificationError):
                 context.wrap_socket(raw, server_hostname=ready["host"])

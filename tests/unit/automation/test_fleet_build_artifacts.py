@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -345,6 +346,44 @@ def test_catalog_rejects_invalid_utf8_with_matching_member_descriptor(tmp_path: 
     rewrite_receipt(registration, receipt)
     with pytest.raises(ValueError):
         ArtifactCatalog([registration])
+
+
+@pytest.mark.parametrize("changed_member", [False, True])
+def test_bundle_load_closes_owned_file_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_member: bool,
+) -> None:
+    """Release real descriptors after a successful load or a rejected member."""
+    registration = retained_bundle(tmp_path / "bundle")
+    if changed_member:
+        private_file(tmp_path / "bundle" / "stderr.txt", b"different fixture")
+    opened: list[int] = []
+    original_open, original_dup = os.open, os.dup
+
+    def observed_open(*args: Any, **kwargs: Any) -> int:
+        descriptor = original_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def observed_dup(descriptor: int) -> int:
+        duplicate = original_dup(descriptor)
+        opened.append(duplicate)
+        return duplicate
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", observed_open)
+        patch.setattr(os, "dup", observed_dup)
+        if changed_member:
+            with pytest.raises(ValueError):
+                ArtifactCatalog([registration])
+        else:
+            ArtifactCatalog([registration])
+    assert opened
+    for descriptor in set(opened):
+        with pytest.raises(OSError) as error:
+            os.fstat(descriptor)
+        assert error.value.errno == errno.EBADF
 
 
 def test_duplicate_and_excess_registrations_fail_before_serving(tmp_path: Path) -> None:
