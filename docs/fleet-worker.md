@@ -4,7 +4,7 @@ The Fleet worker owns one Codex 0.153.4 app-server process. It accepts admitted
 commands through a private Unix socket. Agamemnon owns task admission. Keystone
 supplies the authenticated transport. The worker does not discover issues, assign
 tasks, change state labels, or run another task queue.
-The current CLI supports provider startup and inspection. Session admission is
+The CLI supports contained runtime startup and inspection. Session admission is
 disabled on macOS and Linux until an enforced execution boundary is available.
 The deployment steps below describe that later enabled mode; they do not bypass
 the current gate.
@@ -52,6 +52,87 @@ that registered search path; the worker does not inherit the operator's `PATH`.
 `inventory --state-dir PATH` reports worker and session identities. The command
 `events --state-dir PATH --after N` returns at most 500 metadata events. Its cursor
 is local to one retained worker journal. It is not a global event sequence.
+
+## Contained runtime configuration
+
+Use `serve --contained-config /srv/fleet/control/runtime.json` to construct the
+supervisor, fixed environment registry, and attachment servers. Keep the existing
+worker arguments. The configuration file must be a private regular file owned
+by the worker user. Its parent and all declared private roots must have mode
+`0700`; the file must have mode `0600`. Create the directories before startup.
+
+The following example prepares one session. Replace the paths, identities, and
+zero image digest with the deployment's verified values. Use the engine socket
+on the same Linux host as the worker. The attachment program must be the trusted
+Python executable in which Hephaestus is installed.
+The runtime retains the configured invocation path so a virtual environment
+keeps its installed packages. It validates the executable target separately.
+
+```json
+{
+  "schema": "hi/fleet/contained-runtime/v1",
+  "supervisorState": "/srv/fleet/supervisor",
+  "engine": {
+    "executable": "/usr/bin/podman",
+    "socket": "/run/user/1000/podman/podman.sock",
+    "home": "/srv/fleet/engine"
+  },
+  "attachmentProgram": "/opt/fleet/.venv/bin/python",
+  "authorityRoots": {
+    "controller": "/srv/fleet/control",
+    "gateway": "/srv/fleet/gateway",
+    "spool": "/srv/fleet/spool"
+  },
+  "environments": [
+    {
+      "environmentId": "environment-1",
+      "spec": {
+        "workerId": "laptop-1",
+        "sessionId": "session-1",
+        "executionId": "execution-1",
+        "generation": 1,
+        "workspace": "/srv/fleet/workspaces/issue-1",
+        "imageDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "cpus": 2,
+        "memoryBytes": 8589934592,
+        "pidsLimit": 256
+      }
+    }
+  ]
+}
+```
+
+Use 1–24 entries, within the declared worker capacity. Each entry needs separate
+session, execution, environment, and workspace identities. The worker and
+generation must match the CLI arguments. Workspaces must be below the worker
+workspace root. No workspace can contain or overlap another workspace or a
+protected authority root. The runtime includes authentication, worker and
+supervisor state, engine context, and both the attachment invocation path and
+its resolved target in this check.
+The operator must supply the complete deployed controller, gateway, and spool
+root inventory. This configuration is a local resource description. It does
+not create an Agamemnon claim or authorize a task.
+
+Startup checks retained worker ownership before preparing containers. It starts
+the attachment server loops before the one shared app-server. The exact
+remote-only registry is written before provider startup. Each attachment must
+still complete its binding handshake and supervisor checks before it can
+forward bytes. Neither listener readiness nor provider initialization qualifies
+a deployment for execution.
+
+A complete inventory of unchanged, unstarted leases can be reused with the same
+registry. Partial, active, uncertain, or changed inventories require explicit
+reconciliation. Startup never repeats an uncertain create, start, or remove.
+Cold session resume and dynamic registry updates remain unsupported.
+
+Shutdown stops the provider, closes attachment connections, and joins serving
+threads with one 45-second deadline. Local engine attachment cleanup uses
+bounded process waits and attempts each owned attachment. A failed cleanup does
+not prevent cleanup of the remaining local resources. A live serving thread or
+uncertain engine cleanup keeps the supervisor journal writer owned for a later
+close attempt or process termination. Uncertain provider cleanup remains in the
+worker journal. Shutdown retains containers, leases, and workspaces. It does
+not mean cancellation, disposal, released capacity, or completed issue work.
 
 ## Command contract
 
@@ -177,8 +258,8 @@ interrupted event with incomplete cleanup: the controller would reject that
 event and block replay at its cursor. The controller therefore keeps this stop
 pending and blocks new controls. Resume and explicit recovery remain deployment
 gates. Closing an attachment or worker does not substitute for cancellation or
-prove contained disposal. The default CLI does not yet construct the supervisor
-and fixed registry needed for this composed path.
+prove contained disposal. The optional contained configuration constructs the
+supervisor and fixed registry; the platform admission gates remain closed.
 
 Prompt text, model output, shell command text, and credential values are excluded
 from activity facts and command receipts.
@@ -201,6 +282,11 @@ requires explicit recovery. The worker does not trim unresolved history.
 A retained provider PID blocks restart while that process might still exist.
 An authentication-owner lock also covers the provider process. A different
 generation or an uncertain process-group cleanup requires explicit reconciliation.
+Before it starts the provider, the worker records an unresolved runtime attempt.
+A recorded provider PID or confirmed cleanup resolves this startup marker.
+If initialization or PID recording fails, uncertain cleanup keeps the marker and
+blocks restart. A rejected startup preflight does not replace retained runtime
+evidence.
 The journal stores execution facts;
 it is not another orchestration database.
 

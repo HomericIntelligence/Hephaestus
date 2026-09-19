@@ -96,7 +96,6 @@ class FleetWorker:
         self.codex_home = codex_home.resolve(strict=True)
         if codex_home.is_symlink() or self.codex_home.stat().st_mode & 0o077:
             raise ValueError("codex_home_must_be_private")
-        self.journal = WorkerJournal(state_dir)
         self.generation = generation
         self.capacity = capacity
         self.identity = {
@@ -119,10 +118,11 @@ class FleetWorker:
         self.execution_guard: Callable[[], None] = lambda: require_execution_platform(sys.platform)
         self._activity_emitted: dict[str, float] = {}
         self._closed = False
-        self._started = False
+        self._provider_attempted = False
+        self.journal = WorkerJournal(state_dir)
 
-    def start(self) -> None:
-        """Fence prior processes before acquiring a new provider runtime."""
+    def preflight(self) -> None:
+        """Check retained ownership before creating runtime resources."""
         self.storage_guard()
         if self.journal.generation not in {0, self.generation}:
             raise RuntimeError("generation_change_requires_reconciliation")
@@ -135,15 +135,20 @@ class FleetWorker:
                 pass
             else:
                 raise RuntimeError("prior_provider_may_be_running")
+
+    def start(self) -> None:
+        """Fence prior processes before acquiring a new provider runtime."""
+        self.preflight()
         self.journal.append("generation", {"generation": self.generation})
         if self.environment_registry is not None:
             self.environment_registry.write_configuration()
+        self.journal.append("runtime", {"pid": None, "uncertain": True})
+        self._provider_attempted = True
         self.provider.start()
         process = self.provider.process
         if process is None:
             raise ProviderError("provider_not_started")
         self.journal.append("runtime", {"pid": process.pid})
-        self._started = True
         for session in list(self.journal.sessions.values()):
             if not session.get("released", False):
                 self._activity(session, "disconnected", "restart_requires_resume")
@@ -777,7 +782,7 @@ class FleetWorker:
             try:
                 confirmed = self.provider.close()
             finally:
-                if self._started:
+                if self._provider_attempted:
                     self.journal.append("runtime", {"pid": None, "uncertain": not confirmed})
         finally:
             self.journal.close()

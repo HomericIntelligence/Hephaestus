@@ -115,6 +115,32 @@ def test_engine_attachment_uses_the_owned_full_id_and_real_stdio(engine_process)
     ]
 
 
+def test_attachment_close_attempts_each_process_and_retains_failed_ownership(
+    engine_process, monkeypatch
+):
+    """One failed local cleanup must not leave other owned attachments running."""
+    engine, _private = engine_process
+    first = engine.attach("b" * 64)
+    second = engine.attach("b" * 64)
+    terminate = first.terminate
+
+    def fail_terminate():
+        raise OSError("fixture_termination_uncertain")
+
+    try:
+        monkeypatch.setattr(first, "terminate", fail_terminate)
+        with pytest.raises((OSError, BaseExceptionGroup)):
+            engine.close()
+        assert second.poll() is not None
+        assert all(stream.closed for stream in (second.stdin, second.stdout, second.stderr))
+        assert first in engine.attachments
+    finally:
+        monkeypatch.setattr(first, "terminate", terminate)
+        engine.close()
+    assert first.poll() is not None
+    assert engine.attachments == []
+
+
 def test_tool_hostname_and_environment_are_explicit_before_engine_creation(
     engine_process, tmp_path
 ):

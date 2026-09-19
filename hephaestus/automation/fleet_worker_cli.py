@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.automation.fleet_request_evidence import read_request_evidence
+from hephaestus.automation.fleet_runtime import ContainedRuntime
 from hephaestus.automation.fleet_worker import FleetWorker
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg
@@ -124,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         serving.add_argument(f"--{name}", required=True, type=int)
     serving.add_argument("--allocation-id")
     serving.add_argument("--codex-bin", default="codex")
+    serving.add_argument("--contained-config", type=Path)
     for operation in ("attach", "inventory", "events"):
         command = subcommands.add_parser(operation)
         command.add_argument("--state-dir", required=True, type=Path)
@@ -134,13 +136,23 @@ def main(argv: list[str] | None = None) -> int:
         options = vars(args).copy()
         options.pop("operation")
         options.pop("json")
+        contained_config = options.pop("contained_config")
         options["provider_command"] = [options.pop("codex_bin")]
         worker = FleetWorker(**options)
+        runtime = (
+            ContainedRuntime(worker, contained_config) if contained_config is not None else None
+        )
         try:
-            worker.start()
+            if runtime is None:
+                worker.start()
+            else:
+                runtime.start()
             serve(worker)
         finally:
-            worker.close()
+            if runtime is None:
+                worker.close()
+            else:
+                runtime.close()
     elif args.operation == "attach":
         for line in sys.stdin:
             message = json.loads(line)
