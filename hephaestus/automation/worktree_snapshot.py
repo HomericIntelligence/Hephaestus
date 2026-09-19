@@ -866,3 +866,13 @@ def _secure_dir_fd_supported() -> bool:
         and all(function in os.supports_dir_fd for function in required)
         and os.stat in os.supports_follow_symlinks
     )
+
+
+# Supported capture operations for automation consumers. Keep the private names
+# for existing recovery callers. These bindings use the same implementations
+# and retain their deadline, cancellation, environment, and identity contracts.
+isolated_checkout_git_env = _isolated_checkout_git_env
+path_content_identity = _path_content_identity
+run_bounded_git_output = _run_bounded_git_output
+secure_dir_fd_supported = _secure_dir_fd_supported
+trusted_git_executable = _trusted_git_executable
