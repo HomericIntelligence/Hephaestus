@@ -7,8 +7,11 @@ the documents is intentionally not pinned — behavior gates (pr-policy,
 doc-config validator, link validation) own those guarantees.
 """
 
+import hashlib
 import os
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -18,6 +21,13 @@ ALLOWED_CLAUDE_REFERENCE_LINES = {
         "At decision time this guidance lived in `CLAUDE.md`; "
         "it is now consolidated in `AGENTS.md`."
     },
+}
+
+# Preserve the exact external review record without excluding other fixture content.
+HISTORICAL_FIXTURE_DIGESTS = {
+    Path("tests/fixtures/review-exchange/scylla-2093-state-carrier.txt"): (
+        "54b1cdff9e8113fd6af7bf2a5ec6c8ac50279e8f39973963e3904ca2d911e79a"
+    ),
 }
 
 EXCLUDED_PARTS = {
@@ -43,8 +53,14 @@ def _find_unexpected_claude_references(repo_root: Path, test_file: Path) -> list
             if path.resolve() == test_file.resolve():
                 continue
             relative = path.relative_to(repo_root)
+            content = path.read_bytes()
+            if (
+                relative in HISTORICAL_FIXTURE_DIGESTS
+                and hashlib.sha256(content).hexdigest() == HISTORICAL_FIXTURE_DIGESTS[relative]
+            ):
+                continue
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                lines = content.decode("utf-8").splitlines()
             except UnicodeDecodeError:
                 continue
 
@@ -95,3 +111,29 @@ def test_agent_contract_scan_keeps_untracked_source_candidates(tmp_path: Path) -
 def test_only_explicit_compatibility_and_history_references_remain() -> None:
     """No live policy consumer may continue citing the legacy pointer."""
     assert _find_unexpected_claude_references(REPO_ROOT, Path(__file__)) == []
+
+
+@pytest.mark.parametrize(
+    ("destination", "changed", "unexpected"),
+    [
+        ("tests/fixtures/review-exchange/scylla-2093-state-carrier.txt", False, False),
+        ("tests/fixtures/review-exchange/scylla-2093-state-carrier.txt", True, True),
+        ("tests/fixtures/review-exchange/other.txt", False, True),
+        ("docs/policy.txt", False, True),
+    ],
+)
+def test_historical_fixture_exception_requires_exact_path_and_content(
+    tmp_path: Path, destination: str, changed: bool, unexpected: bool
+) -> None:
+    """Exclude only unchanged historical evidence at its registered path."""
+    source = REPO_ROOT / "tests/fixtures/review-exchange/scylla-2093-state-carrier.txt"
+    content = source.read_bytes()
+    target = tmp_path / destination
+    target.parent.mkdir(parents=True)
+    target.write_bytes(content + (b"\nChanged historical evidence.\n" if changed else b""))
+
+    findings = _find_unexpected_claude_references(tmp_path, Path(__file__))
+
+    assert bool(findings) is unexpected
+    if unexpected:
+        assert all(finding.startswith(f"{destination}:") for finding in findings)
