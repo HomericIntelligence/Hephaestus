@@ -3020,6 +3020,28 @@ not provision a supervisor or admit a contained session. Preserve the disabled
 local fallback. The [Fleet worker design and runbook](fleet-worker.md)
 records the supported contracts, bounded probes, and remaining gates.
 
+### Transferable build source
+
+[`fleet_snapshot`](../hephaestus/automation/fleet_snapshot.py) supplies optional
+Python export, verification, and checked restore for eligible working source.
+It uses supported bounded capture bindings from `worktree_snapshot` and keeps
+the existing recovery API and its three-digest contract. Snapshot-specific
+policy rejects unsupported files, unsafe Git configuration, and unavailable
+capabilities before capture. One deadline covers the complete operation.
+
+The caller retains exclusive source and private construction leases. Export
+produces a deterministic manifest and archive with a six-field commitment.
+Verification checks actual bytes without creating files. Restore creates only
+a new private tree and checks its bytes and modes before returning. Failure
+preserves caller data and uncertain cleanup ownership. These operations do not
+register work or grant build authority.
+
+The [source snapshot runbook](fleet-snapshots.md) defines the regular-file
+profile, explicit policy, format, limits, and caller sequence. Controller
+grants, build execution, result publication, and runtime acceptance remain
+separate gates. A future optional Fleet MCP adapter is separate consuming
+work; snapshot operation has no MCP runtime dependency.
+
 ### Private retained build logs
 
 The separate
