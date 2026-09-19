@@ -17,6 +17,7 @@ from hephaestus.automation import commit_runtime, source_worktree
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.github_jobs import DirtyDirectPrStateRead
+from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import (
@@ -29,6 +30,7 @@ from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snap
 from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.agents.test_dirty_workspace import _claim
+from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.test_source_worktree import _git, _repository
 
 
@@ -76,7 +78,11 @@ def test_dirty_publication_stops_while_its_source_lane_is_held(
     consumed = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
     shutdown = threading.Event()
     pool = WorkerPool(
-        size=1, shutdown=shutdown, completion_q=queue.Queue(), lock_dir=tmp_path / "locks"
+        size=1,
+        shutdown=shutdown,
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
     attempted = threading.Event()
 
@@ -138,6 +144,7 @@ def test_dirty_claim_failure_keeps_its_operation_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout: bool
 ) -> None:
     """Claim failures retain the error contract and the pending writer content."""
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _root=None: "/usr/bin/gh")
     root, _, revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(12, SourceLane.IMPLEMENTATION, revision, branch=_claim().branch)
@@ -150,7 +157,11 @@ def test_dirty_claim_failure_keeps_its_operation_result(
         else SourceWorkspaceError("dirty direct state is unavailable")
     )
     pool = WorkerPool(
-        size=1, shutdown=threading.Event(), completion_q=queue.Queue(), lock_dir=tmp_path / "locks"
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
     read_state = Mock(side_effect=failure)
     monkeypatch.setattr(pool, "_read_dirty_direct_state", read_state)
@@ -187,13 +198,17 @@ def test_dirty_publication_failure_keeps_its_operation_diagnostics(
         else SourceWorkspaceError("dirty direct plan is unavailable")
     )
     pool = WorkerPool(
-        size=1, shutdown=threading.Event(), completion_q=queue.Queue(), lock_dir=tmp_path / "locks"
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
     verify_plan = Mock(side_effect=[None, failure] if phase == "pre_push" else failure)
     monkeypatch.setattr(pool, "_verify_dirty_direct_plan", verify_plan)
     monkeypatch.setattr(pool, "_read_remote_branch_head", lambda *args, **kwargs: binding.revision)
     monkeypatch.setattr(
-        worker_pool, "_controlled_git_signing_env", lambda *args, **kwargs: build_git_child_env()
+        FakeSigningProvider, "environment", lambda *args, **kwargs: build_git_child_env()
     )
 
     def commit(*args: object, **kwargs: object) -> None:
@@ -250,7 +265,11 @@ def test_dirty_plan_read_keeps_the_existing_git_job_deadline(tmp_path: Path) -> 
     runner.run.return_value = receipt
     shutdown = threading.Event()
     pool = WorkerPool(
-        size=1, shutdown=shutdown, completion_q=queue.Queue(), github_job_runner=runner
+        size=1,
+        shutdown=shutdown,
+        completion_q=queue.Queue(),
+        github_job_runner=runner,
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
     job = GitJob(
         "repo",

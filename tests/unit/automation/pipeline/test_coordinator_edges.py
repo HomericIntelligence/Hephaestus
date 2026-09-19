@@ -141,8 +141,22 @@ class TestWiring:
         ]
         assert len(assignments) == 1
 
+    @pytest.mark.parametrize(
+        ("platform", "configured", "backend_id"),
+        [
+            ("darwin", False, "hdiutil-v1"),
+            ("linux", True, "pyxis-v1"),
+            ("linux", False, None),
+            ("unsupported", False, None),
+        ],
+    )
     def test_default_pool_constructed_with_product_size(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        platform: str,
+        configured: bool,
+        backend_id: str | None,
     ) -> None:
         """Pool size = parallel_repos x max_workers (epic contract)."""
         created: dict[str, Any] = {}
@@ -166,6 +180,7 @@ class TestWiring:
                 host_verification_pyxis_sha256: str | None = None,
                 host_verification_pyxis_authority: Path | None = None,
                 host_verification_pyxis_quota_root: Path | None = None,
+                host_capabilities: Any = None,
                 podman_machine: str | None = None,
                 git_lock_timeout: int = 7200,
             ) -> None:
@@ -182,6 +197,7 @@ class TestWiring:
                 created["host_verification_pyxis_sha256"] = host_verification_pyxis_sha256
                 created["host_verification_pyxis_authority"] = host_verification_pyxis_authority
                 created["host_verification_pyxis_quota_root"] = host_verification_pyxis_quota_root
+                created["host_capabilities"] = host_capabilities
                 created["podman_machine"] = podman_machine
                 created["git_lock_timeout"] = git_lock_timeout
 
@@ -190,6 +206,7 @@ class TestWiring:
             "hephaestus.automation.mnemosyne_skill_host.MnemosyneSkillHost", SpyAthenaHost
         )
         gh_root = tmp_path / "custom-gh"
+        monkeypatch.setattr("hephaestus.automation.host_capabilities.sys.platform", platform)
         config = PipelineConfig(
             org="HomericIntelligence",
             repos=["r"],
@@ -199,6 +216,9 @@ class TestWiring:
             gh_extra_path_root=gh_root,
             rate_guard_enabled=False,
             git_lock_timeout=7201,
+            host_verification_pyxis_quota_root=tmp_path / "quota" if configured else None,
+            host_verification_pyxis_sha256="a" * 64 if configured else None,
+            host_verification_pyxis_authority=tmp_path / "authority.json" if configured else None,
         )
         coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
@@ -215,9 +235,17 @@ class TestWiring:
         assert created["rebase_policy_selector"]("Comet") is None
         assert created["evidence_receipt_dir"] is None
         assert created["host_verification_pyxis_image"] == config.host_verification_pyxis_image
-        assert created["host_verification_pyxis_sha256"] is None
-        assert created["host_verification_pyxis_authority"] is None
-        assert created["host_verification_pyxis_quota_root"] is None
+        assert created["host_verification_pyxis_sha256"] == config.host_verification_pyxis_sha256
+        assert (
+            created["host_verification_pyxis_authority"] == config.host_verification_pyxis_authority
+        )
+        assert (
+            created["host_verification_pyxis_quota_root"]
+            == config.host_verification_pyxis_quota_root
+        )
+        capabilities = created["host_capabilities"]
+        assert capabilities.execution_boundary_id == config.run_identity
+        assert getattr(capabilities.quota_backend, "backend_id", None) == backend_id
         assert created["podman_machine"] is None
         assert created["git_lock_timeout"] == 7201
 

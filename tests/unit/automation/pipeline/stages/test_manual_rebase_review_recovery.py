@@ -15,7 +15,10 @@ from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 from tests.unit.automation.pipeline.stages.test_rebase_review_recovery import _proof, _record
-from tests.unit.automation.pipeline.stages.test_stage_implementation import _prepared_writer
+from tests.unit.automation.pipeline.stages.test_stage_implementation import (
+    _consume_rebase_discovery,
+    _prepared_writer,
+)
 
 
 @pytest.mark.parametrize("failure", [None, "host_error", "wrong_head", "record_changed"])
@@ -72,6 +75,8 @@ def test_manual_restart_restores_review_before_rebase(make_ctx: Any, failure: st
         item.payload["pending_review_rebase_record"] = replace(record, state="revoked")
     stage.on_job_done(item, JobResult(ok=failure != "host_error", value=proof), ctx)
     item.state = request.on_done_state
+    if failure is None:
+        _consume_rebase_discovery(stage, item, ctx)
     result = stage.step(item, ctx)
     if failure:
         assert isinstance(result, StageOutcome)

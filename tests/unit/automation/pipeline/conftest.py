@@ -9,6 +9,7 @@ so later coordinator tests can swap it in without renaming call sites.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 from collections import deque
@@ -35,6 +36,16 @@ from hephaestus.automation.pipeline.worker_protocol import (
     MainWorker,
     WorkerFactory,
 )
+
+
+class FakeSigningProvider:
+    """Supply isolated configuration for tests that do not validate signing."""
+
+    def environment(
+        self, cwd: Path, *, timeout: int, private_metadata: bool = False
+    ) -> dict[str, str]:
+        """Exclude host configuration from the controlled test environment."""
+        return {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
 
 
 class FakeWorkerPool:

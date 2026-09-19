@@ -10,6 +10,7 @@ from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOut
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 from tests.unit.automation.pipeline.stages.test_stage_implementation import (
+    _consume_rebase_discovery,
     _prepared_writer,
     _worktree_receipt,
 )
@@ -45,7 +46,10 @@ def test_initial_rebase_has_no_pr_publication(make_ctx: Any, make_work_item: Any
     item = make_work_item(issue=1, state="REBASE_WAIT")
     item.payload.update(rebase_reason="implementation_start", _impl_source_revision="a" * 40)
     _prepared_writer(item)
-    request = ImplementationStage().step(item, make_ctx())
+    stage = ImplementationStage()
+    ctx = make_ctx()
+    _consume_rebase_discovery(stage, item, ctx)
+    request = stage.step(item, ctx)
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, GitJob)
     assert request.job.kwargs["rebase_reason"] == "implementation_start"
@@ -65,8 +69,12 @@ def test_review_conflict_head_drift_requires_review(make_ctx: Any, make_work_ite
     """A changed head cannot use an earlier review to start a rebase."""
     item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
     item.payload.update(rebase_reason="review_conflict", reviewed_pr_head_sha="b" * 40)
+    _prepared_writer(item)
     github = FakeStageGitHub(pr_impl_state=(True, False))
-    result = ImplementationStage().step(item, make_ctx(github=github))
+    stage = ImplementationStage()
+    ctx = make_ctx(github=github)
+    _consume_rebase_discovery(stage, item, ctx)
+    result = stage.step(item, ctx)
     assert result == Continue(next_state="ADOPTED")
     assert "reviewed_pr_head_sha" not in item.payload
 
@@ -98,6 +106,7 @@ def test_manual_conflict_restarts_from_captured_base(make_ctx: Any, make_work_it
         ),
         make_ctx(),
     )
+    _consume_rebase_discovery(stage, item, make_ctx())
     request = stage.step(item, make_ctx())
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, AgentJob)
@@ -126,6 +135,7 @@ def test_manual_conflict_retains_failed_preparation_across_callback_order(
     )
     _prepared_writer(item)
 
+    _consume_rebase_discovery(stage, item, make_ctx())
     request = stage.step(item, make_ctx())
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, AgentJob)
@@ -156,7 +166,10 @@ def test_reviewed_conflict_starts_an_agent_before_rebase(
     item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
     item.payload.update(rebase_reason="review_conflict", reviewed_pr_head_sha="a" * 40)
     _prepared_writer(item)
-    request = ImplementationStage().step(item, make_ctx(github=github))
+    stage = ImplementationStage()
+    ctx = make_ctx(github=github)
+    _consume_rebase_discovery(stage, item, ctx)
+    request = stage.step(item, ctx)
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, AgentJob)
     assert request.job.descr == "prepare_conflict_rebase"
@@ -296,7 +309,9 @@ def test_initial_reservation_moves_before_implementation(
         _impl_source_revision="a" * 40,
         _direct_scope_reservation=reservation,
     )
-    request = stage.step(item, make_ctx())
+    ctx = make_ctx()
+    _consume_rebase_discovery(stage, item, ctx)
+    request = stage.step(item, ctx)
     assert isinstance(request, JobRequest)
     assert request.job.kwargs["direct_scope_reservation"] == reservation
     returned = {"branch": item.branch, "base_sha": "b" * 40 if valid else "c" * 40}
@@ -335,6 +350,7 @@ def test_reviewed_conflict_that_clears_retains_review(make_ctx: Any, make_work_i
         reviewed_pr_node_id="PR_node",
         review_verdict="GO",
     )
+    _prepared_writer(item)
     github = FakeStageGitHub(
         pr_impl_state=(True, False),
         pr_state={
@@ -346,7 +362,10 @@ def test_reviewed_conflict_that_clears_retains_review(make_ctx: Any, make_work_i
             "mergeStateStatus": "CLEAN",
         },
     )
-    result = ImplementationStage().step(item, make_ctx(github=github))
+    stage = ImplementationStage()
+    ctx = make_ctx(github=github)
+    _consume_rebase_discovery(stage, item, ctx)
+    result = stage.step(item, ctx)
     assert result == StageOutcome(Disposition.FAIL_BACK, "review_retained_after_rebase")
     assert item.payload["reviewed_pr_head_sha"] == "a" * 40
     assert item.payload["reviewed_pr_node_id"] == "PR_node"

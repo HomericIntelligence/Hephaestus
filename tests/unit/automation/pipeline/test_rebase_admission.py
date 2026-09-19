@@ -9,9 +9,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
+from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 
 WP = "hephaestus.automation.pipeline.worker_pool"
 
@@ -27,6 +29,7 @@ def worker_factory(tmp_path: Path) -> Iterator[Callable[[], WorkerPool]]:
             shutdown=Event(),
             completion_q=CompletionQueue(),
             lock_dir=tmp_path / "worker-locks",
+            host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
         )
         workers.append(worker)
         return worker
@@ -128,7 +131,7 @@ def test_review_conflict_needs_fresh_admission_after_fetch(
         ),
         patch(f"{WP}.git_utils.is_clean_working_tree", return_value=True),
         patch(f"{WP}.git_utils.run", return_value=MagicMock(returncode=1)),
-        patch(f"{WP}._required_git_signing_env", return_value={}),
+        patch.object(FakeSigningProvider, "environment", return_value={}),
         patch(f"{WP}.git_utils.rebase_worktree_onto", return_value=True) as rebase,
         patch.object(pool, "_authenticated_remote_revalidator", return_value=lambda: ({}, ())),
         patch(f"{WP}.git_utils.push_head_to_branch"),

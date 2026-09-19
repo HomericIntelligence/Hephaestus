@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import secrets
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import cast
 
@@ -16,7 +16,8 @@ from hephaestus.automation.pipeline_github_review_validation import (
 from hephaestus.automation.source_worktree import SourceWorkspaceError
 
 from ..github_jobs import GitHubJob, ReadRepositoryValidationCIRequest, RepositoryValidationCIRead
-from ..jobs import BuildTestJob, GitJob, JobResult
+from ..host_capabilities import CapabilityRequestTarget, HostCapabilityRead, HostCapabilityReceipt
+from ..jobs import BuildTestJob, GitJob, HostCapabilityJob, JobResult
 from ..repository_validation import (
     RepositoryValidationAttempt,
     RepositoryValidationExecution,
@@ -42,20 +43,28 @@ from .base import (
     source_workspace_binding,
     stage_timeout,
 )
+from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_repository_validation_state import _repository_validation_coverage
+from .pr_review_round_state import _clear_host_execution_state
 from .pr_review_threads import (
+    _HOST_VERIFICATION_PENDING,
     GIT_JOB_TIMEOUT_S,
+    HOST_CAPABILITY_WAIT,
     HOST_VERIFICATION_TIMEOUT_S,
+    HOST_VERIFICATION_WAIT,
     REPOSITORY_VALIDATION_CI_WAIT,
     REPOSITORY_VALIDATION_RUNTIME_WAIT,
     REPOSITORY_VALIDATION_SOURCE_WAIT,
     _issue_number,
-    _prepare_host_checks,
     _PrReviewHost,
     _worktree_path,
     logger,
 )
-from .pr_review_verification import _review_change_records, _review_changed_paths
+from .pr_review_verification import (
+    _HostVerificationSpec,
+    _review_change_records,
+    _review_changed_paths,
+)
 from .repo import is_full_commit_sha
 
 
@@ -142,6 +151,178 @@ def _check_repository_preparation_current(
 class PrReviewRepositoryValidationMixin(_PrReviewHost):
     """Keep worker preparation separate from validation evidence."""
 
+    def _host_capability_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Release only the fixed execution owned by a valid capability result."""
+        request = item.payload.get("host_capability_request")
+        value = item.payload.get("host_capability_result")
+        verification = item.payload.get("host_capability_verification")
+        try:
+            if type(request) is not CapabilityRequestTarget:
+                raise ValueError("The capability request is missing.")
+            self._check_capability_request_current(request, item, ctx)
+            if type(value) is not HostCapabilityRead or value.request != request:
+                raise ValueError("The capability result is missing or unowned.")
+            replace(value)
+            if (
+                item.payload.get("host_capability_failure")
+                or value.failure
+                or value.receipt is None
+                or not value.receipt.available
+                or type(verification) is not _HostVerificationSpec
+            ):
+                raise ValueError("The required capability is unavailable.")
+        except (AttributeError, TypeError, ValueError):
+            return self._block_host_capability(item, ctx)
+        for key in (
+            "host_capability_request",
+            "host_capability_result",
+            "host_capability_failure",
+            "host_capability_verification",
+        ):
+            item.payload.pop(key, None)
+        item.payload[_HOST_VERIFICATION_PENDING] = verification.descr
+        return JobRequest(
+            BuildTestJob(
+                item.repo,
+                request.checkout_path,
+                verification.argv,
+                HOST_VERIFICATION_TIMEOUT_S,
+                expected_head_sha=request.expected_head_sha,
+                immutable_source=True,
+                descr=verification.descr,
+            ),
+            on_done_state=HOST_VERIFICATION_WAIT,
+        )
+
+    @staticmethod
+    def _block_host_capability(item: WorkItem, ctx: StageContext) -> StageOutcome:
+        """Report a recoverable runner gap without changing any source verdict."""
+        value = item.payload.get("host_capability_result")
+        receipt = value.receipt if type(value) is HostCapabilityRead else None
+        if type(receipt) is not HostCapabilityReceipt:
+            receipt = None
+        if receipt is not None:
+            try:
+                replace(receipt)
+            except (AttributeError, TypeError, ValueError):
+                receipt = None
+        verification = item.payload.get("host_capability_verification")
+        if type(verification) is not _HostVerificationSpec:
+            verification = None
+        details = asdict(receipt) if receipt is not None else {}
+        diagnostic = {
+            **details,
+            "head_sha": str(item.payload.get("reviewed_pr_head_sha") or ""),
+            "failure_kind": "runner",
+            "capability_failure": True,
+            "labels_unchanged": True,
+            "argv": list(verification.argv) if verification is not None else [],
+            "error": (value.failure if type(value) is HostCapabilityRead else "")
+            or details.get("token")
+            or str(
+                item.payload.get("host_capability_failure")
+                or "host_capability_evidence_unavailable"
+            ),
+            "failed_step": details.get("failed_step", "source"),
+        }
+        item.payload["host_verification_failure"] = diagnostic
+        published = item.pr is not None and publish_host_verification_failure(
+            ctx.github,
+            item.pr,
+            verification,
+            diagnostic,
+            logger,
+        )
+        return StageOutcome(
+            Disposition.BLOCKED,
+            "host_capability_blocked" if published else "host_capability_comment_failed",
+        )
+
+    @staticmethod
+    def _check_capability_request_current(
+        request: CapabilityRequestTarget, item: WorkItem, ctx: StageContext
+    ) -> None:
+        """Require the source and attempt that still own this callback."""
+        replace(request)
+        generation = item.payload.get("reviewed_pr_proof_generation")
+        if (
+            request.repository.casefold() != f"{ctx.org}/{item.repo}".casefold()
+            or request.issue_number != item.issue
+            or request.pr_number != item.pr
+            or request.workspace != item.payload.get("host_verification_workspace")
+            or request.expected_head_sha != item.payload.get("reviewed_pr_head_sha")
+            or type(generation) is not int
+            or request.generation != generation
+        ):
+            raise ValueError("The capability request no longer owns the current review.")
+
+    def _consume_host_capability_result(
+        self, item: WorkItem, result: JobResult, ctx: StageContext
+    ) -> bool:
+        """Keep stale or invalid capability results out of generic review handling."""
+        pending = item.payload.get("host_capability_request")
+        value = result.value
+        if type(value) is not HostCapabilityRead:
+            if pending is None:
+                return False
+            item.payload["host_capability_failure"] = "capability_callback_invalid"
+            return True
+        if type(pending) is not CapabilityRequestTarget or value.request != pending:
+            return True
+        if item.payload.get("host_capability_result") is not None:
+            return True
+        try:
+            self._check_capability_request_current(pending, item, ctx)
+        except (AttributeError, TypeError, ValueError):
+            return True
+        try:
+            replace(value)
+            if result.interrupted and value.failure != "operation_cancelled":
+                raise ValueError("The capability operation was interrupted.")
+            expected_ok = (
+                value.receipt is not None and value.receipt.available and not value.failure
+            )
+            if result.ok is not expected_ok:
+                raise ValueError("The capability outcome is contradictory.")
+        except (AttributeError, TypeError, ValueError):
+            item.payload["host_capability_failure"] = "capability_callback_invalid"
+            return True
+        item.payload["host_capability_result"] = value
+        return True
+
+    @staticmethod
+    def _submit_host_verification(
+        item: WorkItem, ctx: StageContext, verification: _HostVerificationSpec
+    ) -> JobRequest:
+        """Record capability ownership before the worker can inspect its source."""
+        workspace = item.payload.get("host_verification_workspace")
+        if type(workspace) is not WorkspaceBinding or workspace.reusable_root is None:
+            raise ValueError("The host verification source binding is missing.")
+        if item.payload.get("host_capability_request") is not None:
+            raise ValueError("A capability request is already pending.")
+        request = CapabilityRequestTarget(
+            repository=f"{ctx.org}/{item.repo}",
+            issue_number=_issue_number(item),
+            pr_number=cast(int, item.pr),
+            repository_root=workspace.reusable_root,
+            checkout_path=_worktree_path(item, ctx),
+            expected_head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
+            phase="pr_review",
+            purpose="scratch",
+            request_id=secrets.token_hex(16),
+            workspace=workspace,
+            generation=item.payload["reviewed_pr_proof_generation"],
+        )
+        job = HostCapabilityJob(
+            request.repository,
+            request,
+            HOST_VERIFICATION_TIMEOUT_S,
+            deadline_s=operation_deadline_after(HOST_VERIFICATION_TIMEOUT_S),
+        )
+        item.payload["host_capability_request"] = request
+        item.payload["host_capability_verification"] = verification
+        return JobRequest(job, on_done_state=HOST_CAPABILITY_WAIT)
+
     def _review_checkout_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Submit review only after the fresh snapshot matches a clean checkout."""
         expected_head = str(item.payload.pop("review_checkout_expected_head", "") or "")
@@ -183,15 +364,7 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
             return StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
         if ctx.org.casefold() == "llm360" and item.repo.casefold() == "comet":
             return self._start_repository_validation(item, ctx, workspace)
-        verifications = _prepare_host_checks(item.payload, _worktree_path(item, ctx), expected_head)
-        if verifications:
-            logger.info(
-                "pr_review:%d: requesting %d host verifications",
-                _issue_number(item),
-                len(verifications),
-            )
-            item.payload["host_verification_receipts"] = []
-            return self._submit_host_verification(item, ctx, verifications[0])
+        _clear_host_execution_state(item)
         return self._route_threads_before_broad_review(item, ctx)
 
     def _start_repository_validation(

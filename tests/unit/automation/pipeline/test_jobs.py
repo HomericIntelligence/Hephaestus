@@ -443,6 +443,27 @@ def _repository_build_job(execution: Any, **overrides: Any) -> BuildTestJob:
     return BuildTestJob(**values)
 
 
+def test_repository_validation_runtime_preparation_accepts_bound_job(tmp_path: Path) -> None:
+    """Accept a preparation request without execution metadata."""
+    from hephaestus.automation.pipeline.repository_validation import RepositoryValidationInvocation
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationRuntimeRequest,
+    )
+
+    execution = _repository_execution(tmp_path)
+    request = RepositoryValidationRuntimeRequest(
+        RepositoryValidationInvocation(execution.plan, 1, "f" * 32, "local", (execution.check_id,)),
+        123.0,
+    )
+    job = _repository_build_job(
+        execution,
+        repository_validation=None,
+        repository_validation_preparation=request,
+    )
+    assert job.repository_validation_preparation == request
+    assert job.repository_validation is None
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -555,12 +576,14 @@ def test_repository_execution_preserves_build_job_compatibility(tmp_path: Path) 
         "descr",
         "repository_validation",
         "repository_validation_preparation",
+        "capability_target",
     )
     with pytest.raises(FrozenInstanceError):
         execution.request_nonce = "e" * 32  # type: ignore[misc]
     legacy = BuildTestJob("legacy", tmp_path, ("pytest",), 30, "", False, None, "Legacy check.")
     assert legacy.repository_validation is None
     assert legacy.repository_validation_preparation is None
+    assert legacy.capability_target is None
     assert job.repository_validation_preparation is None
     assert legacy.descr == "Legacy check."
 

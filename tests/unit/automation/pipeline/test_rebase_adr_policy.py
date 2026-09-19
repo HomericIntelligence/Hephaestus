@@ -3,22 +3,18 @@
 from __future__ import annotations
 
 import importlib
-import threading
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from functools import partial
 from pathlib import Path
-from time import monotonic
 from typing import cast
-from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
-from hephaestus.automation.pipeline.job_results import JobResult
-from hephaestus.automation.pipeline.jobs import GitJob
-from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.rebase_policy import RebaseValidationPolicy
-from hephaestus.automation.pipeline.worker_pool import WorkerPool
+from tests.unit.automation.pipeline.test_rebase_policy import real_policy_case
+from tests.unit.automation.test_rebase_recovery import _store
+from tests.unit.automation.test_source_worktree import _git
 
 RebasePolicyFactory = Callable[[str, str | None], RebaseValidationPolicy | None]
 
@@ -144,85 +140,36 @@ def test_hephaestus_policy_rejects_readme_index_drift(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("publish", [False, True])
-def test_manual_rebase_without_conflicts_does_not_run_repository_policy(
-    tmp_path: Path, publish: bool
+def test_manual_rebase_without_selected_policy_needs_no_validation_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publish: bool,
 ) -> None:
-    """A successful manual replay does not run conflict-only validation."""
-    pool = WorkerPool(
-        size=1,
-        shutdown=threading.Event(),
-        completion_q=CompletionQueue(),
-        lock_dir=tmp_path / "locks",
-    )
-    head, base, rewritten = "a" * 40, "b" * 40, "c" * 40
-    job = GitJob(
-        repo="Hephaestus",
-        expected_repository="HomericIntelligence/Hephaestus",
-        op="rebase",
-        timeout_s=60,
-        deadline_s=monotonic() + 60,
-        kwargs={
-            "cwd": tmp_path,
-            "rebase_reason": "manual",
-            "publish_rebased_head": publish,
-            "branch": "7-auto-impl",
-            "expected_remote_sha": head,
-            "expected_head_sha": head,
-        },
-    )
-    try:
-        with (
-            patch.object(pool, "_sync_writer_to_expected_remote_head", return_value=None),
-            patch.object(pool, "_authenticated_remote_revalidator", return_value=lambda: ({}, ())),
-            patch.object(
-                pool, "_git_fetch_main", return_value=JobResult(ok=True, value={"head_sha": base})
-            ),
-            patch.object(pool, "_read_publish_head", side_effect=[head, head, rewritten]),
-            patch(
-                "hephaestus.automation.pipeline.worker_pool.git_utils.is_clean_working_tree",
-                return_value=True,
-            ),
-            patch(
-                "hephaestus.automation.pipeline.worker_pool.git_utils.run",
-                return_value=MagicMock(returncode=1),
-            ),
-            patch(
-                "hephaestus.automation.pipeline.worker_pool._required_git_signing_env",
-                return_value={},
-            ),
-            patch(
-                "hephaestus.automation.pipeline.worker_pool.git_utils.rebase_worktree_onto",
-                return_value=True,
-            ) as rebase,
-            patch(
-                "hephaestus.automation.pipeline.worker_pool.git_utils.push_head_to_branch"
-            ) as push,
-            patch.object(pool, "_select_rebase_policy") as select,
-            patch.object(pool, "_run_rebase_structural_validation") as structural,
-            patch.object(pool, "_validate_rebased_tree") as semantic,
-        ):
-            result = pool._git_rebase_once(job, record_source=MagicMock())
-    finally:
-        pool.shutdown(mark_interrupted=False)
+    """No selected policy means no validation execution, not absent source ownership."""
+    with real_policy_case(tmp_path, monkeypatch, publish=publish) as case:
+        selected: list[str] = []
 
-    assert result == JobResult(
-        ok=True, value={"rebased": True, "published": publish, "head_sha": rewritten}
-    )
-    select.assert_not_called()
-    structural.assert_not_called()
-    semantic.assert_not_called()
-    assert rebase.call_args.kwargs["base_sha"] == base
-    assert rebase.call_args.kwargs["preserve_conflicts"] is False
-    assert push.call_count == int(publish)
-    if publish:
-        push.assert_called_once_with(
-            "7-auto-impl",
-            head,
-            tmp_path,
-            source_sha=rewritten,
-            timeout=ANY,
-            env={},
-            remote_config=(),
-            revalidate_remote=ANY,
-        )
-        assert 0 < push.call_args.kwargs["timeout"] <= 60
+        def no_policy(repository: str) -> None:
+            selected.append(repository)
+            return None
+
+        monkeypatch.setattr(case.pool, "_rebase_policy_selector", no_policy)
+        result = case.pool._run_git(case.job)
+        assert result.ok, result
+        assert selected and set(selected) == {"repository"}
+        assert case.starts == [True]
+        assert result.value["rebased"] is True
+        assert result.value["published"] is publish
+        assert result.value["head_sha"] == _git(case.binding.cwd, "rev-parse", "HEAD")
+        assert result.value["head_sha"] != case.original
+        assert _git(case.binding.cwd, "merge-base", "--is-ancestor", case.base, "HEAD") == ""
+        assert "capability_receipt" not in result.value
+        assert "structural_execution_receipt" not in result.value
+        assert result.value["source_workspace"]["revision"] == result.value["head_sha"]
+        case.backend.preflight.assert_not_called()
+        assert case.checks == []
+        assert case.events == (["push"] if publish else [])
+        record = _store(case.manager.common_dir).read(1, case.job.capability_target.request_id)
+        assert record.phase == "complete"
+        assert record.policy_name is None
+        assert record.request == case.job.capability_target

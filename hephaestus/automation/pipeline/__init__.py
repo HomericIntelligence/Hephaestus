@@ -18,7 +18,16 @@ if TYPE_CHECKING:
     from .auxiliary_worker_pool import AuxiliaryWorkerPool
     from .coordinator import run_pipeline
     from .coordinator_types import PipelineConfig
-    from .jobs import GIT_OPS, AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
+    from .jobs import (
+        GIT_OPS,
+        AgentJob,
+        BuildTestJob,
+        CompactJob,
+        GitJob,
+        HostCapabilityJob,
+        JobHandle,
+        JobResult,
+    )
     from .queues import CompletionQueue, StageQueue
     from .repository_validation import RepositoryValidationExecution
     from .routing import (
@@ -46,6 +55,7 @@ __all__ = [
     "Disposition",
     "GitJob",
     "HistoryEvent",
+    "HostCapabilityJob",
     "ItemKind",
     "ItemResult",
     "JobHandle",
@@ -76,6 +86,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "Disposition": "hephaestus.automation.pipeline.routing",
     "GIT_OPS": "hephaestus.automation.pipeline.jobs",
     "GitJob": "hephaestus.automation.pipeline.jobs",
+    "HostCapabilityJob": "hephaestus.automation.pipeline.jobs",
     "HistoryEvent": "hephaestus.automation.pipeline.work_item",
     "ItemKind": "hephaestus.automation.pipeline.work_item",
     "ItemResult": "hephaestus.automation.pipeline.work_item",

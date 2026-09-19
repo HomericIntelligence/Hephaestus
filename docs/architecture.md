@@ -1325,9 +1325,10 @@ failed receipt. It cannot become a passing skip. Other platforms remain
 fail-closed until a separately reviewed isolation backend exists. There is no
 unsandboxed fallback.
 
-The Hephaestus profile uses the host-verification boundary above. The completed
-PR #3006 bootstrap is retired. There is no target-specific grant, comment
-selector, or skip-to-pass path. Generic host receipts remain in
+Capability-dependent Hephaestus execution uses the boundary above. Ordinary
+source review does not execute these checks or require their image and quota
+filesystem. The completed PR #3006 bootstrap is retired. There is no
+target-specific grant, comment selector, or skip-to-pass path. Generic host receipts remain in
 [`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
 
 For `LLM360/comet`, the coordinator first binds the detached source workspace.
@@ -1393,12 +1394,20 @@ summary that preserves the evidence kind. Clean evaluation, audit persistence,
 and implementation GO each require complete current coverage. Production
 operations and repository merge gates retain their separate requirements.
 
-Every host-verification failure also upserts an automation-owned diagnostic on
-the pull request after the exact-head NOGO label is read back. The comment is
-keyed by reviewed head and fixed verification ID, so an identical retry updates
-instead of spamming the PR. It records the command, affected path, failure
-classification, and bounded output tails; it is informational and never grants
-implementation authorization.
+An unavailable capability produces a diagnostic and a recoverable block. It
+does not change source verdicts, consume remediation budget, or start a writer.
+For an execution result, a runner failure with the same source head and no
+source-head mismatch also preserves verdicts and blocks after checkout cleanup.
+
+Other source-validation or execution-evidence failures retain the existing
+NO-GO path. The host publishes their diagnostic only after exact-head NO-GO
+readback. A confirmed test or validation failure can return to implementation.
+Invalid execution evidence retains the failure and checkout cleanup path.
+
+The diagnostic comment uses the reviewed head and fixed verification ID, so
+an identical retry updates the same comment. It records the command, affected
+path, failure classification, and bounded output tails. The comment is
+informational and never grants implementation authorization.
 
 #### Boundary diagram
 
@@ -1406,7 +1415,7 @@ implementation authorization.
 flowchart LR
     PR["PR diff and requirements"] --> ThreadGate{"Open thread state"}
     PR --> Explicit["Explicit operator broad review"] --> Snapshot
-    ThreadGate -->|"no thread"| Snapshot["Immutable host verification"] --> Review
+    ThreadGate -->|"no thread"| Snapshot["Immutable source checkout"] --> Review
     ThreadGate -->|"unreplied thread"| Address["Implementation fixes and replies"]
     ThreadGate -->|"all threads replied"| Validate["Reviewer validates reply + diff"]
     Review --> GitHub["GitHub review and inline threads"]
@@ -1420,6 +1429,9 @@ flowchart LR
 ```
 
 #### State machine
+
+Capability and host-execution states apply only to requested execution. They
+are not prerequisites for the ordinary source-review checkout path.
 
 ```mermaid
 stateDiagram-v2
@@ -1441,11 +1453,13 @@ stateDiagram-v2
     RepositoryValidation --> Review: complete coverage; broad audit
     RepositoryValidation --> Validate: complete coverage; comment validation
     RepositoryValidation --> Failed: invalid evidence or unavailable required capability
-    Checkout --> HostVerification: Hephaestus fixed check is required
+    HostCapability --> HostVerification: available capability; current request and receipt
+    HostCapability --> Blocked: unavailable capability; diagnostic; unchanged verdicts and budget
     HostVerification --> Review: immutable snapshot verification passed
+    HostVerification --> Blocked: runner fault at unchanged head; diagnostic and checkout cleanup
     HostVerification --> Implementation: confirmed test failure, after durable no-go, diagnostic, and checkout cleanup
-    HostVerification --> Failed: boundary/setup failure, after durable no-go diagnostic and checkout cleanup
-    Checkout --> Review: clean checkout matches snapshot head, no fixed check required
+    HostVerification --> Failed: invalid execution evidence; durable no-go diagnostic and checkout cleanup
+    Checkout --> Review: clean source checkout matches snapshot head
     Checkout --> Failed: checkout or head drift; cleanup then a later loop gets a new snapshot
     Review --> Validate: review produced
     Validate --> CorrectAnchor: one or more anchors are invalid
@@ -2015,6 +2029,79 @@ The neutral `commit_runtime` module owns commit staging, message validation,
 signing, and commit creation. Pipeline stages put immutable issue title and
 body values in each job. The Git worker calls this neutral commit interface;
 it does not fetch issue data through an old commit adapter.
+
+### Host capability ownership
+
+[ADR-0056](adr/0056-explicit-host-capabilities-and-operation-recovery.md)
+records the capability and operation recovery contracts.
+
+The coordinator supplies quota and signing providers through
+`WorkerCapabilities`. The pure contracts in `pipeline/host_capabilities.py`
+define requests, receipts, and provider interfaces. Host operations in
+`automation/host_capabilities.py` own platform selection, filesystem access,
+commands, receipt storage, and the quota cache.
+
+A request binds the repository, issue, optional PR, source workspace, head,
+attempt generation, purpose, and request ID. The worker adds the canonical
+root, device, backend, execution boundary, and observed source head to the
+receipt target. The signing provider calls the existing controlled signing
+validator and preserves its failure cause.
+
+Quota receipts are stored under
+`build/.issue_implementer/host-capability-receipts/`. Storage uses a private
+lock, atomic replacement, and exact readback. The cache key includes the
+canonical root, device, capability, backend, execution boundary, and process
+ID. A cache hit creates a new receipt for the current request. Stored
+receipts do not supply cache authority to a new process.
+
+### Pending rebase records
+
+The host-side `PendingRebaseStore` owns durable recovery records. It stores
+them in `hephaestus-source-workspaces/pending-rebases` under the canonical
+Git common directory. The store rejects unsafe ownership, permissions,
+symlinks, and namespace replacement. Existing protected parent directories
+do not need private permissions. The recovery directory must have mode
+`0700`; its record lock must have mode `0600`.
+
+Each write compares the complete prior record before it replaces that
+record. Creation also checks for another active record for the same issue.
+A short file lock protects these checks, the durable write, and its exact
+readback. Lock waits use the caller's absolute deadline. The store does not
+run Git commands or make network requests while it holds this lock.
+
+Discovery returns recovery data, not execution permission. An unresolved
+`intent` or multiple active records require operator recovery. Completed
+and aborted records remain stored but do not select active recovery work.
+The worker must validate source ownership and the current repository state
+before it can use a recovery record to continue an operation.
+
+### First-publication recovery
+
+The existing `commit_push` worker owns first publication. A local no-PR rebase
+does not publish a branch. Before an absent-only push, the worker stores and
+reads back the intended commit, tree, source ownership, destination, branch,
+scope, and operation identity. The
+[`FirstPublicationStore`](../hephaestus/automation/first_publication_recovery.py)
+uses a separate `first-publications` namespace under the source manager's
+protected Git-common state directory. It does not use a rebase record as
+publication permission.
+
+Discovery supplies an untrusted candidate. The
+[`worker`](../hephaestus/automation/pipeline/worker_pool.py) checks current
+source ownership, clean head and tree, signing metadata, approved paths, and
+authenticated remote state before recovery. It checks both the current
+merge-base diff and the retained-start diff against current approved paths.
+It repeats publication validation without another writer, commit, or rebase.
+
+Confirmed remote absence permits a conditional push with normal hooks. The
+exact intended remote head permits completion after durable intent is checked.
+A competing head or failed observation blocks. Completed records remain
+available for a fresh request-bound callback; they do not permit another push.
+The existing
+[`implementation stage`](../hephaestus/automation/pipeline/stages/implementation.py)
+accepts that callback before it advances to PR creation. An ambiguous crash
+before valid intent requires operator recovery. No recovery record grants
+source-review approval or merge authority.
 
 ### Job kinds
 

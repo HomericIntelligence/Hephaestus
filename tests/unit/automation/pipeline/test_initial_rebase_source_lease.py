@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +17,12 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.pipeline import worker_pool
-from hephaestus.automation.pipeline.git_jobs import GitJob
+from hephaestus.automation.pipeline.git_jobs import GitJob, PendingRebaseRecord
+from hephaestus.automation.pipeline.host_capabilities import CapabilityRequestTarget
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import BuildTestJob
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
+from hephaestus.automation.rebase_recovery import PendingRebaseStore
 from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.test_source_worktree import _git, _repository
@@ -30,17 +33,33 @@ def test_initial_rebase_reuses_the_source_lease_and_keeps_its_recorded_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, publication_failed: bool
 ) -> None:
     """A later publication failure must retain the single lease's local successor."""
-    root, _, head = _repository(tmp_path, origin_repository="repo")
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _root=None: "/usr/bin/gh")
+    root, _, head = _repository(tmp_path, origin_repository="org/repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, head, branch="writer")
     pool = WorkerPool(
         size=1, shutdown=threading.Event(), completion_q=queue.Queue(), lock_dir=tmp_path / "locks"
     )
+    capability_target = CapabilityRequestTarget(
+        "org/repo",
+        42,
+        None,
+        root,
+        binding.cwd,
+        head,
+        "rebase",
+        "scratch",
+        "a" * 32,
+        workspace=binding,
+        generation=1,
+    )
     job = GitJob(
         "repo",
         "rebase",
         30,
+        expected_repository="org/repo",
         workspace=binding,
+        capability_target=capability_target,
         kwargs={
             "repo_root": str(root),
             "cwd": str(binding.cwd),
@@ -68,20 +87,41 @@ def test_initial_rebase_reuses_the_source_lease_and_keeps_its_recorded_head(
 
     monkeypatch.setattr(SourceWorkspaceManager, "implementation_local_commit", source_context)
     local_heads: list[str] = []
+    retained_states: list[tuple[PendingRebaseStore, PendingRebaseRecord]] = []
 
-    def rebase(_job: GitJob, *, record_source: Callable[[str], WorkspaceBinding]) -> JobResult:
+    def rebase(
+        _job: GitJob,
+        *,
+        record_source: Callable[[str], WorkspaceBinding],
+        retain_pending: Callable[[PendingRebaseStore, PendingRebaseRecord], None],
+    ) -> JobResult:
+        recovery = pool._begin_rebase_recovery(_job, head)
+        assert not isinstance(recovery, JobResult), recovery
         (binding.cwd / "tracked.txt").write_text("controlled rebase result\n")
         _git(binding.cwd, "commit", "-am", "controlled source change")
         revised = _git(binding.cwd, "rev-parse", "HEAD")
         local_heads.append(revised)
-        record_source(revised)
+        current = record_source(revised)
+        retained = pool._record_rebase_result(_job, recovery, current)
+        assert isinstance(retained, PendingRebaseRecord), retained
+        retained_states.append((recovery[0], retained))
+        retain_pending(recovery[0], retained)
         return JobResult(ok=True, value={"head_sha": revised, "rebased": True})
 
     observed: list[str] = []
 
     def publish(
-        _job: GitJob, result: JobResult, _path: Path, _identity: dict[str, object]
+        _job: GitJob,
+        result: JobResult,
+        _path: Path,
+        _identity: dict[str, object],
+        *,
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord] | None,
     ) -> JobResult:
+        assert recovery is not None and recovery == retained_states[-1]
+        store, retained = recovery
+        assert retained.resulting_workspace is not None
+        assert retained.resulting_workspace.revision == local_heads[-1]
         observed.append(manager._require_receipt(42, SourceLane.IMPLEMENTATION).revision)
         if publication_failed:
             return JobResult(
@@ -89,13 +129,14 @@ def test_initial_rebase_reuses_the_source_lease_and_keeps_its_recorded_head(
                 error="publication unknown",
                 value={"head_sha": local_heads[-1], "initial_reservation_pending": True},
             )
+        store.write(replace(retained, phase="publication_intent"), expected=retained)
         return result
 
     monkeypatch.setattr(pool, "_git_rebase_once", rebase)
     monkeypatch.setattr(pool, "_publish_initial_reservation", publish)
     try:
         result = pool._run_git(job)
-        assert acquisitions == [1]
+        assert acquisitions == [1], result
         assert local_heads and observed == local_heads
         assert result.ok is not publication_failed
         if publication_failed:
@@ -103,6 +144,12 @@ def test_initial_rebase_reuses_the_source_lease_and_keeps_its_recorded_head(
         receipt = manager._require_receipt(42, SourceLane.IMPLEMENTATION)
         assert receipt.revision == local_heads[-1]
         assert result.value["source_receipt"] == receipt.to_dict()
+        store, retained = retained_states[-1]
+        current_record = store.read(42, retained.request.request_id)
+        assert current_record is not None
+        assert current_record.phase == ("pending_validation" if publication_failed else "complete")
+        assert current_record.resulting_workspace is not None
+        assert current_record.resulting_workspace.revision == local_heads[-1]
         assert result.value["source_workspace"] == receipt.to_binding(root).to_dict()
     finally:
         pool.shutdown(mark_interrupted=False)
@@ -193,6 +240,7 @@ def test_initial_journal_lock_keeps_the_existing_job_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool
 ) -> None:
     """A held initial-start journal must not stall the queue worker."""
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _root=None: "/usr/bin/gh")
     root, _, head = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, head, branch="writer")
@@ -232,7 +280,7 @@ def test_initial_journal_lock_keeps_the_existing_job_budget(
     try:
         with file_lock(lock_path, require_exclusive=True):
             thread.start()
-            assert attempted.wait(timeout=1)
+            assert attempted.wait(timeout=1), results
             if cancel:
                 shutdown.set()
             thread.join(timeout=2)

@@ -1,18 +1,34 @@
 """Tests for durable one-use dirty writer claims."""
 
+import os
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from hephaestus.agents.workspace import DirtyPlanIdentity, SourceLane
+from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
 from hephaestus.config.child_environments import build_git_child_env
 from tests.unit.agents.test_dirty_workspace import _claim
+from tests.unit.automation.pipeline.conftest import FakeSigningProvider
+from tests.unit.automation.test_rebase_recovery import (
+    _registered_git_fixture,
+    _source_registration_fixture,
+)
 from tests.unit.automation.test_source_worktree import _repository
+
+if TYPE_CHECKING:
+    from hephaestus.automation.pipeline.git_jobs import GitJob
+    from hephaestus.automation.pipeline.stages import StageContext
+    from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+    from hephaestus.automation.pipeline.work_item import WorkItem
+    from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
 
 def test_dirty_claim_consumes_before_turn_and_rejects_replay(tmp_path: Path) -> None:
@@ -178,8 +194,23 @@ def test_fresh_plan_read_requires_owned_matching_approval(failure: str | None) -
             _dirty_plan_from_read(receipt)
 
 
+@pytest.fixture
+def protected_claim_creation_mask() -> Iterator[None]:
+    """Keep the fixture's owned Git state independent of the host creation mask."""
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 @pytest.mark.parametrize("started", [False, True])
-def test_claim_git_operation_keeps_original_direct_branch(tmp_path: Path, started: bool) -> None:
+def test_claim_git_operation_keeps_original_direct_branch(
+    tmp_path: Path,
+    started: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_claim_creation_mask: None,
+) -> None:
     """A dirty restart claims its owned branch without another reservation."""
     import queue
     import threading
@@ -196,6 +227,8 @@ def test_claim_git_operation_keeps_original_direct_branch(tmp_path: Path, starte
     )
 
     repo, _, head = _repository(tmp_path, origin_repository="example/project")
+    _registered_git_fixture(repo, monkeypatch)
+    _source_registration_fixture(repo, monkeypatch)
     manager = SourceWorkspaceManager(repo, repository="project")
     branch = _claim().branch
     original = manager.prepare(12, SourceLane.IMPLEMENTATION, head, branch=branch)
@@ -218,7 +251,13 @@ def test_claim_git_operation_keeps_original_direct_branch(tmp_path: Path, starte
         issue_state="OPEN",
         issue_labels=("state:plan-go",),
     )
-    pool = WorkerPool(1, threading.Event(), queue.Queue(), github_job_runner=runner)
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        github_job_runner=runner,
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
     if started:
         from hephaestus.automation.pipeline.jobs import JobResult
 
@@ -239,24 +278,78 @@ def test_claim_git_operation_keeps_original_direct_branch(tmp_path: Path, starte
             start_job, JobResult(ok=True, value={"head_sha": head}), path, identity
         )
     try:
-        with patch.object(pool, "_read_remote_branch_head", return_value=head):
-            result = pool._run_git(
-                GitJob(
-                    repo="project",
-                    op="claim_dirty_direct_continuation",
-                    timeout_s=30,
-                    expected_repository="example/project",
-                    kwargs={"repo_root": str(repo), "issue_number": 12},
-                )
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value=head),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+        ):
+            claim_job = GitJob(
+                repo="project",
+                op="claim_dirty_direct_continuation",
+                timeout_s=30,
+                expected_repository="example/project",
+                kwargs={"repo_root": str(repo), "issue_number": 12},
             )
+            if started:
+                stage, item, ctx, claim_job, claim_state = _dirty_restart_claim_request(
+                    pool, repo, manager
+                )
+            result = pool._run_git(claim_job)
         assert result.ok, result.error
         assert result.value["implementation_started"] is started
         assert result.value["branch"] == branch
         assert result.value["source_workspace"]["schema_version"] == 2
         assert manager._require_receipt(12, SourceLane.IMPLEMENTATION).dirty_claim is not None
         assert runner.run.call_count == 1
+        if started:
+            from hephaestus.automation.pipeline.stages import Continue
+
+            item.state = claim_state
+            stage.on_job_done(item, result, ctx)
+            assert stage.step(item, ctx) == Continue(next_state="IMPLEMENT_WAIT")
     finally:
         pool._executor.shutdown()
+
+
+def _dirty_restart_claim_request(
+    pool: "WorkerPool", repo: Path, manager: SourceWorkspaceManager
+) -> "tuple[ImplementationStage, WorkItem, StageContext, GitJob, str]":
+    """Drive fresh publication discovery before the existing dirty claim owner."""
+    from types import SimpleNamespace
+
+    from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+    from hephaestus.automation.pipeline.git_jobs import GitJob
+    from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageContext
+    from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+    from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+    from hephaestus.automation.state_labels import STATE_PLAN_GO
+    from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+    stage = ImplementationStage()
+    item = WorkItem(repo="project", kind=ItemKind.ISSUE, issue=12, state="GATE")
+    ctx = StageContext(
+        config=PipelineConfig(org="example", repos=["project"]),
+        org="example",
+        dry_run=False,
+        github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
+        paths=SimpleNamespace(repo_root=repo, source_workspaces=manager),
+    )
+    assert stage.on_enter(item, ctx) is None
+    discovery = stage.step(item, ctx)
+    assert isinstance(discovery, JobRequest) and isinstance(discovery.job, GitJob)
+    assert discovery.job.op == "discover_first_publication"
+    result = pool._run_git(discovery.job)
+    assert result.ok, result.error
+    stage.on_job_done(item, result, ctx)
+    assert stage.step(item, ctx) == Continue(next_state="WORKTREE_WAIT")
+    item.state = "WORKTREE_WAIT"
+    claim = stage.step(item, ctx)
+    assert isinstance(claim, JobRequest) and isinstance(claim.job, GitJob)
+    assert claim.job.op == "claim_dirty_direct_continuation"
+    return stage, item, ctx, claim.job, claim.on_done_state
 
 
 def test_consumed_dirty_binding_cannot_be_armed_again(tmp_path: Path) -> None:
@@ -354,7 +447,12 @@ def test_dirty_publication_missing_runner_preserves_before_stage(tmp_path: Path)
     )
     with manager.acquire(binding, dirty_plan_identity=identity):
         pass
-    pool = WorkerPool(1, threading.Event(), queue.Queue())
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
     try:
         with patch("hephaestus.automation.commit_runtime._stage_commit_paths") as stage:
             result = pool._run_git(
@@ -407,7 +505,12 @@ def test_failed_commit_helper_cannot_advance_dirty_receipt(tmp_path: Path) -> No
     )
     with manager.acquire(binding, dirty_plan_identity=identity):
         pass
-    pool = WorkerPool(1, threading.Event(), queue.Queue())
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
     try:
 
         def fail_after_commit(*args: object, **kwargs: object) -> None:
@@ -420,7 +523,7 @@ def test_failed_commit_helper_cannot_advance_dirty_receipt(tmp_path: Path) -> No
             patch.object(pool, "_read_remote_branch_head", return_value=head),
             patch.object(pool, "_verify_implementation_edit_scope", return_value=None),
             patch(
-                "hephaestus.automation.pipeline.worker_pool._controlled_git_signing_env",
+                "tests.unit.automation.pipeline.conftest.FakeSigningProvider.environment",
                 return_value=build_git_child_env(),
             ),
             patch(
@@ -484,7 +587,12 @@ def test_dirty_publication_preserves_exact_scope_and_lease(tmp_path: Path, outco
     )
     with manager.acquire(binding, dirty_plan_identity=identity):
         pass
-    pool = WorkerPool(1, threading.Event(), queue.Queue())
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
     try:
         if outcome == "scope":
             (original.cwd / "foreign.txt").write_text("outside scope\n")
@@ -508,7 +616,7 @@ def test_dirty_publication_preserves_exact_scope_and_lease(tmp_path: Path, outco
                 return_value=("f" * 40 if outcome == "remote" else head),
             ),
             patch(
-                "hephaestus.automation.pipeline.worker_pool._controlled_git_signing_env",
+                "tests.unit.automation.pipeline.conftest.FakeSigningProvider.environment",
                 return_value=build_git_child_env(),
             ),
             patch(
@@ -649,7 +757,12 @@ def test_native_dirty_codex_turn_keeps_one_use_claim(tmp_path: Path, outcome: st
             raise RuntimeError("provider failed")
         return AgentRunResult("done", "", "native-dirty-session")
 
-    pool = WorkerPool(1, threading.Event(), queue.Queue())
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
     module = "hephaestus.automation.pipeline.worker_pool"
     try:
         with (

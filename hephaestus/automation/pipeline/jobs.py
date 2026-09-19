@@ -28,6 +28,7 @@ from hephaestus.agents.workspace import (
 )
 
 from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
+from .host_capabilities import CapabilityRequestTarget
 from .job_results import JobHandle, JobResult, ProcessFailureMetadata
 from .repository_validation import (
     RepositoryValidationExecution,
@@ -38,6 +39,7 @@ from .repository_validation_preparation import RepositoryValidationRuntimeReques
 if TYPE_CHECKING:
     from hephaestus.agents.codex_isolation import CodexIsolationRequestV1
 
+
 __all__ = [
     "GIT_OPS",
     "WORKTREE_MATERIALIZED_KEY",
@@ -45,6 +47,7 @@ __all__ = [
     "BuildTestJob",
     "CompactJob",
     "GitJob",
+    "HostCapabilityJob",
     "JobHandle",
     "JobResult",
     "JobWorkspaceError",
@@ -311,6 +314,7 @@ class BuildTestJob:
     descr: str = ""
     repository_validation: RepositoryValidationExecution | None = None
     repository_validation_preparation: RepositoryValidationRuntimeRequest | None = None
+    capability_target: CapabilityRequestTarget | None = None
 
     def __post_init__(self) -> None:
         """Normalize argv to a tuple so the job is deeply immutable/hashable."""
@@ -351,6 +355,33 @@ def validate_build_test_repository_validation(job: BuildTestJob) -> None:
         or job.timeout_s <= 0
     ):
         raise ValueError("The build job does not match its repository validation metadata.")
+
+
+@dataclass(frozen=True, slots=True)
+class HostCapabilityJob:
+    """Request a checked host capability before source verification starts."""
+
+    repo: str
+    target: CapabilityRequestTarget
+    timeout_s: int
+    descr: str = "host_capability_preflight"
+    deadline_s: float = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        """Reject a target that names a different repository."""
+        if type(self.target) is not CapabilityRequestTarget:
+            raise ValueError("The capability job target type is invalid.")
+        replace(self.target)
+        if (
+            self.repo != self.target.repository
+            or self.target.phase != "pr_review"
+            or type(self.timeout_s) is not int
+            or self.timeout_s <= 0
+            or type(self.deadline_s) not in {int, float}
+            or not math.isfinite(self.deadline_s)
+            or self.deadline_s <= 0
+        ):
+            raise ValueError("host capability job is invalid")
 
 
 @dataclass(frozen=True)
@@ -401,6 +432,7 @@ def _valid_writer_publication_facts(value: object) -> bool:
         "remote_at_source",
         "remote_changed",
         "remote_unchanged",
+        "remote_absent",
         "probe_failed",
     }:
         return False
@@ -420,6 +452,8 @@ def _valid_writer_publication_facts(value: object) -> bool:
         return False
     if state in {"published", "remote_at_source"}:
         return bool(observed == head)
+    if state == "remote_absent":
+        return baseline is None and observed is None and value["refresh_phase"] is None
     if state == "remote_changed":
         return observed is not None and observed not in (head, baseline)
     if state == "remote_unchanged":

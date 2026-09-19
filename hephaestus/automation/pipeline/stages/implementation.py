@@ -79,6 +79,10 @@ from hephaestus.automation.agent_config import (
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.commit_policy import normalize_strict_conventional_title
 from hephaestus.automation.operation_deadlines import operation_deadline_after
+from hephaestus.automation.pipeline.git_jobs import (
+    FIRST_PUBLICATION_CHECK_ARGV,
+    _strict_recovery_workspace,
+)
 from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
 from hephaestus.automation.pipeline.rebase_review import REBASE_REVIEW_PROOF_KEY, RebaseReviewProof
 from hephaestus.automation.prompts.address_review import (
@@ -147,6 +151,7 @@ from ..github_jobs import (
     ReplyJournalAppended,
     bind_delivery_request,
 )
+from ..host_capabilities import CapabilityRequestTarget, HostCapabilityReceipt
 from ..jobs import (
     WORKTREE_MATERIALIZED_KEY,
     RemediationPretestInput,
@@ -193,6 +198,7 @@ from .base import (
     stage_model,
     stage_timeout,
 )
+from .pr_review_diagnostics import publish_host_verification_failure
 from .rebase_review_recovery import receive_rebase_review, recover_rebase_review
 from .repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
@@ -335,7 +341,27 @@ REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
 REBASE_CONFLICT_REFRESH_WAIT = "REBASE_CONFLICT_REFRESH_WAIT"
 REBASE_CONFLICT_VALIDATE_WAIT = "REBASE_CONFLICT_VALIDATE_WAIT"
 REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
+_REBASE_RESUME_STATES = frozenset(
+    {
+        REBASE_WAIT,
+        REBASE_AGENT_WAIT,
+        REBASE_CONFLICT_WAIT,
+        REBASE_CONFLICT_REFRESH_WAIT,
+        REBASE_CONFLICT_VALIDATE_WAIT,
+        REBASE_CONTINUE_WAIT,
+    }
+)
 _REBASE_AGENT_INFLIGHT = "rebase_agent_inflight"
+_REBASE_DISCOVERY_PENDING = "rebase_discovery_pending"
+_REBASE_DISCOVERY_CHECKED = "rebase_discovery_checked"
+_REBASE_DISCOVERY_FAILED = "rebase_discovery_failed"
+_PUBLICATION_DISCOVERY_PENDING = "first_publication_discovery_pending"
+_PUBLICATION_DISCOVERY_CHECKED = "first_publication_discovery_checked"
+_PUBLICATION_DISCOVERY_FAILED = "first_publication_discovery_failed"
+_PUBLICATION_REBASE_RESUME = "first_publication_rebase_resume"
+_PUBLICATION_RECOVERY_PENDING = "first_publication_recovery_pending"
+_PUBLICATION_RECOVERY_FAILED = "first_publication_recovery_failed"
+_PUBLICATION_RECOVERY_COMPLETE = "first_publication_recovery_complete"
 ADOPTED = "ADOPTED"
 ADVISE_WAIT = "ADVISE_WAIT"
 IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
@@ -1596,6 +1622,35 @@ class ImplementationStage(Stage):
         if not item.issue:
             logger.warning("implementation: work item has no issue number")
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if item.pr is None and not item.payload.get("dirty_direct_active"):
+            _consume_plan_scope(item)
+            item.payload.pop(_PLAN_SCOPE_FAILURE, None)
+            if isinstance(item.payload.get(_PENDING_GITHUB_REQUEST), ReadCurrentPlanScopeRequest):
+                item.payload.pop(_PENDING_GITHUB_REQUEST)
+        for key in (
+            _PUBLICATION_DISCOVERY_PENDING,
+            _PUBLICATION_DISCOVERY_CHECKED,
+            _PUBLICATION_DISCOVERY_FAILED,
+            _PUBLICATION_REBASE_RESUME,
+            _PUBLICATION_RECOVERY_PENDING,
+            _PUBLICATION_RECOVERY_FAILED,
+            _PUBLICATION_RECOVERY_COMPLETE,
+            "first_publication_candidate",
+            "first_publication_rebase_candidate",
+            _REBASE_DISCOVERY_PENDING,
+            _REBASE_DISCOVERY_CHECKED,
+            _REBASE_DISCOVERY_FAILED,
+            "rebase_recovery_candidate",
+        ):
+            item.payload.pop(key, None)
+        if (
+            item.pr is None
+            and not item.payload.get("dirty_direct_active")
+            and item.state in _STEP_HANDLER_NAMES
+            and item.state not in {ENTER, GATE}
+        ):
+            item.payload["first_publication_resume_state"] = item.state
+            item.state = GATE
         return None
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -2424,6 +2479,8 @@ class ImplementationStage(Stage):
         if recovery is not None:
             return recovery
         if item.payload.pop("rebase_error", None):
+            if item.payload.pop("rebase_runner_blocked", False):
+                return self._block_rebase_runner(item, ctx)
             return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         reason = item.payload.get("rebase_reason")
         if reason not in {"implementation_start", "review_conflict", "manual"}:
@@ -2434,11 +2491,433 @@ class ImplementationStage(Stage):
             return self._finish_rebase(item, ctx)
         if item.payload.pop("rebase_complete", None):
             return self._finish_rebase(item, ctx)
+        discovery = self._rebase_discovery(item, ctx)
+        if discovery is not None:
+            return discovery
         if reason == "implementation_start" and (
             item.pr is not None or item.payload.get("implementation_started")
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "initial_rebase_already_started")
         return self._rebase_request(item, ctx, str(reason))
+
+    @staticmethod
+    def _publication_resume_context(item: WorkItem) -> dict[str, Any]:
+        """Bind a discovery result to one exact host-selected restart route."""
+        return {
+            "publication_resume_state": item.payload.get("first_publication_resume_state"),
+            "publication_manual_rebase": item.payload.get("manual_rebase_required") is True,
+        }
+
+    @staticmethod
+    def _first_publication_discovery(item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Find retained publication before a new branch or source can replace it."""
+        if failure := item.payload.get(_PUBLICATION_DISCOVERY_FAILED):
+            return StageOutcome(
+                Disposition.BLOCKED,
+                failure if isinstance(failure, str) else "first_publication_discovery_failed",
+            )
+        if item.payload.get("first_publication_candidate"):
+            return ImplementationStage._first_publication_recovery_request(item, ctx)
+        if item.payload.get(_PUBLICATION_DISCOVERY_CHECKED):
+            retained = item.payload.get(_PUBLICATION_REBASE_RESUME)
+            if retained is not None and retained != ImplementationStage._publication_resume_context(
+                item
+            ):
+                return StageOutcome(Disposition.BLOCKED, "first_publication_rebase_route_changed")
+            return None
+        pending = item.payload.get(_PUBLICATION_DISCOVERY_PENDING)
+        if not isinstance(pending, GitJob):
+            pending = GitJob(
+                repo=item.repo,
+                expected_repository=f"{ctx.org}/{item.repo}",
+                op="discover_first_publication",
+                timeout_s=GIT_JOB_TIMEOUT_S,
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "issue_number": item.issue,
+                    "branch": item.branch,
+                    "publication_discovery_request_id": uuid.uuid4().hex,
+                    **ImplementationStage._publication_resume_context(item),
+                },
+                descr="discover_first_publication",
+            )
+            item.payload[_PUBLICATION_DISCOVERY_PENDING] = pending
+        return JobRequest(pending, on_done_state=item.state)
+
+    @staticmethod
+    def _retain_pre_intent_route(item: WorkItem, value: dict[str, Any], candidate: object) -> bool:
+        """Permit ambiguity only to reach its separately admitted rebase owner."""
+        pre_intent = value.get("first_publication_pre_intent", False)
+        rebase_candidate = value.get("first_publication_rebase_candidate")
+        if (
+            type(pre_intent) is not bool
+            or (pre_intent and candidate is not None)
+            or (rebase_candidate is not None and not pre_intent)
+        ):
+            raise ValueError("The first-publication source classification is invalid.")
+        if not pre_intent:
+            return True
+        if rebase_candidate is not None:
+            if (
+                type(rebase_candidate) is not str
+                or re.fullmatch(r"[0-9a-f]{32}", rebase_candidate) is None
+                or item.payload.get("first_publication_resume_state") is not None
+                or item.payload.get("manual_rebase_required")
+            ):
+                raise ValueError("The pending rebase handoff is invalid.")
+            return True
+        context = ImplementationStage._publication_resume_context(item)
+        if (
+            not context["publication_manual_rebase"]
+            and context["publication_resume_state"] not in _REBASE_RESUME_STATES
+        ):
+            item.payload[_PUBLICATION_DISCOVERY_FAILED] = (
+                "first_publication_pre_intent_recovery_required"
+            )
+            return False
+        item.payload[_PUBLICATION_REBASE_RESUME] = context
+        return True
+
+    @staticmethod
+    def _receive_first_publication_discovery(item: WorkItem, result: JobResult) -> bool:
+        """Consume a matching discovery result before generic source metadata."""
+        value = result.value if isinstance(result.value, dict) else {}
+        pending = item.payload.get(_PUBLICATION_DISCOVERY_PENDING)
+        key = "publication_discovery_request_id"
+        if key not in value and not isinstance(pending, GitJob):
+            return False
+        if (
+            not isinstance(pending, GitJob)
+            or pending.op != "discover_first_publication"
+            or pending.kwargs.get(key) != value.get(key)
+            or pending.repo != item.repo
+            or pending.kwargs.get("issue_number") != item.issue
+            or pending.kwargs.get("branch") != item.branch
+            or item.state != GATE
+            or item.pr is not None
+            or any(
+                pending.kwargs.get(key) != entry
+                for key, entry in ImplementationStage._publication_resume_context(item).items()
+            )
+        ):
+            return True
+        item.payload.pop(_PUBLICATION_DISCOVERY_PENDING)
+        try:
+            if not result.ok or result.interrupted:
+                raise ValueError("First-publication discovery did not complete.")
+            if (
+                value.get("repository") != pending.transport_repository
+                or value.get("issue_number") != item.issue
+            ):
+                raise ValueError("First-publication discovery identity changed.")
+            candidate = value["first_publication_candidate"]
+            rebase_candidate = value.get("first_publication_rebase_candidate")
+            if not ImplementationStage._retain_pre_intent_route(item, value, candidate):
+                return True
+            if candidate is not None or rebase_candidate is not None:
+                operation_id = candidate if candidate is not None else rebase_candidate
+                if (
+                    type(operation_id) is not str
+                    or re.fullmatch(r"[0-9a-f]{32}", operation_id) is None
+                ):
+                    raise ValueError("The first-publication candidate is invalid.")
+                binding = _strict_recovery_workspace(value["source_workspace"])
+                receipt = SourceWorkspaceReceipt.from_dict(value["source_receipt"])
+                if (
+                    binding.reusable_root != Path(pending.kwargs["repo_root"])
+                    or binding.item_number != item.issue
+                    or binding.schema_version != 1
+                    or binding.detached
+                    or not isinstance(receipt.branch, str)
+                    or receipt.to_binding(binding.reusable_root) != binding
+                    or (item.branch and receipt.branch != item.branch)
+                ):
+                    raise ValueError("The first-publication source identity changed.")
+                recovered = replace(
+                    item,
+                    branch=receipt.branch,
+                    worktree=str(binding.cwd),
+                    payload=dict(item.payload),
+                )
+                _store_impl_source_metadata(recovered, value)
+                for stale in (
+                    "test_receipt",
+                    "test_command",
+                    "test_output",
+                    "tests_failed",
+                    "git_error",
+                    "git_failure_summary",
+                    "git_error_retries",
+                    "no_commits",
+                    "pre_pr_runner_mode",
+                    "pre_pr_fallback_reason",
+                    "pre_pr_runner_unavailable",
+                    "publication_failure_diagnostic",
+                    _COMMIT_PUSH_TERMINAL,
+                    _COMMIT_PUSH_REFRESH,
+                    _PLAN_SCOPE_RECEIPT,
+                    _PLAN_SCOPE_STATE,
+                    _PLAN_SCOPE_FAILURE,
+                    _CODEX_PUBLICATION_SCOPE_KEY,
+                ):
+                    recovered.payload.pop(stale, None)
+                item.branch, item.worktree, item.payload = (
+                    recovered.branch,
+                    recovered.worktree,
+                    recovered.payload,
+                )
+                if rebase_candidate is not None:
+                    item.payload["first_publication_rebase_candidate"] = rebase_candidate
+                    item.payload["first_publication_resume_state"] = REBASE_WAIT
+                    item.payload["rebase_reason"] = "implementation_start"
+                else:
+                    item.payload["first_publication_candidate"] = candidate
+            item.payload[_PUBLICATION_DISCOVERY_CHECKED] = True
+        except (KeyError, TypeError, ValueError, SourceWorkspaceError):
+            item.payload[_PUBLICATION_DISCOVERY_FAILED] = True
+        return True
+
+    @staticmethod
+    def _first_publication_recovery_request(item: WorkItem, ctx: StageContext) -> StepResult:
+        """Refresh scope before one source-owned validation and publication attempt."""
+        if item.payload.get(_PUBLICATION_RECOVERY_FAILED):
+            return StageOutcome(Disposition.BLOCKED, "first_publication_recovery_failed")
+        completed = item.payload.get(_PUBLICATION_RECOVERY_COMPLETE)
+        if completed is not None:
+            if ImplementationStage._first_publication_request_matches(item, completed, ctx):
+                return Continue(next_state=PR_CREATE)
+            return StageOutcome(Disposition.BLOCKED, "first_publication_source_unavailable")
+        pending = item.payload.get(_PUBLICATION_RECOVERY_PENDING)
+        if isinstance(pending, GitJob):
+            return JobRequest(pending, on_done_state=GATE)
+        if scope := _require_plan_scope(item, ctx):
+            return scope
+        try:
+            workspace = _existing_impl_workspace(item)
+            _existing_impl_receipt(item)
+            paths, _ = _pretest_scope(item, ctx)
+        except (KeyError, TypeError, ValueError):
+            return StageOutcome(Disposition.BLOCKED, "first_publication_source_unavailable")
+        hephaestus = (ctx.org.casefold(), item.repo.casefold()) == (
+            "homericintelligence",
+            "hephaestus",
+        )
+        command = (
+            tuple(ctx.config.pre_pr_test_argv)
+            if not hephaestus and ctx.config.run_pre_pr_tests
+            else None
+        )
+        pending = GitJob(
+            repo=item.repo,
+            expected_repository=f"{ctx.org}/{item.repo}",
+            op="commit_push",
+            workspace=workspace,
+            timeout_s=stage_timeout(
+                ctx,
+                "pre_pr_test",
+                HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S if hephaestus else PRE_PR_TEST_TIMEOUT_S,
+            ),
+            kwargs={
+                "repo_root": str(ctx.paths.repo_root),
+                "issue_number": item.issue,
+                "worktree_path": item.worktree,
+                "branch": item.branch,
+                "source_lane": SourceLane.IMPLEMENTATION.value,
+                "allowed_paths": paths,
+                "publication_test_argv": command,
+                "first_publication_candidate": item.payload["first_publication_candidate"],
+                "publication_recovery_request_id": uuid.uuid4().hex,
+            },
+            descr="first_publication_recovery",
+        )
+        item.payload[_PUBLICATION_RECOVERY_PENDING] = pending
+        _consume_plan_scope(item)
+        return JobRequest(pending, on_done_state=GATE)
+
+    @staticmethod
+    def _first_publication_request_matches(
+        item: WorkItem, pending: object, ctx: StageContext
+    ) -> bool:
+        """Require the current stage and source to own the submitted recovery."""
+        if not isinstance(pending, GitJob):
+            return False
+        try:
+            return (
+                pending.op == "commit_push"
+                and pending.repo == item.repo
+                and pending.transport_repository == f"{ctx.org}/{item.repo}"
+                and pending.kwargs.get("issue_number") == item.issue
+                and pending.kwargs.get("branch") == item.branch
+                and pending.kwargs.get("first_publication_candidate")
+                == item.payload.get("first_publication_candidate")
+                and item.state == GATE
+                and item.pr is None
+                and pending.workspace == _existing_impl_workspace(item)
+                and _existing_impl_receipt(item).branch == item.branch
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _receive_first_publication_recovery(
+        item: WorkItem, result: JobResult, ctx: StageContext
+    ) -> bool:
+        """Consume only the owned recovery result before generic callback handling."""
+        value = result.value if isinstance(result.value, dict) else {}
+        key = "publication_recovery_request_id"
+        pending = item.payload.get(_PUBLICATION_RECOVERY_PENDING)
+        if key not in value and pending is None:
+            return False
+        if (
+            not isinstance(pending, GitJob)
+            or not ImplementationStage._first_publication_request_matches(item, pending, ctx)
+            or value.get(key) != pending.kwargs.get(key)
+            or value.get("first_publication_candidate")
+            != pending.kwargs.get("first_publication_candidate")
+        ):
+            return True
+        item.payload.pop(_PUBLICATION_RECOVERY_PENDING)
+        try:
+            publication = ImplementationStage._validate_first_publication_result(
+                item, pending, result
+            )
+            _store_impl_source_metadata(item, value)
+            ImplementationStage._on_commit_push_done(item, replace(result, value=publication))
+            if _COMMIT_PUSH_TERMINAL in item.payload:
+                raise ValueError("The first-publication result conflicts with current state.")
+            command = value["first_publication_validation"]["argv"]
+            if command is not None:
+                item.payload["test_receipt"] = (
+                    f"`{shlex.join(command)}` — passed at `{value['head_sha']}`"
+                )
+            item.payload[_PUBLICATION_RECOVERY_COMPLETE] = pending
+        except (KeyError, TypeError, ValueError, SourceWorkspaceError) as error:
+            _store_publication_failure_diagnostic(
+                item, result if not result.ok else replace(result, ok=False, error=str(error))
+            )
+            item.payload[_PUBLICATION_RECOVERY_FAILED] = True
+        return True
+
+    @staticmethod
+    def _validate_first_publication_result(
+        item: WorkItem, pending: GitJob, result: JobResult
+    ) -> dict[str, Any]:
+        """Bind successful publication and fresh checks to the retained head."""
+        value = result.value
+        if not result.ok or result.interrupted or not isinstance(value, dict):
+            raise ValueError("First-publication recovery did not complete.")
+        binding = _strict_recovery_workspace(value["source_workspace"])
+        receipt = SourceWorkspaceReceipt.from_dict(value["source_receipt"])
+        validation = value["first_publication_validation"]
+        publication = {
+            key: entry
+            for key, entry in value.items()
+            if key
+            not in {
+                "publication_recovery_request_id",
+                "first_publication_candidate",
+                "source_workspace",
+                "source_receipt",
+                "first_publication_validation",
+            }
+        }
+        command = (
+            FIRST_PUBLICATION_CHECK_ARGV
+            if pending.transport_repository.casefold() == "homericintelligence/hephaestus"
+            else pending.kwargs.get("publication_test_argv")
+        )
+        if (
+            binding != pending.workspace
+            or receipt != _existing_impl_receipt(item)
+            or not _writer_publication_matches_refresh(publication, None)
+            or value.get("publication_state") != "published"
+            or value.get("head_sha") != binding.revision
+            or value.get("observed_remote_sha") != binding.revision
+            or not isinstance(validation, dict)
+            or validation.get("argv") != command
+            or validation.get("head_sha") != binding.revision
+            or not is_full_commit_sha(validation.get("tree_sha"))
+            or validation.get("publication_recovery_request_id")
+            != pending.kwargs["publication_recovery_request_id"]
+        ):
+            raise ValueError("The first-publication result does not match its request.")
+        return publication
+
+    @staticmethod
+    def _rebase_discovery(item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Request one source-owned read before a fresh rebase attempt."""
+        if item.payload.get(_REBASE_DISCOVERY_FAILED):
+            return StageOutcome(Disposition.BLOCKED, "rebase_recovery_unavailable")
+        if item.payload.get(_REBASE_DISCOVERY_CHECKED):
+            return None
+        pending = item.payload.get(_REBASE_DISCOVERY_PENDING)
+        if not isinstance(pending, GitJob):
+            pending = GitJob(
+                repo=item.repo,
+                op="discover_pending_rebase",
+                timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "issue_number": item.issue,
+                    "pr_number": item.pr,
+                    "branch": item.branch,
+                    "discovery_request_id": uuid.uuid4().hex,
+                },
+                descr="discover_pending_rebase",
+            )
+            item.payload[_REBASE_DISCOVERY_PENDING] = pending
+        return JobRequest(pending, on_done_state=item.state)
+
+    @staticmethod
+    def _receive_rebase_discovery(item: WorkItem, result: JobResult) -> bool:
+        """Consume only the current discovery callback before generic Git handling."""
+        value = result.value if isinstance(result.value, dict) else {}
+        pending = item.payload.get(_REBASE_DISCOVERY_PENDING)
+        if "discovery_request_id" not in value and not isinstance(pending, GitJob):
+            return False
+        if (
+            item.state not in {REBASE_WAIT, REBASE_CONTINUE_WAIT}
+            or not isinstance(pending, GitJob)
+            or pending.op != "discover_pending_rebase"
+            or (
+                "discovery_request_id" in value
+                and pending.kwargs.get("discovery_request_id") != value["discovery_request_id"]
+            )
+            or pending.repo != item.repo
+            or pending.kwargs.get("issue_number") != item.issue
+            or pending.kwargs.get("pr_number") != item.pr
+            or pending.kwargs.get("branch") != item.branch
+        ):
+            return True
+        item.payload.pop(_REBASE_DISCOVERY_PENDING)
+        try:
+            if not result.ok or result.interrupted or "discovery_request_id" not in value:
+                raise ValueError("The rebase discovery did not complete.")
+            binding = _strict_recovery_workspace(value["source_workspace"])
+            candidate = value.get("rebase_recovery_candidate")
+            handoff = item.payload.get("first_publication_rebase_candidate")
+            if handoff is not None and candidate != handoff:
+                raise ValueError("The pending rebase handoff changed during discovery.")
+            if (
+                binding.reusable_root != Path(pending.kwargs["repo_root"])
+                or binding.schema_version != 1
+                or binding.detached
+                or (candidate is not None and re.fullmatch(r"[0-9a-f]{32}", candidate) is None)
+            ):
+                raise ValueError("The rebase discovery result is invalid.")
+            old_path = item.worktree
+            item.worktree = str(binding.cwd)
+            try:
+                _store_impl_source_metadata(item, value)
+            except (KeyError, TypeError, ValueError):
+                item.worktree = old_path
+                raise
+            item.payload["rebase_recovery_candidate"] = candidate
+            item.payload[_REBASE_DISCOVERY_CHECKED] = True
+        except (KeyError, TypeError, ValueError):
+            item.payload[_REBASE_DISCOVERY_FAILED] = True
+        return True
 
     def _rebase_request(self, item: WorkItem, ctx: StageContext, reason: str) -> StepResult:
         """Check live admission and submit the next rebase operation."""
@@ -2470,6 +2949,7 @@ class ImplementationStage(Stage):
         kwargs = self._rebase_git_kwargs(item, ctx, reason, expected_head, restart_base)
         try:
             workspace = _existing_impl_workspace(item)
+            capability_target = self._rebase_capability_target(item, ctx, workspace)
         except (KeyError, TypeError, ValueError):
             return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
         return JobRequest(
@@ -2477,6 +2957,8 @@ class ImplementationStage(Stage):
                 repo=item.repo,
                 op="rebase",
                 workspace=workspace,
+                capability_target=capability_target,
+                rebase_recovery_candidate=item.payload.get("rebase_recovery_candidate"),
                 timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
                 expected_repository=f"{ctx.org}/{item.repo}",
                 kwargs=kwargs,
@@ -2484,6 +2966,35 @@ class ImplementationStage(Stage):
             ),
             on_done_state=REBASE_WAIT,
         )
+
+    @staticmethod
+    def _rebase_capability_target(
+        item: WorkItem, ctx: StageContext, workspace: WorkspaceBinding
+    ) -> CapabilityRequestTarget:
+        """Bind a fresh capability attempt to the accepted rebase input source."""
+        generation = item.payload.get("rebase_capability_generation", 0)
+        if (
+            type(generation) is not int
+            or generation < 0
+            or workspace.revision is None
+            or workspace.reusable_root is None
+        ):
+            raise ValueError("The rebase capability attempt identity is invalid.")
+        target = CapabilityRequestTarget(
+            repository=f"{ctx.org}/{item.repo}",
+            issue_number=_issue_number(item),
+            pr_number=item.pr,
+            repository_root=workspace.reusable_root,
+            checkout_path=workspace.cwd,
+            expected_head_sha=workspace.revision,
+            phase="rebase",
+            purpose="scratch",
+            request_id=secrets.token_hex(16),
+            workspace=workspace,
+            generation=generation + 1,
+        )
+        item.payload["rebase_capability_generation"] = target.generation
+        return target
 
     @staticmethod
     def _rebase_git_kwargs(
@@ -2566,6 +3077,8 @@ class ImplementationStage(Stage):
     def _rebase_continue_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Let the host validate, complete, sign, and lease-publish a paused rebase."""
         if item.payload.pop("rebase_error", None):
+            if item.payload.pop("rebase_runner_blocked", False):
+                return self._block_rebase_runner(item, ctx)
             return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         if item.payload.pop(_REBASE_HEAD_DRIFT, None):
             return self._finish_rebase(item, ctx)
@@ -2591,18 +3104,23 @@ class ImplementationStage(Stage):
             return self._finish_rebase(item, ctx)
         if item.payload.pop("rebase_conflict_agent_error", None):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
+        recovery = self._discover_rebase_continuation(item, ctx)
+        if recovery is not None:
+            return recovery
         if not item.payload.pop("rebase_conflict_agent_complete", False):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         if item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY) != "resolved_content":
             return Continue(next_state=REBASE_CONFLICT_WAIT)
         try:
             workspace = _existing_impl_workspace(item)
+            capability_target = self._rebase_capability_target(item, ctx, workspace)
         except (KeyError, TypeError, ValueError):
             return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
         job = GitJob(
             repo=item.repo,
             op="continue_rebase",
             workspace=workspace,
+            capability_target=capability_target,
             timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
             expected_repository=f"{ctx.org}/{item.repo}",
             kwargs={
@@ -2629,10 +3147,33 @@ class ImplementationStage(Stage):
                 "conflict_snapshot": item.payload.get("rebase_conflict_snapshot"),
                 "conflict_index_snapshot": item.payload.get("rebase_conflict_index_snapshot"),
                 "paused_head_sha": item.payload.get("rebase_paused_head_sha"),
+                "rebase_recovery_intent_id": item.payload.get("rebase_recovery_intent_id"),
             },
             descr="complete_host_owned_rebase",
         )
         return JobRequest(job, on_done_state=REBASE_CONTINUE_WAIT)
+
+    def _block_rebase_runner(self, item: WorkItem, ctx: StageContext) -> StageOutcome:
+        """Publish one bounded operator diagnostic without changing source verdicts."""
+        raw = item.payload.get("rebase_failure_diagnostic")
+        diagnostic = dict(raw) if isinstance(raw, dict) else {}
+        diagnostic.update(
+            {
+                "operation": "rebase",
+                "capability_failure": True,
+                "labels_unchanged": True,
+                "head_sha": item.payload.get("_impl_source_revision", ""),
+                "error": diagnostic.get("cause") or self._rebase_failure_note(item),
+            }
+        )
+        published = publish_host_verification_failure(
+            ctx.github, item.pr or _issue_number(item), None, diagnostic, logger
+        )
+        item.payload["rebase_diagnostic_published"] = published
+        note = self._rebase_failure_note(item)
+        if not published:
+            note = f"{note}; operator diagnostic publication failed"[:500]
+        return StageOutcome(Disposition.BLOCKED, note)
 
     @staticmethod
     def _rebase_failure_note(item: WorkItem) -> str:
@@ -2901,6 +3442,17 @@ class ImplementationStage(Stage):
         )
         return StageOutcome(Disposition.FINISH_FAIL, "implement_exhausted")
 
+    def _discover_rebase_continuation(self, item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Keep a completed-result retry separate from admitted paused edits."""
+        if item.payload.get("rebase_conflict_agent_complete"):
+            return None
+        discovery = self._rebase_discovery(item, ctx)
+        if discovery is not None:
+            return discovery
+        if item.payload.get("rebase_recovery_candidate"):
+            return self._rebase_request(item, ctx, str(item.payload.get("rebase_reason")))
+        return None
+
     def _rebase_conflict_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Build one separately-budgeted edit-only conflict-resolution turn."""
         issue = _issue_number(item)
@@ -2984,6 +3536,15 @@ class ImplementationStage(Stage):
                 "cwd": _worktree_path(item, ctx),
                 "repo_root": str(ctx.paths.repo_root),
                 "issue_number": item.issue,
+                "publish_rebased_head": item.pr is not None,
+                "expected_head_sha": item.payload.get("rebase_expected_remote_sha"),
+                "rebase_reason": item.payload.get("rebase_reason"),
+                "pr_number": item.pr,
+                "direct_scope_reservation": (
+                    item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
+                    if item.payload.get("rebase_reason") == "implementation_start"
+                    else None
+                ),
                 "base_sha": item.payload.get("rebase_base_sha"),
                 "remote": "origin",
                 "branch": item.branch,
@@ -3591,6 +4152,12 @@ class ImplementationStage(Stage):
             ctx: Stage context.
 
         """
+        if self._receive_first_publication_recovery(item, result, ctx):
+            return
+        if self._receive_first_publication_discovery(item, result):
+            return
+        if self._receive_rebase_discovery(item, result):
+            return
         if receive_rebase_review(item, result):
             return
         pending = item.payload.get(_PENDING_GITHUB_REQUEST)
@@ -4363,7 +4930,7 @@ class ImplementationStage(Stage):
 
     @staticmethod
     def _record_rebase_failure(item: WorkItem, result: JobResult) -> None:
-        """Persist bounded, structured diagnostics for a terminal rebase failure."""
+        """Keep bounded diagnostics and distinguish host setup from source failure."""
         item.payload["rebase_error"] = True
         if result.error:
             item.payload["rebase_error_detail"] = redact_diagnostic_text(result.error)[:500]
@@ -4384,6 +4951,16 @@ class ImplementationStage(Stage):
             item.payload["rebase_error_policy"] = policy
         else:
             item.payload.pop("rebase_error_policy", None)
+        if (
+            isinstance(failure_kind, str)
+            and failure_kind in {"signing_configuration", "validation_runner"}
+            and result.error != "implementation source result is invalid"
+        ):
+            item.payload["rebase_runner_blocked"] = True
+            runner_diagnostic = _rebase_runner_failure_diagnostic(result)
+            item.payload["rebase_failure_diagnostic"] = runner_diagnostic
+            item.payload["git_failure_summary"] = _git_failure_summary(runner_diagnostic)
+            return
         diagnostic = _rebase_failure_diagnostic(result)
         if diagnostic is not None:
             item.payload["rebase_failure_diagnostic"] = diagnostic
@@ -4448,6 +5025,11 @@ class ImplementationStage(Stage):
         item.payload["rebase_paused_head_sha"] = paused_head_sha
         item.payload["rebase_base_sha"] = base_sha
         item.payload["rebase_expected_remote_sha"] = expected_remote_sha
+        intent_id = value.get("rebase_recovery_intent_id")
+        if isinstance(intent_id, str) and re.fullmatch(r"[0-9a-f]{32}", intent_id):
+            item.payload["rebase_recovery_intent_id"] = intent_id
+        elif not preserve_snapshot:
+            item.payload.pop("rebase_recovery_intent_id", None)
 
     @staticmethod
     def _on_worktree_done(item: WorkItem, result: JobResult, *, repository: str) -> None:  # noqa: C901
@@ -5092,6 +5674,7 @@ class ImplementationStage(Stage):
         codex_scope_failure = (
             None
             if item.payload.get("manual_rebase_required")
+            or item.payload.get("first_publication_candidate")
             else _capture_codex_publication_scope(item, ctx)
         )
         if codex_scope_failure is not None:
@@ -5102,12 +5685,24 @@ class ImplementationStage(Stage):
             return _dependency_retry(item, dependency_reason)
         _clear_dependency_retry(item)
 
+        discovery = self._first_publication_discovery(item, ctx)
+        if discovery is not None:
+            return discovery
+
         # A queued scope read must retain the marker. A fresh writer turn
         # charges its own attempt after source preparation.
         item.payload.pop("agent_error_failback", None)
         if not item.branch:
             item.branch = issue_auto_impl_branch_name(item.issue)
-        return Continue(next_state=WORKTREE_WAIT)
+        resume = item.payload.pop("first_publication_resume_state", WORKTREE_WAIT)
+        if resume not in _STEP_HANDLER_NAMES or resume in {ENTER, GATE}:
+            return StageOutcome(Disposition.BLOCKED, "first_publication_resume_state_invalid")
+        rebase_context = item.payload.pop(_PUBLICATION_REBASE_RESUME, None)
+        if rebase_context is not None:
+            item.payload.pop(_PUBLICATION_DISCOVERY_CHECKED, None)
+            if rebase_context["publication_manual_rebase"] and resume not in _REBASE_RESUME_STATES:
+                resume = WORKTREE_WAIT
+        return Continue(next_state=resume)
 
     @staticmethod
     def _complete_dirty_direct_pr(item: WorkItem, result: object, head: str) -> StageOutcome:
@@ -5496,6 +6091,7 @@ def _publication_failure_diagnostic(result: JobResult) -> dict[str, object] | No
     else:
         state = value.get("publication_state")
         states = {
+            "remote_absent": ("push", "absent"),
             "remote_unchanged": ("push", "unchanged"),
             "remote_changed": ("push", "changed"),
             "probe_failed": ("remote_probe", "unverified"),
@@ -5538,14 +6134,54 @@ def _publication_failure_diagnostic(result: JobResult) -> dict[str, object] | No
     return diagnostic
 
 
+def _rebase_runner_failure_diagnostic(result: JobResult) -> dict[str, object]:
+    """Keep validated cleanup evidence for a recoverable rebase runner failure."""
+    value = result.value if isinstance(result.value, dict) else {}
+    diagnostic: dict[str, object] = {
+        "failure_kind": value.get("failure_kind"),
+        "cause": redact_diagnostic_text(result.error or "")[:500],
+        "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
+        "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
+        "labels_unchanged": True,
+    }
+    receipt = value.get("capability_receipt")
+    if type(receipt) is not HostCapabilityReceipt:
+        return diagnostic
+    try:
+        replace(receipt)
+    except (AttributeError, TypeError, ValueError):
+        return diagnostic
+    diagnostic.update(
+        {
+            "failed_step": receipt.failed_step,
+            "cleanup_state": receipt.cleanup_state,
+            "retained_root": redact_diagnostic_text(receipt.retained_root),
+            "receipt_id": receipt.receipt_id,
+            "purpose": receipt.purpose,
+            "source_head_sha": receipt.target.source_head_sha,
+            "persistence_error": redact_diagnostic_text(receipt.persistence_error),
+            "persistence_exception_type": redact_diagnostic_text(
+                receipt.persistence_exception_type
+            ),
+            "operating_system_error": redact_diagnostic_text(receipt.operating_system_error),
+            "exception_type": receipt.exception_type,
+            "return_code": receipt.return_code,
+        }
+    )
+    return diagnostic
+
+
 def _git_failure_summary(diagnostic: dict[str, object]) -> str:
     """Return one deterministic, redacted Git failure summary."""
     ordered = (
         ("failure_kind", diagnostic.get("failure_kind")),
+        ("cause", diagnostic.get("cause")),
         ("phase", diagnostic.get("phase")),
         ("remote_state", diagnostic.get("remote_state")),
         ("returncode", diagnostic.get("returncode")),
         ("exception_class", diagnostic.get("exception_class")),
+        ("failed_step", diagnostic.get("failed_step")),
+        ("retained_root", diagnostic.get("retained_root")),
         ("stderr", diagnostic.get("stderr_tail")),
         ("stdout", diagnostic.get("stdout_tail")),
     )

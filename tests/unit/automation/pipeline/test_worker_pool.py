@@ -57,6 +57,7 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.git_runtime import operation_file_lock
+from hephaestus.automation.host_capabilities import ValidatedSigningProvider
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline import worker_pool as worker_pool_module
@@ -68,6 +69,11 @@ from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
     ReplyJournalAppended,
+)
+from hephaestus.automation.pipeline.host_capabilities import (
+    CapabilityRequestTarget,
+    SigningConfigurationError,
+    WorkerCapabilities,
 )
 from hephaestus.automation.pipeline.host_verification_pyxis import PyxisImageMetadata
 from hephaestus.automation.pipeline.jobs import (
@@ -172,6 +178,7 @@ from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock, file_lock_at
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import source_worktree_name
+from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 
 WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
@@ -515,10 +522,14 @@ def _prepared_publication_writer(
     tmp_path: Path, *, issue_number: int, branch: str, repository: str = "test/repo"
 ) -> tuple[SourceWorkspaceManager, WorkspaceBinding]:
     """Prepare a real source receipt for a publication test."""
-    root, _predecessor, head = _worker_repository(tmp_path)
-    manager = SourceWorkspaceManager(root, repository=repository)
-    binding = manager.prepare(issue_number, SourceLane.IMPLEMENTATION, head, branch=branch)
-    return manager, binding
+    prior_umask = os.umask(0o022)
+    try:
+        root, _predecessor, head = _worker_repository(tmp_path)
+        manager = SourceWorkspaceManager(root, repository=repository)
+        binding = manager.prepare(issue_number, SourceLane.IMPLEMENTATION, head, branch=branch)
+        return manager, binding
+    finally:
+        os.umask(prior_umask)
 
 
 def _commit_publication_change(writer: Path, *_args: object, **_kwargs: object) -> bool:
@@ -899,9 +910,194 @@ def pool(
         completion_q=completion_q,
         lock_dir=tmp_path / "locks",
         rebase_policy_selector=partial(select_rebase_policy, "HomericIntelligence"),
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
     yield p
     p.shutdown()
+
+
+def _validated_signing_capabilities() -> WorkerCapabilities:
+    """Use the real validator with each signing test's controlled host inputs."""
+    return WorkerCapabilities(
+        None, "unit-worker", ValidatedSigningProvider(_controlled_git_signing_env)
+    )
+
+
+def _prepare_rebase_execution_fixture(pool: WorkerPool, job: GitJob) -> tuple[Mock, JobResult]:
+    """Supply external quota and execution results for policy-specific tests."""
+    from dataclasses import replace
+
+    from hephaestus.automation.pipeline.host_capabilities import (
+        QUOTA_AVAILABLE_TOKEN,
+        CapabilityDeadline,
+        CapabilityReceiptTarget,
+        HostCapabilityReceipt,
+    )
+
+    binding = job.workspace
+    assert binding is not None
+    assert job.capability_target is not None
+    test_path = binding.cwd / "tests/unit/docs/test_adr_records.py"
+    test_path.parent.mkdir(parents=True, exist_ok=True)
+    if not test_path.exists():
+        test_path.write_text("# Repository-owned structural test.\n")
+    recorder = Mock(side_effect=lambda head: replace(binding, revision=head, generation=1))
+
+    def preflight(
+        target: CapabilityReceiptTarget, *, deadline: CapabilityDeadline
+    ) -> HostCapabilityReceipt:
+        assert deadline.remaining() > 0
+        recorder.assert_called_once_with(target.source_head_sha)
+        assert target.request == job.capability_target
+        return HostCapabilityReceipt(
+            True,
+            QUOTA_AVAILABLE_TOKEN,
+            None,
+            "scratch",
+            "e" * 32,
+            target=target,
+            cleanup_state="complete",
+        )
+
+    backend = Mock(backend_id="hdiutil-v1")
+    backend.preflight.side_effect = preflight
+    capabilities = pool._host_capabilities
+    assert capabilities is not None
+    pool._host_capabilities = replace(capabilities, quota_backend=backend)
+    execution = JobResult(ok=True, value={"head_sha": "d" * 40, "immutable_source": True})
+    return recorder, execution
+
+
+def _assert_rebase_execution_evidence(
+    result: JobResult, job: GitJob, execution: JobResult
+) -> dict[str, object]:
+    """Check the added evidence before comparing the original result contract."""
+    from hephaestus.automation.pipeline.host_capabilities import HostCapabilityReceipt
+
+    assert isinstance(result.value, dict)
+    receipt = result.value["capability_receipt"]
+    assert isinstance(receipt, HostCapabilityReceipt)
+    assert receipt.available
+    assert receipt.target.request == job.capability_target
+    assert receipt.target.source_head_sha == "d" * 40
+    assert result.value["structural_execution_receipt"] == execution
+    return {"capability_receipt": receipt, "structural_execution_receipt": execution}
+
+
+@contextmanager
+def _retained_continuation_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, scenario: str = "valid"
+) -> Iterator[Any]:
+    """Prepare policy inputs before a real conflict and retain its original intent."""
+    from hephaestus.automation.pipeline.rebase_adr_policy import select_rebase_policy
+    from tests.unit.automation import test_rebase_recovery as recovery
+    from tests.unit.automation.test_source_worktree import _repository
+
+    def prepared_repository(*args: Any, **kwargs: Any) -> Any:
+        root, first, _base = _repository(*args, **kwargs)
+        files = {"tests/unit/docs/test_adr_records.py": "# Structural fixture.\n"}
+        if scenario == "semantic":
+            files.update(
+                {
+                    "docs/adr/0027-durable-plan-review-conversations.md": "# plan\n",
+                    "docs/adr/0027-host-owned-learning-preparation.md": "# learning\n",
+                }
+            )
+        elif scenario == "unconfigured":
+            files.update(
+                {
+                    "docs/adr/index.md": "# Index\n",
+                    "docs/adr/0000-template.md": "# Template\n",
+                    "docs/adr/0001-fleet-routing.md": "# Fleet routing\n",
+                }
+            )
+        for relative, content in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        _git(root, "add", *files)
+        _git(root, "commit", "-s", "-m", "test: prepare continuation policy inputs")
+        return root, first, _git(root, "rev-parse", "HEAD")
+
+    monkeypatch.setattr(recovery, "_repository", prepared_repository)
+    with recovery._abort_worker_case(
+        tmp_path, monkeypatch, fallback=False, fault="clean", structural=True
+    ) as case:
+        policy = select_rebase_policy(
+            "HomericIntelligence", "Comet" if scenario == "unconfigured" else "Hephaestus"
+        )
+        monkeypatch.setattr(case.pool, "_rebase_policy_selector", lambda repo: policy)
+        case.checks = recovery._publication_validation_seams(case, "continued", monkeypatch)
+        case.continuation = recovery._normal_publication_job(case, "continued")
+        case.operation_id = case.job.capability_target.request_id
+        assert case.continuation.kwargs["rebase_recovery_intent_id"] == case.operation_id
+        assert case.continuation.capability_target.request_id != case.operation_id
+        case.push = Mock()
+        monkeypatch.setattr(git_utils, "push_head_to_branch", case.push)
+        yield case
+
+
+def _assert_retained_continuation_result(case: Any, result: JobResult) -> Any:
+    """Require real B and its durable source record before a downstream assertion."""
+    from tests.unit.automation.test_rebase_recovery import _store
+
+    retained = _store(case.manager.common_dir).read(1, case.operation_id)
+    assert retained.resulting_workspace is not None, result
+    head = _git(case.binding.cwd, "rev-parse", "HEAD")
+    assert head != case.original
+    assert retained.resulting_workspace.revision == head
+    assert retained.request == case.job.capability_target
+    assert retained.remote_head_sha == case.original
+    assert result.value["source_workspace"] == retained.resulting_workspace.to_dict()
+    assert case.manager._require_receipt(1, SourceLane.IMPLEMENTATION).revision == head
+    assert case.starts == [True]
+    if "capability_receipt" in result.value:
+        receipt = result.value["capability_receipt"]
+        assert receipt.target.request == case.continuation.capability_target
+        assert receipt.target.source_head_sha == head
+    return retained
+
+
+def _stage_conflict_continuation(
+    stage: Any,
+    item: Any,
+    ctx: Any,
+    pool: WorkerPool,
+    manager: SourceWorkspaceManager,
+    result: JobResult,
+    relative_path: str,
+    content: str,
+) -> GitJob:
+    """Use the stage's real edit lease and validation job for one conflict."""
+    from hephaestus.automation.pipeline.stages import Continue, JobRequest
+
+    stage.on_job_done(item, result, ctx)
+    item.state = "REBASE_CONFLICT_WAIT"
+    edit = stage.step(item, ctx)
+    assert isinstance(edit, JobRequest) and isinstance(edit.job, AgentJob), edit
+    assert edit.job.workspace is not None and edit.job.source_operation is not None
+    assert isinstance(edit.job.allowed_tools, str)
+    with manager.acquire(
+        edit.job.workspace,
+        source_operation=edit.job.source_operation,
+        allowed_tools=edit.job.allowed_tools,
+    ):
+        (edit.job.cwd / relative_path).write_text(content, encoding="utf-8")
+    stage.on_job_done(item, JobResult(ok=True, value="Resolved the reported conflict."), ctx)
+    item.state = str(edit.on_done_state)
+    validation = stage.step(item, ctx)
+    assert isinstance(validation, JobRequest) and isinstance(validation.job, GitJob), validation
+    checked = pool._run_git(validation.job)
+    assert checked.ok, checked
+    assert checked.value["conflict_resolution"] == "resolved_content"
+    stage.on_job_done(item, checked, ctx)
+    following = stage.step(item, ctx)
+    assert isinstance(following, Continue), following
+    item.state = str(following.next_state)
+    continuation = stage.step(item, ctx)
+    assert isinstance(continuation, JobRequest) and isinstance(continuation.job, GitJob)
+    assert continuation.job.op == "continue_rebase"
+    return continuation.job
 
 
 def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
@@ -4457,12 +4653,21 @@ class TestWorkerPoolSubmitComplete:
         )
         command_result = JobResult(ok=True, value={"failure_kind": "none"})
 
+        def fixture_ancestry(path: Path) -> None:
+            # Supply host ancestry trust only for this private fixture subtree.
+            assert path == path.resolve(strict=True)
+            assert path.is_relative_to(tmp_path)
+
         with (
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}.sys.platform", "linux"),
             patch(f"{_WP}._pyxis_runtime_available", return_value=True),
             patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
             patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
+            patch(
+                "hephaestus.automation.pyxis_artifact_io._require_trusted_ancestry",
+                side_effect=fixture_ancestry,
+            ),
             patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata) as stage_image,
             patch(f"{_WP}._bounded_git_archive", return_value=(b"archive", "")),
             patch(f"{_WP}._extract_immutable_archive") as extract_archive,
@@ -9015,15 +9220,18 @@ class TestGitOps:
         advance_main: bool,
     ) -> tuple[JobResult, JobResult, Path, str]:
         """Publish a real recovery commit and pass its head to writer rebase."""
+        from hephaestus.automation.pipeline.host_capabilities import CapabilityRequestTarget
+
         origin = tmp_path / "origin.git"
         checkout = tmp_path / "checkout"
+        repo_root = checkout
         signing_key = tmp_path / "signing-key"
         branch = "2920-auto-impl"
 
-        def git(*args: str, cwd: Path = checkout) -> subprocess.CompletedProcess[str]:
+        def git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
                 ["git", *args],
-                cwd=cwd,
+                cwd=checkout if cwd is None else cwd,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -9035,6 +9243,8 @@ class TestGitOps:
             capture_output=True,
             text=True,
         )
+        checkout.mkdir(mode=0o700)
+        (checkout / ".git").mkdir(mode=0o700)
         subprocess.run(
             ["git", "init", "--quiet", "--initial-branch", "main", str(checkout)],
             check=True,
@@ -9069,15 +9279,23 @@ class TestGitOps:
         git("add", "recovered.txt")
         git("commit", "--quiet", "--no-gpg-sign", "-m", "test: base")
         git("push", "--quiet", "-u", "origin", "main")
-        git("switch", "--quiet", "-c", branch)
+        source_manager = SourceWorkspaceManager(repo_root, repository="test/repo")
+        source_manager.state_dir.mkdir(mode=0o700)
+        binding = source_manager.prepare(
+            2920,
+            SourceLane.IMPLEMENTATION,
+            git("rev-parse", "HEAD").stdout.strip(),
+            branch=branch,
+        )
+        checkout = binding.cwd
+        initial_receipt = source_manager._require_receipt(2920, SourceLane.IMPLEMENTATION)
+        assert initial_receipt.to_binding(repo_root) == binding
         git("push", "--quiet", "-u", "origin", branch)
         if advance_main:
-            git("switch", "--quiet", "main")
-            (checkout / "main.txt").write_text("new main\n", encoding="utf-8")
-            git("add", "main.txt")
-            git("commit", "--quiet", "--no-gpg-sign", "-m", "test: advance main")
-            git("push", "--quiet", "origin", "main")
-            git("switch", "--quiet", branch)
+            (repo_root / "main.txt").write_text("new main\n", encoding="utf-8")
+            git("add", "main.txt", cwd=repo_root)
+            git("commit", "--quiet", "--no-gpg-sign", "-m", "test: advance main", cwd=repo_root)
+            git("push", "--quiet", "origin", "main", cwd=repo_root)
 
         pre_action_head = git("rev-parse", "HEAD").stdout.strip()
         (checkout / "recovered.txt").write_text("recovered bytes\n", encoding="utf-8")
@@ -9085,7 +9303,7 @@ class TestGitOps:
             created=checkout,
             base_sha=None,
             branch_name=branch,
-            repo_root=checkout,
+            repo_root=repo_root,
             repo="test/repo",
             sync_to_remote=False,
             pr_number=None,
@@ -9108,8 +9326,9 @@ class TestGitOps:
             expected_repository="test/repo",
             op="recover_dirty_worktree",
             timeout_s=60,
+            workspace=binding,
             kwargs={
-                "repo_root": str(checkout),
+                "repo_root": str(repo_root),
                 "worktree_path": str(checkout),
                 "branch": branch,
                 "issue_number": 2920,
@@ -9138,9 +9357,15 @@ class TestGitOps:
                 side_effect=commit_recovery,
             ),
         ):
-            recovery = pool._git_recover_dirty_worktree(recovery_job)
-        assert recovery.ok is True and isinstance(recovery.value, dict)
+            recovery = pool._run_git(recovery_job)
+        assert recovery.ok is True and isinstance(recovery.value, dict), recovery
         recovered_head = cast(str, recovery.value["current_head"])
+        receipt = source_manager._require_receipt(2920, SourceLane.IMPLEMENTATION)
+        binding = receipt.to_binding(repo_root)
+        assert binding.revision == recovered_head
+        assert recovery.value["source_workspace"] == binding.to_dict()
+        assert recovery.value["source_receipt"] == receipt.to_dict()
+        assert "\ngpgsig " in git("cat-file", "-p", recovered_head).stdout
 
         signing = {
             "user.name": "Test User",
@@ -9153,8 +9378,24 @@ class TestGitOps:
             expected_repository="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
+            capability_target=CapabilityRequestTarget(
+                repository="test/repo",
+                issue_number=2920,
+                pr_number=None,
+                repository_root=repo_root,
+                checkout_path=checkout,
+                expected_head_sha=recovered_head,
+                phase="rebase",
+                purpose="scratch",
+                request_id="a" * 32,
+                workspace=binding,
+                generation=1,
+            ),
             kwargs={
                 "cwd": checkout,
+                "repo_root": str(repo_root),
+                "issue_number": 2920,
                 "base_branch": "main",
                 "rebase_reason": "review_conflict",
                 "remote": "origin",
@@ -9165,6 +9406,7 @@ class TestGitOps:
         )
         with (
             patch.object(pool, "_revalidate_review_conflict", return_value=None),
+            patch.object(pool, "_host_capabilities", _validated_signing_capabilities()),
             patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
             patch.object(
                 pool,
@@ -9177,7 +9419,12 @@ class TestGitOps:
                 return_value=revalidate_remote,
             ),
         ):
-            rebase = pool._git_rebase(rebase_job, record_source=Mock())
+            rebase = pool._run_git(rebase_job)
+        assert rebase.ok, rebase
+        resulting = source_manager._require_receipt(2920, SourceLane.IMPLEMENTATION)
+        assert rebase.value["source_workspace"] == resulting.to_binding(repo_root).to_dict()
+        assert rebase.value["source_receipt"] == resulting.to_dict()
+        assert rebase.value["head_sha"] == resulting.revision
         return recovery, rebase, checkout, branch
 
     @pytest.mark.usefixtures("require_git_path_format")
@@ -9194,14 +9441,10 @@ class TestGitOps:
         )
         recovered_head = recovery.value["current_head"]
 
-        assert rebase == JobResult(
-            ok=True,
-            value={
-                "rebased": False,
-                "published": False,
-                "head_sha": recovered_head,
-            },
-        )
+        assert rebase.ok is True
+        assert rebase.value["rebased"] is False
+        assert rebase.value["published"] is False
+        assert rebase.value["head_sha"] == recovered_head
         remote_head = subprocess.run(
             ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
             cwd=checkout,
@@ -12753,89 +12996,66 @@ class TestGitOps:
     )
     def test_rebase_dispatch_propagates_result(
         self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
         rebase_clean: bool,
         expected_error: str | None,
     ) -> None:
-        """Rebase propagates its status and explains an aborted conflict."""
-        repo, _predecessor, head = _worker_repository(tmp_path)
-        manager = SourceWorkspaceManager(repo, repository="test/repo")
-        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl")
-        job = GitJob(
-            repo="test/repo",
-            op="rebase",
-            timeout_s=60,
-            workspace=binding,
-            kwargs={
-                "cwd": binding.cwd,
-                "repo_root": str(repo),
-                "issue_number": 7,
-                "branch": "7-auto-impl",
-                "base_branch": "main",
-                "rebase_reason": "manual",
-                "publish_rebased_head": True,
-                "expected_remote_sha": head,
-            },
+        """Dispatch real rebase and checked-abort outcomes through the worker queue."""
+        from tests.unit.automation.test_rebase_recovery import (
+            _abort_worker_case,
+            _publication_validation_seams,
+            _store,
         )
-        with (
-            patch.object(pool, "_read_publish_head", return_value=head),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-            patch.object(
-                pool,
-                "_git_fetch_main",
-                return_value=JobResult(ok=True, value={"head_sha": "b" * 40}),
-            ),
-            patch(f"{_WP}.git_utils.run", return_value=MagicMock(returncode=1)),
-            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
-            patch(
-                "hephaestus.automation.git_utils.rebase_worktree_onto",
-                return_value=rebase_clean,
-            ) as mock_rebase,
-            patch.object(
-                pool,
-                "_authenticated_remote_git_configuration",
-                return_value=(
-                    {"GIT_TERMINAL_PROMPT": "0"},
-                    ("-c", "credential.helper=!trusted-gh auth git-credential"),
-                ),
-            ),
-            patch(
-                f"{_WP}._controlled_git_signing_env",
-                return_value={"GIT_CONFIG_KEY_0": "user.signingkey"},
-            ),
-        ):
-            pool.submit(job, StageName.MERGE_WAIT)
-            _, result = completion_q.get(timeout=10)
 
-        mock_rebase.assert_called_once_with(
-            cwd=binding.cwd,
-            base_sha="b" * 40,
-            base_branch="main",
-            remote="origin",
-            preserve_conflicts=False,
-            timeout=60,
-            env={"GIT_CONFIG_KEY_0": "user.signingkey"},
-        )
-        assert result.ok is rebase_clean
-        if rebase_clean:
-            assert result.value == {
-                "rebased": True,
-                "published": True,
-                "head_sha": head,
-                "source_workspace": binding.to_dict(),
-                "source_receipt": manager._require_receipt(7, SourceLane.IMPLEMENTATION).to_dict(),
-            }
-            push.assert_called_once()
-        else:
-            assert result.value == {
-                "rebase_restart_required": True,
-                "base_sha": "b" * 40,
-                "head_sha": head,
-            }
-            push.assert_not_called()
-        assert result.error == expected_error
+        with _abort_worker_case(
+            tmp_path,
+            monkeypatch,
+            fallback=False,
+            fault="clean",
+            conflict=not rebase_clean,
+            structural=rebase_clean,
+        ) as case:
+            push = Mock()
+            if rebase_clean:
+                _publication_validation_seams(case, "initial", monkeypatch)
+                monkeypatch.setattr(git_utils, "push_head_to_branch", push)
+            case.pool.submit(case.job, StageName.MERGE_WAIT)
+            _, result = case.pool._completion_q.get(timeout=10)
+
+            assert case.starts == [True], result
+            assert result.ok is rebase_clean, result
+            assert result.error == expected_error
+            retained = _store(case.manager.common_dir).read(
+                1, case.job.capability_target.request_id
+            )
+            assert retained.request == case.job.capability_target
+            assert retained.remote_head_sha == case.original
+            if rebase_clean:
+                head = _git(case.binding.cwd, "rev-parse", "HEAD")
+                assert head != case.original
+                assert result.value["rebased"] is True
+                assert result.value["published"] is True
+                assert result.value["head_sha"] == head
+                assert result.value["source_workspace"] == retained.resulting_workspace.to_dict()
+                assert (
+                    result.value["source_receipt"]
+                    == case.manager._require_receipt(1, SourceLane.IMPLEMENTATION).to_dict()
+                )
+                assert retained.phase == "complete"
+                push.assert_called_once()
+                assert push.call_args.args[:2] == ("1-repair", case.original)
+                assert push.call_args.kwargs["source_sha"] == head
+                assert case.aborts == []
+            else:
+                assert result.value["rebase_restart_required"] is True
+                assert result.value["base_sha"] == case.base
+                assert result.value["head_sha"] == case.original
+                assert retained.phase == "aborted"
+                assert retained.restored_workspace == case.binding
+                assert retained.restored_tree_sha == case.tree
+                assert case.aborts == [1]
+                case.pushes.assert_not_called()
 
     def test_remote_git_configuration_preserves_hooks_and_isolates_ssh(
         self,
@@ -12957,215 +13177,116 @@ class TestGitOps:
         rebase.assert_not_called()
 
     def test_writer_publish_rebase_conflict_returns_actionable_reason(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-        tmp_path: Path,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The active writer publish path preserves the conflict explanation."""
-        repo, predecessor, head = _worker_repository(tmp_path)
-        binding = SourceWorkspaceManager(repo, repository="test/repo").prepare(
-            7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl"
-        )
-        job = GitJob(
-            repo="test/repo",
-            op="rebase",
-            timeout_s=60,
-            workspace=binding,
-            kwargs={
-                "cwd": binding.cwd,
-                "repo_root": str(repo),
-                "issue_number": 7,
-                "base_branch": "main",
-                "rebase_reason": "review_conflict",
-                "publish_rebased_head": True,
-                "branch": "7-auto-impl",
-                "expected_remote_sha": head,
-            },
-        )
-        with (
-            patch.object(pool, "_read_publish_head", return_value=head),
-            patch.object(
-                pool,
-                "_git_fetch_main",
-                return_value=JobResult(ok=True, value={"head_sha": "b" * 40}),
-            ),
-            patch.object(pool, "_revalidate_review_conflict", return_value=None),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-            patch(
-                "hephaestus.automation.git_utils.rebase_worktree_onto",
-                return_value=False,
-            ),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch(f"{_WP}.git_utils.run") as run,
-            patch.object(pool, "_conflict_receipt") as receipt,
-        ):
-            run.side_effect = [
-                MagicMock(returncode=1),
-            ]
-            receipt.return_value = {
-                "rebased": False,
-                "conflict_paths": ("x.py",),
-                "conflict_snapshot": {"x.py": "before"},
-                "conflict_index_snapshot": "1" * 64,
-                "paused_head_sha": head,
-                "base_sha": predecessor,
-                "expected_remote_sha": head,
-            }
-            pool.submit(job, StageName.IMPLEMENTATION)
-            _, result = completion_q.get(timeout=10)
+        """Keep the real conflict receipt and original intent through async dispatch."""
+        from dataclasses import replace
 
-        assert result.ok is False
-        assert result.value == receipt.return_value
-        assert result.error == "mechanical rebase hit conflicts; resolution required"
+        from tests.unit.automation.test_rebase_recovery import _abort_worker_case, _store
+
+        with _abort_worker_case(tmp_path, monkeypatch, fallback=False, fault="clean") as case:
+            job = replace(case.job, kwargs={**case.job.kwargs, "rebase_reason": "review_conflict"})
+            admission = Mock(return_value=None)
+            monkeypatch.setattr(case.pool, "_revalidate_review_conflict", admission)
+            case.pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = case.pool._completion_q.get(timeout=10)
+            assert not result.ok, result
+            assert result.error == "mechanical rebase hit conflicts; resolution required"
+            assert result.value["conflict_paths"] == ("tracked.txt",)
+            assert result.value["conflict_snapshot"]
+            assert len(result.value["conflict_index_snapshot"]) == 64
+            assert result.value["paused_head_sha"] == _git(case.binding.cwd, "rev-parse", "HEAD")
+            assert result.value["base_sha"] == case.base
+            assert result.value["expected_remote_sha"] == case.original
+            assert result.value["rebase_recovery_intent_id"] == job.capability_target.request_id
+            retained = _store(case.manager.common_dir).read(1, job.capability_target.request_id)
+            assert retained.phase == "intent" and retained.request == job.capability_target
+            assert case.starts == [True]
+            assert case.aborts == []
+            admission.assert_called_once()
+            case.pushes.assert_not_called()
 
     def test_mnemosyne_writer_rebase_conflict_uses_verified_current_head(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-        tmp_path: Path,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Mnemosyne can continue from its unchanged verified writer head."""
-        repo, _predecessor, expected_head = _worker_repository(tmp_path)
-        manager = SourceWorkspaceManager(repo, repository="Mnemosyne")
-        binding = manager.prepare(7, SourceLane.IMPLEMENTATION, expected_head, branch="7-auto-impl")
-        job = GitJob(
-            repo="Mnemosyne",
-            op="rebase",
-            timeout_s=60,
-            workspace=binding,
-            kwargs={
-                "cwd": binding.cwd,
-                "repo_root": str(repo),
-                "issue_number": 7,
-                "base_branch": "main",
-                "rebase_reason": "review_conflict",
-                "publish_rebased_head": True,
-                "branch": "7-auto-impl",
-                "expected_remote_sha": expected_head,
-            },
-        )
-        with (
-            patch.object(pool, "_read_publish_head", return_value=expected_head),
-            patch.object(
-                pool,
-                "_git_fetch_main",
-                return_value=JobResult(ok=True, value={"head_sha": "b" * 40}),
-            ),
-            patch.object(pool, "_revalidate_review_conflict", return_value=None),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-            patch(
-                "hephaestus.automation.git_utils.rebase_worktree_onto",
-                return_value=False,
-            ),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch(f"{_WP}.git_utils.run") as run,
-            patch.object(
-                pool,
-                "_verify_noop_writer_rebase",
-                return_value=JobResult(
-                    ok=True,
-                    value={
-                        "rebased": False,
-                        "published": False,
-                        "head_sha": expected_head,
-                    },
-                ),
-            ) as verify,
-        ):
-            run.side_effect = lambda command, **kwargs: _rebase_gate_command_result(
-                command,
-                ancestor=False,
-                abort_returncode=0,
-                remote_head=None,
-                **kwargs,
-            )
-            pool.submit(job, StageName.IMPLEMENTATION)
-            _, result = completion_q.get(timeout=10)
+        """Verify restored A after a real conflict and a durable checked abort."""
+        from hephaestus.automation.pipeline.rebase_adr_policy import select_rebase_policy
+        from tests.unit.automation.test_rebase_recovery import _abort_worker_case, _store
 
-        assert result.ok is True
-        assert result.value == {
-            "rebased": False,
-            "published": False,
-            "head_sha": expected_head,
-            "rebase_fallback": "verified-current-head",
-            "rebase_policy": "mnemosyne-current-head-v1",
-            "source_workspace": binding.to_dict(),
-            "source_receipt": manager._require_receipt(7, SourceLane.IMPLEMENTATION).to_dict(),
-        }
-        assert run.call_args_list[-1] == call(
-            ["git", "rebase", "--abort"],
-            cwd=binding.cwd,
-            check=False,
-            timeout=60,
-            env={},
-        )
-        verify.assert_called_once_with(
-            binding.cwd,
-            remote="origin",
-            branch="7-auto-impl",
-            expected_repo=job.transport_repository,
-            expected_remote_sha=expected_head,
-            timeout=60,
-        )
+        with _abort_worker_case(tmp_path, monkeypatch, fallback=True, fault="clean") as case:
+            monkeypatch.setattr(
+                case.pool,
+                "_rebase_policy_selector",
+                lambda repo: select_rebase_policy("HomericIntelligence", "Mnemosyne"),
+            )
+            real_verify = case.pool._verify_noop_writer_rebase
+            phases: list[str] = []
+
+            def observe_verification(*args: Any, **kwargs: Any) -> JobResult:
+                retained = _store(case.manager.common_dir).read(
+                    1, case.job.capability_target.request_id
+                )
+                phases.append(retained.phase)
+                return real_verify(*args, **kwargs)
+
+            verify = Mock(side_effect=observe_verification)
+            monkeypatch.setattr(case.pool, "_verify_noop_writer_rebase", verify)
+            case.pool.submit(case.job, StageName.IMPLEMENTATION)
+            _, result = case.pool._completion_q.get(timeout=10)
+            assert result.ok, result
+            assert result.value["rebase_fallback"] == "verified-current-head"
+            assert result.value["rebase_policy"] == "mnemosyne-current-head-v1"
+            assert result.value["head_sha"] == case.original
+            assert result.value["published"] is False
+            assert result.value["source_workspace"] == case.binding.to_dict()
+            retained = _store(case.manager.common_dir).read(
+                1, case.job.capability_target.request_id
+            )
+            assert retained.phase == "aborted"
+            assert retained.restored_workspace == case.binding
+            assert retained.restored_tree_sha == case.tree
+            assert case.starts == [True] and case.aborts == [1]
+            expected_call = call(
+                case.binding.cwd,
+                remote="origin",
+                branch="1-repair",
+                expected_repo="acme/repository",
+                expected_remote_sha=case.original,
+                timeout=60,
+            )
+            assert phases == ["intent", "aborted"]
+            assert verify.call_args_list == [expected_call, expected_call]
+            case.pushes.assert_not_called()
 
     def test_mnemosyne_writer_rebase_fallback_stops_when_abort_fails(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-        tmp_path: Path,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed abort cannot advance Mnemosyne to head verification."""
-        repo, _predecessor, head = _worker_repository(tmp_path)
-        binding = SourceWorkspaceManager(repo, repository="Mnemosyne").prepare(
-            7, SourceLane.IMPLEMENTATION, head, branch="7-auto-impl"
-        )
-        job = GitJob(
-            repo="Mnemosyne",
-            op="rebase",
-            timeout_s=60,
-            workspace=binding,
-            kwargs={
-                "cwd": binding.cwd,
-                "repo_root": str(repo),
-                "issue_number": 7,
-                "base_branch": "main",
-                "rebase_reason": "review_conflict",
-                "publish_rebased_head": True,
-                "branch": "7-auto-impl",
-                "expected_remote_sha": head,
-            },
-        )
-        with (
-            patch.object(pool, "_read_publish_head", return_value=head),
-            patch.object(
-                pool,
-                "_git_fetch_main",
-                return_value=JobResult(ok=True, value={"head_sha": "b" * 40}),
-            ),
-            patch.object(pool, "_revalidate_review_conflict", return_value=None),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-            patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=False),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch(f"{_WP}.git_utils.run") as run,
-            patch.object(pool, "_verify_noop_writer_rebase") as verify,
-        ):
-            run.side_effect = lambda command, **kwargs: _rebase_gate_command_result(
-                command,
-                ancestor=False,
-                abort_returncode=1,
-                remote_head=None,
-                **kwargs,
-            )
-            pool.submit(job, StageName.IMPLEMENTATION)
-            _, result = completion_q.get(timeout=10)
+        """A failed real abort boundary cannot reach current-head verification."""
+        from hephaestus.automation.pipeline.rebase_adr_policy import select_rebase_policy
+        from tests.unit.automation.test_rebase_recovery import _abort_worker_case, _store
 
-        assert result.ok is False
-        assert result.error == "cannot abort writer rebase for current-head fallback"
-        verify.assert_not_called()
+        with _abort_worker_case(tmp_path, monkeypatch, fallback=True, fault="abort_failed") as case:
+            monkeypatch.setattr(
+                case.pool,
+                "_rebase_policy_selector",
+                lambda repo: select_rebase_policy("HomericIntelligence", "Mnemosyne"),
+            )
+            verify = Mock(side_effect=AssertionError("Failed abort must block head verification."))
+            monkeypatch.setattr(case.pool, "_verify_noop_writer_rebase", verify)
+            case.pool.submit(case.job, StageName.IMPLEMENTATION)
+            _, result = case.pool._completion_q.get(timeout=10)
+            assert not result.ok, result
+            assert result.value["failure_kind"] == "validation_runner"
+            assert "conflict" in result.error.lower()
+            assert "Controlled abort failure." in result.stderr_tail
+            assert case.starts == [True] and case.aborts == [1]
+            retained = _store(case.manager.common_dir).read(
+                1, case.job.capability_target.request_id
+            )
+            assert retained.phase == "intent"
+            assert retained.request == case.job.capability_target
+            verify.assert_not_called()
+            case.pushes.assert_not_called()
 
     @pytest.mark.parametrize(
         "verification_error",
@@ -13175,142 +13296,101 @@ class TestGitOps:
         ],
     )
     def test_mnemosyne_writer_rebase_fallback_stops_when_head_verification_fails(
-        self,
-        pool: WorkerPool,
-        completion_q: CompletionQueue,
-        tmp_path: Path,
-        verification_error: str,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verification_error: str
     ) -> None:
-        """A failed fallback head proof cannot advance Mnemosyne."""
-        repo, _predecessor, expected_head = _worker_repository(tmp_path)
-        binding = SourceWorkspaceManager(repo, repository="Mnemosyne").prepare(
-            7, SourceLane.IMPLEMENTATION, expected_head, branch="7-auto-impl"
-        )
-        job = GitJob(
-            repo="Mnemosyne",
-            op="rebase",
-            timeout_s=60,
-            workspace=binding,
-            kwargs={
-                "cwd": binding.cwd,
-                "repo_root": str(repo),
-                "issue_number": 7,
-                "base_branch": "main",
-                "rebase_reason": "review_conflict",
-                "publish_rebased_head": True,
-                "branch": "7-auto-impl",
-                "expected_remote_sha": expected_head,
-            },
-        )
-        with (
-            patch.object(pool, "_read_publish_head", return_value=expected_head),
-            patch.object(
-                pool,
-                "_git_fetch_main",
-                return_value=JobResult(ok=True, value={"head_sha": "b" * 40}),
-            ),
-            patch.object(pool, "_revalidate_review_conflict", return_value=None),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-            patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=False),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
-            patch(f"{_WP}.git_utils.run") as run,
-            patch.object(
-                pool,
-                "_verify_noop_writer_rebase",
-                return_value=JobResult(ok=False, error=verification_error),
-            ) as verify,
-        ):
-            run.side_effect = lambda command, **kwargs: _rebase_gate_command_result(
-                command,
-                ancestor=False,
-                abort_returncode=0,
-                remote_head=None,
-                **kwargs,
-            )
-            pool.submit(job, StageName.IMPLEMENTATION)
-            _, result = completion_q.get(timeout=10)
+        """Preserve the failed head proof after real restoration and terminal readback."""
+        from hephaestus.automation.pipeline.rebase_adr_policy import select_rebase_policy
+        from tests.unit.automation.test_rebase_recovery import _abort_worker_case, _store
 
-        assert result.ok is False
-        assert result.error == verification_error
-        assert run.call_args_list[-1] == call(
-            ["git", "rebase", "--abort"],
-            cwd=binding.cwd,
-            check=False,
-            timeout=60,
-            env={},
-        )
-        verify.assert_called_once_with(
-            binding.cwd,
-            remote="origin",
-            branch="7-auto-impl",
-            expected_repo=job.transport_repository,
-            expected_remote_sha=expected_head,
-            timeout=60,
-        )
+        with _abort_worker_case(tmp_path, monkeypatch, fallback=True, fault="clean") as case:
+            monkeypatch.setattr(
+                case.pool,
+                "_rebase_policy_selector",
+                lambda repo: select_rebase_policy("HomericIntelligence", "Mnemosyne"),
+            )
+
+            real_verify = case.pool._verify_noop_writer_rebase
+            phases: list[str] = []
+
+            def fail_verification(*args: Any, **kwargs: Any) -> JobResult:
+                retained = _store(case.manager.common_dir).read(
+                    1, case.job.capability_target.request_id
+                )
+                phases.append(retained.phase)
+                if retained.phase == "intent":
+                    return real_verify(*args, **kwargs)
+                assert retained.phase == "aborted"
+                assert retained.restored_workspace == case.binding
+                assert retained.restored_tree_sha == case.tree
+                return JobResult(ok=False, error=verification_error)
+
+            verify = Mock(side_effect=fail_verification)
+            monkeypatch.setattr(case.pool, "_verify_noop_writer_rebase", verify)
+            case.pool.submit(case.job, StageName.IMPLEMENTATION)
+            _, result = case.pool._completion_q.get(timeout=10)
+            assert not result.ok, result
+            assert result.error == verification_error
+            assert case.starts == [True] and case.aborts == [1]
+            expected_call = call(
+                case.binding.cwd,
+                remote="origin",
+                branch="1-repair",
+                expected_repo="acme/repository",
+                expected_remote_sha=case.original,
+                timeout=60,
+            )
+            assert phases == ["intent", "aborted"]
+            assert verify.call_args_list == [expected_call, expected_call]
+            case.pushes.assert_not_called()
 
     def test_clean_rebase_revalidates_destination_after_commit_hooks(
-        self,
-        pool: WorkerPool,
-        tmp_path: Path,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A successful rebase gets a fresh destination proof before publication."""
-        job = GitJob(
-            repo="owner/name",
-            op="rebase",
-            timeout_s=60,
-            kwargs={
-                "cwd": tmp_path,
-                "base_branch": "main",
-                "rebase_reason": "review_conflict",
-                "publish_rebased_head": True,
-                "branch": "7-auto-impl",
-                "expected_remote_sha": "a" * 40,
-            },
+        """Use a fresh authenticated environment after the real rebase completes."""
+        from tests.unit.automation.test_rebase_recovery import (
+            _abort_worker_case,
+            _publication_validation_seams,
+            _store,
         )
-        first_env = {"AUTH": "before-hooks"}
-        fresh_env = {"AUTH": "after-hooks"}
-        first_config = ("-c", "credential.helper=!first")
-        fresh_config = ("-c", "credential.helper=!fresh")
 
-        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
-            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
-                return MagicMock(returncode=1)
-            return MagicMock(returncode=0, stdout="c" * 40)
+        with _abort_worker_case(
+            tmp_path, monkeypatch, fallback=False, fault="clean", conflict=False, structural=True
+        ) as case:
+            _publication_validation_seams(case, "initial", monkeypatch)
+            first_env, fresh_env = {"AUTH": "before-hooks"}, {"AUTH": "after-hooks"}
+            first_config = ("-c", "credential.helper=!first")
+            fresh_config = ("-c", "credential.helper=!fresh")
+            observations: list[str] = []
 
-        with (
-            patch.object(pool, "_revalidate_review_conflict", return_value=None),
-            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
-            patch.object(
-                pool,
-                "_authenticated_remote_git_configuration",
-                side_effect=((first_env, first_config), (fresh_env, fresh_config)),
-            ) as authentication,
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
-            patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=True),
-            patch.object(
-                pool, "_read_publish_head", side_effect=["a" * 40, "a" * 40, "a" * 40, "b" * 40]
-            ),
-            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
-        ):
-            result = pool._git_rebase(job, record_source=Mock())
+            def authenticate(**kwargs: Any) -> Any:
+                assert kwargs["cwd"] == case.binding.cwd
+                assert kwargs["expected_repo"] == "acme/repository"
+                phase = "after" if case.starts else "before"
+                observations.append(phase)
+                return (fresh_env, fresh_config) if case.starts else (first_env, first_config)
 
-        assert result.ok is True
-        assert authentication.call_args_list == [
-            call(cwd=tmp_path, expected_repo="owner/name", timeout=60),
-            call(cwd=tmp_path, expected_repo="owner/name", timeout=60),
-        ]
-        push.assert_called_once_with(
-            "7-auto-impl",
-            "a" * 40,
-            tmp_path,
-            source_sha="b" * 40,
-            timeout=60,
-            env=fresh_env,
-            remote_config=fresh_config,
-            revalidate_remote=ANY,
-        )
+            def publish(branch: str, expected: str, cwd: Path, **kwargs: Any) -> None:
+                assert observations[-1] == "after"
+                assert branch == "1-repair" and expected == case.original
+                assert cwd == case.binding.cwd
+                assert kwargs["env"] == fresh_env
+                assert kwargs["remote_config"] == fresh_config
+                assert kwargs["source_sha"] == _git(cwd, "rev-parse", "HEAD")
+                assert kwargs["revalidate_remote"]() == (fresh_env, fresh_config)
+                retained = _store(case.manager.common_dir).read(
+                    1, case.job.capability_target.request_id
+                )
+                assert retained.phase == "publication_intent"
+
+            monkeypatch.setattr(case.pool, "_authenticated_remote_git_configuration", authenticate)
+            push = Mock(side_effect=publish)
+            monkeypatch.setattr(git_utils, "push_head_to_branch", push)
+            case.pool.submit(case.job, StageName.IMPLEMENTATION)
+            _, result = case.pool._completion_q.get(timeout=10)
+            assert result.ok, result
+            assert observations[0] == "before" and observations[-1] == "after"
+            assert case.starts == [True]
+            push.assert_called_once()
 
     def test_remote_head_probe_binds_expected_repository(
         self,
@@ -13380,7 +13460,7 @@ class TestGitOps:
                 "hephaestus.automation.git_utils.rebase_worktree_onto",
                 return_value=False,
             ) as rebase,
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(FakeSigningProvider, "environment", return_value={}),
             patch.object(pool, "_authenticated_remote_git_configuration", return_value=({}, ())),
             patch(f"{_WP}.git_utils.run") as run,
             patch.object(pool, "_conflict_receipt") as receipt,
@@ -13763,10 +13843,39 @@ class TestGitOps:
 
     @staticmethod
     def _continue_rebase_job(tmp_path: Path, *, repo: str = "Hephaestus") -> GitJob:
+        from hephaestus.automation.pipeline.host_capabilities import CapabilityRequestTarget
+
+        binding = WorkspaceBinding.source(
+            cwd=tmp_path,
+            reusable_root=tmp_path,
+            repository=repo,
+            ownership_key=f"{repo}:7:impl",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision="c" * 40,
+            generation=0,
+            detached=False,
+        )
+        target = CapabilityRequestTarget(
+            f"HomericIntelligence/{repo}",
+            7,
+            1007,
+            tmp_path,
+            tmp_path,
+            "c" * 40,
+            "rebase",
+            "scratch",
+            "b" * 32,
+            workspace=binding,
+            generation=1,
+        )
         return GitJob(
             repo=repo,
             op="continue_rebase",
             timeout_s=60,
+            expected_repository=target.repository,
+            workspace=binding,
+            capability_target=target,
             kwargs={
                 "cwd": tmp_path,
                 "remote": "origin",
@@ -14224,185 +14333,83 @@ class TestGitOps:
         )
 
     def test_continue_rebase_selected_policy_semantic_failure_does_not_publish(
-        self, pool: WorkerPool, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Semantic validation fails closed after Git completes and before push."""
-        (tmp_path / "x.py").write_text("resolved\n")
-        adr_dir = tmp_path / "docs" / "adr"
-        adr_dir.mkdir(parents=True)
-        (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
-        (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
-        structural_test = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
-        structural_test.parent.mkdir(parents=True)
-        structural_test.write_text("# structural test\n", encoding="utf-8")
-        job = self._continue_rebase_job(tmp_path)
-        receipt = {
-            "conflict_paths": ("x.py",),
-            "conflict_snapshot": {"x.py": "after"},
-            "conflict_index_snapshot": "1" * 64,
-            "paused_head_sha": "c" * 40,
-            "base_sha": "b" * 40,
-        }
-
-        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
-            if argv == ["git", "diff", "--name-only", "-z"]:
-                return MagicMock(returncode=0, stdout="x.py\0")
-            return MagicMock(returncode=0, stdout="")
-
-        with (
-            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
-            patch.object(pool, "_conflict_receipt", return_value=receipt),
-            patch.object(pool, "_read_publish_head", return_value="d" * 40),
-            patch.object(pool, "_run_immutable_build_test", return_value=JobResult(ok=True)),
-            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
-            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
-        ):
-            result = pool._git_continue_rebase(job, record_source=Mock())
-
-        assert result.ok is False
-        assert result.value == {
-            "failure_kind": "semantic_validation",
-            "rebase_policy": "hephaestus-adr-v1",
-        }
-        assert result.error == (
-            "rebase policy hephaestus-adr-v1 semantic validation failed: "
-            "rebase semantic validation failed: duplicate ADR number 0027 "
-            "(0027-durable-plan-review-conversations.md, "
-            "0027-host-owned-learning-preparation.md)"
-        )
-        push.assert_not_called()
+        """Reject actual duplicate ADR files after the admitted continuation completes."""
+        with _retained_continuation_case(tmp_path, monkeypatch, scenario="semantic") as case:
+            result = case.pool._run_git(case.continuation)
+            retained = _assert_retained_continuation_result(case, result)
+            assert not result.ok, result
+            assert case.checks[:2] == ["quota", "structural"]
+            assert result.value["failure_kind"] == "semantic_validation"
+            assert result.value["rebase_policy"] == "hephaestus-adr-v1"
+            assert result.error == (
+                "rebase policy hephaestus-adr-v1 semantic validation failed: "
+                "rebase semantic validation failed: duplicate ADR number 0027 "
+                "(0027-durable-plan-review-conversations.md, "
+                "0027-host-owned-learning-preparation.md)"
+            )
+            assert result.value["structural_execution_receipt"].ok
+            assert retained.phase == "pending_validation"
+            case.push.assert_not_called()
 
     def test_continue_rebase_selected_policy_structural_failure_does_not_publish(
-        self, pool: WorkerPool, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A selected structural failure stops publication and keeps diagnostics."""
-        (tmp_path / "x.py").write_text("resolved\n")
-        test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
-        test_path.parent.mkdir(parents=True)
-        test_path.write_text("# repository-owned structural test\n")
-        failed = JobResult(
-            ok=False,
-            value={"failure_kind": "validation"},
-            error="rc=1",
-            stdout_tail="duplicate ADR number 0027",
-            stderr_tail="pytest diagnostics",
-        )
-        job = self._continue_rebase_job(tmp_path)
-        receipt = {
-            "conflict_paths": ("x.py",),
-            "conflict_snapshot": {"x.py": "after"},
-            "conflict_index_snapshot": "1" * 64,
-            "paused_head_sha": "c" * 40,
-            "base_sha": "b" * 40,
-        }
+        """Keep the failed execution cause and B receipts without publication."""
+        with _retained_continuation_case(tmp_path, monkeypatch) as case:
+            failed = JobResult(
+                ok=False,
+                value={"failure_kind": "validation"},
+                error="rc=1",
+                stdout_tail="duplicate ADR number 0027",
+                stderr_tail="pytest diagnostics",
+            )
 
-        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
-            if argv == ["git", "diff", "--name-only", "-z"]:
-                return MagicMock(returncode=0, stdout="x.py\0")
-            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
-                return MagicMock(returncode=0, stdout="")
-            if argv[:3] == ["git", "rev-list", "--reverse"]:
-                return MagicMock(returncode=0, stdout="c" * 40)
-            if argv[:3] == ["git", "cat-file", "-p"]:
-                return MagicMock(
-                    returncode=0,
-                    stdout=(
-                        "tree deadbeef\ngpgsig signature\n\nfix\n\n"
-                        "Signed-off-by: Test User <test@example.com>\n"
-                    ),
-                )
-            return MagicMock(returncode=0, stdout="")
+            def fail_execution(job: BuildTestJob) -> JobResult:
+                assert job.immutable_source
+                assert job.expected_head_sha == _git(case.binding.cwd, "rev-parse", "HEAD")
+                assert job.expected_head_sha != case.original
+                return failed
 
-        with (
-            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
-            patch.object(pool, "_conflict_receipt", return_value=receipt),
-            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch.object(pool, "_read_publish_head", return_value="d" * 40),
-            patch.object(pool, "_run_immutable_build_test", return_value=failed),
-            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
-            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
-        ):
-            result = pool._git_continue_rebase(job, record_source=Mock())
-
-        assert result == JobResult(
-            ok=False,
-            value={"failure_kind": "validation", "rebase_policy": "hephaestus-adr-v1"},
-            error="rebase policy hephaestus-adr-v1 structural validation failed: rc=1",
-            stdout_tail="duplicate ADR number 0027",
-            stderr_tail="pytest diagnostics",
-        )
-        push.assert_not_called()
+            execute = Mock(side_effect=fail_execution)
+            monkeypatch.setattr(case.pool, "_run_immutable_build_test", execute)
+            result = case.pool._run_git(case.continuation)
+            retained = _assert_retained_continuation_result(case, result)
+            execute.assert_called_once()
+            assert not result.ok, result
+            assert result.value["failure_kind"] == "validation"
+            assert result.value["rebase_policy"] == "hephaestus-adr-v1"
+            assert (
+                result.error == "rebase policy hephaestus-adr-v1 structural validation failed: rc=1"
+            )
+            assert result.stdout_tail == failed.stdout_tail
+            assert result.stderr_tail == failed.stderr_tail
+            assert not result.value["structural_execution_receipt"].ok
+            assert retained.phase == "pending_validation"
+            case.push.assert_not_called()
 
     def test_continue_rebase_unconfigured_target_adr_layout_publishes(
-        self, pool: WorkerPool, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An unconfigured target publishes after a valid conflict continuation."""
-        (tmp_path / "x.py").write_text("resolved\n")
-        adr_dir = tmp_path / "docs" / "adr"
-        adr_dir.mkdir(parents=True)
-        (adr_dir / "index.md").write_text("# Index\n", encoding="utf-8")
-        (adr_dir / "0000-template.md").write_text("# Template\n", encoding="utf-8")
-        (adr_dir / "0001-fleet-routing.md").write_text("# Fleet routing\n", encoding="utf-8")
-        job = self._continue_rebase_job(tmp_path, repo="Comet")
-        receipt = {
-            "conflict_paths": ("x.py",),
-            "conflict_snapshot": {"x.py": "after"},
-            "conflict_index_snapshot": "1" * 64,
-            "paused_head_sha": "c" * 40,
-            "base_sha": "b" * 40,
-        }
-
-        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
-            if argv == ["git", "diff", "--name-only", "-z"]:
-                return MagicMock(returncode=0, stdout="x.py\0")
-            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
-                return MagicMock(returncode=0, stdout="")
-            if argv[:3] == ["git", "rev-list", "--reverse"]:
-                return MagicMock(returncode=0, stdout="c" * 40)
-            if argv[:3] == ["git", "cat-file", "-p"]:
-                return MagicMock(
-                    returncode=0,
-                    stdout=(
-                        "tree deadbeef\ngpgsig signature\n\nfix\n\n"
-                        "Signed-off-by: Test User <test@example.com>\n"
-                    ),
-                )
-            return MagicMock(returncode=0, stdout="")
-
-        with (
-            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
-            patch.object(pool, "_conflict_receipt", return_value=receipt),
-            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch.object(
-                pool,
-                "_run_rebase_structural_validation",
-                wraps=pool._run_rebase_structural_validation,
-            ) as structural,
-            patch.object(
-                pool, "_validate_rebased_tree", wraps=pool._validate_rebased_tree
-            ) as semantic,
-            patch.object(pool, "_read_publish_head", return_value="d" * 40),
-            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
-            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
-        ):
-            result = pool._git_continue_rebase(job, record_source=Mock())
-
-        assert result == JobResult(
-            ok=True,
-            value={
-                "rebased": True,
-                "published": True,
-                "head_sha": "d" * 40,
-                "rebase_policy": None,
-            },
-        )
-        structural.assert_called_once_with(tmp_path, timeout=60, policy=None)
-        semantic.assert_called_once_with(tmp_path, policy=None)
-        push.assert_called_once()
+        """An unconfigured policy keeps an alternate ADR layout and exact publication."""
+        with _retained_continuation_case(tmp_path, monkeypatch, scenario="unconfigured") as case:
+            structural = Mock(wraps=case.pool._run_rebase_structural_validation)
+            semantic = Mock(wraps=case.pool._validate_rebased_tree)
+            monkeypatch.setattr(case.pool, "_run_rebase_structural_validation", structural)
+            monkeypatch.setattr(case.pool, "_validate_rebased_tree", semantic)
+            result = case.pool._run_git(case.continuation)
+            retained = _assert_retained_continuation_result(case, result)
+            assert result.ok, result
+            assert result.value["rebase_policy"] is None
+            assert result.value["published"] is True
+            assert retained.phase == "complete"
+            structural.assert_not_called()
+            semantic.assert_called_once_with(case.binding.cwd, policy=None)
+            case.backend.preflight.assert_not_called()
+            case.push.assert_called_once()
+            assert case.push.call_args.args[:2] == ("1-repair", case.original)
+            assert case.push.call_args.kwargs["source_sha"] == retained.resulting_workspace.revision
 
     def test_rebase_structural_validation_preserves_bounded_diagnostics(
         self, pool: WorkerPool, tmp_path: Path
@@ -14437,6 +14444,46 @@ class TestGitOps:
             stderr_tail="pytest diagnostics",
         )
         run_test.assert_called_once()
+
+    @pytest.mark.parametrize("selected_policy", [False, True], ids=["no-policy", "validated"])
+    def test_rebase_structural_success_retains_execution_evidence(
+        self, pool: WorkerPool, tmp_path: Path, selected_policy: bool
+    ) -> None:
+        """Keep successful execution evidence distinct from an absent policy."""
+        test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
+        test_path.parent.mkdir(parents=True)
+        test_path.write_text("# Repository-owned structural test.\n")
+        resulting_head = "d" * 40
+        executed = JobResult(
+            ok=True,
+            value={"head_sha": resulting_head, "immutable_source": True},
+            stdout_tail="structural checks passed",
+        )
+        policy = pool._select_rebase_policy("Hephaestus") if selected_policy else None
+        if selected_policy:
+            assert policy is not None
+
+        with (
+            patch.object(pool, "_read_publish_head", return_value=resulting_head) as read_head,
+            patch.object(pool, "_run_immutable_build_test", return_value=executed) as execute,
+        ):
+            result = pool._run_rebase_structural_validation(tmp_path, timeout=60, policy=policy)
+
+        if not selected_policy:
+            assert result is None
+            read_head.assert_not_called()
+            execute.assert_not_called()
+            return
+        read_head.assert_called_once_with(tmp_path, timeout=60)
+        execute.assert_called_once()
+        execution_job = execute.call_args.args[0]
+        assert isinstance(execution_job, BuildTestJob)
+        assert execution_job.expected_head_sha == resulting_head
+        assert execution_job.immutable_source is True
+        assert execution_job.cwd == tmp_path
+        assert policy is not None
+        assert execution_job.argv == policy.structural_test_argv
+        assert result == executed
 
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path
@@ -14890,7 +14937,7 @@ class TestGitOps:
             stderr="error: cannot run gpg: No such file or directory",
         )
         with (
-            patch(f"{_WP}._controlled_git_signing_env", return_value={"GIT_EDITOR": "true"}),
+            patch.object(FakeSigningProvider, "environment", return_value={"GIT_EDITOR": "true"}),
             patch(
                 f"{_WP}.git_utils.run",
                 side_effect=[MagicMock(), MagicMock(), failure],
@@ -14938,7 +14985,7 @@ class TestGitOps:
             stderr="hook rejected token=private-token",
         )
         with (
-            patch(f"{_WP}._controlled_git_signing_env", return_value={"GIT_EDITOR": "true"}),
+            patch.object(FakeSigningProvider, "environment", return_value={"GIT_EDITOR": "true"}),
             patch(f"{_WP}.git_utils.run", side_effect=[MagicMock(), MagicMock(), failure]),
             patch.object(
                 pool,
@@ -14980,7 +15027,7 @@ class TestGitOps:
             stderr=b"Authorization: Bearer secret-value",
         )
         with (
-            patch(f"{_WP}._controlled_git_signing_env", return_value={"GIT_EDITOR": "true"}),
+            patch.object(FakeSigningProvider, "environment", return_value={"GIT_EDITOR": "true"}),
             patch(f"{_WP}.git_utils.run", side_effect=[MagicMock(), MagicMock(), failure]),
         ):
             result = pool._continue_rebase_process(
@@ -15016,7 +15063,7 @@ class TestGitOps:
         )
         receipt = {"conflict_paths": ("second.py",), "base_sha": "b" * 40}
         with (
-            patch(f"{_WP}._controlled_git_signing_env", return_value={"GIT_EDITOR": "true"}),
+            patch.object(FakeSigningProvider, "environment", return_value={"GIT_EDITOR": "true"}),
             patch(f"{_WP}.git_utils.run", side_effect=[MagicMock(), MagicMock(), failure]),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
         ):
@@ -15629,37 +15676,29 @@ class TestGitOps:
         assert result.stderr_tail.index("push stderr") < result.stderr_tail.index("probe stderr")
 
     def test_continue_rebase_rejects_missing_captured_base_ancestry(
-        self, pool: WorkerPool, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A host-completed rebase must descend from its captured base head."""
-        (tmp_path / "x.py").write_text("resolved\n")
-        job = self._continue_rebase_job(tmp_path)
-        receipt = {
-            "conflict_paths": ("x.py",),
-            "conflict_snapshot": {"x.py": "after"},
-            "conflict_index_snapshot": "1" * 64,
-            "paused_head_sha": "c" * 40,
-            "base_sha": "b" * 40,
-        }
-        record_source = Mock()
-        with (
-            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
-            patch.object(pool, "_conflict_receipt", return_value=receipt),
-            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
-            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch(f"{_WP}.git_utils.run") as run,
-            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
-        ):
-            run.side_effect = lambda command, **kwargs: _continue_rebase_command_result(
-                command, ancestor=False, raw_commit="", **kwargs
-            )
-            result = pool._git_continue_rebase(job, record_source=record_source)
+        """Reject a failed final ancestry proof after real continuation and execution."""
+        with _retained_continuation_case(tmp_path, monkeypatch) as case:
+            run = git_utils.run
+            failures: list[list[str]] = []
 
-        record_source.assert_called_once_with("d" * 40)
-        push.assert_not_called()
-        assert result.ok is False
-        assert result.error == "completed rebase lacks captured base ancestry"
+            def ancestry(argv: list[str], **kwargs: Any) -> Any:
+                if argv == ["git", "merge-base", "--is-ancestor", case.base, "HEAD"]:
+                    assert case.checks[:2] == ["quota", "structural"]
+                    failures.append(argv)
+                    return subprocess.CompletedProcess(argv, 1, "", "")
+                return run(argv, **kwargs)
+
+            monkeypatch.setattr(git_utils, "run", ancestry)
+            result = case.pool._run_git(case.continuation)
+            retained = _assert_retained_continuation_result(case, result)
+            assert len(failures) == 1
+            assert not result.ok, result
+            assert result.error == "completed rebase lacks captured base ancestry"
+            assert result.value["structural_execution_receipt"].ok
+            assert retained.phase == "pending_validation"
+            case.push.assert_not_called()
 
     @pytest.mark.parametrize(
         "raw_commit",
@@ -15669,103 +15708,56 @@ class TestGitOps:
         ],
     )
     def test_continue_rebase_rejects_unsigned_or_non_dco_commit(
-        self, pool: WorkerPool, tmp_path: Path, raw_commit: str
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_commit: str
     ) -> None:
-        """Host completion verifies every replayed commit's signature and DCO trailer."""
-        (tmp_path / "x.py").write_text("resolved\n")
-        job = self._continue_rebase_job(tmp_path)
-        receipt = {
-            "conflict_paths": ("x.py",),
-            "conflict_snapshot": {"x.py": "after"},
-            "conflict_index_snapshot": "1" * 64,
-            "paused_head_sha": "c" * 40,
-            "base_sha": "b" * 40,
-        }
-        record_source = Mock()
-        with (
-            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
-            patch.object(pool, "_conflict_receipt", return_value=receipt),
-            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
-            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch(f"{_WP}.git_utils.run") as run,
-            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
-        ):
-            run.side_effect = lambda command, **kwargs: _continue_rebase_command_result(
-                command, ancestor=True, raw_commit=raw_commit, **kwargs
-            )
-            result = pool._git_continue_rebase(job, record_source=record_source)
+        """Check signature and DCO fields after the real continuation reaches B."""
+        assert ("\ngpgsig " in raw_commit) != ("Signed-off-by:" in raw_commit)
+        with _retained_continuation_case(tmp_path, monkeypatch) as case:
+            run = git_utils.run
+            reads: list[str] = []
 
-        record_source.assert_called_once_with("d" * 40)
-        push.assert_not_called()
-        assert result.ok is False
-        assert result.error == "completed rebase commit metadata invalid"
+            def metadata(argv: list[str], **kwargs: Any) -> Any:
+                result = run(argv, **kwargs)
+                if argv[:3] == ["git", "cat-file", "-p"]:
+                    assert case.checks[:2] == ["quota", "structural"]
+                    assert argv[3] == _git(case.binding.cwd, "rev-parse", "HEAD")
+                    assert result.returncode == 0
+                    reads.append(argv[3])
+                    return subprocess.CompletedProcess(argv, 0, raw_commit, result.stderr)
+                return result
+
+            monkeypatch.setattr(git_utils, "run", metadata)
+            result = case.pool._run_git(case.continuation)
+            retained = _assert_retained_continuation_result(case, result)
+            assert reads == [retained.resulting_workspace.revision]
+            assert not result.ok, result
+            assert result.error == "completed rebase commit metadata invalid"
+            assert result.value["structural_execution_receipt"].ok
+            assert retained.phase == "pending_validation"
+            case.push.assert_not_called()
 
     def test_continue_rebase_signs_verifies_and_exact_lease_publishes(
-        self, pool: WorkerPool, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A valid resolution advances only through the host's exact-head publication."""
-        (tmp_path / "x.py").write_text("resolved\n")
-        job = self._continue_rebase_job(tmp_path)
-        receipt = {
-            "conflict_paths": ("x.py",),
-            "conflict_snapshot": {"x.py": "after"},
-            "conflict_index_snapshot": "1" * 64,
-            "paused_head_sha": "c" * 40,
-            "base_sha": "b" * 40,
-        }
-        signed = (
-            "tree deadbeef\ngpgsig -----BEGIN SIGNATURE-----\n\nfix\n\n"
-            "Signed-off-by: Micah Villmow "
-            "<4211002+mvillmow@users.noreply.github.com>\n"
-        )
-        with (
-            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
-            patch.object(pool, "_conflict_receipt", return_value=receipt),
-            patch.object(pool, "_run_rebase_structural_validation", return_value=None),
-            patch(f"{_WP}._run_bounded_git_output", return_value=_EMPTY_DIFF_OUTPUT),
-            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
-            patch.object(
-                pool,
-                "_authenticated_remote_git_configuration",
-                return_value=(
-                    {"GIT_TERMINAL_PROMPT": "0"},
-                    ("-c", "credential.helper=!trusted-gh auth git-credential"),
-                ),
-            ),
-            patch.object(pool, "_read_publish_head", return_value="d" * 40),
-            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
-            patch(f"{_WP}.git_utils.run") as run,
-        ):
-            run.side_effect = [
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout="c" * 40),
-                MagicMock(returncode=0, stdout=signed),
-            ]
-            result = pool._git_continue_rebase(job, record_source=Mock())
-
-        assert result == JobResult(
-            ok=True,
-            value={
-                "rebased": True,
-                "published": True,
-                "head_sha": "d" * 40,
-                "rebase_policy": "hephaestus-adr-v1",
-            },
-        )
-        push.assert_called_once_with(
-            "7-auto-impl",
-            "a" * 40,
-            tmp_path,
-            source_sha="d" * 40,
-            timeout=60,
-            env={"GIT_TERMINAL_PROMPT": "0"},
-            remote_config=("-c", "credential.helper=!trusted-gh auth git-credential"),
-            revalidate_remote=ANY,
-        )
+        """Use fresh signing and B evidence before exact-A publication."""
+        with _retained_continuation_case(tmp_path, monkeypatch) as case:
+            provider = case.pool._host_capabilities.signing_provider
+            provider.environment.reset_mock()
+            result = case.pool._run_git(case.continuation)
+            retained = _assert_retained_continuation_result(case, result)
+            assert result.ok, result
+            assert result.value["published"] is True
+            assert result.value["rebase_policy"] == "hephaestus-adr-v1"
+            assert case.checks == ["quota", "structural", "metadata"]
+            assert result.value["structural_execution_receipt"].ok
+            assert retained.phase == "complete"
+            provider.environment.assert_called_once_with(
+                case.binding.cwd, timeout=case.continuation.timeout_s, private_metadata=False
+            )
+            case.push.assert_called_once()
+            assert case.push.call_args.args == ("1-repair", case.original, case.binding.cwd)
+            assert case.push.call_args.kwargs["source_sha"] == retained.resulting_workspace.revision
+            assert callable(case.push.call_args.kwargs["revalidate_remote"])
 
     @pytest.mark.usefixtures("require_git_path_format")
     @pytest.mark.parametrize("delete_topic", [False, True], ids=["text", "delete"])
@@ -15781,23 +15773,57 @@ class TestGitOps:
         )
         relative_path = "tests/test_gateway_lifecycle.py"
         source = checkout / relative_path
+        binding = WorkspaceBinding.source(
+            cwd=checkout,
+            reusable_root=checkout,
+            repository="test/repo",
+            ownership_key="test/repo:7:impl",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision=expected_remote_sha,
+            generation=0,
+            detached=False,
+        )
+        capability_target = CapabilityRequestTarget(
+            "test/repo",
+            7,
+            1007,
+            checkout,
+            checkout,
+            expected_remote_sha,
+            "rebase",
+            "scratch",
+            "a" * 32,
+            workspace=binding,
+            generation=1,
+        )
         rebase_job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
+            capability_target=capability_target,
             kwargs={
                 "cwd": checkout,
                 "base_branch": "main",
                 "remote": "origin",
+                "issue_number": 7,
+                "pr_number": 1007,
                 "publish_rebased_head": True,
                 "branch": "7-auto-impl",
                 "expected_remote_sha": expected_remote_sha,
                 "rebase_reason": "review_conflict",
             },
         )
+        record_source = Mock(
+            side_effect=lambda head: replace(
+                binding, revision=head, generation=binding.generation + 1
+            )
+        )
 
         with (
             patch.object(pool, "_revalidate_review_conflict", return_value=None),
+            patch.object(pool, "_host_capabilities", _validated_signing_capabilities()),
             patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
             patch.object(
                 pool,
@@ -15805,9 +15831,10 @@ class TestGitOps:
                 return_value=(os.environ.copy(), ()),
             ),
         ):
-            paused = pool._git_rebase(rebase_job, record_source=Mock())
+            paused = pool._git_rebase(rebase_job, record_source=record_source)
 
             assert paused.ok is False
+            record_source.assert_not_called()
             assert paused.error == "mechanical rebase hit conflicts; resolution required"
             assert isinstance(paused.value, dict)
             assert paused.value["conflict_paths"] == (relative_path,)
@@ -15828,7 +15855,16 @@ class TestGitOps:
                 key: value for key, value in paused.value.items() if key != "rebased"
             }
             continuation_kwargs.update(
-                {"cwd": checkout, "remote": "origin", "branch": "7-auto-impl"}
+                {
+                    "cwd": checkout,
+                    "remote": "origin",
+                    "branch": "7-auto-impl",
+                    "publish_rebased_head": True,
+                    "expected_head_sha": expected_remote_sha,
+                    "rebase_reason": "review_conflict",
+                    "pr_number": 1007,
+                    "direct_scope_reservation": None,
+                }
             )
             validation_job = GitJob(
                 repo="test/repo",
@@ -15861,14 +15897,22 @@ class TestGitOps:
             assert validated.value["conflict_resolution"] == "resolved_content"
             assert status_after_validation == status_before_validation
 
+            continuation_target = replace(
+                capability_target,
+                expected_head_sha=expected_remote_sha,
+                request_id="b" * 32,
+                generation=2,
+            )
             continued = pool._git_continue_rebase(
                 GitJob(
                     repo="test/repo",
                     op="continue_rebase",
                     timeout_s=60,
+                    workspace=binding,
+                    capability_target=continuation_target,
                     kwargs=continuation_kwargs,
                 ),
-                record_source=Mock(),
+                record_source=record_source,
             )
 
         assert continued.ok is True
@@ -15888,6 +15932,7 @@ class TestGitOps:
             == ""
         )
         published_sha = str(continued.value["head_sha"])
+        record_source.assert_called_once_with(published_sha)
         assert (
             subprocess.run(
                 ["git", "ls-remote", "origin", "refs/heads/7-auto-impl"],
@@ -15912,266 +15957,320 @@ class TestGitOps:
         pool: WorkerPool,
         tmp_path: Path,
     ) -> None:
-        """Sequential real conflicts each yield a receipt before exact publication."""
-        origin = tmp_path / "origin.git"
-        checkout = tmp_path / "checkout"
-        signing_key = tmp_path / "signing-key"
-        subprocess.run(
-            ["git", "init", "--bare", "--quiet", str(origin)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "init", "--initial-branch", "main", str(checkout)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            [
-                _executable_path("ssh-keygen"),
-                "-q",
-                "-t",
-                "ed25519",
-                "-N",
-                "",
-                "-f",
-                str(signing_key),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        for key, value in (
-            ("user.name", "Test User"),
-            ("user.email", "test@example.invalid"),
-            ("gpg.format", "ssh"),
-            ("user.signingkey", str(signing_key)),
-            ("commit.gpgsign", "false"),
-        ):
+        """Retain one source-owned operation through two real signed conflict replays."""
+        from types import SimpleNamespace
+
+        from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+        from hephaestus.automation.pipeline.host_capabilities import CapabilityRequestTarget
+        from hephaestus.automation.pipeline.stages import ImplementationStage, StageContext
+        from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+        from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+        from tests.unit.automation.test_rebase_recovery import _store
+
+        prior_umask = os.umask(0o022)
+        try:
+            origin = tmp_path / "origin.git"
+            checkout = tmp_path / "checkout"
+            signing_key = tmp_path / "signing-key"
             subprocess.run(
-                ["git", "config", key, value],
+                ["git", "init", "--bare", "--quiet", str(origin)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "init", "--initial-branch", "main", str(checkout)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    _executable_path("ssh-keygen"),
+                    "-q",
+                    "-t",
+                    "ed25519",
+                    "-N",
+                    "",
+                    "-f",
+                    str(signing_key),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            for key, value in (
+                ("user.name", "Test User"),
+                ("user.email", "test@example.invalid"),
+                ("gpg.format", "ssh"),
+                ("user.signingkey", str(signing_key)),
+                ("commit.gpgsign", "false"),
+            ):
+                subprocess.run(
+                    ["git", "config", key, value],
+                    cwd=checkout,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            subprocess.run(
+                ["git", "remote", "add", "origin", str(origin)],
                 cwd=checkout,
                 check=True,
                 capture_output=True,
                 text=True,
             )
-        subprocess.run(
-            ["git", "remote", "add", "origin", str(origin)],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
 
-        (checkout / "a.txt").write_text("base-a\n", encoding="utf-8")
-        (checkout / "b.txt").write_text("base-b\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "add", "a.txt", "b.txt"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", "test: add base files"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "push", "-u", "origin", "main"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "switch", "-c", "7-auto-impl"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        (checkout / "a.txt").write_text("topic-a\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "commit", "-am", "fix: change a"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        (checkout / "b.txt").write_text("topic-b\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "commit", "-am", "fix: change b"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "push", "-u", "origin", "7-auto-impl"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        expected_remote_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-
-        subprocess.run(
-            ["git", "switch", "main"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        (checkout / "a.txt").write_text("main-a\n", encoding="utf-8")
-        (checkout / "b.txt").write_text("main-b\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "commit", "-am", "test: change base files"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "push", "origin", "main"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        base_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        subprocess.run(
-            ["git", "switch", "7-auto-impl"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-        signing = {
-            "user.name": "Test User",
-            "user.email": "test@example.invalid",
-            "gpg.format": "ssh",
-            "user.signingkey": str(signing_key),
-        }
-        rebase_job = GitJob(
-            repo="test/repo",
-            op="rebase",
-            timeout_s=60,
-            kwargs={
-                "cwd": checkout,
-                "base_branch": "main",
-                "rebase_reason": "review_conflict",
-                "remote": "origin",
-                "publish_rebased_head": True,
-                "branch": "7-auto-impl",
-                "expected_remote_sha": expected_remote_sha,
-            },
-        )
-
-        with (
-            patch.object(pool, "_revalidate_review_conflict", return_value=None),
-            patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
-            patch.object(
-                pool,
-                "_authenticated_remote_git_configuration",
-                return_value=(os.environ.copy(), ()),
-            ),
-        ):
-            first = pool._git_rebase(rebase_job, record_source=Mock())
-            assert first.ok is False
-            assert first.error == "mechanical rebase hit conflicts; resolution required"
-            assert isinstance(first.value, dict)
-            assert first.value["conflict_paths"] == ("a.txt",)
-            assert first.value["base_sha"] == base_sha
-
-            (checkout / "a.txt").write_text("resolved-a\n", encoding="utf-8")
-            first_continuation = GitJob(
-                repo="test/repo",
-                op="continue_rebase",
-                timeout_s=60,
-                kwargs={
-                    "cwd": checkout,
-                    "remote": "origin",
-                    "branch": "7-auto-impl",
-                    **{key: value for key, value in first.value.items() if key != "rebased"},
-                },
-            )
-            second = pool._git_continue_rebase(first_continuation, record_source=Mock())
-            assert second.ok is False
-            assert second.error == (
-                "rebase conflict resolution required: additional conflicts found"
-            )
-            assert isinstance(second.value, dict)
-            assert second.value["conflict_paths"] == ("b.txt",)
-            assert second.value["base_sha"] == base_sha
-
-            (checkout / "b.txt").write_text("resolved-b\n", encoding="utf-8")
-            second_continuation = GitJob(
-                repo="test/repo",
-                op="continue_rebase",
-                timeout_s=60,
-                kwargs={
-                    "cwd": checkout,
-                    "remote": "origin",
-                    "branch": "7-auto-impl",
-                    **{key: value for key, value in second.value.items() if key != "rebased"},
-                },
-            )
-            completed = pool._git_continue_rebase(second_continuation, record_source=Mock())
-
-        assert completed.ok is True
-        assert isinstance(completed.value, dict)
-        assert completed.value["rebased"] is True
-        assert completed.value["published"] is True
-        published_sha = str(completed.value["head_sha"])
-        remote_sha = subprocess.run(
-            ["git", "ls-remote", "origin", "refs/heads/7-auto-impl"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.split()[0]
-        assert remote_sha == published_sha
-        subprocess.run(
-            ["git", "merge-base", "--is-ancestor", base_sha, published_sha],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        for commit in subprocess.run(
-            ["git", "rev-list", f"{base_sha}..{published_sha}"],
-            cwd=checkout,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.split():
-            raw_commit = subprocess.run(
-                ["git", "cat-file", "-p", commit],
+            (checkout / "a.txt").write_text("base-a\n", encoding="utf-8")
+            (checkout / "b.txt").write_text("base-b\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "a.txt", "b.txt"],
                 cwd=checkout,
                 check=True,
                 capture_output=True,
                 text=True,
-            ).stdout
-            assert "\ngpgsig " in f"\n{raw_commit}"
-            assert "Signed-off-by: Test User <test@example.invalid>" in raw_commit
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "test: add base files"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "push", "-u", "origin", "main"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "switch", "-c", "7-auto-impl"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (checkout / "a.txt").write_text("topic-a\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "commit", "-am", "fix: change a"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (checkout / "b.txt").write_text("topic-b\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "commit", "-am", "fix: change b"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "push", "-u", "origin", "7-auto-impl"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            expected_remote_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            subprocess.run(
+                ["git", "switch", "main"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (checkout / "a.txt").write_text("main-a\n", encoding="utf-8")
+            (checkout / "b.txt").write_text("main-b\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "commit", "-am", "test: change base files"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "push", "origin", "main"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            base_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            assert _git(checkout, "branch", "--show-current") == "main"
+            assert _git(checkout, "rev-parse", "7-auto-impl") == expected_remote_sha
+            remote_before = _git(checkout, "ls-remote", "origin", "refs/heads/7-auto-impl")
+            assert remote_before == f"{expected_remote_sha}\trefs/heads/7-auto-impl"
+            # The source manager must create its branch, not adopt an unowned local ref.
+            _git(checkout, "branch", "-D", "7-auto-impl")
+            manager = SourceWorkspaceManager(checkout, repository="test/repo")
+            binding = manager.prepare(
+                7, SourceLane.IMPLEMENTATION, expected_remote_sha, branch="7-auto-impl"
+            )
+            assert _git(checkout, "ls-remote", "origin", "refs/heads/7-auto-impl") == remote_before
+            writer = binding.cwd
+            target = CapabilityRequestTarget(
+                "test/repo",
+                7,
+                1007,
+                checkout,
+                writer,
+                expected_remote_sha,
+                "rebase",
+                "scratch",
+                "a" * 32,
+                workspace=binding,
+                generation=1,
+            )
+            signing = {
+                "user.name": "Test User",
+                "user.email": "test@example.invalid",
+                "gpg.format": "ssh",
+                "user.signingkey": str(signing_key),
+            }
+            rebase_job = GitJob(
+                repo="repo",
+                expected_repository="test/repo",
+                op="rebase",
+                timeout_s=60,
+                workspace=binding,
+                capability_target=target,
+                kwargs={
+                    "cwd": writer,
+                    "repo_root": str(checkout),
+                    "issue_number": 7,
+                    "pr_number": 1007,
+                    "base_branch": "main",
+                    "rebase_reason": "review_conflict",
+                    "remote": "origin",
+                    "publish_rebased_head": True,
+                    "branch": "7-auto-impl",
+                    "expected_remote_sha": expected_remote_sha,
+                    "expected_head_sha": expected_remote_sha,
+                },
+            )
+            stage = ImplementationStage()
+            ctx = StageContext(
+                PipelineConfig(org="test", repos=["repo"]),
+                "test",
+                False,
+                FakeStageGitHub(
+                    pr_state={
+                        "state": "OPEN",
+                        "headRefOid": expected_remote_sha,
+                        "autoMergeRequest": None,
+                        "baseRefName": "main",
+                    }
+                ),
+                SimpleNamespace(repo_root=checkout, worktree=writer),
+            )
+            item = WorkItem(
+                "repo",
+                ItemKind.ISSUE,
+                issue=7,
+                pr=1007,
+                stage=StageName.IMPLEMENTATION,
+                state="REBASE_WAIT",
+                branch="7-auto-impl",
+                worktree=str(writer),
+                payload={
+                    "rebase_reason": "review_conflict",
+                    "_impl_source_workspace": binding.to_dict(),
+                    "_impl_source_revision": expected_remote_sha,
+                    "_impl_source_receipt": manager._require_receipt(7, SourceLane.IMPLEMENTATION),
+                },
+            )
+            with (
+                patch.object(pool, "_revalidate_review_conflict", return_value=None),
+                patch.object(pool, "_host_capabilities", _validated_signing_capabilities()),
+                patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
+                patch.object(
+                    pool,
+                    "_authenticated_remote_git_configuration",
+                    return_value=(os.environ.copy(), ()),
+                ),
+            ):
+                first = pool._run_git(rebase_job)
+                assert not first.ok, first
+                assert first.error == "mechanical rebase hit conflicts; resolution required"
+                assert first.value["conflict_paths"] == ("a.txt",)
+                assert first.value["base_sha"] == base_sha
+                assert first.value["rebase_recovery_intent_id"] == target.request_id
+                store = _store(manager.common_dir)
+                intent = store.read(7, target.request_id)
+                assert intent.phase == "intent" and intent.request == target
+                first_continuation = _stage_conflict_continuation(
+                    stage, item, ctx, pool, manager, first, "a.txt", "resolved-a\n"
+                )
+                assert first_continuation.capability_target is not None
+                assert first_continuation.kwargs["rebase_recovery_intent_id"] == target.request_id
+                second = pool._run_git(first_continuation)
+                assert not second.ok, second
+                assert (
+                    second.error
+                    == "rebase conflict resolution required: additional conflicts found"
+                )
+                assert second.value["conflict_paths"] == ("b.txt",)
+                assert second.value["base_sha"] == base_sha
+                assert second.value["expected_remote_sha"] == expected_remote_sha
+                assert second.value["rebase_recovery_intent_id"] == target.request_id
+                assert store.read(7, target.request_id) == intent
+                item.state = "REBASE_CONTINUE_WAIT"
+                second_continuation = _stage_conflict_continuation(
+                    stage, item, ctx, pool, manager, second, "b.txt", "resolved-b\n"
+                )
+                assert second_continuation.capability_target is not None
+                assert (
+                    len(
+                        {
+                            target.request_id,
+                            first_continuation.capability_target.request_id,
+                            second_continuation.capability_target.request_id,
+                        }
+                    )
+                    == 3
+                )
+                assert second_continuation.kwargs["rebase_recovery_intent_id"] == target.request_id
+                completed = pool._run_git(second_continuation)
+
+            assert completed.ok, completed
+            assert completed.value["rebased"] is True
+            assert completed.value["published"] is True
+            published_sha = completed.value["head_sha"]
+            retained = store.read(7, target.request_id)
+            assert retained.phase == "complete"
+            assert retained.request == target and retained.remote_head_sha == expected_remote_sha
+            assert retained.resulting_workspace.revision == published_sha
+            assert manager._require_receipt(7, SourceLane.IMPLEMENTATION).revision == published_sha
+            assert (
+                _git(writer, "ls-remote", "origin", "refs/heads/7-auto-impl").split()[0]
+                == published_sha
+            )
+            assert _git(writer, "merge-base", "--is-ancestor", base_sha, published_sha) == ""
+            commits = _git(writer, "rev-list", f"{base_sha}..{published_sha}").split()
+            assert len(commits) == 2
+            for commit in commits:
+                raw_commit = _git(writer, "cat-file", "-p", commit)
+                assert "\ngpgsig " in f"\n{raw_commit}"
+                assert "Signed-off-by: Test User <test@example.invalid>" in raw_commit
+        finally:
+            os.umask(prior_umask)
 
     def test_writer_rebase_keeps_exact_head_when_current_base_is_already_ancestor(
         self,
@@ -17982,7 +18081,8 @@ class TestGitOps:
         with (
             patch.object(pool, "_writer_tracking_head", return_value=binding.revision),
             patch(
-                f"{_WP}._controlled_git_signing_env", return_value=signing_env
+                "tests.unit.automation.pipeline.conftest.FakeSigningProvider.environment",
+                return_value=signing_env,
             ) as controlled_signing,
             patch(
                 "hephaestus.automation.git_utils._commit_changes",
@@ -18107,6 +18207,7 @@ class TestGitOps:
         )
 
         with (
+            patch.object(pool, "_host_capabilities", _validated_signing_capabilities()),
             patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
             patch(
                 "hephaestus.automation.commit_runtime._generate_commit_message",
@@ -18161,8 +18262,8 @@ class TestGitOps:
                 return_value=MagicMock(stdout=" M pending.py\\n"),
             ),
             patch(
-                "hephaestus.automation.pipeline.worker_pool._controlled_git_signing_env",
-                return_value=signing_failure,
+                "tests.unit.automation.pipeline.conftest.FakeSigningProvider.environment",
+                side_effect=SigningConfigurationError(signing_failure.error or ""),
             ),
             patch("hephaestus.automation.git_utils._commit_changes") as commit,
         ):
@@ -22940,6 +23041,7 @@ def test_commit_push_rejects_stale_writer_replay_without_mutation(
         return True
 
     with (
+        patch.object(pool, "_host_capabilities", _validated_signing_capabilities()),
         patch.object(pool, "_commit_if_changes_with_controlled_signing", side_effect=commit),
         patch(f"{_WP}.git_utils.push_head_to_branch") as publish,
         patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
@@ -25871,3 +25973,413 @@ def test_repository_validation_rechecks_runtime_before_launch(
         ),
     ):
         pool._recheck_repository_runtime(job, runtime)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "current",
+        "stale",
+        "expired",
+        "lock_delay",
+        "cancelled",
+        "deadline_bound",
+        "late_receipt",
+        "cancelled_receipt",
+    ],
+)
+def test_host_capability_probe_requires_current_review_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Only current source ownership can supply a worker-bound probe target."""
+    from hephaestus.automation.pipeline.host_capabilities import (
+        QUOTA_AVAILABLE_TOKEN,
+        CapabilityReceiptTarget,
+        CapabilityRequestTarget,
+        HostCapabilityReceipt,
+        WorkerCapabilities,
+    )
+    from hephaestus.automation.pipeline.jobs import HostCapabilityJob
+    from hephaestus.automation.source_worktree import SourceWorkspaceManager
+    from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+    from tests.unit.automation.pipeline.test_worker_git_source_binding import (
+        _supply_registered_worktree_listing,
+    )
+    from tests.unit.automation.test_source_worktree import _git, _repository
+
+    root, _, revision = _repository(tmp_path, origin_repository="example/project")
+    manager = SourceWorkspaceManager(root, repository="example/project")
+    binding = manager.prepare(42, SourceLane.REVIEW, revision)
+    _supply_registered_worktree_listing(root, monkeypatch)
+    clock = [time.monotonic()]
+    if case in {"late_receipt", "cancelled_receipt"}:
+        monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    if case == "lock_delay":
+        acquire = SourceWorkspaceManager.acquire
+
+        @contextmanager
+        def delayed_acquire(
+            owner: SourceWorkspaceManager, source: WorkspaceBinding, **kwargs: Any
+        ) -> Iterator[Path]:
+            with acquire(owner, source, **kwargs) as path:
+                clock[0] += 2
+                yield path
+
+        monkeypatch.setattr(SourceWorkspaceManager, "acquire", delayed_acquire)
+        monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    expected = replace(binding, generation=binding.generation + 1) if case == "stale" else binding
+    request = CapabilityRequestTarget(
+        "example/project",
+        42,
+        99,
+        root,
+        binding.cwd,
+        revision,
+        "pr_review",
+        "scratch",
+        "f" * 32,
+        workspace=expected,
+        generation=1,
+    )
+
+    def probe(target: CapabilityReceiptTarget, *, deadline: Any = None) -> HostCapabilityReceipt:
+        with pytest.raises(LockUnavailableError):
+            with file_lock(
+                manager._lane_lock_path(42, SourceLane.REVIEW),
+                blocking=False,
+                require_exclusive=True,
+            ):
+                pytest.fail("The capability probe did not hold its source lease.")
+        assert isinstance(target, CapabilityReceiptTarget)
+        assert target.request == request
+        assert target.source_head_sha == _git(binding.cwd, "rev-parse", "HEAD")
+        assert target.canonical_repository_root == root
+        assert target.root_device == root.stat().st_dev
+        assert target.execution_boundary_id == "worker-boundary"
+        if case == "deadline_bound":
+            assert deadline is not None
+            assert 0 < deadline.remaining() <= 1
+            remaining = git_utils.remaining_operation_timeout(999)
+            assert remaining is not None and 0 < remaining <= 1
+        if case in {"late_receipt", "cancelled_receipt"}:
+            if case == "late_receipt":
+                clock[0] += 61
+            else:
+                shutdown.set()
+            return HostCapabilityReceipt(
+                False,
+                "host_verification_quota_detach_failed",
+                "detach",
+                "scratch",
+                "c" * 32,
+                target=target,
+                cleanup_state="retained",
+                retained_root=str(root / "build/.host-verification" / request.request_id),
+                stderr_tail="detach remained uncertain",
+            )
+        return HostCapabilityReceipt(
+            True,
+            QUOTA_AVAILABLE_TOKEN,
+            None,
+            "scratch",
+            "c" * 32,
+            target=target,
+            cleanup_state="complete",
+        )
+
+    backend = Mock(backend_id="hdiutil-v1", preflight=Mock(side_effect=probe))
+    shutdown = threading.Event()
+    if case == "cancelled":
+        shutdown.set()
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown,
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        host_capabilities=WorkerCapabilities(backend, "worker-boundary"),
+    )
+    try:
+        job = HostCapabilityJob(
+            "example/project",
+            request,
+            60,
+            deadline_s=time.monotonic()
+            + {"expired": -1, "lock_delay": 1, "deadline_bound": 1}.get(case, 60),
+        )
+        result = pool._run_host_capability(job)
+        assert result.ok is (case in {"current", "deadline_bound"})
+        if case in {"stale", "expired", "lock_delay", "cancelled"}:
+            backend.preflight.assert_not_called()
+        else:
+            backend.preflight.assert_called_once()
+        if case in {"late_receipt", "cancelled_receipt"}:
+            assert result.value.receipt is not None
+            assert result.value.receipt.failed_step == "detach"
+            assert result.value.receipt.cleanup_state == "retained"
+            assert result.value.receipt.retained_root
+            assert result.value.receipt.stderr_tail == "detach remained uncertain"
+            assert result.interrupted is (case == "cancelled_receipt")
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+
+def test_pyxis_runtime_child_uses_the_active_source_operation_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real runtime probe stops its child at the outer operation deadline."""
+    monkeypatch.chdir(tmp_path)
+    clock = [100.0]
+    process = MagicMock()
+    process.poll.return_value = None
+    shutdown = threading.Event()
+
+    def launch(command: tuple[str, ...], **kwargs: Any) -> Any:
+        assert command[-2:] == ("/usr/bin/srun", "--help")
+        assert kwargs["start_new_session"] is True
+        clock[0] = 100.3
+        return process
+
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    with (
+        patch(f"{_WP}._trusted_executable", return_value="/usr/bin/srun"),
+        patch(f"{_WP}.subprocess.Popen", side_effect=launch) as child,
+        patch(f"{_WP}.subprocess_registry.track_process_group", return_value=nullcontext()),
+        patch(f"{_WP}._terminate_process_group") as terminate,
+        patch(f"{_WP}.time.sleep", side_effect=AssertionError("The expired child must stop.")),
+        git_utils.operation_deadline(100.2, shutdown=shutdown),
+    ):
+        assert not worker_pool_module._pyxis_runtime_available(shutdown=shutdown)
+    child.assert_called_once()
+    terminate.assert_called_once_with(process)
+    process.wait.assert_called_once_with()
+
+
+@pytest.mark.parametrize("phase", ["initial", "continuation"])
+def test_rebase_without_an_explicit_signing_provider_stops_before_git_mutation(
+    pool: WorkerPool, tmp_path: Path, phase: str
+) -> None:
+    """A worker cannot use ambient signing configuration as an implicit provider."""
+    pool._host_capabilities = None
+    result: JobResult | None
+    job = GitJob(
+        "test/repo",
+        "rebase",
+        60,
+        kwargs={"cwd": str(tmp_path), "expected_head_sha": "a" * 40, "rebase_reason": "manual"},
+    )
+    with (
+        patch(f"{_WP}._controlled_git_signing_env", return_value={}) as ambient,
+        patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=False) as rebase,
+        patch(f"{_WP}.git_utils.run") as git,
+        patch.object(pool, "_prepare_writer_rebase_source", return_value="b" * 40) as source,
+        patch.object(pool, "_admit_writer_rebase", return_value=None) as admission,
+        patch.object(pool, "_writer_rebase_conflict", return_value=JobResult(ok=False)),
+    ):
+        if phase == "initial":
+            try:
+                result = pool._git_rebase_once(job, record_source=Mock())
+            except worker_pool_module._RebaseSigningEnvironmentError as error:
+                result = worker_pool_module._git_environment_failure_result(error)
+            source.assert_called_once_with(job)
+            admission.assert_called_once_with(job, "b" * 40)
+        else:
+            result = pool._continue_rebase_process(
+                tmp_path,
+                remote="origin",
+                expected_repo="test/repo",
+                base_sha="b" * 40,
+                expected_remote_sha="a" * 40,
+                paths=("file.py",),
+                timeout=60,
+            )
+        assert isinstance(result, JobResult)
+        assert not result.ok
+        assert result.value == {"failure_kind": "signing_configuration"}
+        ambient.assert_not_called()
+        rebase.assert_not_called()
+        git.assert_not_called()
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_rebase_continuation_uses_only_the_explicit_signing_provider(
+    pool: WorkerPool, tmp_path: Path, available: bool
+) -> None:
+    """An injected provider controls signing independently of ambient host configuration."""
+    from hephaestus.automation.pipeline.host_capabilities import (
+        SigningConfigurationError,
+        WorkerCapabilities,
+    )
+
+    provider = Mock()
+    provider.environment.return_value = {"GIT_CONFIG_GLOBAL": os.devnull}
+    if not available:
+        provider.environment.side_effect = SigningConfigurationError("Signing is unavailable.")
+    pool._host_capabilities = WorkerCapabilities(None, "test-boundary", signing_provider=provider)
+    with (
+        patch(f"{_WP}._controlled_git_signing_env", return_value={}) as ambient,
+        patch(f"{_WP}.git_utils.run") as git,
+    ):
+        result = pool._continue_rebase_process(
+            tmp_path,
+            remote="origin",
+            expected_repo="test/repo",
+            base_sha="b" * 40,
+            expected_remote_sha="a" * 40,
+            paths=("file.py",),
+            timeout=60,
+        )
+    provider.environment.assert_called_once_with(tmp_path, timeout=60, private_metadata=False)
+    ambient.assert_not_called()
+    if available:
+        assert result is None
+        assert git.call_args.kwargs["env"] == {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_EDITOR": "true",
+        }
+    else:
+        assert isinstance(result, JobResult)
+        assert result.value == {"failure_kind": "signing_configuration"}
+        git.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["rebase", "continue_rebase"])
+@pytest.mark.parametrize(
+    "scenario", ["unavailable", "available", "malformed", "publication_failure"]
+)
+def test_rebase_receipts_bind_resulting_source_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, scenario: str
+) -> None:
+    """Both rebase paths need result-bound capability and execution evidence."""
+    from hephaestus.automation.pipeline.host_capabilities import (
+        QUOTA_AVAILABLE_TOKEN,
+        QUOTA_UNAVAILABLE_TOKEN,
+        CapabilityDeadline,
+        CapabilityReceiptTarget,
+        HostCapabilityReceipt,
+    )
+    from tests.unit.automation.test_rebase_recovery import (
+        _abort_worker_case,
+        _normal_publication_job,
+        _publication_validation_seams,
+        _store,
+    )
+
+    available = scenario != "unavailable"
+    mode = "initial" if operation == "rebase" else "continued"
+    with _abort_worker_case(
+        tmp_path,
+        monkeypatch,
+        fallback=False,
+        fault="clean",
+        conflict=mode == "continued",
+        structural=True,
+    ) as case:
+        _publication_validation_seams(case, mode, monkeypatch)
+        job = _normal_publication_job(case, mode)
+        signing = case.pool._host_capabilities.signing_provider
+        assert isinstance(signing, Mock)
+        signing.environment.reset_mock()
+        request = job.capability_target
+        assert request is not None
+        root = request.repository_root.resolve()
+        operation_id = case.job.capability_target.request_id
+        receipts: list[HostCapabilityReceipt] = []
+        executions: list[JobResult] = []
+
+        def probe(
+            target: CapabilityReceiptTarget, *, deadline: CapabilityDeadline
+        ) -> HostCapabilityReceipt:
+            assert deadline.remaining() > 0
+            resulting_head = _git(case.binding.cwd, "rev-parse", "HEAD")
+            assert resulting_head != case.original
+            assert target.request == request
+            assert target.source_head_sha == resulting_head
+            assert target.canonical_repository_root == root
+            assert target.root_device == root.stat().st_dev
+            assert target.execution_boundary_id == "abort-test"
+            retained = _store(case.manager.common_dir).read(1, operation_id)
+            assert retained.phase == "pending_validation"
+            assert retained.resulting_workspace.revision == resulting_head
+            receipt = HostCapabilityReceipt(
+                available,
+                QUOTA_AVAILABLE_TOKEN if available else QUOTA_UNAVAILABLE_TOKEN,
+                None if available else "backend",
+                "scratch",
+                "c" * 32,
+                target=target,
+                cleanup_state="complete" if available else "not_started",
+            )
+            if scenario == "malformed":
+                object.__setattr__(receipt, "failed_step", "attach")
+            receipts.append(receipt)
+            return receipt
+
+        def execute_source(build: Any) -> JobResult:
+            assert build.immutable_source is True
+            assert build.expected_head_sha == _git(case.binding.cwd, "rev-parse", "HEAD")
+            result = JobResult(
+                ok=True,
+                value={"head_sha": build.expected_head_sha, "immutable_source": True},
+                stdout_tail="structural checks passed",
+            )
+            executions.append(result)
+            return result
+
+        def publish(branch: str, expected: str, cwd: Path, **kwargs: Any) -> None:
+            assert branch == "1-repair" and expected == case.original
+            assert cwd == case.binding.cwd
+            retained = _store(case.manager.common_dir).read(1, operation_id)
+            assert retained.phase == "publication_intent"
+            assert retained.resulting_workspace.revision == kwargs["source_sha"]
+            if scenario == "publication_failure":
+                raise git_utils.BranchPublicationRemoteHeadUnchangedError(
+                    failure_kind="transport"
+                ) from subprocess.CalledProcessError(
+                    1, ["git", "push"], stderr="remote diagnostics"
+                )
+
+        case.backend.preflight.side_effect = probe
+        execute = Mock(side_effect=execute_source)
+        push = Mock(side_effect=publish)
+        monkeypatch.setattr(case.pool, "_run_immutable_build_test", execute)
+        monkeypatch.setattr(git_utils, "push_head_to_branch", push)
+        result = case.pool._run_git(job)
+        resulting_head = _git(case.binding.cwd, "rev-parse", "HEAD")
+        retained = _store(case.manager.common_dir).read(1, operation_id)
+        assert (
+            case.manager._require_receipt(1, SourceLane.IMPLEMENTATION).revision == resulting_head
+        )
+        assert retained.resulting_workspace.revision == resulting_head != case.original
+        assert case.starts == [True]
+        signing.environment.assert_called_once_with(
+            case.binding.cwd, timeout=ANY, private_metadata=False
+        )
+        case.backend.preflight.assert_called_once()
+        if scenario == "malformed":
+            assert not result.ok
+            assert result.value["capability_receipt"] is None
+            assert retained.phase == "pending_validation"
+            execute.assert_not_called()
+            push.assert_not_called()
+            return
+        assert result.ok is (available and scenario != "publication_failure"), result
+        assert result.value["capability_receipt"] == receipts[0]
+        assert receipts[0].target.request.expected_head_sha == case.original
+        if available:
+            execute.assert_called_once()
+            assert execute.call_args.args[0].expected_head_sha == resulting_head
+            assert result.value["structural_execution_receipt"] == executions[0]
+            push.assert_called_once()
+            if scenario == "publication_failure":
+                assert result.error == "publish failed: transport failure"
+                assert result.stderr_tail == "remote diagnostics"
+                assert result.value["failure_kind"] == "publish_transport_failed"
+                assert result.value["publication_failure_diagnostic"]["phase"] == "push"
+                assert retained.phase == "publication_intent"
+            else:
+                assert result.value["head_sha"] == resulting_head
+                assert retained.phase == "complete"
+        else:
+            assert retained.phase == "pending_validation"
+            execute.assert_not_called()
+            push.assert_not_called()
