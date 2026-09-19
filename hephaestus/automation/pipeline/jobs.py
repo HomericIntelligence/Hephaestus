@@ -15,7 +15,7 @@ import math
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,12 +28,17 @@ from hephaestus.agents.workspace import (
 )
 
 from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
-from .job_results import JobHandle, JobResult
+from .host_capabilities import CapabilityRequestTarget
+from .job_results import JobHandle, JobResult, ProcessFailureMetadata
+from .repository_validation import (
+    RepositoryValidationExecution,
+    validate_repository_validation_execution,
+)
+from .repository_validation_preparation import RepositoryValidationRuntimeRequest
 
 if TYPE_CHECKING:
     from hephaestus.agents.codex_isolation import CodexIsolationRequestV1
 
-    from .host_capabilities import CapabilityRequestTarget
 
 __all__ = [
     "GIT_OPS",
@@ -46,6 +51,7 @@ __all__ = [
     "JobHandle",
     "JobResult",
     "JobWorkspaceError",
+    "ProcessFailureMetadata",
     "validate_job_workspace",
 ]
 
@@ -289,6 +295,8 @@ class BuildTestJob:
     Security: ``argv`` MUST NOT carry untrusted (issue-body-derived) strings.
     It is executed directly as a subprocess argument vector, so only the
     coordinator may construct these jobs, from vetted command templates.
+    Optional repository validation metadata binds one immutable check and its
+    sealed runtime. A job without that metadata keeps the legacy execution path.
     """
 
     repo: str
@@ -300,17 +308,55 @@ class BuildTestJob:
     # from the reviewer worktree.
     expected_head_sha: str = ""
     immutable_source: bool = False
-    capability_target: CapabilityRequestTarget | None = None
     # A non-None value tells the worker to run ``argv`` through the host-owned
     # descriptor snapshot launcher. An empty value keeps fallback untrusted.
     verified_runner_source_revision: str | None = None
     descr: str = ""
+    repository_validation: RepositoryValidationExecution | None = None
+    repository_validation_preparation: RepositoryValidationRuntimeRequest | None = None
+    capability_target: CapabilityRequestTarget | None = None
 
     def __post_init__(self) -> None:
         """Normalize argv to a tuple so the job is deeply immutable/hashable."""
         if not isinstance(self.argv, tuple):
             # frozen dataclass: bypass the frozen __setattr__ for normalization
             object.__setattr__(self, "argv", tuple(self.argv))
+        validate_build_test_repository_validation(self)
+
+
+def validate_build_test_repository_validation(job: BuildTestJob) -> None:
+    """Reject job fields that conflict with repository validation metadata."""
+    execution = job.repository_validation
+    preparation = job.repository_validation_preparation
+    if execution is None and preparation is None:
+        return
+    if preparation is not None:
+        if execution is not None or type(preparation) is not RepositoryValidationRuntimeRequest:
+            raise ValueError("Runtime preparation and execution must be separate jobs.")
+        replace(preparation)
+        plan = preparation.invocation.plan
+        check = next(
+            check for check in plan.checks if check.check_id == preparation.invocation.check_ids[0]
+        )
+        if type(job.timeout_s) is not int or not 0 < job.timeout_s <= 120:
+            raise ValueError("The runtime preparation timeout is invalid.")
+    else:
+        if execution is None:
+            raise ValueError("Repository validation execution is missing.")
+        check = validate_repository_validation_execution(execution)
+        plan = execution.plan
+    if (
+        type(job.repo) is not str
+        or job.repo.casefold() not in {plan.repository.casefold(), "comet"}
+        or job.cwd != plan.source_workspace.cwd
+        or job.argv != check.argv
+        or job.expected_head_sha != plan.reviewed_head
+        or job.immutable_source is not True
+        or job.verified_runner_source_revision is not None
+        or type(job.timeout_s) is not int
+        or job.timeout_s <= 0
+    ):
+        raise ValueError("The build job does not match its repository validation metadata.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,10 +367,22 @@ class HostCapabilityJob:
     target: CapabilityRequestTarget
     timeout_s: int
     descr: str = "host_capability_preflight"
+    deadline_s: float = field(kw_only=True)
 
     def __post_init__(self) -> None:
         """Reject a target that names a different repository."""
-        if self.repo != self.target.repository or self.timeout_s <= 0:
+        if type(self.target) is not CapabilityRequestTarget:
+            raise ValueError("The capability job target type is invalid.")
+        replace(self.target)
+        if (
+            self.repo != self.target.repository
+            or self.target.phase != "pr_review"
+            or type(self.timeout_s) is not int
+            or self.timeout_s <= 0
+            or type(self.deadline_s) not in {int, float}
+            or not math.isfinite(self.deadline_s)
+            or self.deadline_s <= 0
+        ):
             raise ValueError("host capability job is invalid")
 
 
@@ -376,6 +434,7 @@ def _valid_writer_publication_facts(value: object) -> bool:
         "remote_at_source",
         "remote_changed",
         "remote_unchanged",
+        "remote_absent",
         "probe_failed",
     }:
         return False
@@ -395,6 +454,8 @@ def _valid_writer_publication_facts(value: object) -> bool:
         return False
     if state in {"published", "remote_at_source"}:
         return bool(observed == head)
+    if state == "remote_absent":
+        return baseline is None and observed is None and value["refresh_phase"] is None
     if state == "remote_changed":
         return observed is not None and observed not in (head, baseline)
     if state == "remote_unchanged":

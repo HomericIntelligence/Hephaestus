@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic
+from types import SimpleNamespace
 
 import pytest
 
 from hephaestus.automation import event_log_retention
+from hephaestus.automation.event_log_io import (
+    EventLogCandidate,
+    EventLogHandle,
+    open_event_log_handle,
+)
 from hephaestus.automation.event_log_retention import event_log_lifecycle
+from hephaestus.automation.pipeline.coordinator_observability import record_event
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock as real_file_lock
 
 
@@ -177,13 +186,13 @@ def test_cleaner_first_interleaving_protects_recreated_log(
     cleaner_reached_unlink = Event()
     allow_unlink = Event()
     lifecycle_entered = Event()
-    original_unlink = Path.unlink
+    original_unlink = event_log_retention._unlink_event_log
 
-    def paused_unlink(path: Path, *, missing_ok: bool = False) -> None:
-        if path == reused:
+    def paused_unlink(handle: EventLogHandle, log: event_log_retention._EventLog) -> None:
+        if log.path == reused:
             cleaner_reached_unlink.set()
             assert allow_unlink.wait(timeout=5)
-        original_unlink(path, missing_ok=missing_ok)
+        original_unlink(handle, log)
 
     def clean() -> None:
         with event_log_lifecycle(
@@ -206,7 +215,7 @@ def test_cleaner_first_interleaving_protects_recreated_log(
             reused.write_text("new run\n", encoding="utf-8")
             lifecycle_entered.set()
 
-    monkeypatch.setattr(Path, "unlink", paused_unlink)
+    monkeypatch.setattr(event_log_retention, "_unlink_event_log", paused_unlink)
     cleaner = Thread(target=clean)
     lifecycle = Thread(target=reuse)
     cleaner.start()
@@ -310,14 +319,14 @@ def test_unlink_failure_is_logged_and_lifecycle_continues(
     first = _event_log(tmp_path, now - timedelta(days=32), 101)
     second = _event_log(tmp_path, now - timedelta(days=31), 102)
     current = _event_log(tmp_path, now, 103)
-    original_unlink = Path.unlink
+    original_unlink = event_log_retention._unlink_event_log
 
-    def unlink(path: Path, *, missing_ok: bool = False) -> None:
-        if path == first:
+    def unlink(handle: EventLogHandle, log: event_log_retention._EventLog) -> None:
+        if log.path == first:
             raise OSError("simulated unlink failure")
-        original_unlink(path, missing_ok=missing_ok)
+        original_unlink(handle, log)
 
-    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(event_log_retention, "_unlink_event_log", unlink)
     with caplog.at_level("WARNING", logger=event_log_retention.LOG.name):
         with event_log_lifecycle(
             current,
@@ -340,11 +349,11 @@ def test_current_lock_failure_is_nonfatal(
 ) -> None:
     """Failure to acquire the current lock only warns and yields."""
 
-    def unavailable(path: Path, *, blocking: bool = True, require_exclusive: bool = False) -> None:
-        del path, blocking, require_exclusive
+    def unavailable(self: EventLogHandle, name: str, *, blocking: bool) -> None:
+        del self, name, blocking
         raise LockUnavailableError("simulated lock failure")
 
-    monkeypatch.setattr(event_log_retention, "file_lock", unavailable)
+    monkeypatch.setattr(EventLogHandle, "lock", unavailable)
     with caplog.at_level("WARNING", logger=event_log_retention.LOG.name):
         with event_log_lifecycle(
             tmp_path / "pipeline-events-20260131T000000Z-101.jsonl",
@@ -354,7 +363,7 @@ def test_current_lock_failure_is_nonfatal(
         ):
             pass
 
-    assert any("cleanup skipped" in record.message for record in caplog.records)
+    assert any("candidate is unavailable" in record.message for record in caplog.records)
 
 
 def test_cleanup_lock_failure_is_nonfatal(
@@ -364,26 +373,29 @@ def test_cleanup_lock_failure_is_nonfatal(
 ) -> None:
     """Failure to acquire the directory cleanup lock preserves the files."""
     old = _event_log(tmp_path, datetime(2025, 1, 1, tzinfo=UTC), 101)
-    real_file_lock = event_log_retention.file_lock
+    real_lock = EventLogHandle.lock
 
     @contextmanager
-    def fail_cleanup_lock(
-        path: Path, *, blocking: bool = True, require_exclusive: bool = False
-    ) -> Iterator[None]:
-        if path.name == event_log_retention._RETENTION_LOCK_NAME:
+    def fail_cleanup_lock(handle: EventLogHandle, name: str, *, blocking: bool) -> Iterator[None]:
+        if name == event_log_retention._RETENTION_LOCK_NAME:
             raise LockUnavailableError("simulated cleanup lock failure")
-        with real_file_lock(path, blocking=blocking, require_exclusive=require_exclusive):
+        with real_lock(handle, name, blocking=blocking):
             yield
 
-    monkeypatch.setattr(event_log_retention, "file_lock", fail_cleanup_lock)
+    monkeypatch.setattr(EventLogHandle, "lock", fail_cleanup_lock)
     with caplog.at_level("WARNING", logger=event_log_retention.LOG.name):
-        event_log_retention._cleanup_event_logs(
-            tmp_path,
-            retention_days=30,
-            retention_count=0,
-            dry_run=False,
-            now=datetime(2026, 1, 31, tzinfo=UTC),
+        candidate = EventLogCandidate(
+            path=tmp_path / "pipeline-events-20260131T000000Z-102.jsonl",
+            private_root=tmp_path,
         )
+        with open_event_log_handle(candidate) as handle:
+            event_log_retention._cleanup_event_logs(
+                handle,
+                retention_days=30,
+                retention_count=0,
+                dry_run=False,
+                now=datetime(2026, 1, 31, tzinfo=UTC),
+            )
 
     assert old.exists()
     assert any("cleanup skipped" in record.message for record in caplog.records)
@@ -404,3 +416,39 @@ def test_zero_limits_disable_cleanup(tmp_path: Path) -> None:
         pass
 
     assert old.exists()
+
+
+def test_lifecycle_handle_survives_parent_replacement(tmp_path: Path) -> None:
+    """A bound handle survives replacement of an intermediate component."""
+    namespace = tmp_path / "namespace"
+    original = namespace / "selected"
+    original.mkdir(parents=True, mode=0o700)
+    current = original / "pipeline-events-20260131T000000Z-102.jsonl"
+    moved = tmp_path / "namespace-moved"
+    attacker = tmp_path / "attacker"
+    (attacker / "selected").mkdir(parents=True, mode=0o700)
+
+    with event_log_lifecycle(
+        current,
+        retention_days=0,
+        retention_count=0,
+        dry_run=False,
+    ) as handle:
+        assert handle is not None
+        coordinator = SimpleNamespace(
+            config=SimpleNamespace(event_log_path=current, event_log_handle=handle),
+            event_log=[],
+            _event_log_disabled=False,
+        )
+        namespace.rename(moved)
+        namespace.symlink_to(attacker, target_is_directory=True)
+        record_event(
+            coordinator,
+            "probe",
+            now_fn=lambda: 0.0,
+            logger=logging.getLogger(__name__),
+        )
+
+    record = json.loads((moved / "selected" / current.name).read_text(encoding="utf-8"))
+    assert record["event"] == "probe"
+    assert not (attacker / "selected" / current.name).exists()

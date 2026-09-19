@@ -49,8 +49,24 @@ def _required_status_rule(
     return _required_checks(parameters), strict
 
 
-def ruleset_rule_facts(rules: object) -> tuple[set[RequiredCheck], bool, bool, str | None]:
-    """Parse checks, thread resolution, strict update, and queue mode."""
+def _merge_queue_rule(parameters: dict[str, object]) -> tuple[str, int, int]:
+    """Parse the merge method and both server wait limits."""
+    method = parameters.get("merge_method")
+    check_timeout = parameters.get("check_response_timeout_minutes")
+    minimum_wait = parameters.get("min_entries_to_merge_wait_minutes")
+    if method not in {"MERGE", "SQUASH", "REBASE"}:
+        raise ValueError("ruleset merge-queue method is malformed")
+    if type(check_timeout) is not int or check_timeout <= 0:
+        raise ValueError("ruleset merge-queue check timeout is malformed")
+    if type(minimum_wait) is not int or minimum_wait < 0:
+        raise ValueError("ruleset merge-queue minimum wait is malformed")
+    return str(method), check_timeout, minimum_wait
+
+
+def ruleset_rule_facts(
+    rules: object,
+) -> tuple[set[RequiredCheck], bool, bool, str | None, int | None, int | None]:
+    """Parse checks, thread resolution, strict update, and queue limits."""
     if not isinstance(rules, list):
         raise ValueError("ruleset rules are malformed")
     checks: set[RequiredCheck] = set()
@@ -58,6 +74,8 @@ def ruleset_rule_facts(rules: object) -> tuple[set[RequiredCheck], bool, bool, s
     seen: set[str] = set()
     strict_update = False
     merge_queue_method: str | None = None
+    check_response_timeout_minutes: int | None = None
+    min_entries_to_merge_wait_minutes: int | None = None
     selected = {"required_status_checks", "pull_request", "merge_queue"}
     for rule in rules:
         if not isinstance(rule, dict) or not isinstance(rule.get("type"), str):
@@ -77,11 +95,19 @@ def ruleset_rule_facts(rules: object) -> tuple[set[RequiredCheck], bool, bool, s
                 raise ValueError("ruleset thread-resolution policy is malformed")
             requires_resolution = resolution
         elif rule_type == "merge_queue":
-            method = parameters.get("merge_method")
-            if method not in {"MERGE", "SQUASH", "REBASE"}:
-                raise ValueError("ruleset merge-queue method is malformed")
-            merge_queue_method = str(method)
+            (
+                merge_queue_method,
+                check_response_timeout_minutes,
+                min_entries_to_merge_wait_minutes,
+            ) = _merge_queue_rule(parameters)
         else:
             status_checks, strict_update = _required_status_rule(parameters)
             checks.update(status_checks)
-    return checks, requires_resolution, strict_update, merge_queue_method
+    return (
+        checks,
+        requires_resolution,
+        strict_update,
+        merge_queue_method,
+        check_response_timeout_minutes,
+        min_entries_to_merge_wait_minutes,
+    )

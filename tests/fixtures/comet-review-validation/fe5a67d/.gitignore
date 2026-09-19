@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.runtime/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+docker/*.whl
+docker/smg-wheelhouse/
+.env
+site/

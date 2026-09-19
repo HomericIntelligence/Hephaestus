@@ -64,14 +64,22 @@ from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+from hephaestus.automation.pipeline.merge_wait_admission import RequiredChecksDeferred
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
 from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..events import StageEvent
-from ..github_jobs import GitHubJob, ImplementationReplyProgress
+from ..github_jobs import (
+    GitHubJob,
+    ImplementationReplyProgress,
+    MergeQueueReconciliation,
+    ReadRepositoryValidationCIRequest,
+    RepositoryValidationCIRead,
+)
 from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
+from ..merge_wait_admission import VerifiedRepositoryDefaultBranch
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..stage_results import Continue, JobRequest
 from ..work_item import ItemKind, WorkItem
@@ -235,6 +243,12 @@ class StageGitHub(Protocol):
         self, deadline_s: float, *, shutdown: threading.Event | None = None
     ) -> AbstractContextManager[None]:
         """Apply one deadline and cancellation signal to a service operation."""
+        ...
+
+    def read_repository_validation_ci(
+        self, request: ReadRepositoryValidationCIRequest
+    ) -> RepositoryValidationCIRead:
+        """Collect bound Comet CI evidence through the GitHub worker."""
         ...
 
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
@@ -571,6 +585,10 @@ class StageGitHub(Protocol):
         """Read operational normal-merge readiness without granting authorization."""
         pass
 
+    def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
+        """Read validated repository identity and its exact default branch."""
+        pass
+
     def effective_merge_policy(
         self,
         pr_number: int,
@@ -589,8 +607,8 @@ class StageGitHub(Protocol):
         *,
         deadline_s: float,
         cancellation: threading.Event,
-    ) -> bool:
-        """Return whether required status evidence passes for ``head_sha``."""
+    ) -> bool | RequiredChecksDeferred:
+        """Only literal True permits merge admission for ``head_sha``."""
         pass
 
     def merge_pr_if_head(
@@ -604,6 +622,18 @@ class StageGitHub(Protocol):
         cancellation: threading.Event | None = None,
     ) -> ConditionalMergeResult:
         """Request one server-enforced merge route for the reviewed head."""
+        pass
+
+    def reconcile_merge_queue_entry(
+        self,
+        pr_number: int,
+        pull_request_id: str,
+        reviewed_sha: str,
+        *,
+        deadline_s: float,
+        cancellation: threading.Event,
+    ) -> MergeQueueReconciliation:
+        """Read the exact-head live merge-queue entry state."""
         pass
 
     # -- repo-stage surface (#1817) -----------------------------------------

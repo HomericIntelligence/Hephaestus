@@ -10,6 +10,8 @@
 # BOTH the pre-commit and commit-msg stages, so the conventional-commit-msg hook
 # below actually fires without `--hook-type commit-msg`. See issue #1209.
 default_install_hook_types: [pre-commit, commit-msg]
+# Preserve the exact bytes of external source-admission fixtures.
+exclude: ^tests/fixtures/comet-review-validation/(current/|fe5a67d/|historical/controls/)
 
 repos:
 
@@ -431,7 +433,7 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
-        exclude: ^(tests/fixtures/sigstore/codex-rekor\.proof)$
+        exclude: ^tests/fixtures/(sigstore/codex-rekor\.proof|comet-review-validation/historical/(jobs|run)\.json)$
       - id: check-yaml
       - id: check-toml
       - id: check-added-large-files

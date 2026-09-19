@@ -94,7 +94,12 @@ Repository and direct intake use the same row boundary. Intake does not write
  spending a merge attempt. The `--poll-max-wait` option controls this wait. Its
  default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof.
  Readiness is not authorization, and each request
- still has fresh open/`main`/unarmed/exclusive-GO admission.
+ still has fresh open/unarmed/exclusive-GO admission against the verified
+ repository default branch. The initial repository/default-branch/base/head
+ snapshot must equal the final snapshot immediately before the request. If the
+ metadata accessor fails, stop queue-driven merge requests and use the normal
+ protected manual process until repair. Do not guess `main` or use labels as
+ branch authority.
  The adapter makes one request per call and never retries. A required merge
  queue uses exact-head GraphQL admission. Otherwise, direct REST merge requires
  strict-update protection from a source that the current actor cannot bypass.
@@ -689,9 +694,10 @@ exact-head status evidence ─────► current CI merge gate
 ```
 
 `merge_wait` requires the implementation-GO label, a matching in-memory
-reviewed-head proof on an open `main`, confirmed-unarmed live PR with an
-exclusive GO label, no unresolved review threads, and complete passing required
-status evidence for that head. A missing or drifted proof,
+reviewed-head proof on an open PR whose base equals the verified repository
+default branch, a confirmed-unarmed live PR with an exclusive GO label, no
+unresolved review threads, and complete passing required status evidence for
+that head. A missing or drifted proof,
 failed or missing required status evidence, or untrusted merge state blocks
 without a label mutation. A matching set
 permits a bounded sequence (default: five) of policy-selected server requests.
@@ -773,8 +779,9 @@ Repo intake has three separate worktree layers:
   outside the user checkout. Its receipt records the common directory, exact
   fetched SHA, default branch, and ownership generation.
 - The per-item implementation and review worktrees are created from the
-  verified intake worktree. They retain their existing strict dirty-state and
-  cleanup checks.
+  verified intake worktree. Their files use `build/.worktrees` below the
+  receipt-bound intake state root, outside the intake checkout. They retain
+  their existing strict dirty-state and cleanup checks.
 
 Before intake preparation starts, the main worker pool takes an exclusive
 nonblocking run lease for the Git common directory. The lease path is stable
@@ -1056,9 +1063,17 @@ Architectural contract:
   and charged round. Publication retries reuse that verdict and do not charge
   the logical round again. The stage checks current plan identity before
   publication, after the audit write, and after the label transition.
-- A changed plan returns to planning. If this review wrote a proposed label,
-  the stage restores exclusive `state:needs-plan` with readback. An operator
-  `state:plan-blocked` label has priority.
+- Before a Codex implementation GO, plan review uses the implementation scope
+  parser on the exact canonical plan. The plan must declare at least one safe
+  path under `## Files to Modify`, `## Files to Create`, or `## File Changes`.
+  A changed canonical plan returns to planning before scope validation. An
+  invalid scope blocks admission. The blocked audit states the accepted form
+  and the required operator recovery steps.
+- The stage checks plan identity before it checks Codex scope admission. A
+  changed plan returns to planning, including when a Codex implementation GO is
+  pending. If this review wrote a proposed label, the stage restores exclusive
+  `state:needs-plan` with readback. An existing `state:plan-blocked` label stops
+  automatic recovery and has priority.
 - Invalid output and reviewer-session replacement share a bounded error
   sequence. Two consecutive retries are allowed; the third failure stops the
   item. Session replacement preserves logical review rounds.
@@ -1310,10 +1325,73 @@ failed receipt. It cannot become a passing skip. Other platforms remain
 fail-closed until a separately reviewed isolation backend exists. There is no
 unsandboxed fallback.
 
-Every PR uses the normal host-verification boundary. The completed PR #3006
-bootstrap is retired. There is no target-specific grant, comment selector, or
-skip-to-pass path. Generic host receipts remain in
+The Hephaestus profile uses the host-verification boundary above. The completed
+PR #3006 bootstrap is retired. There is no target-specific grant, comment
+selector, or skip-to-pass path. Generic host receipts remain in
 [`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
+
+For `LLM360/comet`, the coordinator first binds the detached source workspace.
+A closed `prepare_repository_validation` Git job then builds the exact
+source-profile plan on a worker. The worker holds the repository locks and
+the current review-lane lease. This read operation does not receive writer
+authority. The request binds the complete checkout manifest, both base
+identities, head, workspace, generation, and nonce. No bootstrap grant is
+necessary. The plan
+keeps applicable checks separate from the checks eligible for ordinary PR CI
+or offline local execution. Unknown or mixed control versions fail admission.
+See [ADR-0054](adr/0054-comet-review-validation.md) for profile and receipt rules.
+
+The admitted profiles are `comet-5232ef5-v1`, `comet-d19d3dd-v1`, and
+`comet-fe5a67d-v1`. The last profile binds the public-root test controls and
+adds `scripts/build_public_access_application.py` to the control-deployment
+policy. Its deployment contract remains a nightly check. Profile admission
+does not prove that a validation command passed.
+
+The submitted GitHub job collects two agreeing CI observations. The retained
+PR identity, reviewed head, target base, immutable merge parents, control bytes,
+and command steps must agree. `on_job_done()` consumes the result before the
+coordinator assigns `REPOSITORY_VALIDATION_CI_WAIT`. That wait handler evaluates
+coverage. Complete CI coverage proceeds without a local runtime lookup.
+
+Otherwise, the coordinator reserves one local invocation. A separate
+`BuildTestJob` first admits the fixed runtime on a worker. Its preparation
+field is mutually exclusive with execution metadata. Admission returns only
+bound runtime metadata, not a validation receipt. The coordinator then submits
+the existing execution job with that metadata and the same invocation.
+Execution retains source inspection, isolation, runtime admission, and the
+immediate pre-launch recheck. The wait handler selects the next uncovered
+check or proceeds to review.
+
+Both preparation operations have a maximum 120-second budget. Their absolute
+deadlines include queue time, lock waits, and nested work. An expired budget
+cannot be renewed. The coordinator checks callback ownership and live identity
+before acceptance and again before the next job. A failed runtime admission
+creates a terminal gap. A foreign callback cannot replace an active request.
+
+The pure contracts are in
+[`repository_validation_preparation.py`](../hephaestus/automation/pipeline/repository_validation_preparation.py).
+The stage owner is
+[`pr_review_repository_validation.py`](../hephaestus/automation/pipeline/stages/pr_review_repository_validation.py).
+Pure coverage and prompt summaries are in
+[`pr_review_repository_validation_state.py`](../hephaestus/automation/pipeline/stages/pr_review_repository_validation_state.py).
+The effectful runtime adapter is outside the pure pipeline, in
+[`repository_validation_runtime.py`](../hephaestus/automation/repository_validation_runtime.py).
+
+Local Comet execution uses the existing isolation backend and a separately
+admitted sealed runtime at the fixed host capability path. Unlike the host's
+working virtual environment, this runtime is explicitly bound and read-only.
+The reviewed source precedes installed packages for the main and nested Python
+processes. Permitted output uses bounded scratch storage; review does not
+install dependencies or use an unsandboxed fallback.
+
+The coordinator stores pending ownership before submission and consumes each
+callback before changing state. Invalid or failed evidence remains a gap.
+Restart clears the attempt and preparation state. It starts again with source
+admission. CI and local receipts can jointly cover the plan,
+but source review remains separate. Both reviewer prompts receive a fenced
+summary that preserves the evidence kind. Clean evaluation, audit persistence,
+and implementation GO each require complete current coverage. Production
+operations and repository merge gates retain their separate requirements.
 
 Every host-verification failure also upserts an automation-owned diagnostic on
 the pull request after the exact-head NOGO label is read back. The comment is
@@ -1354,7 +1432,16 @@ stateDiagram-v2
     ThreadGate --> Checkout: explicit operator broad review; preserve inherited threads
     Checkout --> Review: broad audit entry and clean snapshot matches H
     Checkout --> Validate: comment-validation entry and clean snapshot matches H
-    Checkout --> HostVerification: clean checkout matches snapshot head and fixed check is required
+    Checkout --> SourcePreparation: Comet bound checkout manifest
+    SourcePreparation --> RepositoryValidation: worker admits exact source plan
+    RepositoryValidation --> RuntimePreparation: uncovered eligible local check
+    RuntimePreparation --> RepositoryValidation: worker admits runtime; separate check execution
+    SourcePreparation --> Failed: stale ownership or invalid source plan
+    RuntimePreparation --> Failed: unavailable runtime or stale callback
+    RepositoryValidation --> Review: complete coverage; broad audit
+    RepositoryValidation --> Validate: complete coverage; comment validation
+    RepositoryValidation --> Failed: invalid evidence or unavailable required capability
+    Checkout --> HostVerification: Hephaestus fixed check is required
     HostVerification --> Review: immutable snapshot verification passed
     HostVerification --> Implementation: confirmed test failure, after durable no-go, diagnostic, and checkout cleanup
     HostVerification --> Failed: boundary/setup failure, after durable no-go diagnostic and checkout cleanup
@@ -1586,8 +1673,8 @@ Architectural contract:
 Merge wait verifies a still-valid implementation review against its
 in-memory reviewed-head proof before each request. It may issue a bounded
 sequence (default: five) of policy-selected server merge requests. Admission
-for every request requires an open
-`main` PR, an explicitly unarmed record, an exclusive implementation-GO
+for every request requires an open PR whose base equals the verified repository
+default branch, an explicitly unarmed record, an exclusive implementation-GO
 label, the current-process reviewed-head proof or a verified retained rebase
 proof, no unresolved review threads, and complete passing required status
 evidence for the merge head. The merge head is the original reviewed commit
@@ -1633,7 +1720,7 @@ stateDiagram-v2
     Inspect --> OperatorOwned: externally armed
     Inspect --> PRReview: implementation proof missing
     Inspect --> Verify: implementation proof present
-    Verify --> Merge: matching reviewed head, main, unarmed exclusive GO
+    Verify --> Merge: matching head and verified default branch, unarmed exclusive GO
     Verify --> PRReview: missing or drifted proof
     Verify --> OperatorOwned: externally armed or ownership ambiguous
     Verify --> Failed: required status evidence missing or failed
@@ -1929,6 +2016,76 @@ signing, and commit creation. Pipeline stages put immutable issue title and
 body values in each job. The Git worker calls this neutral commit interface;
 it does not fetch issue data through an old commit adapter.
 
+### Host capability ownership
+
+The coordinator supplies quota and signing providers through
+`WorkerCapabilities`. The pure contracts in `pipeline/host_capabilities.py`
+define requests, receipts, and provider interfaces. Host operations in
+`automation/host_capabilities.py` own platform selection, filesystem access,
+commands, receipt storage, and the quota cache.
+
+A request binds the repository, issue, optional PR, source workspace, head,
+attempt generation, purpose, and request ID. The worker adds the canonical
+root, device, backend, execution boundary, and observed source head to the
+receipt target. The signing provider calls the existing controlled signing
+validator and preserves its failure cause.
+
+Quota receipts are stored under
+`build/.issue_implementer/host-capability-receipts/`. Storage uses a private
+lock, atomic replacement, and exact readback. The cache key includes the
+canonical root, device, capability, backend, execution boundary, and process
+ID. A cache hit creates a new receipt for the current request. Stored
+receipts do not supply cache authority to a new process.
+
+### Pending rebase records
+
+The host-side `PendingRebaseStore` owns durable recovery records. It stores
+them in `hephaestus-source-workspaces/pending-rebases` under the canonical
+Git common directory. The store rejects unsafe ownership, permissions,
+symlinks, and namespace replacement. Existing protected parent directories
+do not need private permissions. The recovery directory must have mode
+`0700`; its record lock must have mode `0600`.
+
+Each write compares the complete prior record before it replaces that
+record. Creation also checks for another active record for the same issue.
+A short file lock protects these checks, the durable write, and its exact
+readback. Lock waits use the caller's absolute deadline. The store does not
+run Git commands or make network requests while it holds this lock.
+
+Discovery returns recovery data, not execution permission. An unresolved
+`intent` or multiple active records require operator recovery. Completed
+and aborted records remain stored but do not select active recovery work.
+The worker must validate source ownership and the current repository state
+before it can use a recovery record to continue an operation.
+
+### First-publication recovery
+
+The existing `commit_push` worker owns first publication. A local no-PR rebase
+does not publish a branch. Before an absent-only push, the worker stores and
+reads back the intended commit, tree, source ownership, destination, branch,
+scope, and operation identity. The
+[`FirstPublicationStore`](../hephaestus/automation/first_publication_recovery.py)
+uses a separate `first-publications` namespace under the source manager's
+protected Git-common state directory. It does not use a rebase record as
+publication permission.
+
+Discovery supplies an untrusted candidate. The
+[`worker`](../hephaestus/automation/pipeline/worker_pool.py) checks current
+source ownership, clean head and tree, signing metadata, approved paths, and
+authenticated remote state before recovery. It checks both the current
+merge-base diff and the retained-start diff against current approved paths.
+It repeats publication validation without another writer, commit, or rebase.
+
+Confirmed remote absence permits a conditional push with normal hooks. The
+exact intended remote head permits completion after durable intent is checked.
+A competing head or failed observation blocks. Completed records remain
+available for a fresh request-bound callback; they do not permit another push.
+The existing
+[`implementation stage`](../hephaestus/automation/pipeline/stages/implementation.py)
+accepts that callback before it advances to PR creation. An ambiguous crash
+before valid intent requires operator recovery. No recovery record grants
+source-review approval or merge authority.
+
 ### Job kinds
 
 Every job that can read repository source carries a provider-neutral
@@ -1948,7 +2105,10 @@ worktree-management control plane. For each issue or linked PR, planning and
 reviewer source reads reuse the detached
 `build/.worktrees/auto-<#>-review` source at the captured default-branch
 revision. Implementation, remediation, and writer recovery source reads reuse
-`build/.worktrees/auto-<#>-impl`. Changed revisions rebind the same path and
+`build/.worktrees/auto-<#>-impl`. For a verified intake checkout, these paths
+start at its receipt-bound state root. An ordinary checkout keeps its existing
+local path convention. A missing or invalid intake receipt cannot select the
+ordinary path convention. Changed revisions rebind the same path and
 increment its receipt generation. Review never creates a review branch. The
 stable `auto-<#>-guard` ref is a CAS-protected ownership record only and never
 owns a third worktree. Dirty lanes and lanes with durable learning or cleanup
@@ -2016,6 +2176,9 @@ The exhaustive classification is maintained in the
  local bytes after the read. A recovered ready sequence does not invent its
  historical predecessor digest. Live test-fix jobs must provide the exact
  invalidated predecessor before the provider can run.
+ For `create_worktree`, Git admission replaces `repo_root` with its selected
+ checkout only when the job has no source binding. A source-bound job keeps
+ its validated reusable repository root.
 - [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py) — one frozen
  typed request. The request can recover a normal reply journal, recover a
  remediation-only format-three journal, append a prepared journal, deliver an
@@ -2046,11 +2209,22 @@ failure with bounded output and error text. A failure can retain a typed
 recovery value. Consumers must inspect that value before they select a retry.
 An unsuccessful result does not prove that no external effect occurred.
 
+A dirty direct claim preparation error with cause `GIT_TIMEOUT` produces
+`timeout` and `value=None`. Other caught claim failures return
+`dirty_direct_claim_failed`. Their value includes `preserved_worktree` when
+its path exists or is a symlink. Dirty direct publication uses `timeout` for
+the same cause. Its value retains `phase`, `reason`, `committed`, `pushed`,
+and `local_head`, as with other caught publication failures. Both operations
+propagate `InterruptedError` to
+[`_run_git`](../hephaestus/automation/pipeline/worker_pool.py),
+which returns `interrupted` with `interrupted=True` and `value=None`.
+
 During forced shutdown, a failed typed learning result remains interrupted
 after host execution starts. The coordinator retains the uncertain claim;
 restart must not repeat an unconfirmed delivery. A successful typed host
-result survives shutdown and a later workspace-cleanup error. The learning
-stage still validates its delivery receipt before it records success.
+result with a validated delivery receipt survives shutdown and a later
+workspace-cleanup error. The learning stage still validates its delivery
+receipt before it records success.
 Without forced shutdown, a typed host rejection retains the existing bounded
 retry policy.
 
@@ -2077,23 +2251,38 @@ internal failure is distinct from an OS signal and does not select exit code
 ### Per-repo lock layering
 
 [`_run_git`](../hephaestus/automation/pipeline/worker_pool.py) wraps each Git
-operation in three locks. `_run_github` uses the same in-process repository
-lock. It does not use the Git metadata locks:
+operation in these lock layers. `_run_github` uses only the in-process
+repository lock:
 
 1. **In-process**: One `threading.Lock` for each repository in
    [`RepositoryOperationLock`](../hephaestus/automation/pipeline/repository_lock.py).
    This lock prevents file-lock ambiguity between threads in one process.
-2. **Primary**: One cross-process
+2. **Compatibility primary**: One cross-process
    [`file_lock`](../hephaestus/utils/file_lock.py) at
    `<repo_root>/<DEFAULT_STATE_DIR>/locks/git-<repo>.lock`.
-3. **Owner sentinel**: One cross-process `file_lock` with `.owner.lock`
-   appended to the primary path. Its record has `.owner.json` appended to the
-   primary path.
+3. **Compatibility owner sentinel**: One cross-process `file_lock` with
+   `.owner.lock` appended to the compatibility primary path. Its record has
+   `.owner.json` appended to the primary path.
+4. **Git common-directory primary**: One cross-process `file_lock` at
+   `<git-common-dir>/.hephaestus-git-metadata.lock` when an existing checkout
+   supplies a verified Git common directory.
+5. **Git common-directory owner sentinel**: The owner sentinel and record for
+   the Git common-directory primary.
 
-Git operations hold all three locks for the complete operation because linked
-worktrees share `.git`. `--git-lock-timeout` controls only passive lock wait.
-The Git command timeout starts after all three locks are held. The three
-acquisition steps use one monotonic deadline and interruptible polling.
+Git operations hold the compatibility lock pair for the complete operation.
+An operation for an existing checkout then holds the Git common-directory
+lock pair. Thus, different repository aliases and linked worktrees use the
+same stable lock. A clone cannot use this lock until its Git common directory
+exists. It continues to use the compatibility lock pair.
+`--git-lock-timeout` controls only passive lock wait. The Git command timeout
+starts after the applicable locks are held. The acquisition steps use one
+monotonic deadline and interruptible polling.
+
+An explicit absolute Git deadline bounds both admission and execution. Before
+lock admission, a Git job whose deadline has expired returns `timeout`. A
+GitHub job whose deadline has expired returns `github_timeout`. These jobs do
+not create lock records or start work. An already-set shutdown signal takes
+priority and returns `interrupted`.
 
 The owner record has mode `0600`. It contains only the version, repository,
 operation, process ID, acquisition token, and UTC acquisition time. A waiter
@@ -2104,28 +2293,77 @@ holder operation and process, the holder acquisition time and source, and the
 measured wait duration. It does not contain lock paths, tokens, or raw record
 data.
 
+The compatibility record uses the requested repository identity. The Git
+common-directory record uses a digest of the canonical common-directory path.
+Thus, two valid repository aliases can verify the same holder. The failure
+diagnostic continues to identify the repository that the waiting job
+requested.
+
 Release removes the matching record, releases the owner sentinel, releases the
 primary lock, and then clears and releases the in-process lock. A cleanup
 failure produces a bounded warning. It does not replace a completed Git result.
 The next holder removes a stale regular record before it publishes a new one.
 
-An old worker uses only the primary lock. A new waiter returns
-`lock_metadata_error` when it cannot verify that old holder. This mixed-version
-behavior keeps shared Git metadata safe during rollback.
+An old ordinary worker uses only the compatibility primary lock in its current
+worktree. A current `prepare_intake` job gets the compatibility primary path
+for each registered worktree root. It removes duplicate paths, sorts the paths
+by path bytes, and acquires each path before the Git common-directory lock.
+Thus, the intake job cannot race an old `fetch_main` job in the primary
+worktree or a linked worktree. An old metadata-lock user uses the exact Git
+common-directory primary. A current waiter that cannot verify its owner data
+returns `lock_metadata_error`. These compatibility paths keep shared Git
+metadata safe during rollback.
+
+Before common-lock creation, a source job validates its workspace shape,
+repository relation, canonical reusable root, canonical worktree common
+directory, and ownership key. A checkout job validates its Git configuration
+and expected origin without a write. The job repeats checkout validation after
+lock admission. Recovery publication parses its durable receipt before lock
+admission. It binds the receipt repository root and worktree to one canonical
+common directory and validates the expected origin. A foreign valid repository
+cannot receive a common-lock file from an invalid job binding.
+
+Each existing-checkout job carries its authoritative checkout and the exact
+canonical common-lock path and directory device/inode identity from validation.
+Common-lock admission opens this existing directory without following its final
+path component. It opens the lock and owner files relative to that bound
+directory descriptor and does not create a parent. A missing lock entry uses an
+exclusive no-follow create. An existing entry uses a separate no-follow open.
+Before locking, the worker requires one mode-`0600`, singly linked regular file
+that the effective user owns. It does not change an existing entry's mode. The
+exclusive path fails closed when the host does not supply no-follow,
+descriptor-relative open, effective-owner, or advisory-lock support. The worker
+resolves and checks the common-directory binding again after it takes the
+compatibility lock and while it holds the selected common lock. A changed,
+replaced, or unavailable Git directory stops the job before the operation
+context, intake lease, or dispatch. Intake passes the admitted lock path into
+preparation. Thus, preparation cannot take a nested lock from a new `commondir`
+value.
 
 A GitHub job holds only the in-process lock for its complete fresh-client
 operation. Its in-process holder record lets a Git waiter identify the GitHub
 operation. This contract does not imply cross-process GitHub serialization.
 Exact live-state guards remain authoritative across processes.
 
-`prepare_intake` first takes a nonblocking run-lifetime lease at
+`prepare_intake` constructs its manager and validates the caller before lock
+admission. Thus, the first validation does not create `DEFAULT_STATE_DIR` in
+the caller. The first validation returns the compatibility primary path for
+each registered worktree root. After this validation, the worker creates or
+opens each compatibility lock directory securely and binds its device and inode
+identity. It then acquires each compatibility lock before the Git
+common-directory lock. The compatibility lock files are operational state. A
+second validation permits only the exact primary, owner sentinel, and owner
+record in each registered worktree root. It continues to reject all other
+caller state. It recomputes the registered lock set and stops before mutation
+if the set changed.
+
+The intake job then takes a nonblocking run-lifetime lease at
 `<git-common-dir>/hephaestus-repository-intake.run.lock`. The main worker pool
 holds one lease for each Git common directory. A repeated preparation in the
-same pool uses that lease and does not take a nested file
-lock. If the first preparation fails, the pool releases the new lease. The
-coordinator releases retained leases after its final run report. A separate
-process that owns the lease causes an immediate `repository_intake_in_use`
-result.
+same pool uses that lease and does not take a nested file lock. If the first
+preparation fails, the pool releases the new lease. The coordinator releases
+retained leases after its final run report. A separate process that owns the
+lease causes an immediate `repository_intake_in_use` result.
 
 `prepare_intake` and `sync_checkout` also take the status-safe Git-metadata
 lock resolved by
@@ -2133,6 +2371,8 @@ lock resolved by
 For linked worktrees this resolves Git's common directory, so the primary
 checkout and every linked worktree serialize synchronization and worktree
 metadata mutations without leaving an untracked sentinel in the worktree.
+An inner metadata operation reuses the common-directory lock that `_run_git`
+already holds. It does not take a nested file lock on the same sentinel.
 Before inspecting the origin or worktree status, it also reads the effective
 repository and worktree Git configuration with global/system configuration
 disabled, rejecting executable, transport-routing, and TLS-affecting settings
@@ -2208,9 +2448,42 @@ path so hatch-vcs, tests, and scanners resolve the candidate commit without
 granting container write access to repository metadata.
 
 This automation-loop gate is separate from developer pre-commit. Developer
-pre-commit does not run pytest. Required GitHub CI/CD remains the full-suite
-authority. Before PR creation, a contributor must also run each new or changed
-test and verify that pytest collects it and reports success.
+pre-commit and required PR checks run the shared fast selection. Nightly CI/CD
+owns full suites and coverage. Before PR creation, a contributor runs focused
+checks for affected behavior and each new or changed test. The result must show
+nonempty collection and success. A complete local suite is not required.
+
+The selected `just ci-check-only` and `just ci-lint-check-only` commands support
+test-only agents. They use the same PR/static runner resources and the
+[`check_only`](../hephaestus/ci/check_only.py) adapter for lint. The adapter reads
+canonical pre-commit configuration and pinned cached manifests, preserves file
+selection, and runs hooks in a private candidate with its own Git metadata.
+Its Git subprocesses use the shared finite environment policy and preserve
+only the supplied candidate index, object directory, and alternate object
+directories in addition to the approved platform values. The private candidate
+clears those input overrides before its own Git operations and hook execution.
+Human-facing templates use the localization boundary; hook IDs, error values,
+and raw tool output keep their original content.
+It includes local private-denylist policy. It uses native check flags or detects
+changes to the private copy, and restores the input before each subsequent
+hook. Missing prepared tools and unknown execution contracts fail verification.
+It does not install hook dependencies or request the queue's native fallback.
+The CI builder prepares hooks with the same pinned Node/npm prefix copied into
+the runtime. This keeps the Markdown hook's system Node environment consistent
+across image stages. Toolchain changes require a new candidate image build.
+These selections disable dependency syncing for every CI-image call and import
+the mounted candidate source. They mount the original checkout read-only for
+every CI-image call. The full selection runs both Gitleaks scans, requires the
+pinned image, and disables pulls. The lint selection does not run these scans. A
+simultaneous `--rebuild` request is rejected before engine preparation.
+On SELinux hosts, the history scan gives the read-only source tree its private
+label.
+The next scanner mounts only the candidate tree with `:ro,Z` to apply its own
+private label and keep the files read-only. The history scan completes before
+the candidate scan starts.
+The queue's fixed command and source admission remain unchanged. See
+[required checks](ci/required-checks.md#delegated-local-verification) for the
+separate focused manual checks and nightly requirements.
 
 The implementation stage submits only the fixed command and the source
 revision in a `BuildTestJob`. The closed worker resolves the system
@@ -2316,8 +2589,10 @@ not establish that replay is safe. See the
 Developer validation uses the relevant new and changed tests on a supported
 native host. Container reproduction is optional for this local development
 workflow. This does not alter the product's fixed `BuildTestJob` commands,
-source verification, or macOS and Linux isolation requirements. Required CI
-runs the full suites and coverage gate.
+source verification, or macOS and Linux isolation requirements. Required PR
+checks run the fast selection. Nightly CI runs full suites and the coverage
+gate. ADR-0053 defines focused manual contribution evidence. Source review is
+separate from test execution and does not require a local review image.
 
 ---
 
@@ -2481,12 +2756,22 @@ Collaborators must not import their assembly module. Tests inject the
 transport command runner or patch the actual external boundary. Facade symbol
 copies and runtime monkeypatch translators are removed.
 
+`pipeline_github_merge_policy.py` owns the immutable `EffectiveMergePolicy`
+value and its derived queue wait limits. `pipeline_github_check_policy.py`
+keeps the public type import and owns the stable classic and ruleset reads.
+The value module has no reader, transport, or process dependency. Existing
+consumers share one type, so policy equality and identity checks are unchanged.
+
 `review_anchors.py` owns review finding values, bounds, and diff validation.
 `review_finding_history.py` validates compacted outcomes and bounded history
 collections. Both modules have no transport or logging dependency.
 `pr_review_verification_specs.py` owns the common host checks and configuration
 paths. `pr_review_verification_paths.py` owns the checks that changed paths
 select.
+`pr_review_verification_publication_specs.py` owns the fixed publication
+diagnostic node data. `pr_review_verification_paths.py` imports these data
+through a one-way dependency. The data module has no runtime dependencies.
+Architecture tests enforce this boundary and its 150-line source cap.
 `github_api.diff` keeps its compatibility exports and emits transport diagnostics.
 The review stage uses the value modules directly. `pr_review_findings.py` builds
 finding records and applies ordinary review receipts. `pr_review_history.py`
@@ -2546,9 +2831,11 @@ Exit-code priority is:
   matching the live `headRefOid` of the PR. `pr_review` creates its
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
-  compares the proof with the confirmed-unarmed live PR, reads complete passing
-  required status evidence for that SHA, and issues the server route that the
-  effective policy requires. It does not arm or poll native auto-merge.
+  compares the proof with the confirmed-unarmed live PR, verifies that its base
+  equals the repository default branch from validated repository metadata,
+  reads complete passing required status evidence for that SHA, and issues the
+  server route that the effective policy requires. It does not arm or poll
+  native auto-merge.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Host advice and learning** — typed `AthenaSkillJob` operations executed
   by the Mnemosyne host boundary. Advice and learning do not invoke an agent

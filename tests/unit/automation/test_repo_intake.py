@@ -5,10 +5,12 @@ from __future__ import annotations
 import builtins
 import errno
 import json
+import logging
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,8 +21,11 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation import git_runtime
+from hephaestus.automation import git_runtime, pipeline_cli
+from hephaestus.automation.event_log_retention import event_log_lifecycle
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.coordinator_observability import record_event
+from hephaestus.automation.pipeline.repository_lock import RepositoryOperationLock
 from hephaestus.automation.repo_intake import (
     RepoIntakeError,
     RepoIntakeManager,
@@ -39,6 +44,7 @@ def _run_git(cwd: Path, *arguments: str, check: bool = True) -> subprocess.Compl
         capture_output=True,
         text=True,
         check=check,
+        env=_controlled_git_env(),
     )
 
 
@@ -111,6 +117,26 @@ def _advance_remote(tmp_path: Path, remote: Path) -> None:
     _run_git(updater, "add", "remote.txt")
     _run_git(updater, "commit", "-m", "remote update")
     _run_git(updater, "push", "origin", "master")
+
+
+def test_prepare_rejects_a_common_lock_that_changed_after_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Intake does not nest a lock for a newly selected common directory."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    admitted = WorktreeManager.git_metadata_lock_path(caller)
+    foreign = tmp_path / "foreign-git"
+    foreign.mkdir()
+    selected = foreign / admitted.name
+    monkeypatch.setattr(
+        "hephaestus.automation.repo_intake.git_metadata_lock_path", lambda _root: selected
+    )
+
+    with pytest.raises(RepoIntakeError, match="changed before preparation"):
+        manager.prepare(admitted_metadata_lock=admitted)
+
+    assert tuple(foreign.iterdir()) == ()
 
 
 def _rewrite_remote(tmp_path: Path, remote: Path) -> str:
@@ -629,6 +655,67 @@ def test_legacy_caller_state_blocks_before_intake_and_is_preserved(
     assert _caller_state(caller) == before
 
 
+def test_compatibility_lock_does_not_poison_intake_validation(tmp_path: Path) -> None:
+    """The caller-local compatibility lock is not durable caller state."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    lock_path = caller / DEFAULT_STATE_DIR / "locks" / "git-repo.lock"
+    compatibility_paths = (
+        lock_path,
+        Path(f"{lock_path}.owner.lock"),
+        Path(f"{lock_path}.owner.json"),
+    )
+    lock = RepositoryOperationLock("repo", lock_path=lock_path)
+
+    manager.validate(operational_state_paths=compatibility_paths)
+    with (
+        git_runtime.operation_deadline(time.monotonic() + 30),
+        lock.acquire(operation="prepare_intake", timeout_s=30),
+    ):
+        receipt = manager.prepare(operational_state_paths=compatibility_paths)
+
+    assert receipt.path.is_dir()
+    assert lock_path.is_file()
+    assert Path(f"{lock_path}.owner.lock").is_file()
+    manager.validate(operational_state_paths=compatibility_paths)
+
+
+@pytest.mark.parametrize("unsafe_kind", ["extra", "symlink", "mode"])
+def test_compatibility_lock_cannot_hide_unsafe_caller_state(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    """Only safe files from the exact compatibility lock can be ignored."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    lock_path = caller / DEFAULT_STATE_DIR / "locks" / "git-repo.lock"
+    owner_lock_path = Path(f"{lock_path}.owner.lock")
+    compatibility_paths = (
+        lock_path,
+        owner_lock_path,
+        Path(f"{lock_path}.owner.json"),
+    )
+    lock = RepositoryOperationLock("repo", lock_path=lock_path)
+    with lock.acquire(operation="prepare_intake", timeout_s=30):
+        pass
+
+    if unsafe_kind == "extra":
+        unsafe_path = lock_path.parent / "legacy-state.json"
+        unsafe_path.write_text("preserve\n", encoding="utf-8")
+    elif unsafe_kind == "symlink":
+        owner_lock_path.unlink()
+        unsafe_path = owner_lock_path
+        unsafe_path.symlink_to(tmp_path / "foreign-lock")
+    else:
+        unsafe_path = lock_path
+        unsafe_path.chmod(0o644)
+
+    with pytest.raises(RepoIntakeError):
+        manager.validate(operational_state_paths=compatibility_paths)
+
+    assert unsafe_path.exists() or unsafe_path.is_symlink()
+
+
 @pytest.mark.parametrize("directory_name", [".automation-state", Path(DEFAULT_STATE_DIR).name])
 def test_linked_caller_detects_legacy_state_in_primary_worktree(
     tmp_path: Path,
@@ -747,6 +834,123 @@ def test_empty_legacy_caller_state_does_not_block_intake(tmp_path: Path) -> None
     receipt = _manager(caller, remote).prepare()
 
     assert receipt.path.is_dir()
+
+
+@pytest.mark.parametrize(
+    "writer_relative",
+    (Path("build/.worktrees/writer"), Path("writer")),
+    ids=("automation-worktree", "direct-child-worktree"),
+)
+def test_nested_registered_writer_event_log_does_not_block_intake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer_relative: Path,
+) -> None:
+    """Pre-intake diagnostics stay outside a registered writer worktree."""
+    caller, remote = _make_repository(tmp_path)
+    # A normal home is outside the inferred projects root. Keep the fixture
+    # independent of an ambient system temporary namespace.
+    user_home = tmp_path.with_name(f"{tmp_path.name}-user-home")
+    user_home.mkdir()
+    monkeypatch.setattr(
+        Path,
+        "home",
+        classmethod(lambda cls: user_home),
+    )
+    writer = caller / writer_relative
+    _run_git(caller, "worktree", "add", "--detach", str(writer), "HEAD")
+    monkeypatch.chdir(writer)
+    config = pipeline_cli.build_config(
+        pipeline_cli.parse_args([]),
+        "acme",
+        ["repo"],
+    )
+    assert config.event_log_path is not None
+    coordinator = SimpleNamespace(
+        config=config,
+        event_log=[],
+        _event_log_disabled=False,
+    )
+
+    with event_log_lifecycle(
+        config.event_log_path,
+        retention_days=30,
+        retention_count=100,
+        dry_run=False,
+    ):
+        record_event(
+            coordinator,
+            "repo_submit",
+            "repo#1",
+            now_fn=lambda: 0.0,
+            logger=logging.getLogger(__name__),
+        )
+
+    diagnostics_dir = config.event_log_path.parent
+    assert config.event_log_path.is_file()
+    assert (diagnostics_dir / f".{config.event_log_path.name}.lock").is_file()
+    assert (diagnostics_dir / ".pipeline-events-retention.lock").is_file()
+    for registered_root in (caller.resolve(), writer.resolve()):
+        assert registered_root not in config.event_log_path.resolve().parents
+
+    receipt = _manager(writer, remote).prepare()
+
+    assert receipt.path.is_dir()
+
+
+def test_registered_home_event_log_does_not_dirty_or_block_intake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-intake diagnostics do not dirty a home directory that is a worktree."""
+    caller, remote = _make_repository(tmp_path)
+    projects_dir = tmp_path / "projects"
+    host_temp = tmp_path / "host-temp"
+    host_temp.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: caller))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(host_temp))
+    monkeypatch.chdir(caller)
+    config = pipeline_cli.build_config(
+        pipeline_cli.parse_args(["--projects-dir", str(projects_dir)]),
+        "acme",
+        ["repo"],
+    )
+    assert config.event_log_path is not None
+    coordinator = SimpleNamespace(
+        config=config,
+        event_log=[],
+        _event_log_disabled=False,
+    )
+
+    with event_log_lifecycle(
+        config.event_log_path,
+        retention_days=30,
+        retention_count=100,
+        dry_run=False,
+    ):
+        record_event(
+            coordinator,
+            "repo_submit",
+            "repo#1",
+            now_fn=lambda: 0.0,
+            logger=logging.getLogger(__name__),
+        )
+
+    assert config.event_log_path.parent == (
+        host_temp
+        / f"hephaestus-{os.geteuid()}"
+        / ".hephaestus-diagnostics"
+        / config.projects_dir.name
+    )
+    assert config.event_log_path.is_file()
+    status = _run_git(
+        caller,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    ).stdout
+    assert status == ""
+    assert _manager(caller, remote).prepare().path.is_dir()
 
 
 def test_current_destination_state_is_preserved_during_reuse(tmp_path: Path) -> None:

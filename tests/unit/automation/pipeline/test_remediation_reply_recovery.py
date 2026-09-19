@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.reply_handoff import PENDING_IMPLEMENTATION_REPLY_HANDOFF
@@ -31,6 +32,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _dirty_worktree_content_snapshot,
 )
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -77,6 +79,7 @@ def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path)
     (repo / "module.py").write_text("value = 1\n", encoding="utf-8")
     git("add", "module.py")
     git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+    git("remote", "add", "origin", "https://github.com/test-org/test-repo.git")
     head = git("rev-parse", "HEAD").stdout.strip()
     manager = SourceWorkspaceManager(repo, repository="test-repo")
     binding = manager.prepare_bounded(
@@ -144,6 +147,7 @@ def test_dirty_failed_writer_cannot_publish_before_reply_mapping(tmp_path: Path)
         shutdown=threading.Event(),
         completion_q=CompletionQueue(),
         lock_dir=tmp_path / "locks",
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
     try:
         inspection = pool._run_git(inspection_request.job)
@@ -286,11 +290,12 @@ def test_recovery_commit_error_preserves_dirty_writer_without_handoff(tmp_path: 
         shutdown=threading.Event(),
         completion_q=CompletionQueue(),
         lock_dir=tmp_path / "locks",
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
     try:
         with (
             patch(
-                "hephaestus.automation.pipeline.worker_pool._controlled_git_signing_env",
+                "tests.unit.automation.pipeline.conftest.FakeSigningProvider.environment",
                 return_value={},
             ),
             patch(

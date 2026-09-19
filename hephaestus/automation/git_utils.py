@@ -322,6 +322,41 @@ def push_branch(
         raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
 
 
+def publish_branch_if_absent(
+    branch_name: str,
+    source_sha: str,
+    worktree_path: Path,
+    *,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
+) -> None:
+    """Publish an exact implementation commit with an absent-only server lease.
+
+    Keep normal hooks. The reservation helper's metadata-only exception does not
+    apply to implementation changes.
+    """
+    if not _is_full_commit_sha(source_sha):
+        raise ValueError("The first-publication source commit is invalid.")
+    ref = f"refs/heads/{branch_name}"
+    run_kwargs = _timeout_kw(timeout)
+    if env is not None:
+        run_kwargs["env"] = env
+    run(["git", "check-ref-format", ref], cwd=worktree_path, **run_kwargs)
+    run(
+        [
+            "git",
+            *remote_config,
+            "push",
+            f"--force-with-lease={ref}:",
+            "origin",
+            f"{source_sha}:{ref}",
+        ],
+        cwd=worktree_path,
+        **run_kwargs,
+    )
+
+
 def reserve_remote_branch_if_absent(
     branch_name: str,
     base_sha: str,
@@ -654,7 +689,16 @@ def push_head_to_branch(
         # contain repository data.  A fresh authoritative ref read classifies
         # only the safe ownership distinction needed by the pipeline.
         if revalidate_remote is not None:
-            env, remote_config = revalidate_remote()
+            try:
+                env, remote_config = revalidate_remote()
+            except subprocess.TimeoutExpired as revalidation_exc:
+                raise BranchPublicationRemoteProbeError(
+                    failure_kind="timeout"
+                ) from revalidation_exc
+            except (OSError, RuntimeError, subprocess.SubprocessError) as revalidation_exc:
+                raise BranchPublicationRemoteProbeError(
+                    failure_kind="transport"
+                ) from revalidation_exc
             run_kwargs = _timeout_kw(timeout)
             run_kwargs["env"] = env
         try:

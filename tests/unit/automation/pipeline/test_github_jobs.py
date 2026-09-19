@@ -47,6 +47,9 @@ from hephaestus.automation.pipeline.github_jobs import (
     ScopeExpansionDependenciesReconciled,
     bind_delivery_request,
 )
+from hephaestus.automation.pipeline.merge_wait_admission import (
+    VerifiedRepositoryDefaultBranch,
+)
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
     implementation_remediation_reply_handoff_journal_entry,
@@ -2465,6 +2468,12 @@ def test_merge_rechecks_approval_and_preserves_required_gates(revoke_at: int) ->
         "baseRefName": "main",
     }
     github.gh_pr_state.return_value = state
+    github.verified_repository_default_branch.return_value = VerifiedRepositoryDefaultBranch(
+        "HomericIntelligence",
+        "Hephaestus",
+        "HomericIntelligence/Hephaestus",
+        "main",
+    )
     reads = 0
 
     def implementation_state(_: int) -> tuple[bool, bool]:

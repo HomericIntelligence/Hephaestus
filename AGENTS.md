@@ -348,24 +348,29 @@ For a manual contribution, use this final-rebase sequence:
    subagent to run each affected test again.
 5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
    Record `git rev-parse HEAD`.
-6. Use a test-only subagent to run this command:
-
-   ```bash
-   uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
-     -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
-   ```
+6. Use a test-only subagent to run focused checks on this head. Select tests
+   for the affected behavior and each new or changed test. Use locked pytest
+   commands with explicit paths or node IDs and `--override-ini="addopts="` so
+   the default fast marker does not hide a selected test. Require nonempty
+   collection and success. For documentation-only changes, run the applicable
+   existing documentation checks. Do not require a complete local suite.
 
 7. Record `git rev-parse HEAD` again. Require the same value and an empty
    `git status --porcelain=v1 --untracked-files=all` result. Record the command,
    result, and test summary.
 8. If the branch changes after this verification, repeat the final-rebase
-   sequence and test run.
+   sequence and focused checks for the resulting change.
 
-A pre-push hook can supply step 6 only when it runs the exact locked command on
-the final rebased head and records the result. A hook that does not run this
-command does not supply complete normal-test evidence. The current pre-push
-hook does not run the Python suite and cannot supply this evidence. Keep the
-test-only and no-edit requirements for all delegated runs. See ADR-0051.
+A hook result can supply focused evidence only when it collected and passed
+the selected tests on the final head and recorded the command and result.
+Keep the test-only and no-edit requirements for all delegated runs.
+Installed hooks retain the shared fast selection. Required PR checks provide
+head-bound merge evidence. Nightly CI/CD owns full suites and coverage; a fast
+PR result is not full-suite evidence. See ADR-0053.
+
+Source review is separate from test execution. The reviewer inspects source
+and recorded evidence; it does not need to run tests or prepare a local review
+image. CI/CD results do not replace source review or authorize its GO state.
 
 ### Skill Catalog
 
@@ -536,24 +541,18 @@ in [Delegated Verification](#delegated-verification). The environment setup
 commands below prepare a new environment. They do not supply change-verification
 evidence. Required CI/CD supplies separate head-bound evidence.
 
-The manual sequence uses ADR-0051. The automation loop uses the rebase policy
+The manual sequence uses ADR-0053. The automation loop uses the rebase policy
 in ADR-0048. It prepares the branch before implementation and does not do a
 routine final rebase. An operator can request the explicit `--rebase` path.
 
 ```bash
-# Run all unit tests
-uv run pytest tests/unit -v
-
-# Run specific test file
-uv run pytest tests/unit/utils/test_general_utils.py -v
-
-# Run with coverage
-uv run pytest tests/unit --cov=hephaestus --cov-report=html
-
-# Run the complete normal local selection after the final rebase
-uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
-  -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
+# Run an affected test file, including tests outside the default fast selection
+uv run --locked pytest tests/unit/utils/test_general_utils.py \
+  --override-ini="addopts=" -v --strict-markers
 ```
+
+Use the paths and node IDs for the change. Full suites and coverage run in
+CI/CD. A complete local run is not a PR-creation or merge prerequisite.
 
 ## Environment Setup
 
@@ -598,9 +597,9 @@ uv run mypy hephaestus/ scripts/ tests/
 ### Pre-commit Hooks
 
 Pre-commit hooks automatically check code quality and run the shared fast test
-selection. They do not supply the required complete normal-test evidence. Use
-the delegated final-rebase sequence to produce that evidence. Required CI/CD
-supplies separate test evidence for the pushed head.
+selection. Use the delegated final-rebase sequence for focused change evidence.
+Required CI/CD supplies separate test evidence for the pushed head. Nightly
+CI/CD owns the full-suite and coverage results.
 
 ```bash
 # Install pre-commit hooks (one-time setup)

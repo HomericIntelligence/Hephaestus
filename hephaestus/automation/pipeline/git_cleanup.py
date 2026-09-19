@@ -7,18 +7,18 @@ import json
 import os
 import re
 import stat
-import subprocess
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.git_runtime import (
     current_operation_shutdown,
-    remaining_operation_timeout,
+    operation_deadline,
+    operation_file_lock,
 )
 from hephaestus.automation.git_utils import (
     delete_local_branch_if_unchanged,
@@ -31,7 +31,6 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspacePreparationError,
 )
 from hephaestus.automation.worktree_manager import WorktreeManager
-from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import is_expected_managed_worktree_path
 
@@ -115,7 +114,9 @@ def _repository_matches_quarantine(receipt_repository: object, expected_reposito
         return False
     if "/" in expected_repository:
         return receipt_repository == expected_repository
-    return receipt_repository.endswith(f"/{expected_repository}")
+    return receipt_repository == expected_repository or receipt_repository.endswith(
+        f"/{expected_repository}"
+    )
 
 
 def _read_codex_quarantine(descriptor: int) -> tuple[os.stat_result, bytes]:
@@ -1096,6 +1097,7 @@ def _run_source_lane_cleanup(
     remote_env: dict[str, str] | None,
     remote_config: tuple[str, ...],
     revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None,
+    admitted_metadata_lock: Path | None,
 ) -> JobResult:
     """Clean one receipt-owned source lane through its state owner."""
     try:
@@ -1119,11 +1121,13 @@ def _run_source_lane_cleanup(
                 kwargs=generic_kwargs,
                 descr=job.descr,
                 expected_repository=job.expected_repository,
+                deadline_s=job.deadline_s,
             ),
             worktree_manager_type=worktree_manager_type,
             remote_env=remote_env,
             remote_config=remote_config,
             revalidate_remote=revalidate_remote,
+            admitted_metadata_lock=admitted_metadata_lock,
         )
         if not result.ok:
             raise SourceWorkspaceError(result.error or "worktree cleanup failed")
@@ -1184,24 +1188,11 @@ def _cleanup_metadata_lock(path: Path, job: GitJob) -> Iterator[None]:
     if job.deadline_s is not None:
         deadline_s = min(deadline_s, job.deadline_s)
     shutdown = current_operation_shutdown()
-    while True:
-        remaining = cast(float, remaining_operation_timeout(deadline_s - time.monotonic()))
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired("cleanup metadata lock", 0)
-        with contextlib.ExitStack() as stack:
-            try:
-                stack.enter_context(file_lock(path, blocking=False, require_exclusive=True))
-            except LockUnavailableError:
-                wait_s = min(0.1, remaining)
-                if shutdown is None:
-                    time.sleep(wait_s)
-                else:
-                    shutdown.wait(wait_s)
-                continue
-            if cast(float, remaining_operation_timeout(deadline_s - time.monotonic())) <= 0:
-                raise subprocess.TimeoutExpired("cleanup metadata lock", 0)
-            yield
-            return
+    with (
+        operation_deadline(deadline_s, shutdown=shutdown),
+        operation_file_lock(path, require_exclusive=True),
+    ):
+        yield
 
 
 def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable receipts
@@ -1211,6 +1202,7 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
     remote_env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
     revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
+    admitted_metadata_lock: Path | None = None,
 ) -> JobResult:
     """Run one validated worktree or reservation cleanup operation."""
     if job.op == "release_branch_reservation":
@@ -1254,8 +1246,12 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
                 remote_env=remote_env,
                 remote_config=remote_config,
                 revalidate_remote=revalidate_remote,
+                admitted_metadata_lock=admitted_metadata_lock,
             )
-        with _cleanup_metadata_lock(worktree_manager_type.git_metadata_lock_path(repo_root), job):
+        metadata_lock = admitted_metadata_lock or worktree_manager_type.git_metadata_lock_path(
+            repo_root
+        )
+        with _cleanup_metadata_lock(metadata_lock, job):
             record = _worktree_record(
                 worktree_path,
                 repo_root=repo_root,
@@ -1265,7 +1261,7 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
             if record is None and not worktree_path.exists():
                 session_failure = _codex_session_cleanup_failure(
                     worktree_path,
-                    repository=job.transport_repository,
+                    repository=job.repo,
                     issue_number=issue_number,
                 )
                 if session_failure is not None:
@@ -1291,7 +1287,7 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
                 return JobResult(ok=False, error="worktree cleanup ownership changed")
             quarantine_authorized, quarantine_failure = _codex_session_quarantine_proof(
                 worktree_path,
-                repository=job.transport_repository,
+                repository=job.repo,
                 issue_number=issue_number,
             )
             if quarantine_failure is not None:
@@ -1308,7 +1304,7 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
                 )
             session_failure = _codex_session_cleanup_failure(
                 worktree_path,
-                repository=job.transport_repository,
+                repository=job.repo,
                 issue_number=issue_number,
                 require_quarantine=quarantine_authorized,
                 detach_only=quarantine_authorized,
@@ -1323,7 +1319,7 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
             if quarantine_authorized:
                 session_failure = _codex_session_cleanup_failure(
                     worktree_path,
-                    repository=job.transport_repository,
+                    repository=job.repo,
                     issue_number=issue_number,
                     require_quarantine=True,
                 )

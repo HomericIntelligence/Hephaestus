@@ -123,6 +123,42 @@ readers = [
 ]
 
 [[variables]]
+name = "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Check-only candidate Git alternate object directories"
+sensitivity = "public"
+validation = "non-empty"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "build_check_only_git_env", access = "read" },
+]
+
+[[variables]]
+name = "GIT_INDEX_FILE"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Bound implementation Git index"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "build_check_only_git_env", access = "read" },
+]
+
+[[variables]]
+name = "GIT_OBJECT_DIRECTORY"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Check-only candidate Git object directory"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "build_check_only_git_env", access = "read" },
+]
+
+[[variables]]
 name = "GPG_TTY"
 category = "child-process"
 owner = "config.child_environments"

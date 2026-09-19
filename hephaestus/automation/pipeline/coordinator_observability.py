@@ -5,8 +5,14 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.event_log_io import (
+    EventLogCandidate,
+    EventLogHandle,
+    open_event_log_handle,
+)
 from hephaestus.automation.review_finding_history import (
     compact_terminal_review_finding_collection,
     empty_review_finding_compacted_outcomes,
@@ -18,6 +24,22 @@ from hephaestus.observability.alerts import evaluate_alerts
 from .coordinator_types import _json_safe
 from .routing import AUXILIARY_PIPELINE_ORDER, MAIN_PIPELINE_ORDER
 from .work_item import WorkItem
+
+
+def _append_event_log(
+    path: Path,
+    record: dict[str, Any],
+    *,
+    handle: EventLogHandle | None = None,
+) -> None:
+    """Append one record through a bound private directory."""
+    line = json.dumps(record, sort_keys=True) + "\n"
+    if handle is not None:
+        handle.append_line(line)
+        return
+    candidate = EventLogCandidate(path=path, private_root=path.parent)
+    with open_event_log_handle(candidate) as transient_handle:
+        transient_handle.append_line(line)
 
 
 def record_event(
@@ -40,9 +62,7 @@ def record_event(
         "fields": [_json_safe(field) for field in fields],
     }
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, sort_keys=True) + "\n")
+        _append_event_log(path, record, handle=coordinator.config.event_log_handle)
     except OSError as exc:
         logger.warning("failed to write pipeline event log %s: %s", path, exc)
         coordinator._event_log_disabled = True

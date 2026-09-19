@@ -5,6 +5,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from .pr_review_repository_validation_state import (
+    _repository_validation_complete as _repository_validation_complete,
+    _repository_validation_coverage as _repository_validation_coverage,
+    _repository_validation_prompt_json as _repository_validation_prompt_json,
+    _repository_validation_required as _repository_validation_required,
+)
 from .pr_review_verification_specs import (
     _FULL_UNIT_COVERAGE_SPEC as _FULL_UNIT_COVERAGE_SPEC,
     _NONHERMETIC_HOST_UNIT_TEST_PATHS as _NONHERMETIC_HOST_UNIT_TEST_PATHS,
@@ -48,6 +54,26 @@ def _review_changed_paths(value: object) -> tuple[str, ...] | None:
     if len(set(paths)) != len(paths):
         return None
     return tuple(paths)
+
+
+def _review_change_records(
+    value: object, paths: tuple[str, ...]
+) -> tuple[tuple[str, str], ...] | None:
+    """Normalize status records that match the complete legacy path list."""
+    if not isinstance(value, (list, tuple)) or len(value) != len(paths):
+        return None
+    records: list[tuple[str, str]] = []
+    for record, path in zip(value, paths, strict=True):
+        if (
+            not isinstance(record, (list, tuple))
+            or len(record) != 2
+            or not isinstance(record[0], str)
+            or record[0] not in {"A", "M", "D", "T"}
+            or record[1] != path
+        ):
+            return None
+        records.append((record[0], path))
+    return tuple(records)
 
 
 def _changed_unit_pytest_argv(target: str) -> tuple[str, ...]:

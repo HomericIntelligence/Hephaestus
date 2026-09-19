@@ -670,7 +670,8 @@ class SourceWorkspaceManager:
         )
         digest = hashlib.sha256(str(self.common_dir).encode()).hexdigest()[:16]
         self.repository_identity = f"{repository}:{digest}"
-        self.base_dir = (base_dir or self.repo_root / "build" / ".worktrees").resolve()
+        default_base = WorktreeManager.default_base_dir(self.repo_root, repository=repository)
+        self.base_dir = (base_dir or default_base).resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir = self.common_dir / "hephaestus-source-workspaces"
 

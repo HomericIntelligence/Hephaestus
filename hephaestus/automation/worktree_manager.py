@@ -8,20 +8,16 @@ Provides:
 Layout note
 -----------
 Queue-pipeline source worktrees use the deterministic
-``auto-{N}-impl`` and ``auto-{N}-review`` paths. Compatibility callers that
-have not opted in with ``source_lane`` retain the historical ``issue-{N}``
-and generation-suffixed review layout. Putting worktrees inside
-the repo (rather than ``~/.tmp``) keeps them visible to the implementer process
-even after a force-kill: an interrupted run leaves the worktree on disk so a
-subsequent invocation can either resume work or surface a ``WorktreeDirtyError``
-to the operator. The trade-off is that ``git status`` in the parent repo can
-show ``build/.worktrees/`` as untracked if it isn't ignored; ensure
-``build/.worktrees/`` is in ``.gitignore`` (or a global ignore) for any repo
-that runs the automation. Recovery procedure for a force-killed loop:
+``auto-{N}-impl`` and ``auto-{N}-review`` paths. Compatibility callers without
+``source_lane`` retain the historical ``issue-{N}`` paths and review generations.
+For a verified intake checkout, the default worker directory is
+``state_root/build/.worktrees``, outside the checkout. Other repositories retain
+``repo_root/build/.worktrees``. An invalid intake receipt stops path selection.
 
-    git -C <repo> worktree list
-    # Inspect each build/.worktrees/auto-N-{impl,review} for modifications
-    git -C <repo> worktree remove build/.worktrees/auto-N-review
+An interrupted run preserves its worktrees. Inspect the registered paths with
+``git -C <repo> worktree list`` before recovery. Follow the automation runtime
+recovery runbook for an old worker that is inside an intake checkout.
+
 """
 
 import logging
@@ -37,6 +33,7 @@ from typing import Any
 
 from hephaestus.automation.git_runtime import (
     current_operation_shutdown,
+    git_metadata_lock_path,
     operation_deadline,
     operation_file_lock,
     remaining_operation_timeout,
@@ -57,7 +54,6 @@ _AUTOMATION_PROMPT_PREFIXES = (
     ".claude-prompt-",
     ".claude-followup-",
 )
-_GIT_METADATA_LOCK_NAME = ".hephaestus-git-metadata.lock"
 _REBASE_STATE_DIRS = ("rebase-merge", "rebase-apply")
 _MAX_GIT_REF_LENGTH = 1024
 
@@ -109,6 +105,9 @@ class WorktreeCreationReceiptError(RuntimeError):
 
 
 BRANCH_WORKTREE_OWNED = "branch_worktree_owned"
+ADOPTED_HEAD_VALIDATION_FAILED = "adopted_head_validation_failed"
+ADOPTED_HEAD_TRANSPORT_FAILED = "adopted_head_transport_failed"
+ADOPTED_HEAD_FAILURES = frozenset({ADOPTED_HEAD_VALIDATION_FAILED, ADOPTED_HEAD_TRANSPORT_FAILED})
 
 
 class BranchWorktreeOwnedError(RuntimeError):
@@ -215,7 +214,8 @@ class WorktreeManager:
         """Initialize worktree manager.
 
         Args:
-            base_dir: Base directory for worktrees (default: repo_root/build/.worktrees)
+            base_dir: Worker directory. The default uses the verified intake state
+                directory, or the repository directory for other checkouts.
             base_branch: Base branch for worktrees (default: auto-detect from origin/HEAD
                 lazily on first use)
             repo_root: Repository checkout to operate in (default: ambient CWD's
@@ -228,7 +228,7 @@ class WorktreeManager:
         """
         self.repo_root = repo_root if repo_root is not None else get_repo_root()
         if base_dir is None:
-            base_dir = self.repo_root / "build" / ".worktrees"
+            base_dir = self.default_base_dir(self.repo_root)
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -258,34 +258,22 @@ class WorktreeManager:
         logger.debug("Initialized WorktreeManager at %s", self.base_dir)
 
     @staticmethod
+    def default_base_dir(repo_root: Path, *, repository: str | None = None) -> Path:
+        """Keep receipt-bound intake workers outside the intake checkout."""
+        from hephaestus.automation.repo_intake import intake_worker_base
+
+        root = repo_root.resolve()
+        if (root / ".git").exists():
+            common_dir = WorktreeManager.git_metadata_lock_path(root).parent.resolve(strict=True)
+            selected = intake_worker_base(root, common_dir, repository=repository)
+            if selected is not None:
+                return selected
+        return repo_root / "build" / ".worktrees"
+
+    @staticmethod
     def git_metadata_lock_path(repo_root: Path) -> Path:
-        """Return the cross-process lock guarding ``repo_root``'s Git metadata.
-
-        The sentinel belongs in ``.git`` so acquiring it never creates an
-        untracked file in a reusable checkout's worktree.  Linked worktrees
-        use a ``.git`` *file*, so resolve their ``commondir`` and share the
-        sentinel with the primary checkout.
-        """
-        git_entry = repo_root / ".git"
-        if not git_entry.is_file():
-            return git_entry / _GIT_METADATA_LOCK_NAME
-
-        gitdir_line = git_entry.read_text(encoding="utf-8").strip()
-        prefix = "gitdir: "
-        if not gitdir_line.startswith(prefix):
-            raise RuntimeError(f"Invalid Git directory reference: {git_entry}")
-        git_dir = Path(gitdir_line.removeprefix(prefix))
-        if not git_dir.is_absolute():
-            git_dir = repo_root / git_dir
-        git_dir = git_dir.resolve()
-
-        common_dir_file = git_dir / "commondir"
-        if common_dir_file.is_file():
-            common_dir = Path(common_dir_file.read_text(encoding="utf-8").strip())
-            if not common_dir.is_absolute():
-                common_dir = git_dir / common_dir
-            return common_dir.resolve() / _GIT_METADATA_LOCK_NAME
-        return git_dir / _GIT_METADATA_LOCK_NAME
+        """Return the shared Git metadata lock path."""
+        return git_metadata_lock_path(repo_root)
 
     def _git_metadata_lock_path(self) -> Path:
         """Return the cross-process lock guarding shared git worktree metadata."""
@@ -1591,23 +1579,10 @@ class WorktreeManager:
         except Exception as e:
             logger.debug("git worktree prune failed: %s", e)
 
-    def _add_authenticated_adopted_implementation_writer(  # noqa: C901
-        self,
-        *,
-        issue_number: int,
-        branch_name: str,
-        worktree_path: Path,
-        expected_head: str,
-        timeout: int | None,
-        implementation_writer_handoff: ImplementationWriterHandoff | None = None,
+    def fetch_adopted_implementation_head(
+        self, *, branch_name: str, expected_head: str, timeout: int | None
     ) -> None:
-        """Create one writer from the authenticated, exact adopted PR head.
-
-        This is the only exception to the normal implementation-lane rule
-        that rejects an existing branch. The worker supplies trusted Git
-        transport configuration and an exact head it obtained before create.
-        Check all remote facts before replacing a clean deterministic path.
-        """
+        """Fetch and verify the exact adopted head before writer changes."""
         if self._remote_git_env is None or not self._remote_git_config:
             raise WorktreeCreationReceiptError("implementation writer adoption transport is absent")
         remote_ref = f"refs/remotes/origin/{branch_name}"
@@ -1632,6 +1607,27 @@ class WorktreeManager:
         ).stdout.strip()
         if fetched_head != expected_head:
             raise WorktreeCreationReceiptError("implementation writer adoption head changed")
+
+    def _add_authenticated_adopted_implementation_writer(
+        self,
+        *,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        expected_head: str,
+        timeout: int | None,
+        implementation_writer_handoff: ImplementationWriterHandoff | None = None,
+    ) -> None:
+        """Create one writer from the authenticated, exact adopted PR head.
+
+        This is the only exception to the normal implementation-lane rule
+        that rejects an existing branch. The worker supplies trusted Git
+        transport configuration and an exact head it obtained before create.
+        Check all remote facts before replacing a clean deterministic path.
+        """
+        self.fetch_adopted_implementation_head(
+            branch_name=branch_name, expected_head=expected_head, timeout=timeout
+        )
         holder = self._worktree_holding_branch(branch_name, timeout=timeout)
         if holder is not None and holder.resolve() != worktree_path.resolve():
             raise BranchWorktreeOwnedError(branch_name, holder)

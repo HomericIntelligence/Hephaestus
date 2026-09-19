@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         JobResult,
     )
     from .queues import CompletionQueue, StageQueue
+    from .repository_validation import RepositoryValidationExecution
     from .routing import (
         ROUTES,
         Disposition,
@@ -62,6 +63,7 @@ __all__ = [
     "LearningIntent",
     "PipelineConfig",
     "PipelineScope",
+    "RepositoryValidationExecution",
     "Route",
     "StageName",
     "StageOutcome",
@@ -72,6 +74,7 @@ __all__ = [
 ]
 
 _LAZY_EXPORTS: dict[str, str] = {
+    "RepositoryValidationExecution": "hephaestus.automation.pipeline.repository_validation",
     "AgentJob": "hephaestus.automation.pipeline.jobs",
     "AthenaSkillJob": "hephaestus.automation.pipeline.athena_skill_jobs",
     "AthenaSkillRequest": "hephaestus.automation.pipeline.athena_skill_jobs",

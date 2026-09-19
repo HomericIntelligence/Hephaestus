@@ -1,4 +1,4 @@
-"""Tests for the total budget of ordinary queued Git work."""
+"""Tests for passive lock waits and bounded Git command execution."""
 
 import queue
 import threading
@@ -11,20 +11,23 @@ from unittest.mock import MagicMock, Mock
 import pytest
 
 from hephaestus.automation import git_runtime
-from hephaestus.automation.pipeline import worker_pool
+from hephaestus.automation.pipeline import repository_lock, worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.job_results import JobResult
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+from tests.unit.automation.test_source_worktree import _repository
 
 
 def test_git_job_budget_includes_the_repository_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An ordinary Git job must expire while another job holds its lock."""
+    """An ordinary Git job must use the configured passive lock wait limit."""
     pool = worker_pool.WorkerPool(
         size=1,
         shutdown=threading.Event(),
         completion_q=queue.Queue(),
         lock_dir=tmp_path,
+        git_lock_timeout=1,
     )
     started = threading.Event()
     completed = threading.Event()
@@ -35,7 +38,7 @@ def test_git_job_budget_includes_the_repository_lock(
     def run_job() -> None:
         started.set()
         try:
-            results.append(pool._run_git(GitJob("repo", "commit_push", 1)))
+            results.append(pool._run_git(GitJob("repo", "commit_push", 60)))
         finally:
             completed.set()
 
@@ -81,20 +84,19 @@ def test_git_job_children_use_the_remaining_total_budget(
         pool.shutdown(mark_interrupted=False)
 
 
-def test_intake_common_dir_lock_uses_git_job_budget(
+def test_intake_common_dir_lock_uses_configured_lock_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Intake jobs for one common directory cannot wait past their budget."""
+    """Intake jobs for one common directory use the configured wait budget."""
     pool = worker_pool.WorkerPool(
         size=2,
         shutdown=threading.Event(),
         completion_q=queue.Queue(),
         lock_dir=tmp_path / "locks",
     )
-    caller = tmp_path / "caller"
-    caller.mkdir()
-    common_dir = tmp_path / "common"
-    common_dir.mkdir()
+    caller, _, _ = _repository(tmp_path, origin_repository="acme/repo")
+    caller = caller.resolve()
+    common_dir = caller / ".git"
     first_entered = threading.Event()
     release_first = threading.Event()
     second_complete = threading.Event()
@@ -103,16 +105,16 @@ def test_intake_common_dir_lock_uses_git_job_budget(
 
     receipt = MagicMock()
     receipt.to_dict.return_value = {"revision": "a" * 40}
-    first_manager = MagicMock(common_dir=common_dir)
+    first_manager = MagicMock(caller_root=caller, common_dir=common_dir, repository="acme/repo")
     first_manager.run_lease.return_value = nullcontext()
 
-    def first_prepare() -> object:
+    def first_prepare(**_kwargs: object) -> object:
         first_entered.set()
         assert release_first.wait(5.0)
         return receipt
 
     first_manager.prepare.side_effect = first_prepare
-    second_manager = MagicMock(common_dir=common_dir)
+    second_manager = MagicMock(caller_root=caller, common_dir=common_dir, repository="acme/repo")
     second_manager.run_lease.return_value = nullcontext()
     second_manager.prepare.return_value = receipt
     managers = iter((first_manager, second_manager))
@@ -131,8 +133,9 @@ def test_intake_common_dir_lock_uses_git_job_budget(
     second_job = GitJob(
         "repo-two",
         "prepare_intake",
-        1,
+        30,
         kwargs={"repo": "acme/repo", "caller_root": str(caller)},
+        repository_lock_wait_timeout_s=1,
     )
 
     def run_first() -> None:
@@ -177,38 +180,47 @@ def test_checkout_network_budget_starts_after_repository_lock_admission(
         completion_q=queue.Queue(),
         lock_dir=tmp_path,
     )
+    waiting = threading.Event()
+    results: list[JobResult] = []
 
+    # Record real file-lock contention. Keep the actual acquisition and release.
     @contextmanager
-    def repo_lock(*args: object, **kwargs: object) -> Iterator[None]:
-        del args, kwargs
-        clock["now"] += 20.0
-        yield
-
-    @contextmanager
-    def advisory_lock(*args: object, **kwargs: object) -> Iterator[None]:
-        del args, kwargs
-        clock["now"] += 30.0
-        yield
+    def observe_lock(
+        path: Path, *, blocking: bool = True, require_exclusive: bool = False
+    ) -> Iterator[None]:
+        try:
+            with file_lock(path, blocking=blocking, require_exclusive=require_exclusive):
+                yield
+        except LockUnavailableError:
+            waiting.set()
+            raise
 
     def dispatch(job: GitJob) -> JobResult:
         assert job.deadline_s == 120.0
         return JobResult(ok=True)
 
-    monkeypatch.setattr(pool, "_repo_lock", repo_lock)
-    monkeypatch.setattr(pool, "_advisory_repo_lock", advisory_lock)
+    monkeypatch.setattr(repository_lock, "file_lock", observe_lock)
     monkeypatch.setattr(pool, "_dispatch_git_op", dispatch)
-    try:
-        result = pool._run_git(
-            GitJob(
-                "repo",
-                "clone",
-                60,
-                repository_lock_wait_timeout_s=120,
-            )
+    holder = repository_lock.RepositoryOperationLock("repo", lock_dir=tmp_path)
+
+    def run_job() -> None:
+        results.append(
+            pool._run_git(GitJob("repo", "clone", 60, repository_lock_wait_timeout_s=120))
         )
-        assert result.ok
+
+    thread = threading.Thread(target=run_job)
+    try:
+        with holder.acquire(operation="commit_push", timeout_s=1):
+            thread.start()
+            assert waiting.wait(2)
+            assert not results
+            clock["now"] = 60.0
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert results and results[0].ok
     finally:
         pool.shutdown(mark_interrupted=False)
+        thread.join(timeout=2)
 
 
 def test_github_job_budget_includes_the_repository_lock(tmp_path: Path) -> None:
@@ -250,7 +262,10 @@ def test_github_job_budget_includes_the_repository_lock(tmp_path: Path) -> None:
             completed_while_locked = completed.wait(2)
         thread.join(timeout=2)
         assert completed_while_locked
-        assert results and results[0].error == "github_timeout"
+        assert results and results[0].error == "lock_timeout"
+        assert isinstance(results[0].value, dict)
+        assert results[0].value["holder_operation"] == "repository_operation"
+        assert results[0].value["holder_source"] == "in_process"
         runner.run.assert_not_called()
     finally:
         pool.shutdown(mark_interrupted=False)

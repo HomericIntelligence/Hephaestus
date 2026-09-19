@@ -206,6 +206,7 @@ class TestCleanup:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob) and result.job.op == "remove_worktree"
+        assert result.job.expected_repository == f"{ctx.org}/repo-a"
         assert result.job.kwargs == {
             "worktree_path": "/wt/issue-42",
             "repo_root": str(ctx.paths.repo_root),
@@ -1022,3 +1023,26 @@ def test_terminal_evidence_restores_creation_failure_without_item_payload(
         stage.step(item, ctx)
 
     assert ledger[0].reason.endswith("creation_failure=writer_receipt")
+
+
+@pytest.mark.precommit
+def test_terminal_recovery_does_not_create_state_inside_intake(
+    tmp_path: Path, stage: FinishedStage, make_ctx: Any
+) -> None:
+    """Invalid terminal evidence must leave the intake checkout unchanged."""
+    from tests.unit.automation.test_repo_intake import _make_repository, _manager
+
+    caller, remote = _make_repository(tmp_path)
+    intake = _manager(caller, remote).prepare()
+    item = _item(state="RECORD")
+    item.repo = "repo"
+    item.payload["source_workspace_preserve"] = True
+    item.payload["source_workspace_terminal"] = {
+        "identity": "42-impl-terminal.json",
+        "content_sha256": "b" * 64,
+    }
+    ctx = make_ctx(paths=SimpleNamespace(repo_root=intake.path))
+
+    stage.step(item, ctx)
+
+    assert not (intake.path / "build").exists()

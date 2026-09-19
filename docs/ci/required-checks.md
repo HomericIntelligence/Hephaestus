@@ -93,6 +93,60 @@ The direct ruleset contexts and `required-checks-gate` remain authoritative
 merge requirements. The local run is early failure feedback only; it does not grant
 `state:implementation-go` and does not replace GitHub's exact-head checks.
 
+## Delegated local verification
+
+Use `just ci-check-only` for the local PR/static checks, or
+`just ci-lint-check-only` for the lint subset. Prepare the CI image for the
+candidate separately before a test-only agent runs these commands. A missing
+image fails verification instead of starting an implicit build. The full
+`ci-check-only` selection also requires the separate Gitleaks image and disables
+pulls for both scans. The lint selection does not run the Gitleaks scans.
+The CI builder and runtime use the same pinned Node/npm prefix so the prepared
+Markdown hook has the same environment name and executable in both stages.
+Rebuild the candidate image after a toolchain or hook-preparation change.
+Combining `--check-only` with `--rebuild` fails before engine preparation.
+Every CI-image call in these selections uses the prepared Python environment
+without syncing dependencies, imports source from the mounted candidate, and
+mounts the original checkout read-only. The selected mode uses the existing
+container runner and substitutes
+[`hephaestus.ci.check_only`](../../hephaestus/ci/check_only.py) for the mutating
+pre-commit command. It cannot request the queue's native fallback. The queue
+continues to use its existing fixed `all --rebuild` command.
+
+The check-only validator reads the configured pre-commit-stage hooks and their
+pinned cached manifests. It uses pre-commit's file and type selectors, including
+whole-directory commands and always-run hooks. It does not honor `SKIP` as a
+way to omit required checks. Unknown execution contracts or missing prepared
+tools fail the command. It does not clone hook repositories or install or
+refresh their environments.
+
+Checks run against a private copy of the candidate and its Git index, including
+nonignored untracked source and the local private denylist. Native check flags
+are used where available. A formatter without a reliable check mode operates
+only on that private copy. A source, mode, or index change fails the check, and
+the private candidate is restored before the next hook. Markdown configuration
+that enables fixes cannot cause a passing result after a source change. Hook
+cache paths remain inputs; temporary tool caches belong to the private run. The
+Gitleaks history scan also mounts the original checkout read-only.
+
+A pass supplies the current PR/static selection, including the fast pytest
+hook. It supplies focused evidence only for the applicable tests that it
+collected and passed on the final source. After the signed rebase and clean-head
+checks, a test-only agent must cover the affected behavior and each new or
+changed test under [AGENTS](../../AGENTS.md) and
+[ADR-0053](../adr/0053-focused-local-ci-full-validation.md). Use locked focused
+commands and confirm nonempty collection and success. Documentation-only
+changes use applicable documentation checks. A complete local suite is not
+required before PR creation or merge.
+
+Keep the recorded head and source unchanged across focused checks. Source
+review does not execute tests or require these optional local image commands.
+Full unit coverage,
+installed CLI and package checks, artifact tests, Pi checks, and cross-platform
+nightly jobs retain their existing owners. Contract, performance, live Pyxis,
+and GitHub PR-policy evidence remain separate when applicable. Local success
+does not replace exact-head GitHub CI or Athena PR review.
+
 ## macOS PR-review Git boundary
 
 Before candidate code starts, host verification resolves Git with the system

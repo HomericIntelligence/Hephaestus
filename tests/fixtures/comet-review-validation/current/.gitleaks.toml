@@ -1,0 +1,27 @@
+# Gitleaks configuration for Comet. This configuration extends the default
+# rules. It permits one revoked historical key and the listed public test names.
+title = "comet gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+The SMG de-risk script used the historical placeholder test key
+`ck_headerpassthrough`. The key is revoked in the cluster key caches. The script
+now uses $COMET_API_KEY. The first expression permits only the dead historical
+value. Gitleaks 8.24.3 reports `DiagnosticResponderRevocationV1` as a generic
+API key in a dynamic-import test. The second anchored expression permits only
+this public Python class name. The third expression permits only the public
+`replica-generation-0001` test value. The fourth expression permits only
+deterministic context tokens in render golden files. These values are public
+test namespaces, not credentials. The fifth expression permits only the public
+`OperationNonceV3` type name. All other secrets remain detectable.
+"""
+regexes = [
+  '''ck_headerpassthrough''',
+  '''^DiagnosticResponderRevocationV1$''',
+  '''replica-generation-0001''',
+  '''^(2f15a4a1f1c8a5689b88d7cd9ec7f93d|2308a40a32e34ac8732f752e8d3ba9c3|20d67f680f1c46661a6c7bc7d3e583dd|e4a1b6bbf78c215f8f2cd2a0d608a1c9)$''',
+  '''^OperationNonceV3$''',
+]

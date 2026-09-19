@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import stat
+import subprocess
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -918,3 +920,68 @@ class TestCLIEntryPoints:
         )
         monkeypatch.setattr("sys.argv", ["hephaestus-validate-workflow-checkout", str(wf)])
         assert validate_workflow_checkout_main() == 0
+
+
+@pytest.mark.parametrize(
+    ("path", "accepted"),
+    [
+        ("tests/fixtures/comet-review-validation/current/scripts/tool.sh", True),
+        ("tests/fixtures/comet-review-validation/fe5a67d/scripts/tool.sh", True),
+        ("tests/fixtures/comet-review-validation/fe5a67d-extra/tool.sh", False),
+        ("tests/fixtures/comet-review-validation/historical/controls/scripts/tool.sh", True),
+        ("scripts/tool.sh", False),
+        ("tests/fixtures/comet-review-validation/current-extra/tool.sh", False),
+        ("tests/fixtures/comet-review-validation/runtime-imports/tool.sh", False),
+        ("tests/fixtures/comet-review-validation/historical/tool.sh", False),
+        ("tests/fixtures/other/tool.sh", False),
+    ],
+)
+def test_suppression_scan_preserves_external_controls_only(
+    tmp_path: Path, path: str, accepted: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep fixed external bytes while rejecting owned shell suppressions."""
+    from hephaestus.config.child_environments import build_git_child_env
+
+    parent_index = tmp_path / "parent-index"
+    parent_index.write_bytes(b"parent index must not change")
+    monkeypatch.setenv("GIT_INDEX_FILE", str(parent_index))
+    environment = build_git_child_env()
+    bash = shutil.which("bash")
+    assert bash is not None
+    version = subprocess.run(
+        [bash, "-c", 'test "${BASH_VERSINFO[0]}" -ge 4'],
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    if version.returncode:
+        pytest.skip("The workflow scan requires Bash 4 or later.")
+    workflow = yaml.safe_load(REQUIRED_WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["forbid-suppressions"]["steps"]
+    command = next(
+        step["run"]
+        for step in steps
+        if step.get("name")
+        == "Reject silent-failure workaround in shell/YAML/Dockerfile/justfile/HCL"
+    )
+    source = tmp_path / path
+    source.parent.mkdir(parents=True)
+    source.write_text("false || true\n", encoding="utf-8")
+    for argv in (["git", "init", "-q"], ["git", "add", "--", path]):
+        subprocess.run(
+            argv, cwd=tmp_path, env=environment, capture_output=True, check=True, timeout=10
+        )
+    result = subprocess.run(
+        [bash, "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert parent_index.read_bytes() == b"parent index must not change"
+    assert result.returncode == (0 if accepted else 1), result.stdout + result.stderr
+    if not accepted:
+        assert "1:false || true" in result.stdout
+        assert "Found silent-failure workarounds above" in result.stdout

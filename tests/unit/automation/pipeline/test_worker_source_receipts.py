@@ -1,7 +1,9 @@
 """Tests for source receipt publication from held worker leases."""
 
+import os
 import queue
 import threading
+from collections.abc import Iterator
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock
@@ -9,11 +11,29 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from tests.unit.automation.test_rebase_recovery import (
+    _registered_git_fixture,
+    _source_registration_fixture,
+)
 from tests.unit.automation.test_source_worktree import _repository
+
+
+@pytest.fixture(autouse=True)
+def _controlled_source_host(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Control host discovery and parent permissions without remote execution."""
+    monkeypatch.setattr(
+        worker_pool, "_trusted_gh_executable", lambda extra_path_root=None: "/usr/bin/gh"
+    )
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
 
 
 def test_classified_publication_requires_the_before_publish_callback(
@@ -39,7 +59,9 @@ def test_source_job_returns_its_full_receipt_from_the_held_lease(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     """The coordinator must receive full source facts without a second live read."""
-    root, _, revision = _repository(tmp_path)
+    root, _, revision = _repository(tmp_path, origin_repository="example/repo")
+    _registered_git_fixture(root, monkeypatch)
+    _source_registration_fixture(root, monkeypatch)
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     receipt = manager._require_receipt(42, SourceLane.IMPLEMENTATION)
@@ -48,19 +70,16 @@ def test_source_job_returns_its_full_receipt_from_the_held_lease(
     )
     monkeypatch.setattr(pool, "_recover_pretest_candidate", lambda *args: None)
     monkeypatch.setattr(pool, "_recover_prepared_remediation_worktree", lambda *args: None)
-    monkeypatch.setattr(
-        pool,
-        "_git_create_worktree_with_handoff",
-        lambda *args: JobResult(ok=True, value={"path": str(binding.cwd)}),
-    )
-    monkeypatch.setattr(
-        pool, "_git_inspect_implementation_worktree", lambda *args: JobResult(ok=True, value={})
-    )
+    create = Mock(return_value=JobResult(ok=True, value={"path": str(binding.cwd)}))
+    inspect = Mock(return_value=JobResult(ok=True, value={}))
+    monkeypatch.setattr(pool, "_git_create_worktree_with_handoff", create)
+    monkeypatch.setattr(pool, "_git_inspect_implementation_worktree", inspect)
     job = GitJob(
         "repo",
         operation,
         30,
         workspace=binding,
+        expected_repository="example/repo",
         kwargs={
             "repo_root": str(root),
             "worktree_path": str(binding.cwd),
@@ -74,6 +93,7 @@ def test_source_job_returns_its_full_receipt_from_the_held_lease(
         assert result.ok
         assert result.value["source_receipt"] == receipt.to_dict()
         assert result.value["source_workspace"] == binding.to_dict()
+        (create if operation == "create_worktree" else inspect).assert_called_once()
     finally:
         pool.shutdown(mark_interrupted=False)
 
@@ -93,18 +113,22 @@ def test_source_publication_preserves_a_failure_before_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: JobResult
 ) -> None:
     """A valid source lease must preserve a closed signing or scope failure."""
-    root, _, revision = _repository(tmp_path)
+    root, _, revision = _repository(tmp_path, origin_repository="example/repo")
+    _registered_git_fixture(root, monkeypatch)
+    _source_registration_fixture(root, monkeypatch)
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     pool = WorkerPool(
         size=1, shutdown=threading.Event(), completion_q=queue.Queue(), lock_dir=tmp_path / "locks"
     )
-    monkeypatch.setattr(pool, "_git_commit_push_inner", lambda *args, **kwargs: failure)
+    commit = Mock(return_value=failure)
+    monkeypatch.setattr(pool, "_git_commit_push_inner", commit)
     job = GitJob(
         "repo",
         "commit_push",
         30,
         workspace=binding,
+        expected_repository="example/repo",
         kwargs={
             "repo_root": str(root),
             "worktree_path": str(binding.cwd),
@@ -115,6 +139,7 @@ def test_source_publication_preserves_a_failure_before_publication(
     )
     try:
         assert pool._run_git(job) == failure
+        commit.assert_called_once()
         assert manager._require_receipt(42, SourceLane.IMPLEMENTATION).revision == revision
     finally:
         pool.shutdown(mark_interrupted=False)

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -740,17 +740,20 @@ def test_remove_worktree_without_quarantine_refuses_dirty_checkout(tmp_path: Pat
     )
 
 
-def test_remove_worktree_accepts_owner_suffix_for_local_repo_key(tmp_path: Path) -> None:
-    """A local repository key accepts one bound owner/repository receipt."""
+def test_remove_worktree_keeps_short_local_receipt_with_full_remote_identity(
+    tmp_path: Path,
+) -> None:
+    """Remote authentication does not change the local cleanup receipt identity."""
     (tmp_path / ".git").mkdir()
     worktree = tmp_path / "issue-7"
     worktree.mkdir()
     _make_session_root(worktree)
-    _write_quarantine(worktree, _quarantine_payload(worktree, repository="owner/repo"))
+    _write_quarantine(worktree, _quarantine_payload(worktree, repository="repo"))
     job = GitJob(
         repo="repo",
         op="remove_worktree",
         timeout_s=60,
+        expected_repository="owner/repo",
         kwargs=dict(_remove_job(tmp_path, worktree).kwargs),
     )
 
@@ -762,6 +765,57 @@ def test_remove_worktree_accepts_owner_suffix_for_local_repo_key(tmp_path: Path)
         result = run_cleanup_job(job)
 
     assert result.ok is True
+
+
+def test_source_cleanup_keeps_outer_deadline_and_admitted_metadata_lock(
+    tmp_path: Path,
+) -> None:
+    """A source cleanup cannot extend its deadline or select a second lock path."""
+    (tmp_path / ".git").mkdir()
+    worktree = tmp_path / "build" / ".worktrees" / "review-pr-7"
+    worktree.mkdir(parents=True)
+    deadline_s = 999_999_999.0
+    admitted_lock = tmp_path / ".git" / "admitted.lock"
+    job = GitJob(
+        repo="repo",
+        op="remove_worktree",
+        timeout_s=60,
+        expected_repository="owner/repo",
+        deadline_s=deadline_s,
+        kwargs={
+            "worktree_path": str(worktree),
+            "repo_root": str(tmp_path),
+            "issue_number": 7,
+            "expected_head": "a" * 40,
+            "expected_detached": True,
+            "source_lane": "review",
+        },
+    )
+    manager = MagicMock()
+    manager.path_for.return_value = worktree
+    manager.cleanup.side_effect = lambda *_args, **kwargs: kwargs["physical_cleanup"]()
+    nested: list[tuple[GitJob, Path | None]] = []
+
+    def run_nested(nested_job: GitJob, **kwargs: Any) -> JobResult:
+        nested.append((nested_job, kwargs.get("admitted_metadata_lock")))
+        return JobResult(ok=True)
+
+    with (
+        patch(
+            "hephaestus.automation.pipeline.git_cleanup.SourceWorkspaceManager",
+            return_value=manager,
+        ),
+        patch(
+            "hephaestus.automation.pipeline.git_cleanup.run_cleanup_job",
+            side_effect=run_nested,
+        ),
+    ):
+        result = run_cleanup_job(job, admitted_metadata_lock=admitted_lock)
+
+    assert result.ok is True
+    assert len(nested) == 1
+    assert nested[0][0].deadline_s == deadline_s
+    assert nested[0][1] == admitted_lock
 
 
 @pytest.mark.parametrize(

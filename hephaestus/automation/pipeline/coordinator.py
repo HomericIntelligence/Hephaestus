@@ -13,10 +13,11 @@ from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
+from hephaestus.automation.host_capabilities import ValidatedSigningProvider, select_quota_backend
 from hephaestus.automation.pipeline.athena_executor_scope import (
     pipeline_requires_athena_executor,
 )
-from hephaestus.automation.pipeline.host_capabilities import HdiutilQuotaBackend, WorkerCapabilities
+from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.pipeline.jobs import JobHandle
 from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, ROUTES, StageName
@@ -133,7 +134,11 @@ class Coordinator(
             from hephaestus.automation.pipeline.rebase_adr_policy import (
                 select_rebase_policy,
             )
-            from hephaestus.automation.pipeline.worker_pool import WorkerPool
+            from hephaestus.automation.pipeline.worker_pool import (
+                WorkerPool,
+                _controlled_git_signing_env,
+                _pyxis_runtime_available,
+            )
             from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
             athena_executor = (
@@ -164,8 +169,18 @@ class Coordinator(
                 host_verification_pyxis_authority=config.host_verification_pyxis_authority,
                 host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
                 host_capabilities=WorkerCapabilities(
-                    quota_backend=HdiutilQuotaBackend(),
+                    quota_backend=select_quota_backend(
+                        image=config.host_verification_pyxis_image,
+                        image_sha256=config.host_verification_pyxis_sha256,
+                        authority=config.host_verification_pyxis_authority,
+                        quota_root=config.host_verification_pyxis_quota_root,
+                        runtime_available=partial(
+                            _pyxis_runtime_available, shutdown=self._worker_shutdown
+                        ),
+                        execution_boundary_id=config.run_identity,
+                    ),
                     execution_boundary_id=config.run_identity,
+                    signing_provider=ValidatedSigningProvider(_controlled_git_signing_env),
                 ),
                 podman_machine=config.podman_machine,
                 git_lock_timeout=config.git_lock_timeout,

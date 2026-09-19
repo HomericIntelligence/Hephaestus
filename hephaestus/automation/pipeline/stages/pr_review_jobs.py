@@ -1,6 +1,5 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
-import hashlib
 import json
 from pathlib import Path
 from typing import cast
@@ -30,7 +29,6 @@ from hephaestus.automation.review_finding_history import (
     empty_review_finding_compacted_outcomes,
     normalize_review_finding_compacted_outcomes,
 )
-from hephaestus.automation.source_worktree import SourceWorkspaceError
 
 from ..coordinator_sessions import agent_session_lifecycle
 from ..diagnostics import redact_diagnostic_text
@@ -39,7 +37,6 @@ from ..github_jobs import (
     GitHubJob,
     ReconcilePrReviewRequest,
 )
-from ..host_capabilities import CapabilityRequestTarget
 from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
 from .pr_review_diagnostics import publish_host_verification_failure
@@ -58,16 +55,21 @@ from .pr_review_recovery import (
     _PENDING_GITHUB_REQUEST as _PENDING_GITHUB_REQUEST,
     PrReviewRecoveryMixin,
 )
+from .pr_review_repository_validation import PrReviewRepositoryValidationMixin
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 from .pr_review_threads import POST_APPLY
-from .pr_review_verification import _review_changed_paths
+from .pr_review_verification import (
+    _repository_validation_prompt_json,
+)
 
 _ANCHOR_CORRECTION_JOB_PENDING = "review_anchor_correction_job_pending"
 _ANCHOR_CORRECTION_RESULT = "review_anchor_correction_result"
 
 
-class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
+class PrReviewJobs(
+    PrReviewRepositoryValidationMixin, PrReviewScopeExpansionMixin, PrReviewRecoveryMixin
+):
     """Own review worktrees, validation jobs, and result handoffs."""
 
     @staticmethod
@@ -81,6 +83,22 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
 
         The counter resets once per implementation pass.
         """
+        for key in (
+            "repository_validation_source_request",
+            "repository_validation_source_result",
+            "repository_validation_runtime_request",
+            "repository_validation_runtime_result",
+            "repository_validation_attempt",
+            "repository_validation_ci_request",
+            "repository_validation_local_request",
+            "repository_validation_failure",
+            "host_verification_workspace",
+            "host_capability_request",
+            "host_capability_result",
+            "host_capability_failure",
+            "host_capability_verification",
+        ):
+            item.payload.pop(key, None)
         if item.pr is not None:
             item.payload.pop("reviewed_pr_head_sha", None)
             item.payload.pop("reviewed_pr_node_id", None)
@@ -300,89 +318,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
         )
         return JobRequest(job, on_done_state=REVIEW_CHECKOUT_WAIT)
 
-    def _review_checkout_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Submit review only after the fresh snapshot matches a clean checkout."""
-        expected_head = str(item.payload.pop("review_checkout_expected_head", "") or "")
-        error = str(item.payload.pop("review_checkout_error", "") or "")
-        ready = bool(item.payload.pop("review_checkout_ready", False))
-        if error:
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_checkout_unavailable"),
-            )
-        if not ready:
-            # A review is one immutable snapshot. Do not mutate the PR branch
-            # or re-fetch it; the next item takes a fresh detached snapshot.
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_checkout_head_drift"),
-            )
-        normalized_paths = _review_changed_paths(item.payload.get("review_changed_paths"))
-        if normalized_paths is None:
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    "review_checkout_path_manifest_invalid",
-                ),
-            )
-        item.payload["review_changed_paths"] = list(normalized_paths)
-        item.payload["reviewed_pr_head_sha"] = expected_head
-        item.payload["reviewed_pr_node_id"] = item.payload.get("pr_node_id")
-        prior_generation = item.payload.get("reviewed_pr_proof_generation", 0)
-        if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
-            prior_generation = 0
-        item.payload["reviewed_pr_proof_generation"] = prior_generation + 1
-        try:
-            source_workspace_binding(item, ctx, SourceLane.REVIEW, revision=expected_head)
-        except (RuntimeError, SourceWorkspaceError):
-            return StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
-        verifications = _prepare_host_checks(item.payload, _worktree_path(item, ctx), expected_head)
-        if verifications:
-            logger.info(
-                "pr_review:%d: requesting %d host verifications",
-                _issue_number(item),
-                len(verifications),
-            )
-            item.payload["host_verification_receipts"] = []
-            return self._submit_host_verification(item, ctx, verifications[0])
-        return self._route_threads_before_broad_review(item, ctx)
-
-    @staticmethod
-    def _submit_host_verification(
-        item: WorkItem, ctx: StageContext, verification: _HostVerificationSpec
-    ) -> JobRequest:
-        """Submit one fixed host command from the immutable review plan."""
-        # Callbacks run before ``on_done_state``; keep an ownership marker.
-        item.payload[_HOST_VERIFICATION_PENDING] = verification.descr
-        checkout = _worktree_path(item, ctx)
-        request_id = hashlib.sha256(
-            f"{item.repo}:{item.pr}:{item.payload.get('reviewed_pr_head_sha')}:{verification.descr}".encode()
-        ).hexdigest()[:32]
-        return JobRequest(
-            BuildTestJob(
-                repo=item.repo,
-                cwd=checkout,
-                argv=verification.argv,
-                timeout_s=HOST_VERIFICATION_TIMEOUT_S,
-                expected_head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
-                immutable_source=True,
-                capability_target=CapabilityRequestTarget(
-                    repository=item.repo,
-                    issue_number=_issue_number(item),
-                    pr_number=cast(int, item.pr),
-                    repository_root=checkout,
-                    checkout_path=checkout,
-                    expected_head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
-                    phase="pr_review",
-                    purpose="scratch",
-                    request_id=request_id,
-                ),
-                descr=verification.descr,
-            ),
-            on_done_state=HOST_VERIFICATION_WAIT,
-        )
-
     def _submit_review_job(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Create the agent job after the checkout/head barrier succeeds."""
         pending_recovery = self._prepare_pending_finding_recovery(item, ctx)
@@ -447,6 +382,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
                 "issue_body": item.payload.get("issue_body", ""),
                 "pr_description": item.payload.get("pr_description", ""),
                 "advise_findings": item.payload.get("advise_findings", ""),
+                "repository_validation_json": _repository_validation_prompt_json(
+                    item, ctx.config.org
+                ),
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
@@ -641,6 +579,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
                 "diff_text": item.payload.get("pr_diff", ""),
                 "pr_title": pr_title,
                 "pr_description": pr_description,
+                "repository_validation_json": _repository_validation_prompt_json(
+                    item, ctx.config.org
+                ),
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
@@ -885,14 +826,14 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
         verification: _HostVerificationSpec | None,
         reason: str,
     ) -> StepResult:
-        """Durably reject a failed host test without entering audit retries."""
+        """Separate a recoverable runner fault from a source validation failure."""
         receipts = item.payload.get("host_verification_receipts")
         receipt = (
             receipts[-1]
             if isinstance(receipts, list) and receipts and isinstance(receipts[-1], dict)
             else None
         )
-        diagnostic = {
+        diagnostic: dict[str, object] = {
             "argv": list(verification.argv) if verification is not None else [],
             "path": ((verification.changed_path or "") if verification is not None else ""),
             "head_sha": str(item.payload.get("reviewed_pr_head_sha") or ""),
@@ -922,17 +863,18 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
             and receipt.get("head_sha") == diagnostic["head_sha"]
             and receipt.get("source_head_mismatch") is not True
         ):
+            diagnostic["labels_unchanged"] = True
             pr_number = cast(int, item.pr)
             if not publish_host_verification_failure(
                 ctx.github, pr_number, verification, diagnostic, logger
             ):
                 return self._cleanup_review_worktree_then(
                     item,
-                    StageOutcome(Disposition.FINISH_FAIL, "host_verification_comment_failed"),
+                    StageOutcome(Disposition.BLOCKED, "host_verification_comment_failed"),
                 )
             return self._cleanup_review_worktree_then(
                 item,
-                StageOutcome(Disposition.FINISH_FAIL, "host_verification_runner_blocked"),
+                StageOutcome(Disposition.BLOCKED, "host_verification_runner_blocked"),
             )
         no_go_outcome = PrReviewGate._write_no_go(item, ctx)
         if no_go_outcome is not None:
@@ -1057,6 +999,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
                 repo=item.repo,
                 op="remove_worktree",
                 timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
                 kwargs={
                     "worktree_path": review_worktree,
                     "repo_root": str(ctx.paths.repo_root),
@@ -1095,6 +1038,14 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
         self, item: WorkItem, result: JobResult, ctx: StageContext
     ) -> None:
         """Store one completed job result for the current review wait state."""
+        if self._consume_host_capability_result(item, result, ctx):
+            return
+        if self._consume_repository_validation_preparation(item, result):
+            return
+        if self._consume_repository_validation_ci_result(item, result):
+            return
+        if self._consume_repository_validation_local_result(item, result):
+            return
         if self._consume_scope_expansion_result(item, result):
             return
         if self._consume_review_worktree_cleanup_result(item, result):
@@ -1151,38 +1102,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, PrReviewRecoveryMixin):
             item.payload["review_worktree_cleanup_done"] = True
         else:
             item.payload["review_worktree_cleanup_error"] = result.error or "remove worktree failed"
-        return True
-
-    @staticmethod
-    def _consume_review_checkout_result(item: WorkItem, result: JobResult) -> bool:
-        """Store the review checkout barrier result when one is pending."""
-        if not item.payload.pop("review_checkout_pending", None):
-            return False
-        if not result.ok:
-            item.payload["review_checkout_error"] = result.error or "checkout job failed"
-            return True
-        value = result.value
-        ready = bool(isinstance(value, dict) and value.get("ready"))
-        review_diff = value.get("diff") if isinstance(value, dict) else None
-        review_base = value.get("base") if isinstance(value, dict) else None
-        changed_paths = value.get("changed_paths") if isinstance(value, dict) else None
-        if ready and not isinstance(review_diff, str):
-            item.payload["review_checkout_error"] = "checkout job returned no bound diff"
-            ready = False
-        normalized_paths = _review_changed_paths(changed_paths)
-        if ready and normalized_paths is None:
-            item.payload["review_checkout_error"] = (
-                "checkout job returned no bound path manifest"
-                if changed_paths is None
-                else "checkout job returned an invalid path manifest"
-            )
-            ready = False
-        if ready and normalized_paths is not None:
-            item.payload["pr_diff"] = review_diff
-            item.payload["review_changed_paths"] = list(normalized_paths)
-            if is_full_commit_sha(review_base):
-                item.payload["reviewed_pr_base_sha"] = review_base
-        item.payload["review_checkout_ready"] = ready
         return True
 
     @staticmethod

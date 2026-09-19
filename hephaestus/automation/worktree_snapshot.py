@@ -22,8 +22,10 @@ from typing import Any, TypeGuard, cast
 
 import hephaestus.automation.git_utils as git_utils
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.diagnostics import bounded_git_diagnostic
 
 _TAIL = 4000
+_GIT_STDERR_CAPTURE_MIN_BYTES = 64 * 1024
 DIRTY_SNAPSHOT_GIT_MAX_BYTES = 4 * 1024 * 1024
 DIRTY_SNAPSHOT_CONTENT_MAX_BYTES = 8 * 1024 * 1024
 DIRTY_SNAPSHOT_CHANGED_FILE_MAX = 512
@@ -143,7 +145,8 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
     started_readers: list[threading.Thread] = []
     digest = hashlib.sha256()
     output = bytearray()
-    stderr_tail = bytearray()
+    stderr_output = bytearray()
+    stderr_max_bytes = max(max_bytes, _GIT_STDERR_CAPTURE_MIN_BYTES)
     byte_count = 0
     ended: set[str] = set()
     deadline = time.monotonic() + timeout
@@ -186,9 +189,9 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
             if isinstance(chunk, BaseException):
                 raise RuntimeError(f"Git {name} pipe read failed") from chunk
             if name == "stderr":
-                stderr_tail.extend(chunk)
-                if len(stderr_tail) > _TAIL:
-                    del stderr_tail[:-_TAIL]
+                stderr_output.extend(chunk)
+                if len(stderr_output) > stderr_max_bytes:
+                    raise _GitInspectionResourceLimitError("Git stderr limit exceeded")
                 continue
             byte_count += len(chunk)
             if byte_count > max_bytes:
@@ -221,7 +224,7 @@ def _read_bounded_git_output_with_threads(  # noqa: C901
             returncode,
             argv,
             output=text,
-            stderr=stderr_tail.decode("utf-8", errors="replace"),
+            stderr=bounded_git_diagnostic(stderr_output, limit=_TAIL),
         )
     return _BoundedGitOutput(text=text, sha256=digest.hexdigest(), byte_count=byte_count)
 
@@ -292,7 +295,8 @@ def _run_bounded_git_output(  # noqa: C901
     selector: selectors.BaseSelector | None = None
     digest = hashlib.sha256()
     output = bytearray()
-    stderr_tail = bytearray()
+    stderr_output = bytearray()
+    stderr_max_bytes = max(max_bytes, _GIT_STDERR_CAPTURE_MIN_BYTES)
     byte_count = 0
     deadline = time.monotonic() + timeout
     process_completed = False
@@ -319,9 +323,9 @@ def _run_bounded_git_output(  # noqa: C901
                     selector.unregister(key.fileobj)
                     continue
                 if key.data == "stderr":
-                    stderr_tail.extend(chunk)
-                    if len(stderr_tail) > _TAIL:
-                        del stderr_tail[:-_TAIL]
+                    stderr_output.extend(chunk)
+                    if len(stderr_output) > stderr_max_bytes:
+                        raise _GitInspectionResourceLimitError("Git stderr limit exceeded")
                     continue
                 byte_count += len(chunk)
                 if byte_count > max_bytes:
@@ -349,7 +353,7 @@ def _run_bounded_git_output(  # noqa: C901
             returncode,
             argv,
             output=text,
-            stderr=stderr_tail.decode("utf-8", errors="replace"),
+            stderr=bounded_git_diagnostic(stderr_output, limit=_TAIL),
         )
     return _BoundedGitOutput(text=text, sha256=digest.hexdigest(), byte_count=byte_count)
 

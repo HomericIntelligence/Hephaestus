@@ -11,10 +11,11 @@ import threading
 import time
 from collections import deque
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -22,7 +23,7 @@ import hephaestus.automation.pipeline.stages.pr_review_jobs as pr_review_jobs
 import hephaestus.automation.pipeline.stages.pr_review_recovery as pr_review_recovery
 from hephaestus.agents import runtime as agent_runtime
 from hephaestus.agents.execution_policy import AgentOperation
-from hephaestus.agents.workspace import SourceLane
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.address_review_core import parse_addressed_replies
 from hephaestus.automation.github_api.diff import (
     _validate_comments_to_diff,
@@ -608,6 +609,7 @@ class TestExplicitPrReviewRetry:
         assert isinstance(removal, JobRequest)
         assert isinstance(removal.job, GitJob)
         assert removal.job.op == "remove_worktree"
+        assert removal.job.expected_repository == f"{ctx.org}/{item.repo}"
         stage.on_job_done(item, JobResult(ok=True), ctx)
         item.state = removal.on_done_state
         result = stage.step(item, ctx)
@@ -1385,6 +1387,7 @@ class TestPrReviewStageStep:
         assert isinstance(removal, JobRequest)
         assert isinstance(removal.job, GitJob)
         assert removal.job.op == "remove_worktree"
+        assert removal.job.expected_repository == f"{ctx.org}/{item.repo}"
         assert removal.job.kwargs["expected_head"] == "a" * 40
         assert removal.job.kwargs["expected_detached"] is True
         assert removal.job.kwargs["source_lane"] == "review"
@@ -2386,14 +2389,37 @@ class TestPrReviewStageStep:
         assert item.payload["review_audit_failure"] is True
 
     @pytest.mark.parametrize("issue_number", [1, 3007])
-    def test_checkout_runs_registered_host_verification_before_primary_reviewer(
-        self, tmp_path: Path, make_ctx: Any, make_work_item: Any, issue_number: int
+    def test_explicit_registered_host_execution_retains_each_receipt(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+        issue_number: int,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A changed regression receives only hermetic host checks first."""
+        """Explicit execution retains its fixed checks and exact-head receipts."""
+        from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=issue_number, pr=1001, state=REVIEW_CHECKOUT_WAIT)
         item.worktree = _make_hephaestus_checkout(tmp_path)
+        workspace = WorkspaceBinding.source(
+            cwd=Path(item.worktree),
+            reusable_root=tmp_path,
+            repository=f"{ctx.org}/{item.repo}",
+            ownership_key="test-owner",
+            item_number=issue_number,
+            lane=SourceLane.REVIEW,
+            revision="a" * 40,
+            generation=1,
+            detached=True,
+        )
+        binding_call = Mock(return_value=workspace)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.stages.pr_review_repository_validation.source_workspace_binding",
+            binding_call,
+        )
         changed_test = Path(item.worktree) / (
             "tests/unit/automation/pipeline/stages/test_stage_pr_review.py"
         )
@@ -2426,7 +2452,19 @@ class TestPrReviewStageStep:
             }
         )
 
-        request = stage.step(item, ctx)
+        request = _start_explicit_host_execution(stage, item, ctx, workspace=workspace)
+        binding_call.assert_not_called()
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, BuildTestJob)
+        assert item.payload["host_verification_workspace"] == workspace
+        assert request.job.capability_target is None
+        publication_diagnostics_argv = next(
+            spec.argv
+            for spec in _host_verification_specs(
+                ["tests/unit/automation/pipeline/test_worker_pool.py"]
+            )
+            if spec.descr == "review_worker_pool_publication_diagnostics"
+        )
         expected = (
             (
                 "review_python_ruff_check",
@@ -2526,6 +2564,10 @@ class TestPrReviewStageStep:
                 ),
             ),
             (
+                "review_worker_pool_publication_diagnostics",
+                publication_diagnostics_argv,
+            ),
+            (
                 "review_fleet_podman_unix_socket",
                 (
                     "uv",
@@ -2593,7 +2635,7 @@ class TestPrReviewStageStep:
                 ctx,
             )
             item.state = request.on_done_state
-            request = stage.step(item, ctx)
+            request = _release_explicit_capability(stage, item, ctx, stage.step(item, ctx))
 
         review = request
 
@@ -2614,10 +2656,10 @@ class TestPrReviewStageStep:
         assert item.payload["review_audit"] == audit
         assert item.payload["host_verification_receipts"] == receipts
 
-    def test_comment_validation_carries_fresh_host_verification_receipts(
+    def test_comment_validation_needs_no_automatic_execution_receipts(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Reply validation receives exact-head host evidence without a broad review."""
+        """Source reply validation does not request local test execution."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(1, 0)])
         github._thread_replies["live-thread-1001-0"] = [
@@ -2648,22 +2690,8 @@ class TestPrReviewStageStep:
         )
 
         result = stage.step(item, ctx)
-        while isinstance(result, JobRequest) and isinstance(result.job, BuildTestJob):
-            receipt = {
-                "head_sha": "a" * 40,
-                "argv": list(result.job.argv),
-                "immutable_source": True,
-                "failure_kind": "none",
-                "ok": True,
-                "stdout_tail": "65 passed in 0.5s",
-                "stderr_tail": "",
-            }
-            stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
-            item.state = result.on_done_state
-            result = stage.step(item, ctx)
-
-        receipts = item.payload["host_verification_receipts"]
-        assert receipts
+        assert "host_verification_receipts" not in item.payload
+        assert "host_capability_request" not in item.payload
         assert result == Continue(next_state="VALIDATE_WAIT")
         item.state = result.next_state
         validation = stage.step(item, ctx)
@@ -2671,7 +2699,7 @@ class TestPrReviewStageStep:
         assert isinstance(validation, JobRequest)
         assert isinstance(validation.job, AgentJob)
         assert validation.job.descr == "validate"
-        assert json.loads(validation.job.prompt_kwargs["host_verifications_json"]) == receipts
+        assert json.loads(validation.job.prompt_kwargs["host_verifications_json"]) == []
         assert 1001 not in github.reviews
 
     def test_comment_validation_stays_validation_only_if_threads_resolve_during_host_checks(
@@ -2858,6 +2886,82 @@ class TestPrReviewStageStep:
             (
                 f"{path}::TestWorkerPoolSubmitComplete::"
                 "test_host_verification_profile_keeps_source_outside_writable_root"
+            ),
+            "-q",
+            "--tb=short",
+        )
+
+    def test_changed_worker_pool_runs_publication_diagnostics(self) -> None:
+        """A worker-pool change runs each publication diagnostic regression."""
+        path = "tests/unit/automation/pipeline/test_worker_pool.py"
+        specs = _host_verification_specs([path])
+        source_specs = _host_verification_specs(["hephaestus/automation/pipeline/worker_pool.py"])
+
+        spec = next(
+            spec for spec in specs if spec.descr == "review_worker_pool_publication_diagnostics"
+        )
+        source_spec = next(
+            spec
+            for spec in source_specs
+            if spec.descr == "review_worker_pool_publication_diagnostics"
+        )
+
+        assert spec.changed_path == path
+        assert spec.additional_changed_paths == ("hephaestus/automation/pipeline/worker_pool.py",)
+        assert source_spec == spec
+        assert spec.argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            (
+                f"{path}::TestGitOps::"
+                "test_continue_rebase_command_failure_preserves_redacted_bounded_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_continue_rebase_timeout_preserves_redacted_bounded_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_continue_rebase_additional_conflict_returns_conflict_receipt"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_remote_unchanged_preserves_hook_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_remote_probe_failure_preserves_push_and_probe_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_revalidation_timeout_preserves_push_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_rebase_publish_revalidation_failure_preserves_push_diagnostics"
+            ),
+            (f"{path}::test_ordinary_publication_probe_failure_keeps_push_timeout_metadata"),
+            f"{path}::TestGitOps::test_publication_diagnostic_cycle_is_bounded",
+            (
+                f"{path}::TestGitOps::"
+                "test_commit_push_hook_failure_preserves_local_head_and_diagnostics"
+            ),
+            (
+                f"{path}::TestGitOps::"
+                "test_direct_reservation_hook_failure_preserves_head_and_diagnostics"
+            ),
+            (f"{path}::TestGitOps::test_direct_reservation_probe_failure_uses_probe_metadata"),
+            f"{path}::TestGitOps::test_run_git_redacts_generic_subprocess_tails",
+            f"{path}::TestGitOps::test_run_git_timeout_redacts_before_tail_truncation",
+            f"{path}::TestGitOps::test_source_git_timeout_redacts_before_tail_truncation",
+            (f"{path}::TestGitOps::test_source_git_command_failure_redacts_before_tail_truncation"),
+            (f"{path}::TestGitOps::test_initial_reservation_failure_keeps_publication_diagnostics"),
+            (
+                f"{path}::TestGitOps::"
+                "test_commit_push_probe_failure_orders_push_and_probe_diagnostics"
             ),
             "-q",
             "--tb=short",
@@ -3190,10 +3294,10 @@ class TestPrReviewStageStep:
             {**skipped, "immutable_source": True}, spec, expected_head
         )
 
-    def test_python_changes_run_complete_host_validation_before_primary_reviewer(
+    def test_python_changes_start_source_only_review(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A read-only Python review receives deterministic static receipts."""
+        """Python source changes do not request capability-dependent execution."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -3215,15 +3319,15 @@ class TestPrReviewStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
-        assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == ("uv", "run", "ruff", "check", "hephaestus/", "tests/")
-        assert result.job.descr == "review_python_ruff_check"
-        assert result.on_done_state == "HOST_VERIFICATION_WAIT"
+        assert isinstance(result.job, AgentJob)
+        assert result.job.descr == "review"
+        assert json.loads(result.job.prompt_kwargs["host_verifications_json"]) == []
+        assert "host_capability_request" not in item.payload
 
-    def test_checkout_rebinds_review_source_before_host_verification(
+    def test_checkout_rebinds_source_before_source_only_review(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Host verification must have a receipt for its exact review head."""
+        """Source review keeps the exact-head source admission boundary."""
 
         class SourceWorkspaces:
             """Record the review-source preparation boundary."""
@@ -3272,11 +3376,15 @@ class TestPrReviewStageStep:
         result = PrReviewStage().step(item, ctx)
 
         assert isinstance(result, JobRequest)
-        assert isinstance(result.job, BuildTestJob)
-        assert source_workspaces.calls == [(1, SourceLane.REVIEW, head, None)]
-
-        assert source_workspaces.deadlines[0].expires_at == 145.0
-        assert source_workspaces.deadlines[0].shutdown is ctx.cancellation
+        assert isinstance(result.job, AgentJob)
+        assert result.job.descr == "review"
+        assert json.loads(result.job.prompt_kwargs["host_verifications_json"]) == []
+        # Checkout admission and reviewer submission each bind the same source.
+        assert source_workspaces.calls == [(1, SourceLane.REVIEW, head, None)] * 2
+        assert len(source_workspaces.deadlines) == 2
+        for deadline in source_workspaces.deadlines:
+            assert deadline.expires_at == 145.0
+            assert deadline.shutdown is ctx.cancellation
 
     def test_checkout_fails_closed_when_review_source_binding_fails(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
@@ -3294,16 +3402,17 @@ class TestPrReviewStageStep:
         )
         stage = PrReviewStage()
         uncaught = StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_uncaught")
-        with patch.object(
-            pr_review_jobs,
-            "source_workspace_binding",
+        with patch(
+            "hephaestus.automation.pipeline.stages."
+            "pr_review_repository_validation.source_workspace_binding",
             side_effect=RuntimeError("review source unavailable"),
-        ):
+        ) as source_binding:
             try:
                 result = stage.step(item, make_ctx())
             except RuntimeError:
                 result = uncaught
 
+        source_binding.assert_called_once()
         assert result == StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
 
     def test_non_hephaestus_repository_has_no_hephaestus_host_plan(self) -> None:
@@ -3311,7 +3420,7 @@ class TestPrReviewStageStep:
 
         assert specs == ()
 
-    def test_non_hephaestus_checkout_reports_unsupported_host_verification(
+    def test_non_hephaestus_checkout_starts_review_without_execution_evidence(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         stage = PrReviewStage()
@@ -3331,19 +3440,13 @@ class TestPrReviewStageStep:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.descr == "review"
-        assert json.loads(result.job.prompt_kwargs["host_verifications_json"]) == [
-            {
-                "head_sha": "a" * 40,
-                "immutable_source": True,
-                "reason": "repository_profile_unavailable",
-                "status": "unsupported",
-            }
-        ]
+        assert json.loads(result.job.prompt_kwargs["host_verifications_json"]) == []
+        assert "host_verification_receipts" not in item.payload
 
-    def test_python_validation_config_changes_run_host_plan(
+    def test_python_validation_config_changes_start_source_only_review(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Dependency and tool configuration cannot bypass host validation."""
+        """Changed tool configuration does not request local execution."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -3360,8 +3463,10 @@ class TestPrReviewStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
-        assert isinstance(result.job, BuildTestJob)
-        assert result.job.descr == "review_python_ruff_check"
+        assert isinstance(result.job, AgentJob)
+        assert result.job.descr == "review"
+        assert json.loads(result.job.prompt_kwargs["host_verifications_json"]) == []
+        assert "host_capability_request" not in item.payload
 
     def test_migration_docs_change_runs_version_currency_host_verification(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
@@ -3387,7 +3492,7 @@ class TestPrReviewStageStep:
             }
         )
 
-        request = stage.step(item, ctx)
+        request = _start_explicit_host_execution(stage, item, ctx)
 
         expected_argv = (
             "uv",
@@ -3450,26 +3555,12 @@ class TestPrReviewStageStep:
             }
         )
         request = stage.step(item, ctx)
-        for _ in range(3):
-            assert isinstance(request, JobRequest)
-            item.state = request.on_done_state
-            stage.on_job_done(
-                item,
-                JobResult(
-                    ok=True,
-                    value={
-                        "head_sha": "a" * 40,
-                        "immutable_source": True,
-                        "failure_kind": "none",
-                    },
-                ),
-                ctx,
-            )
-            request = stage.step(item, ctx)
 
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, AgentJob)
         assert request.job.descr == "review"
+        assert json.loads(request.job.prompt_kwargs["host_verifications_json"]) == []
+        assert "host_capability_request" not in item.payload
 
     def test_actionable_host_failure_hands_remediation_to_implementation(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
@@ -3489,7 +3580,7 @@ class TestPrReviewStageStep:
                 "pr_diff": "diff --git a/hephaestus/example.py b/hephaestus/example.py\n",
             }
         )
-        request = stage.step(item, ctx)
+        request = _start_explicit_host_execution(stage, item, ctx)
         assert isinstance(request, JobRequest)
         item.state = request.on_done_state
         stage.on_job_done(
@@ -3536,7 +3627,7 @@ class TestPrReviewStageStep:
             }
         )
 
-        request = stage.step(item, ctx)
+        request = _start_explicit_host_execution(stage, item, ctx)
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, BuildTestJob)
         for _ in range(3):
@@ -3553,7 +3644,7 @@ class TestPrReviewStageStep:
                 ),
                 ctx,
             )
-            request = stage.step(item, ctx)
+            request = _release_explicit_capability(stage, item, ctx, stage.step(item, ctx))
             assert isinstance(request, JobRequest)
             assert isinstance(request.job, BuildTestJob)
         assert request.job.descr == "review_stalled_consumer_verification"
@@ -3629,7 +3720,7 @@ class TestPrReviewStageStep:
                 ),
             }
         )
-        request = stage.step(item, ctx)
+        request = _start_explicit_host_execution(stage, item, ctx)
         assert isinstance(request, JobRequest)
         for _ in range(3):
             item.state = request.on_done_state
@@ -3645,7 +3736,7 @@ class TestPrReviewStageStep:
                 ),
                 ctx,
             )
-            request = stage.step(item, ctx)
+            request = _release_explicit_capability(stage, item, ctx, stage.step(item, ctx))
             assert isinstance(request, JobRequest)
         assert isinstance(request.job, BuildTestJob)
         assert request.job.descr == "review_stalled_consumer_verification"
@@ -3690,7 +3781,7 @@ class TestPrReviewStageStep:
                 ),
             }
         )
-        request = stage.step(item, ctx)
+        request = _start_explicit_host_execution(stage, item, ctx)
         assert isinstance(request, JobRequest)
         item.state = request.on_done_state
         stage.on_job_done(
@@ -3711,9 +3802,7 @@ class TestPrReviewStageStep:
 
         next_result = stage.step(item, ctx)
 
-        assert next_result == StageOutcome(
-            Disposition.FINISH_FAIL, "host_verification_runner_blocked"
-        )
+        assert next_result == StageOutcome(Disposition.BLOCKED, "host_verification_runner_blocked")
         receipt = item.payload["host_verification_receipts"][0]
         assert receipt["error"] == "unsupported_host_verification_boundary"
         assert receipt["platform"] == "linux"
@@ -3742,7 +3831,7 @@ class TestPrReviewStageStep:
                 ),
             }
         )
-        request = stage.step(item, ctx)
+        request = _start_explicit_host_execution(stage, item, ctx)
         assert isinstance(request, JobRequest)
         item.state = request.on_done_state
         stage.on_job_done(
@@ -3789,7 +3878,7 @@ class TestPrReviewStageStep:
                 "pr_diff": "diff --git a/hephaestus/example.py b/hephaestus/example.py\n",
             }
         )
-        request = stage.step(item, ctx)
+        request = _start_explicit_host_execution(stage, item, ctx)
         assert isinstance(request, JobRequest)
         item.state = request.on_done_state
         stage.on_job_done(
@@ -8949,3 +9038,444 @@ class TestAgentErrorFailbackFlag:
         stage.on_enter(item, ctx)
 
         assert "review_error_retries" not in item.payload
+
+
+def _release_explicit_capability(stage: PrReviewStage, item: Any, ctx: Any, request: Any) -> Any:
+    """Supply a valid provider receipt through the owned callback boundary."""
+    from hephaestus.automation.pipeline.jobs import HostCapabilityJob
+
+    if not isinstance(request, JobRequest) or not isinstance(request.job, HostCapabilityJob):
+        return request
+    value = _capability_callback_value(request, request.job.target.repository_root, available=True)
+    stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+    item.state = request.on_done_state
+    execution = stage.step(item, ctx)
+    assert isinstance(execution, JobRequest)
+    assert isinstance(execution.job, BuildTestJob)
+    assert execution.job.expected_head_sha == request.job.target.expected_head_sha
+    assert execution.job.immutable_source is True
+    return execution
+
+
+def _start_explicit_host_execution(
+    stage: PrReviewStage, item: Any, ctx: Any, *, workspace: WorkspaceBinding | None = None
+) -> JobRequest:
+    """Request fixed execution directly without making it a checkout prerequisite."""
+    root = Path(item.worktree)
+    head = item.payload["review_checkout_expected_head"]
+    if workspace is None:
+        workspace = WorkspaceBinding.source(
+            cwd=root,
+            reusable_root=root,
+            repository=f"{ctx.org}/{item.repo}",
+            ownership_key="explicit-test-owner",
+            item_number=item.issue,
+            lane=SourceLane.REVIEW,
+            revision=head,
+            generation=1,
+            detached=True,
+        )
+    item.payload.update(
+        reviewed_pr_head_sha=head,
+        reviewed_pr_proof_generation=1,
+        host_verification_workspace=workspace,
+        host_verification_receipts=[],
+    )
+    specs = _prepare_host_checks(item.payload, root, head)
+    assert specs
+    request = stage._submit_host_verification(item, ctx, specs[0])
+    execution = _release_explicit_capability(stage, item, ctx, request)
+    assert isinstance(execution, JobRequest)
+    return execution
+
+
+def _capability_stage_case(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> tuple[PrReviewStage, Any, Any, JobRequest]:
+    """Submit one capability job with an explicit controlled source binding."""
+    from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+
+    stage = PrReviewStage()
+    ctx = make_ctx()
+    item = make_work_item(issue=42, pr=99, state=REVIEW_CHECKOUT_WAIT)
+    item.worktree = str(tmp_path)
+    workspace = WorkspaceBinding.source(
+        cwd=tmp_path,
+        reusable_root=tmp_path,
+        repository=f"{ctx.org}/{item.repo}",
+        ownership_key="test-owner",
+        item_number=42,
+        lane=SourceLane.REVIEW,
+        revision="a" * 40,
+        generation=1,
+        detached=True,
+    )
+    item.payload.update(
+        reviewed_pr_head_sha="a" * 40,
+        reviewed_pr_proof_generation=1,
+        host_verification_workspace=workspace,
+    )
+    spec = _host_verification_specs(["hephaestus/automation/pipeline/worker_pool.py"])[0]
+    result = stage._submit_host_verification(item, ctx, spec)
+    assert isinstance(result, JobRequest)
+    return stage, ctx, item, result
+
+
+def test_host_capability_has_closed_job_and_pending_identity_before_execution(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """Capability admission must not be an inline source-test prerequisite."""
+    from hephaestus.automation.pipeline.jobs import HostCapabilityJob
+
+    _, _, item, result = _capability_stage_case(tmp_path, make_ctx, make_work_item)
+    assert isinstance(result.job, HostCapabilityJob)
+    assert item.payload["host_capability_request"] == result.job.target
+    assert "host_verification_pending" not in item.payload
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "current",
+        "foreign_request",
+        "head_drift",
+        "generation_drift",
+        "malformed",
+        "duplicate",
+        "unowned",
+        "cancelled",
+    ],
+)
+def test_host_capability_callback_preserves_exact_pending_owner(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any, case: str
+) -> None:
+    """Capability callbacks must not enter generic review-result handling."""
+    from hephaestus.automation.pipeline.host_capabilities import (
+        QUOTA_AVAILABLE_TOKEN,
+        CapabilityReceiptTarget,
+        HostCapabilityRead,
+        HostCapabilityReceipt,
+    )
+    from hephaestus.automation.pipeline.jobs import HostCapabilityJob
+
+    stage, ctx, item, submitted = _capability_stage_case(tmp_path, make_ctx, make_work_item)
+    assert isinstance(submitted.job, HostCapabilityJob)
+    pending = submitted.job.target
+    returned = replace(pending, request_id="f" * 32) if case == "foreign_request" else pending
+    target = CapabilityReceiptTarget(
+        returned,
+        tmp_path,
+        tmp_path.stat().st_dev,
+        "test-boundary",
+        "a" * 40,
+        backend="hdiutil-v1",
+    )
+    receipt = HostCapabilityReceipt(
+        True,
+        QUOTA_AVAILABLE_TOKEN,
+        None,
+        "scratch",
+        "d" * 32,
+        target=target,
+        cleanup_state="complete",
+    )
+    read = HostCapabilityRead(returned, receipt=receipt)
+    item.state = "REVIEW_WAIT"
+    item.payload["review_job_pending"] = True
+    if case == "head_drift":
+        item.payload["reviewed_pr_head_sha"] = "c" * 40
+    elif case == "generation_drift":
+        item.payload["reviewed_pr_proof_generation"] = 2
+    elif case == "malformed":
+        object.__setattr__(read, "failure", "invalid")
+    elif case == "unowned":
+        item.payload.pop("host_capability_request")
+    elif case == "duplicate":
+        item.payload["host_capability_result"] = read
+    before_result = item.payload.get("host_capability_result")
+    stage.on_job_done(item, JobResult(ok=True, value=read, interrupted=case == "cancelled"), ctx)
+    assert item.payload.get("review_job_pending") is True
+    assert "review_failed" not in item.payload
+    assert "review_audit" not in item.payload
+    if case == "current":
+        assert item.payload["host_capability_result"] == read
+    else:
+        assert item.payload.get("host_capability_result") is before_result
+    if case != "unowned":
+        assert item.payload["host_capability_request"] == pending
+
+
+def _capability_callback_value(submitted: JobRequest, root: Path, *, available: bool) -> Any:
+    """Supply one complete worker receipt at the stage's external boundary."""
+    from hephaestus.automation.pipeline.host_capabilities import (
+        QUOTA_AVAILABLE_TOKEN,
+        CapabilityReceiptTarget,
+        HostCapabilityRead,
+        HostCapabilityReceipt,
+    )
+    from hephaestus.automation.pipeline.jobs import HostCapabilityJob
+
+    assert isinstance(submitted.job, HostCapabilityJob)
+    request = submitted.job.target
+    target = CapabilityReceiptTarget(
+        request,
+        root,
+        root.stat().st_dev,
+        "test-boundary",
+        request.expected_head_sha,
+        backend="hdiutil-v1",
+    )
+    receipt = HostCapabilityReceipt(
+        available,
+        QUOTA_AVAILABLE_TOKEN if available else "host_verification_quota_detach_failed",
+        None if available else "detach",
+        request.purpose,
+        "e" * 32,
+        stderr_tail="" if available else "quota detach denied",
+        retained_root="" if available else str(root / "retained-volume"),
+        target=target,
+        cleanup_state="complete" if available else "retained",
+    )
+    return HostCapabilityRead(request, receipt=receipt)
+
+
+def test_host_capability_success_starts_only_the_owned_execution(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A valid receipt releases one exact fixed command without another probe."""
+    stage, ctx, item, submitted = _capability_stage_case(tmp_path, make_ctx, make_work_item)
+    value = _capability_callback_value(submitted, tmp_path, available=True)
+    stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+    item.state = submitted.on_done_state
+    outcome = stage.step(item, ctx)
+    assert isinstance(outcome, JobRequest)
+    assert isinstance(outcome.job, BuildTestJob)
+    assert outcome.job.cwd == value.request.checkout_path
+    assert outcome.job.expected_head_sha == value.request.expected_head_sha
+    assert outcome.job.immutable_source is True
+    assert outcome.job.capability_target is None
+    assert "host_capability_request" not in item.payload
+    assert "host_capability_result" not in item.payload
+
+
+@pytest.mark.parametrize("comment_fails", [False, True])
+def test_host_capability_failure_blocks_without_verdict_or_writer(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    comment_fails: bool,
+) -> None:
+    """Runner recovery preserves labels and budgets even if its comment fails."""
+    stage, ctx, item, submitted = _capability_stage_case(tmp_path, make_ctx, make_work_item)
+    value = _capability_callback_value(submitted, tmp_path, available=False)
+    before_attempts = dict(item.attempts)
+    before_mutations = list(ctx.github.mutation_log)
+    no_go = Mock(side_effect=AssertionError("A runner fault is not a source verdict."))
+    writer = Mock(side_effect=AssertionError("A runner fault must not submit a writer."))
+    comment = Mock(side_effect=RuntimeError("comment unavailable") if comment_fails else None)
+    monkeypatch.setattr(stage, "_write_no_go", no_go)
+    monkeypatch.setattr(ctx.github, "mark_pr_implementation_no_go", no_go)
+    monkeypatch.setattr(stage, "_handoff_implementation", writer)
+    monkeypatch.setattr(ctx.github, "upsert_issue_comment", comment)
+    stage.on_job_done(item, JobResult(ok=False, value=value, error=value.receipt.token), ctx)
+    item.state = submitted.on_done_state
+    outcome = stage.step(item, ctx)
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.BLOCKED
+    assert item.attempts == before_attempts
+    assert ctx.github.mutation_log == before_mutations
+    no_go.assert_not_called()
+    writer.assert_not_called()
+    comment.assert_called_once()
+    body = comment.call_args.args[-1]
+    assert value.receipt.receipt_id in body
+    assert value.receipt.retained_root in body
+    assert "quota detach denied" in body
+    assert "detach" in body
+
+
+@pytest.mark.parametrize("reset", ["round", "entry"])
+def test_host_capability_restart_clears_only_transient_ownership(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    reset: str,
+) -> None:
+    """A fresh attempt cannot reuse old ownership, but keeps durable evidence."""
+    from hephaestus.automation.pipeline.stages.pr_review_round_state import (
+        _clear_round_review_state,
+    )
+
+    stage, ctx, item, submitted = _capability_stage_case(tmp_path, make_ctx, make_work_item)
+    value = _capability_callback_value(submitted, tmp_path, available=True)
+    item.payload["host_capability_result"] = value
+    item.payload["host_capability_failure"] = "old-error"
+    receipt_file = tmp_path / "build/.issue_implementer/host-capability-receipts/retained.json"
+    receipt_file.parent.mkdir(parents=True, mode=0o700)
+    receipt_file.write_text("retained", encoding="utf-8")
+    if reset == "round":
+        _clear_round_review_state(item)
+    else:
+        stage.on_enter(item, ctx)
+    for key in (
+        "host_capability_request",
+        "host_capability_result",
+        "host_capability_failure",
+        "host_capability_verification",
+        "host_verification_workspace",
+    ):
+        assert key not in item.payload
+    assert receipt_file.read_text(encoding="utf-8") == "retained"
+
+
+@pytest.mark.parametrize("failure", ["operation_deadline", "operation_cancelled"])
+@pytest.mark.parametrize("available", [False, True])
+def test_stopped_capability_keeps_cleanup_evidence_in_operator_diagnostic(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    available: bool,
+) -> None:
+    """Report the stop cause and keep the original receipt and cleanup result."""
+    stage, ctx, item, submitted = _capability_stage_case(tmp_path, make_ctx, make_work_item)
+    value = replace(
+        _capability_callback_value(submitted, tmp_path, available=available), failure=failure
+    )
+    before_attempts = dict(item.attempts)
+    before_mutations = list(ctx.github.mutation_log)
+    comment = Mock()
+    monkeypatch.setattr(ctx.github, "upsert_issue_comment", comment)
+    stage.on_job_done(
+        item,
+        JobResult(ok=False, value=value, interrupted=failure == "operation_cancelled"),
+        ctx,
+    )
+    item.state = submitted.on_done_state
+    outcome = stage.step(item, ctx)
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.BLOCKED
+    assert item.attempts == before_attempts
+    assert ctx.github.mutation_log == before_mutations
+    diagnostic = item.payload["host_verification_failure"]
+    assert diagnostic["error"] == failure
+    assert diagnostic["token"] == value.receipt.token
+    assert diagnostic["failed_step"] == value.receipt.failed_step
+    assert diagnostic["retained_root"] == value.receipt.retained_root
+    assert diagnostic["cleanup_state"] == value.receipt.cleanup_state
+    assert diagnostic["labels_unchanged"] is True
+    comment.assert_called_once()
+    body = comment.call_args.args[-1]
+    assert failure in body
+    assert value.receipt.receipt_id in body
+    assert value.receipt.cleanup_state in body
+    if not available:
+        assert value.receipt.retained_root in body
+        assert value.receipt.stderr_tail in body
+
+
+@pytest.mark.parametrize("comment_fails", [False, True])
+def test_host_execution_runner_failure_is_recoverable_without_a_source_verdict(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    comment_fails: bool,
+) -> None:
+    """A runtime fault after preflight remains an operator block, not a verdict."""
+    stage, ctx, item, submitted = _capability_stage_case(tmp_path, make_ctx, make_work_item)
+    item.payload.update(
+        review_changed_paths=["hephaestus/automation/pipeline/worker_pool.py"],
+        host_verification_repository_profile="hephaestus",
+        host_verification_receipts=[],
+    )
+    value = _capability_callback_value(submitted, tmp_path, available=True)
+    stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+    item.state = submitted.on_done_state
+    execution = stage.step(item, ctx)
+    assert isinstance(execution, JobRequest)
+    assert isinstance(execution.job, BuildTestJob)
+    before_attempts = dict(item.attempts)
+    before_mutations = list(ctx.github.mutation_log)
+    comment = Mock(side_effect=RuntimeError("comment unavailable") if comment_fails else None)
+    monkeypatch.setattr(ctx.github, "upsert_issue_comment", comment)
+    item.state = execution.on_done_state
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=False,
+            error="host_verification_pyxis_runtime_unavailable",
+            value={
+                "failure_kind": "runner",
+                "head_sha": value.request.expected_head_sha,
+                "immutable_source": False,
+                "platform": "linux",
+                "status": "failed",
+            },
+        ),
+        ctx,
+    )
+    receipt = item.payload["host_verification_receipts"][0]
+    assert receipt["failure_kind"] == "runner"
+    assert receipt["head_sha"] == value.request.expected_head_sha
+    assert receipt["argv"] == list(execution.job.argv)
+    outcome = stage.step(item, ctx)
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.BLOCKED
+    assert item.attempts == before_attempts
+    assert ctx.github.mutation_log == before_mutations
+    assert item.payload["host_verification_failure"]["labels_unchanged"] is True
+    comment.assert_called_once()
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_source_review_does_not_request_path_derived_host_execution(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    stale: bool,
+) -> None:
+    """Ordinary source review needs no quota probe or invented test receipts."""
+    from hephaestus.automation.pipeline.jobs import HostCapabilityJob
+
+    stage, ctx, item, submitted = _capability_stage_case(tmp_path, make_ctx, make_work_item)
+    assert isinstance(submitted.job, HostCapabilityJob)
+    _make_hephaestus_checkout(tmp_path)
+    stale_fields = (
+        "host_verification_receipts",
+        "host_verification_repository_profile",
+        "host_verification_existing_changed_paths",
+        "host_verification_failure",
+        "host_verification_pending",
+        "host_verification_workspace",
+        "host_capability_request",
+        "host_capability_result",
+        "host_capability_failure",
+        "host_capability_verification",
+    )
+    for key in stale_fields:
+        if stale:
+            item.payload[key] = "old execution state"
+        else:
+            item.payload.pop(key, None)
+    item.state = REVIEW_CHECKOUT_WAIT
+    item.payload.update(
+        review_checkout_expected_head="a" * 40,
+        review_checkout_ready=True,
+        review_changed_paths=["hephaestus/automation/pipeline/worker_pool.py"],
+    )
+    route = Mock(return_value=Continue(next_state="REVIEW_WAIT"))
+    monkeypatch.setattr(stage, "_route_threads_before_broad_review", route)
+    binding = Mock(return_value=submitted.job.target.workspace)
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.stages.pr_review_repository_validation.source_workspace_binding",
+        binding,
+    )
+    result = stage.step(item, ctx)
+    assert result == route.return_value
+    route.assert_called_once_with(item, ctx)
+    binding.assert_called_once_with(item, ctx, SourceLane.REVIEW, revision="a" * 40)
+    assert all(key not in item.payload for key in stale_fields)

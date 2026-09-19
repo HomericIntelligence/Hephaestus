@@ -35,11 +35,11 @@ A piece of work is **done** when every item below is true.
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 | 23 | New or revised English technical prose follows the [ASD-STE100 writing standard](asd-ste100.md); principle declarations and specialized principle statements do not change only to satisfy the standard | Author and PR reviewer |
 | 24 | Each `required-checks-gate` dependency succeeds on pull-request and merge-group events; only `pr-policy` can skip on a push event | CI gate `required-checks-gate` + structural unit guard |
-| 25 | For a manual contribution, verify the canonical `upstream`, fetch `upstream/main`, use a signed rebase, verify the new commit signatures, and create clean exact-head evidence for the complete normal local pytest selection. ADR-0051 defines this manual sequence. The automation loop uses the separate ADR-0048 rebase policy. Pre-commit and required PR checks run the shared fast selection. Nightly CI runs the complete validation contract. | Author and PR reviewer; fast tests in `lint`, full suites in nightly CI |
+| 25 | For a manual contribution, verify the canonical `upstream`, fetch `upstream/main`, use a signed rebase, verify the new commit signatures, and record clean exact-head evidence from focused checks. Cover affected behavior and each new or changed test; use applicable documentation checks for documentation-only changes. ADR-0053 defines this manual sequence. No complete local suite is required. The automation loop retains ADR-0048. Pre-commit and required PR checks run the shared fast selection. Nightly CI owns full validation. | Author and source reviewer; focused local checks, fast tests in `lint`, full suites in nightly CI |
 
 ### Final-rebase test evidence
 
-Complete normal-test evidence is valid only for the final rebased head. First,
+Focused local evidence is valid only for the final rebased head. First,
 verify that `upstream` has the canonical
 `https://github.com/HomericIntelligence/Hephaestus.git` URL. Fetch
 `upstream/main` with these commands:
@@ -64,22 +64,26 @@ Strict mode stops the sequence if the rebase, revision enumeration, or a
 signature check fails.
 
 Require `git status --porcelain=v1 --untracked-files=all` to have no output.
-Record `git rev-parse HEAD`. Run this command:
-
-```bash
-uv run --locked pytest tests --override-ini="addopts=" -v --strict-markers \
-  -m "not performance and not contract and not artifact and not codex_release_artifact and not pyxis"
-```
+Record `git rev-parse HEAD`. Run focused checks for the affected behavior and
+each new or changed test. Use locked pytest commands with explicit paths or
+node IDs and `--override-ini="addopts="`. Require nonempty collection and
+success. For documentation-only changes, use applicable documentation checks.
 
 Record `git rev-parse HEAD` again. Require the same value and an empty
 `git status --porcelain=v1 --untracked-files=all` result. Conflict-resolution
 edits, later commits, and other branch changes invalidate the prior evidence.
-After such a change, repeat the final-rebase sequence and test run. Record the
-command, branch head, result, and test summary.
+After such a change, repeat the final-rebase sequence and focused checks for
+the resulting change. Record each command, branch head, result, and summary.
 
-A pre-push hook result counts only when the hook runs that exact locked command
-on the applicable head and records the result. A hook that omits the command
-does not supply complete normal-test evidence. See ADR-0051.
+A hook result counts as focused evidence only when it collected and passed the
+selected tests on the applicable head and recorded the command and result.
+No complete local suite is required before PR creation or merge. Required PR
+checks supply exact-head merge evidence; nightly CI supplies full-suite and
+coverage results. A fast PR result is not full-suite evidence. See ADR-0053.
+
+Source review does not execute tests and does not require a local review image.
+The reviewer inspects source and recorded evidence. CI/CD results remain
+separate from source-review authority and protected merge admission.
 
 ### Conventional Commit history boundary
 

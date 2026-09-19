@@ -9,11 +9,15 @@ planning review, and terminal completion.
 from __future__ import annotations
 
 import logging
+import os
+import queue
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -38,6 +42,7 @@ from hephaestus.automation.pipeline.stages.repo import (
     RepoStage,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
 from .conftest import FakeStageGitHub
 
@@ -163,11 +168,61 @@ class TestOnEnterAndCloneStates:
         assert isinstance(sync, JobRequest)
         assert isinstance(sync.job, GitJob)
         assert sync.job.op == "sync_checkout"
+        assert sync.job.expected_repository == "test-org/repo-a"
 
         stage.on_job_done(repo_item, JobResult(ok=True, value="a" * 40), repo_ctx)
         ready = stage.step(repo_item, repo_ctx)
         assert isinstance(ready, Continue)
         assert ready.next_state == "WAVE_ADMIT"
+
+    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
+    def test_stage_sync_keeps_full_repository_identity_through_worker(
+        self,
+        repo_item: WorkItem,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+    ) -> None:
+        """The worker rechecks one stage sync with its validated full identity."""
+        checkout = tmp_path / "repo-a"
+        (checkout / ".git").mkdir(parents=True)
+        ctx = make_ctx(paths=_RepoPaths(tmp_path, repo_root=checkout))
+        repo_item.state = "CLONE_WAIT"
+        repo_item.payload["checkout_cloned"] = True
+        request = RepoStage().step(repo_item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        checked: list[str | None] = []
+
+        def authenticate(**kwargs: Any) -> tuple[dict[str, str], tuple[str, ...]]:
+            checked.append(kwargs.get("expected_repo"))
+            return {}, ()
+
+        pool = WorkerPool(
+            1,
+            threading.Event(),
+            queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            with (
+                patch.object(
+                    pool,
+                    "_validated_sync_checkout",
+                    return_value=(checkout.resolve(), "test-org/repo-a"),
+                ),
+                patch.object(
+                    pool,
+                    "_authenticated_remote_git_configuration",
+                    side_effect=authenticate,
+                ),
+                patch.object(pool, "_git_sync_checkout", return_value=JobResult(ok=True)),
+            ):
+                result = pool._run_git(request.job)
+        finally:
+            pool.shutdown()
+
+        assert result.ok is True
+        assert checked == ["test-org/repo-a"]
 
     def test_explicit_existing_repo_root_submits_intake_job(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
@@ -788,6 +843,7 @@ class TestIssueWaveRecovery:
         assert isinstance(pending, JobRequest)
         assert isinstance(pending.job, GitJob)
         assert pending.job.op == "verify_issue_wave_ancestry"
+        assert pending.job.expected_repository == "test-org/repo-a"
         assert pending.job.kwargs == {
             "repo_root": str(tmp_path),
             "main_sha": _WAVE_MERGE,

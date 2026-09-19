@@ -113,7 +113,7 @@ Build the local image from the current reviewed checkout:
 podman --connection hephaestus-ci build -f ci/Containerfile -t hephaestus-ci:local .
 ```
 
-Run the complete local CI runner through Podman:
+Run the local PR/static selection through Podman:
 
 ```bash
 CONTAINER_CONNECTION=hephaestus-ci CONTAINER_ENGINE=podman bash scripts/run_ci_local.sh all --rebuild
@@ -122,6 +122,30 @@ CONTAINER_CONNECTION=hephaestus-ci CONTAINER_ENGINE=podman bash scripts/run_ci_l
 The command must exit with status 0. Its output must not contain
 `HEPHAESTUS_CI_RUNNER_FAILURE`. Keep the native fallback active until these
 health checks pass.
+
+For delegated verification, prepare the candidate image and the pinned Gitleaks
+image separately, then have the test-only agent run the check-only selection:
+
+```bash
+CONTAINER_CONNECTION=hephaestus-ci CONTAINER_ENGINE=podman just ci-check-only
+```
+
+Use an image built after the latest toolchain or hook-preparation change. Its
+builder and runtime must use the same pinned Node/npm prefix for Markdown hooks.
+
+Use `just ci-lint-check-only` when only the lint subset is needed. These commands
+run the configured lint checks against a private candidate and fail if a hook
+changes it. They mount the original checkout read-only and disable Python
+dependency syncing. The full selection requires the pinned Gitleaks image and
+disables pulls for both scans. The lint selection does not run these scans. Do
+not combine this selection with `--rebuild`; image preparation is separate. They
+do not provide the queue's native fallback. Use [AGENTS](../../AGENTS.md) and
+[ADR-0053](../adr/0053-focused-local-ci-full-validation.md) for focused checks
+on the final source. These commands supply focused evidence only for applicable
+tests that they collected and passed. A complete local suite is not required.
+Source review does not require these optional image commands.
+See [delegated local verification](../ci/required-checks.md#delegated-local-verification)
+for the separate PR/static, manual contribution, nightly, and optional lanes.
 
 ## Record the result
 

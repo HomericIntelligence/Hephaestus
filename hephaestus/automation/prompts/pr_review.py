@@ -276,6 +276,7 @@ def get_pr_review_analysis_prompt(
     reviewer_provider: str = "",
     host_verification_bootstrap_json: str = "",
     anchor_corrections_json: str = "",
+    repository_validation_json: str = "",
 ) -> str:
     """Get the `$athena:pr-review` analysis prompt for inline review comments.
 
@@ -293,6 +294,7 @@ def get_pr_review_analysis_prompt(
         pr_description: PR description body
         advise_findings: Prior team learnings from Mnemosyne to give the
             reviewer continuity with the advise-first implementation turn.
+        repository_validation_json: Current host-bound repository evidence.
         host_verifications_json: Host-captured output from every fixed,
             repository-owned validation command bound to the reviewed head.
         host_verification_bootstrap_json: Host-owned bootstrap data that
@@ -328,6 +330,7 @@ def get_pr_review_analysis_prompt(
         review_context_kind=review_context_kind,
         reviewer_provider=reviewer_provider,
         fenced=fence_content(),
+        repository_validation_json=repository_validation_json,
     )
 
 
@@ -346,6 +349,7 @@ def _render_pr_review_analysis_prompt(
     review_context_kind: str,
     reviewer_provider: str,
     fenced: FencedContent,
+    repository_validation_json: str,
 ) -> str:
     """Render an analysis prompt with one caller-owned fence nonce."""
     nitpick_template = (
@@ -367,6 +371,11 @@ def _render_pr_review_analysis_prompt(
         advise_findings_block=fenced.fence(
             "ADVISE_FINDINGS",
             advise_findings or "_(no prior advise findings supplied)_",
+        ),
+        repository_validation_block=(
+            fenced.fence("REPOSITORY_VALIDATION", repository_validation_json)
+            if repository_validation_json
+            else ""
         ),
         host_verifications_block=fenced.fence(
             "HOST_VERIFICATIONS",
@@ -412,6 +421,7 @@ def build_bounded_pr_review_analysis_prompt(
     reviewer_provider: str = "",
     host_verification_bootstrap_json: str = "",
     anchor_corrections_json: str = "",
+    repository_validation_json: str = "",
 ) -> str:
     """Render a direct analysis prompt within the provider-safe limit."""
     fenced = fence_content()
@@ -438,6 +448,7 @@ def build_bounded_pr_review_analysis_prompt(
             review_context_kind=review_context_kind,
             reviewer_provider=reviewer_provider,
             fenced=fenced,
+            repository_validation_json=repository_validation_json,
         )
 
     prompt_limit = (
@@ -517,6 +528,7 @@ def get_review_validation_prompt(
     pr_title: str = "",
     pr_description: str = "",
     review_context_kind: str = "issue",
+    repository_validation_json: str = "",
 ) -> str:
     """Get the prompt that validates whether prior review comments were addressed.
 
@@ -537,6 +549,7 @@ def get_review_validation_prompt(
         prior_comments_json: JSON array string of prior comment dicts
             (``path``/``line``/``body``).
         diff_text: The current cumulative PR diff.
+        repository_validation_json: Current host-bound repository evidence.
         host_verifications_json: Host-captured output from every fixed,
             repository-owned validation command bound to the reviewed head.
         pr_title: Current GitHub PR title captured with the reviewed head.
@@ -558,6 +571,7 @@ def get_review_validation_prompt(
         pr_description=pr_description,
         review_context_kind=review_context_kind,
         fenced=fence_content(),
+        repository_validation_json=repository_validation_json,
     )
 
 
@@ -652,6 +666,7 @@ def _render_review_validation_prompt(
     pr_description: str,
     review_context_kind: str,
     fenced: FencedContent,
+    repository_validation_json: str,
 ) -> str:
     """Render a validation prompt with one caller-owned fence nonce."""
     return PromptCatalog.current().render(
@@ -661,6 +676,11 @@ def _render_review_validation_prompt(
         review_context_kind=review_context_kind,
         prior_comments_block=fenced.fence("PRIOR_COMMENTS", prior_comments_json),
         diff_block=fenced.fence("DIFF", diff_text),
+        repository_validation_block=(
+            fenced.fence("REPOSITORY_VALIDATION", repository_validation_json)
+            if repository_validation_json
+            else ""
+        ),
         host_verifications_block=fenced.fence(
             "HOST_VERIFICATIONS",
             host_verifications_json or "[]",
@@ -681,6 +701,7 @@ def build_bounded_review_validation_prompt(
     pr_title: str = "",
     pr_description: str = "",
     review_context_kind: str = "issue",
+    repository_validation_json: str = "",
 ) -> str:
     """Render a validation prompt within the provider-safe limit."""
     fenced = fence_content()
@@ -696,6 +717,7 @@ def build_bounded_review_validation_prompt(
             pr_description=context["pr_description"],
             review_context_kind=review_context_kind,
             fenced=fenced,
+            repository_validation_json=repository_validation_json,
         )
 
     original_context = {

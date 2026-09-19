@@ -40,15 +40,35 @@ are constructed only when a metrics port is configured.
   existing lifecycle fields.
 - **Structured event log (JSONL).** When a loop runs, the coordinator can append
   a best-effort JSONL diagnostic log (default:
-  `build/.issue_implementer/pipeline-events-<timestamp>-<pid>.jsonl`, set via
-  `PipelineConfig.event_log_path`). Each metrics tick appends a
+  `~/.hephaestus-diagnostics/<projects-root-name>/pipeline-events-<timestamp>-<pid>.jsonl`,
+  set via `PipelineConfig.event_log_path`). Each metrics tick appends a
   `metrics_snapshot` record, and every alert transition appends an
   `alert_fired` or `alert_resolved` record carrying the alert `name`,
   `severity`, and `message`. Local JSONL and the in-memory event window are
-  diagnostic only: a write failure disables further JSONL writes without
-  changing routing, and restart always reconstructs from GitHub labels,
+  diagnostic only. The loop first tries the user-owned directory. It rejects a
+  directory below the resolved projects root or in a Git worktree. If that
+  directory is unsafe or unavailable, the loop tries a private
+  `hephaestus-<effective-user-id>` namespace below the system temporary
+  directory. The event-log directory in that namespace is
+  `.hephaestus-diagnostics/<projects-root-name>`.
+  If neither location is safe or available, the loop disables the optional
+  event log. The loop accepts only diagnostic directories that the effective
+  user owns with mode `0700`. It opens each directory component relative to a
+  held descriptor and does not follow symlinks in the managed subtree. The loop
+  first resolves the trusted home or system temporary provider root. It then
+  appends and validates the managed private subtree. It keeps the descriptor
+  for the complete run. Event writes, locks, and retention use that descriptor.
+  The loop creates event-log files with mode `0600`.
+  This policy keeps pre-intake files outside repository clone destinations and
+  registered worktrees. It does not require write access to the projects-root
+  parent. A write failure disables further
+  JSONL writes without changing routing, and restart always reconstructs from GitHub labels,
   comments, and PR state rather than this file. These are useful lines to cite
   when escalating, not a durable authority.
+
+  The default path does not move diagnostics that already exist in registered
+  worktrees. Archive or reconcile those files with the recovery procedure
+  before the next intake run.
 
   The automation-loop wrapper retains inactive event logs for 30 days and caps
   the recognized set at 100 files by default. Operators can override these

@@ -1,0 +1,2952 @@
+{
+  "status": "unsealed candidate metadata; not runtime admission",
+  "hashes": {
+    "pyproject.toml": "6f2c39177653ce91e36dbdbe69e1246f2a0257a8c335fa3dbc3e624ba4f88da2",
+    "uv.lock": "df261ef8e5ddca3317594213e12140b4fbfb750cb09298006e22a530c9c97da2"
+  },
+  "python_version": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "python_executable": "/tmp/comet-1719-init-venv/bin/python3.12",
+  "marker_environment": {
+    "implementation_name": "cpython",
+    "implementation_version": "3.12.3",
+    "os_name": "posix",
+    "platform_machine": "aarch64",
+    "platform_release": "7.1.8-200.fc44.aarch64",
+    "platform_system": "Linux",
+    "platform_version": "#1 SMP PREEMPT_DYNAMIC Mon Aug 10 03:37:58 UTC 2026",
+    "python_full_version": "3.12.3",
+    "platform_python_implementation": "CPython",
+    "python_version": "3.12",
+    "sys_platform": "linux"
+  },
+  "roots": [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "jinja2>=3.1",
+    "httpx>=0.27",
+    "grpcio>=1.81.0",
+    "grpcio-health-checking>=1.81.0",
+    "pyyaml>=6.0",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
+    "uvloop>=0.21",
+    "asyncpg>=0.29",
+    "huggingface_hub==1.28.0",
+    "ruff>=0.15",
+    "ty>=0.0.1a1",
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
+    "jsonschema>=4.23",
+    "pre-commit>=4",
+    "mkdocs-material>=9.6,<10",
+    "pymdown-extensions>=10.14,<11"
+  ],
+  "resolved_distributions": {
+    "annotated-doc": {
+      "version": "0.0.4",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 10,
+      "top_level_names": [
+        "annotated_doc"
+      ],
+      "top_level_metadata_present": false
+    },
+    "annotated-types": {
+      "version": "0.7.0",
+      "requires_dist": [
+        "typing-extensions>=4.0.0; python_version < '3.9'"
+      ],
+      "extras": [],
+      "file_records": 9,
+      "top_level_names": [
+        "annotated_types"
+      ],
+      "top_level_metadata_present": false
+    },
+    "anyio": {
+      "version": "4.14.2",
+      "requires_dist": [
+        "exceptiongroup>=1.0.2; python_version < \"3.11\"",
+        "idna>=2.8",
+        "typing_extensions>=4.5; python_version < \"3.13\"",
+        "trio>=0.32.0; extra == \"trio\""
+      ],
+      "extras": [],
+      "file_records": 54,
+      "top_level_names": [
+        "anyio"
+      ],
+      "top_level_metadata_present": true
+    },
+    "asyncpg": {
+      "version": "0.31.0",
+      "requires_dist": [
+        "async_timeout>=4.0.3; python_version < \"3.11.0\"",
+        "gssapi; platform_system != \"Windows\" and extra == \"gssauth\"",
+        "sspilib; platform_system == \"Windows\" and extra == \"gssauth\""
+      ],
+      "extras": [],
+      "file_records": 91,
+      "top_level_names": [
+        "asyncpg"
+      ],
+      "top_level_metadata_present": true
+    },
+    "attrs": {
+      "version": "26.1.0",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 37,
+      "top_level_names": [
+        "attr",
+        "attrs"
+      ],
+      "top_level_metadata_present": false
+    },
+    "babel": {
+      "version": "2.18.0",
+      "requires_dist": [
+        "pytz>=2015.7; python_version < \"3.9\"",
+        "tzdata; sys_platform == \"win32\" and extra == \"dev\"",
+        "backports.zoneinfo; python_version < \"3.9\" and extra == \"dev\"",
+        "freezegun~=1.0; extra == \"dev\"",
+        "jinja2>=3.0; extra == \"dev\"",
+        "pytest-cov; extra == \"dev\"",
+        "pytest>=6.0; extra == \"dev\"",
+        "pytz; extra == \"dev\"",
+        "setuptools; extra == \"dev\""
+      ],
+      "extras": [],
+      "file_records": 1122,
+      "top_level_names": [
+        "babel"
+      ],
+      "top_level_metadata_present": true
+    },
+    "backrefs": {
+      "version": "8.0",
+      "requires_dist": [
+        "regex; extra == 'extras'"
+      ],
+      "extras": [],
+      "file_records": 42,
+      "top_level_names": [
+        "backrefs"
+      ],
+      "top_level_metadata_present": false
+    },
+    "certifi": {
+      "version": "2026.6.17",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 12,
+      "top_level_names": [
+        "certifi"
+      ],
+      "top_level_metadata_present": true
+    },
+    "cfgv": {
+      "version": "3.5.0",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 8,
+      "top_level_names": [
+        "cfgv"
+      ],
+      "top_level_metadata_present": true
+    },
+    "charset-normalizer": {
+      "version": "3.5.1",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 24,
+      "top_level_names": [
+        "charset_normalizer"
+      ],
+      "top_level_metadata_present": true
+    },
+    "click": {
+      "version": "8.4.2",
+      "requires_dist": [
+        "colorama; platform_system == 'Windows'"
+      ],
+      "extras": [],
+      "file_records": 24,
+      "top_level_names": [
+        "click"
+      ],
+      "top_level_metadata_present": false
+    },
+    "colorama": {
+      "version": "0.4.6",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 19,
+      "top_level_names": [
+        "colorama"
+      ],
+      "top_level_metadata_present": false
+    },
+    "coverage": {
+      "version": "7.15.2",
+      "requires_dist": [
+        "tomli; python_full_version <= \"3.11.0a6\" and extra == \"toml\""
+      ],
+      "extras": [
+        "toml"
+      ],
+      "file_records": 66,
+      "top_level_names": [
+        "coverage"
+      ],
+      "top_level_metadata_present": true
+    },
+    "distlib": {
+      "version": "0.4.3",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 26,
+      "top_level_names": [
+        "distlib"
+      ],
+      "top_level_metadata_present": true
+    },
+    "fastapi": {
+      "version": "0.141.1",
+      "requires_dist": [
+        "starlette>=0.46.0",
+        "pydantic>=2.9.0",
+        "typing-extensions>=4.8.0",
+        "typing-inspection>=0.4.2",
+        "annotated-doc>=0.0.2",
+        "fastapi-cli[standard]>=0.0.32; extra == \"standard\"",
+        "fastar>=0.9.0; extra == \"standard\"",
+        "httpx<1.0.0,>=0.23.0; extra == \"standard\"",
+        "jinja2>=3.1.5; extra == \"standard\"",
+        "python-multipart>=0.0.18; extra == \"standard\"",
+        "email-validator>=2.0.0; extra == \"standard\"",
+        "uvicorn[standard]>=0.12.0; extra == \"standard\"",
+        "pydantic-settings>=2.0.0; extra == \"standard\"",
+        "pydantic-extra-types>=2.0.0; extra == \"standard\"",
+        "fastapi-cli[standard-no-fastapi-cloud-cli]>=0.0.32; extra == \"standard-no-fastapi-cloud-cli\"",
+        "httpx<1.0.0,>=0.23.0; extra == \"standard-no-fastapi-cloud-cli\"",
+        "jinja2>=3.1.5; extra == \"standard-no-fastapi-cloud-cli\"",
+        "python-multipart>=0.0.18; extra == \"standard-no-fastapi-cloud-cli\"",
+        "email-validator>=2.0.0; extra == \"standard-no-fastapi-cloud-cli\"",
+        "uvicorn[standard]>=0.12.0; extra == \"standard-no-fastapi-cloud-cli\"",
+        "pydantic-settings>=2.0.0; extra == \"standard-no-fastapi-cloud-cli\"",
+        "pydantic-extra-types>=2.0.0; extra == \"standard-no-fastapi-cloud-cli\"",
+        "fastapi-cli[standard]>=0.0.32; extra == \"all\"",
+        "httpx<1.0.0,>=0.23.0; extra == \"all\"",
+        "jinja2>=3.1.5; extra == \"all\"",
+        "python-multipart>=0.0.18; extra == \"all\"",
+        "itsdangerous>=1.1.0; extra == \"all\"",
+        "pyyaml>=5.3.1; extra == \"all\"",
+        "email-validator>=2.0.0; extra == \"all\"",
+        "uvicorn[standard]>=0.12.0; extra == \"all\"",
+        "pydantic-settings>=2.0.0; extra == \"all\"",
+        "pydantic-extra-types>=2.0.0; extra == \"all\""
+      ],
+      "extras": [],
+      "file_records": 64,
+      "top_level_names": [
+        "fastapi"
+      ],
+      "top_level_metadata_present": false
+    },
+    "filelock": {
+      "version": "3.32.0",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 28,
+      "top_level_names": [
+        "filelock"
+      ],
+      "top_level_metadata_present": false
+    },
+    "fsspec": {
+      "version": "2026.6.0",
+      "requires_dist": [
+        "adlfs; extra == 'abfs'",
+        "adlfs; extra == 'adl'",
+        "pyarrow>=1; extra == 'arrow'",
+        "dask; extra == 'dask'",
+        "distributed; extra == 'dask'",
+        "pre-commit; extra == 'dev'",
+        "ruff>=0.5; extra == 'dev'",
+        "numpydoc; extra == 'doc'",
+        "sphinx; extra == 'doc'",
+        "sphinx-design; extra == 'doc'",
+        "sphinx-rtd-theme; extra == 'doc'",
+        "yarl; extra == 'doc'",
+        "dropbox; extra == 'dropbox'",
+        "dropboxdrivefs; extra == 'dropbox'",
+        "requests; extra == 'dropbox'",
+        "adlfs; extra == 'full'",
+        "aiohttp!=4.0.0a0,!=4.0.0a1; extra == 'full'",
+        "dask; extra == 'full'",
+        "distributed; extra == 'full'",
+        "dropbox; extra == 'full'",
+        "dropboxdrivefs; extra == 'full'",
+        "fusepy; extra == 'full'",
+        "gcsfs>2024.2.0; extra == 'full'",
+        "libarchive-c; extra == 'full'",
+        "ocifs; extra == 'full'",
+        "panel; extra == 'full'",
+        "paramiko; extra == 'full'",
+        "pyarrow>=1; extra == 'full'",
+        "pygit2; extra == 'full'",
+        "requests; extra == 'full'",
+        "s3fs>2024.2.0; extra == 'full'",
+        "smbprotocol; extra == 'full'",
+        "tqdm; extra == 'full'",
+        "fusepy; extra == 'fuse'",
+        "gcsfs>2024.2.0; extra == 'gcs'",
+        "pygit2; extra == 'git'",
+        "requests; extra == 'github'",
+        "gcsfs; extra == 'gs'",
+        "panel; extra == 'gui'",
+        "pyarrow>=1; extra == 'hdfs'",
+        "aiohttp!=4.0.0a0,!=4.0.0a1; extra == 'http'",
+        "libarchive-c; extra == 'libarchive'",
+        "ocifs; extra == 'oci'",
+        "s3fs>2024.2.0; extra == 's3'",
+        "paramiko; extra == 'sftp'",
+        "smbprotocol; extra == 'smb'",
+        "paramiko; extra == 'ssh'",
+        "aiohttp!=4.0.0a0,!=4.0.0a1; extra == 'test'",
+        "numpy; extra == 'test'",
+        "pytest; extra == 'test'",
+        "pytest-asyncio!=0.22.0; extra == 'test'",
+        "pytest-benchmark; extra == 'test'",
+        "pytest-cov; extra == 'test'",
+        "pytest-mock; extra == 'test'",
+        "pytest-recording; extra == 'test'",
+        "pytest-rerunfailures; extra == 'test'",
+        "requests; extra == 'test'",
+        "aiobotocore<3.0.0,>=2.5.4; extra == 'test-downstream'",
+        "dask[dataframe,test]; extra == 'test-downstream'",
+        "moto[server]<5,>4; extra == 'test-downstream'",
+        "pytest-timeout; extra == 'test-downstream'",
+        "xarray; extra == 'test-downstream'",
+        "adlfs; extra == 'test-full'",
+        "aiohttp!=4.0.0a0,!=4.0.0a1; extra == 'test-full'",
+        "backports-zstd; (python_version < '3.14') and extra == 'test-full'",
+        "cloudpickle; extra == 'test-full'",
+        "dask; extra == 'test-full'",
+        "distributed; extra == 'test-full'",
+        "dropbox; extra == 'test-full'",
+        "dropboxdrivefs; extra == 'test-full'",
+        "fastparquet; extra == 'test-full'",
+        "fusepy; extra == 'test-full'",
+        "gcsfs; extra == 'test-full'",
+        "jinja2; extra == 'test-full'",
+        "kerchunk; extra == 'test-full'",
+        "libarchive-c; extra == 'test-full'",
+        "lz4; extra == 'test-full'",
+        "notebook; extra == 'test-full'",
+        "numpy; extra == 'test-full'",
+        "ocifs; extra == 'test-full'",
+        "pandas<3.0.0; extra == 'test-full'",
+        "panel; extra == 'test-full'",
+        "paramiko; extra == 'test-full'",
+        "pyarrow; extra == 'test-full'",
+        "pyarrow>=1; extra == 'test-full'",
+        "pyftpdlib; extra == 'test-full'",
+        "pygit2; extra == 'test-full'",
+        "pytest; extra == 'test-full'",
+        "pytest-asyncio!=0.22.0; extra == 'test-full'",
+        "pytest-benchmark; extra == 'test-full'",
+        "pytest-cov; extra == 'test-full'",
+        "pytest-mock; extra == 'test-full'",
+        "pytest-recording; extra == 'test-full'",
+        "pytest-rerunfailures; extra == 'test-full'",
+        "python-snappy; extra == 'test-full'",
+        "requests; extra == 'test-full'",
+        "smbprotocol; extra == 'test-full'",
+        "tqdm; extra == 'test-full'",
+        "urllib3; extra == 'test-full'",
+        "zarr<3.2.0; extra == 'test-full'",
+        "zstandard; (python_version < '3.14') and extra == 'test-full'",
+        "tqdm; extra == 'tqdm'"
+      ],
+      "extras": [],
+      "file_records": 63,
+      "top_level_names": [
+        "fsspec"
+      ],
+      "top_level_metadata_present": false
+    },
+    "ghp-import": {
+      "version": "2.1.0",
+      "requires_dist": [
+        "python-dateutil (>=2.8.1)",
+        "twine ; extra == 'dev'",
+        "markdown ; extra == 'dev'",
+        "flake8 ; extra == 'dev'",
+        "wheel ; extra == 'dev'"
+      ],
+      "extras": [],
+      "file_records": 10,
+      "top_level_names": [
+        "ghp_import"
+      ],
+      "top_level_metadata_present": true
+    },
+    "grpcio": {
+      "version": "1.83.0",
+      "requires_dist": [
+        "typing-extensions~=4.12",
+        "grpcio-tools>=1.83.0; extra == \"protobuf\""
+      ],
+      "extras": [],
+      "file_records": 68,
+      "top_level_names": [
+        "grpc"
+      ],
+      "top_level_metadata_present": true
+    },
+    "grpcio-health-checking": {
+      "version": "1.83.0",
+      "requires_dist": [
+        "protobuf<8.0.0,>=7.35.1",
+        "grpcio>=1.83.0"
+      ],
+      "extras": [],
+      "file_records": 14,
+      "top_level_names": [
+        "grpc_health"
+      ],
+      "top_level_metadata_present": true
+    },
+    "h11": {
+      "version": "0.16.0",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 19,
+      "top_level_names": [
+        "h11"
+      ],
+      "top_level_metadata_present": true
+    },
+    "hf-xet": {
+      "version": "1.5.2",
+      "requires_dist": [
+        "pytest ; extra == 'tests'"
+      ],
+      "extras": [],
+      "file_records": 9,
+      "top_level_names": [
+        "hf_xet"
+      ],
+      "top_level_metadata_present": false
+    },
+    "httpcore": {
+      "version": "1.0.9",
+      "requires_dist": [
+        "certifi",
+        "h11>=0.16",
+        "anyio<5.0,>=4.0; extra == 'asyncio'",
+        "h2<5,>=3; extra == 'http2'",
+        "socksio==1.*; extra == 'socks'",
+        "trio<1.0,>=0.22.0; extra == 'trio'"
+      ],
+      "extras": [],
+      "file_records": 38,
+      "top_level_names": [
+        "httpcore"
+      ],
+      "top_level_metadata_present": false
+    },
+    "httpx": {
+      "version": "0.28.1",
+      "requires_dist": [
+        "anyio",
+        "certifi",
+        "httpcore==1.*",
+        "idna",
+        "brotli; (platform_python_implementation == 'CPython') and extra == 'brotli'",
+        "brotlicffi; (platform_python_implementation != 'CPython') and extra == 'brotli'",
+        "click==8.*; extra == 'cli'",
+        "pygments==2.*; extra == 'cli'",
+        "rich<14,>=10; extra == 'cli'",
+        "h2<5,>=3; extra == 'http2'",
+        "socksio==1.*; extra == 'socks'",
+        "zstandard>=0.18.0; extra == 'zstd'"
+      ],
+      "extras": [],
+      "file_records": 32,
+      "top_level_names": [
+        "httpx"
+      ],
+      "top_level_metadata_present": false
+    },
+    "huggingface-hub": {
+      "version": "1.28.0",
+      "requires_dist": [
+        "click<9.0.0,>=8.4.2",
+        "filelock>=3.10.0",
+        "fsspec>=2023.5.0",
+        "hf-xet<2.0.0,>=1.5.2; platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"aarch64\"",
+        "httpx<1,>=0.23.0",
+        "packaging>=20.9",
+        "pyyaml>=5.1",
+        "tqdm>=4.42.1",
+        "typing-extensions>=4.1.0",
+        "authlib>=1.3.2; extra == \"oauth\"",
+        "fastapi; extra == \"oauth\"",
+        "httpx; extra == \"oauth\"",
+        "itsdangerous; extra == \"oauth\"",
+        "torch; extra == \"torch\"",
+        "safetensors[torch]; extra == \"torch\"",
+        "toml; extra == \"fastai\"",
+        "fastai>=2.4; extra == \"fastai\"",
+        "fastcore>=1.3.27; extra == \"fastai\"",
+        "hf-xet<2.0.0,>=1.5.2; extra == \"hf-xet\"",
+        "mcp>=1.8.0; extra == \"mcp\"",
+        "authlib>=1.3.2; extra == \"testing\"",
+        "fastapi; extra == \"testing\"",
+        "httpx; extra == \"testing\"",
+        "itsdangerous; extra == \"testing\"",
+        "jedi; extra == \"testing\"",
+        "Jinja2; extra == \"testing\"",
+        "pytest>=8.4.2; extra == \"testing\"",
+        "pytest-cov; extra == \"testing\"",
+        "pytest-env; extra == \"testing\"",
+        "pytest-xdist; extra == \"testing\"",
+        "pytest-vcr; extra == \"testing\"",
+        "pytest-asyncio; extra == \"testing\"",
+        "pytest-rerunfailures>=16.2; extra == \"testing\"",
+        "pytest-mock; extra == \"testing\"",
+        "urllib3<2.0; extra == \"testing\"",
+        "soundfile; extra == \"testing\"",
+        "Pillow; extra == \"testing\"",
+        "numpy; extra == \"testing\"",
+        "duckdb; extra == \"testing\"",
+        "fastapi; extra == \"testing\"",
+        "gradio>=5.0.0; extra == \"gradio\"",
+        "requests; extra == \"gradio\"",
+        "typing-extensions>=4.8.0; extra == \"typing\"",
+        "types-PyYAML; extra == \"typing\"",
+        "types-simplejson; extra == \"typing\"",
+        "types-toml; extra == \"typing\"",
+        "types-tqdm; extra == \"typing\"",
+        "types-urllib3; extra == \"typing\"",
+        "ruff>=0.9.0; extra == \"quality\"",
+        "mypy==1.15.0; extra == \"quality\"",
+        "libcst>=1.4.0; extra == \"quality\"",
+        "ty; extra == \"quality\"",
+        "authlib>=1.3.2; extra == \"all\"",
+        "fastapi; extra == \"all\"",
+        "httpx; extra == \"all\"",
+        "itsdangerous; extra == \"all\"",
+        "jedi; extra == \"all\"",
+        "Jinja2; extra == \"all\"",
+        "pytest>=8.4.2; extra == \"all\"",
+        "pytest-cov; extra == \"all\"",
+        "pytest-env; extra == \"all\"",
+        "pytest-xdist; extra == \"all\"",
+        "pytest-vcr; extra == \"all\"",
+        "pytest-asyncio; extra == \"all\"",
+        "pytest-rerunfailures>=16.2; extra == \"all\"",
+        "pytest-mock; extra == \"all\"",
+        "urllib3<2.0; extra == \"all\"",
+        "soundfile; extra == \"all\"",
+        "Pillow; extra == \"all\"",
+        "numpy; extra == \"all\"",
+        "duckdb; extra == \"all\"",
+        "fastapi; extra == \"all\"",
+        "ruff>=0.9.0; extra == \"all\"",
+        "mypy==1.15.0; extra == \"all\"",
+        "libcst>=1.4.0; extra == \"all\"",
+        "ty; extra == \"all\"",
+        "typing-extensions>=4.8.0; extra == \"all\"",
+        "types-PyYAML; extra == \"all\"",
+        "types-simplejson; extra == \"all\"",
+        "types-toml; extra == \"all\"",
+        "types-tqdm; extra == \"all\"",
+        "types-urllib3; extra == \"all\"",
+        "authlib>=1.3.2; extra == \"dev\"",
+        "fastapi; extra == \"dev\"",
+        "httpx; extra == \"dev\"",
+        "itsdangerous; extra == \"dev\"",
+        "jedi; extra == \"dev\"",
+        "Jinja2; extra == \"dev\"",
+        "pytest>=8.4.2; extra == \"dev\"",
+        "pytest-cov; extra == \"dev\"",
+        "pytest-env; extra == \"dev\"",
+        "pytest-xdist; extra == \"dev\"",
+        "pytest-vcr; extra == \"dev\"",
+        "pytest-asyncio; extra == \"dev\"",
+        "pytest-rerunfailures>=16.2; extra == \"dev\"",
+        "pytest-mock; extra == \"dev\"",
+        "urllib3<2.0; extra == \"dev\"",
+        "soundfile; extra == \"dev\"",
+        "Pillow; extra == \"dev\"",
+        "numpy; extra == \"dev\"",
+        "duckdb; extra == \"dev\"",
+        "fastapi; extra == \"dev\"",
+        "ruff>=0.9.0; extra == \"dev\"",
+        "mypy==1.15.0; extra == \"dev\"",
+        "libcst>=1.4.0; extra == \"dev\"",
+        "ty; extra == \"dev\"",
+        "typing-extensions>=4.8.0; extra == \"dev\"",
+        "types-PyYAML; extra == \"dev\"",
+        "types-simplejson; extra == \"dev\"",
+        "types-toml; extra == \"dev\"",
+        "types-tqdm; extra == \"dev\"",
+        "types-urllib3; extra == \"dev\""
+      ],
+      "extras": [],
+      "file_records": 197,
+      "top_level_names": [
+        "huggingface_hub"
+      ],
+      "top_level_metadata_present": true
+    },
+    "identify": {
+      "version": "2.6.19",
+      "requires_dist": [
+        "ukkonen; extra == \"license\""
+      ],
+      "extras": [],
+      "file_records": 17,
+      "top_level_names": [
+        "identify"
+      ],
+      "top_level_metadata_present": true
+    },
+    "idna": {
+      "version": "3.18",
+      "requires_dist": [
+        "ruff >= 0.6.2 ; extra == \"all\"",
+        "mypy >= 1.11.2 ; extra == \"all\"",
+        "pytest >= 8.3.2 ; extra == \"all\""
+      ],
+      "extras": [],
+      "file_records": 19,
+      "top_level_names": [
+        "idna"
+      ],
+      "top_level_metadata_present": false
+    },
+    "iniconfig": {
+      "version": "2.3.0",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 12,
+      "top_level_names": [
+        "iniconfig"
+      ],
+      "top_level_metadata_present": true
+    },
+    "jinja2": {
+      "version": "3.1.6",
+      "requires_dist": [
+        "MarkupSafe>=2.0",
+        "Babel>=2.7 ; extra == \"i18n\""
+      ],
+      "extras": [],
+      "file_records": 33,
+      "top_level_names": [
+        "jinja2"
+      ],
+      "top_level_metadata_present": false
+    },
+    "jsonschema": {
+      "version": "4.26.0",
+      "requires_dist": [
+        "attrs>=22.2.0",
+        "jsonschema-specifications>=2023.03.6",
+        "referencing>=0.28.4",
+        "rpds-py>=0.25.0",
+        "fqdn; extra == 'format'",
+        "idna; extra == 'format'",
+        "isoduration; extra == 'format'",
+        "jsonpointer>1.13; extra == 'format'",
+        "rfc3339-validator; extra == 'format'",
+        "rfc3987; extra == 'format'",
+        "uri-template; extra == 'format'",
+        "webcolors>=1.11; extra == 'format'",
+        "fqdn; extra == 'format-nongpl'",
+        "idna; extra == 'format-nongpl'",
+        "isoduration; extra == 'format-nongpl'",
+        "jsonpointer>1.13; extra == 'format-nongpl'",
+        "rfc3339-validator; extra == 'format-nongpl'",
+        "rfc3986-validator>0.1.0; extra == 'format-nongpl'",
+        "rfc3987-syntax>=1.1.0; extra == 'format-nongpl'",
+        "uri-template; extra == 'format-nongpl'",
+        "webcolors>=24.6.0; extra == 'format-nongpl'"
+      ],
+      "extras": [],
+      "file_records": 46,
+      "top_level_names": [
+        "jsonschema"
+      ],
+      "top_level_metadata_present": false
+    },
+    "jsonschema-specifications": {
+      "version": "2025.9.1",
+      "requires_dist": [
+        "referencing>=0.31.0"
+      ],
+      "extras": [],
+      "file_records": 30,
+      "top_level_names": [
+        "jsonschema_specifications"
+      ],
+      "top_level_metadata_present": false
+    },
+    "markdown": {
+      "version": "3.10.3",
+      "requires_dist": [
+        "coverage; extra == \"testing\"",
+        "pyyaml; extra == \"testing\"",
+        "mkdocs>=1.6; extra == \"docs\"",
+        "mkdocs-nature>=0.6; extra == \"docs\"",
+        "mdx_gh_links>=0.2; extra == \"docs\"",
+        "mkdocstrings[python]>=0.28.3; extra == \"docs\"",
+        "mkdocs-gen-files; extra == \"docs\"",
+        "mkdocs-section-index; extra == \"docs\"",
+        "mkdocs-literate-nav; extra == \"docs\""
+      ],
+      "extras": [],
+      "file_records": 42,
+      "top_level_names": [
+        "markdown"
+      ],
+      "top_level_metadata_present": true
+    },
+    "markdown-it-py": {
+      "version": "4.2.0",
+      "requires_dist": [
+        "mdurl~=0.1",
+        "psutil ; extra == \"benchmarking\"",
+        "pytest ; extra == \"benchmarking\"",
+        "pytest-benchmark ; extra == \"benchmarking\"",
+        "commonmark~=0.9 ; extra == \"compare\"",
+        "markdown~=3.4 ; extra == \"compare\"",
+        "mistletoe~=1.0 ; extra == \"compare\"",
+        "mistune~=3.0 ; extra == \"compare\"",
+        "panflute~=2.3 ; extra == \"compare\"",
+        "markdown-it-pyrs ; extra == \"compare\"",
+        "linkify-it-py>=1,<3 ; extra == \"linkify\"",
+        "mdit-py-plugins>=0.5.0 ; extra == \"plugins\"",
+        "gprof2dot ; extra == \"profiling\"",
+        "mdit-py-plugins>=0.5.0 ; extra == \"rtd\"",
+        "myst-parser ; extra == \"rtd\"",
+        "pyyaml ; extra == \"rtd\"",
+        "sphinx ; extra == \"rtd\"",
+        "sphinx-copybutton ; extra == \"rtd\"",
+        "sphinx-design ; extra == \"rtd\"",
+        "sphinx-book-theme~=1.0 ; extra == \"rtd\"",
+        "jupyter_sphinx ; extra == \"rtd\"",
+        "ipykernel ; extra == \"rtd\"",
+        "coverage ; extra == \"testing\"",
+        "pytest ; extra == \"testing\"",
+        "pytest-cov ; extra == \"testing\"",
+        "pytest-regressions ; extra == \"testing\"",
+        "pytest-timeout ; extra == \"testing\"",
+        "requests ; extra == \"testing\""
+      ],
+      "extras": [],
+      "file_records": 77,
+      "top_level_names": [
+        "markdown_it"
+      ],
+      "top_level_metadata_present": false
+    },
+    "markupsafe": {
+      "version": "3.0.3",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 13,
+      "top_level_names": [
+        "markupsafe"
+      ],
+      "top_level_metadata_present": true
+    },
+    "mdurl": {
+      "version": "0.1.2",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 13,
+      "top_level_names": [
+        "mdurl"
+      ],
+      "top_level_metadata_present": false
+    },
+    "mergedeep": {
+      "version": "1.3.4",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 10,
+      "top_level_names": [
+        "mergedeep"
+      ],
+      "top_level_metadata_present": true
+    },
+    "mkdocs": {
+      "version": "1.6.1",
+      "requires_dist": [
+        "click>=7.0",
+        "colorama>=0.4; platform_system == 'Windows'",
+        "ghp-import>=1.0",
+        "importlib-metadata>=4.4; python_version < '3.10'",
+        "jinja2>=2.11.1",
+        "markdown>=3.3.6",
+        "markupsafe>=2.0.1",
+        "mergedeep>=1.3.4",
+        "mkdocs-get-deps>=0.2.0",
+        "packaging>=20.5",
+        "pathspec>=0.11.1",
+        "pyyaml-env-tag>=0.1",
+        "pyyaml>=5.1",
+        "watchdog>=2.0",
+        "babel>=2.9.0; extra == 'i18n'",
+        "babel==2.9.0; extra == 'min-versions'",
+        "click==7.0; extra == 'min-versions'",
+        "colorama==0.4; (platform_system == 'Windows') and extra == 'min-versions'",
+        "ghp-import==1.0; extra == 'min-versions'",
+        "importlib-metadata==4.4; (python_version < '3.10') and extra == 'min-versions'",
+        "jinja2==2.11.1; extra == 'min-versions'",
+        "markdown==3.3.6; extra == 'min-versions'",
+        "markupsafe==2.0.1; extra == 'min-versions'",
+        "mergedeep==1.3.4; extra == 'min-versions'",
+        "mkdocs-get-deps==0.2.0; extra == 'min-versions'",
+        "packaging==20.5; extra == 'min-versions'",
+        "pathspec==0.11.1; extra == 'min-versions'",
+        "pyyaml-env-tag==0.1; extra == 'min-versions'",
+        "pyyaml==5.1; extra == 'min-versions'",
+        "watchdog==2.0; extra == 'min-versions'"
+      ],
+      "extras": [],
+      "file_records": 177,
+      "top_level_names": [
+        "mkdocs"
+      ],
+      "top_level_metadata_present": false
+    },
+    "mkdocs-get-deps": {
+      "version": "0.2.2",
+      "requires_dist": [
+        "importlib-metadata>=4.3; python_version < '3.10'",
+        "mergedeep>=1.3.4",
+        "platformdirs>=2.2.0",
+        "pyyaml>=5.1"
+      ],
+      "extras": [],
+      "file_records": 13,
+      "top_level_names": [
+        "mkdocs_get_deps"
+      ],
+      "top_level_metadata_present": false
+    },
+    "mkdocs-material": {
+      "version": "9.7.7",
+      "requires_dist": [
+        "babel>=2.10",
+        "backrefs>=5.7.post1",
+        "colorama>=0.4",
+        "jinja2>=3.1",
+        "markdown>=3.2",
+        "mkdocs-material-extensions>=1.3",
+        "mkdocs<2,>=1.6",
+        "paginate>=0.5",
+        "pygments>=2.16",
+        "pymdown-extensions>=10.2",
+        "requests>=2.30",
+        "mkdocs-git-committers-plugin-2>=1.1; extra == 'git'",
+        "mkdocs-git-revision-date-localized-plugin>=1.2.4; extra == 'git'",
+        "cairosvg>=2.6; extra == 'imaging'",
+        "pillow>=10.2; extra == 'imaging'",
+        "mkdocs-minify-plugin>=0.7; extra == 'recommended'",
+        "mkdocs-redirects>=1.2; extra == 'recommended'",
+        "mkdocs-rss-plugin>=1.6; extra == 'recommended'"
+      ],
+      "extras": [],
+      "file_records": 14593,
+      "top_level_names": [
+        "material"
+      ],
+      "top_level_metadata_present": false
+    },
+    "mkdocs-material-extensions": {
+      "version": "1.3.1",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 9,
+      "top_level_names": [
+        "materialx"
+      ],
+      "top_level_metadata_present": false
+    },
+    "nodeenv": {
+      "version": "1.10.0",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 11,
+      "top_level_names": [
+        "nodeenv"
+      ],
+      "top_level_metadata_present": true
+    },
+    "packaging": {
+      "version": "26.2",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 29,
+      "top_level_names": [
+        "packaging"
+      ],
+      "top_level_metadata_present": false
+    },
+    "paginate": {
+      "version": "0.5.7",
+      "requires_dist": [
+        "pytest; extra == \"dev\"",
+        "tox; extra == \"dev\"",
+        "black; extra == \"lint\""
+      ],
+      "extras": [],
+      "file_records": 9,
+      "top_level_names": [
+        "paginate"
+      ],
+      "top_level_metadata_present": true
+    },
+    "pathspec": {
+      "version": "1.1.1",
+      "requires_dist": [
+        "hyperscan >=0.7 ; extra == \"hyperscan\"",
+        "typing-extensions >=4 ; extra == \"optional\"",
+        "google-re2 >=1.1 ; extra == \"re2\""
+      ],
+      "extras": [],
+      "file_records": 38,
+      "top_level_names": [
+        "pathspec"
+      ],
+      "top_level_metadata_present": false
+    },
+    "platformdirs": {
+      "version": "4.11.0",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 16,
+      "top_level_names": [
+        "platformdirs"
+      ],
+      "top_level_metadata_present": false
+    },
+    "pluggy": {
+      "version": "1.6.0",
+      "requires_dist": [
+        "pre-commit; extra == \"dev\"",
+        "tox; extra == \"dev\"",
+        "pytest; extra == \"testing\"",
+        "pytest-benchmark; extra == \"testing\"",
+        "coverage; extra == \"testing\""
+      ],
+      "extras": [],
+      "file_records": 16,
+      "top_level_names": [
+        "pluggy"
+      ],
+      "top_level_metadata_present": true
+    },
+    "pre-commit": {
+      "version": "4.6.1",
+      "requires_dist": [
+        "cfgv>=2.0.0",
+        "identify>=1.0.0",
+        "nodeenv>=0.11.1",
+        "pyyaml>=5.1",
+        "virtualenv>=20.10.0"
+      ],
+      "extras": [],
+      "file_records": 92,
+      "top_level_names": [
+        "pre_commit"
+      ],
+      "top_level_metadata_present": true
+    },
+    "protobuf": {
+      "version": "7.35.1",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 61,
+      "top_level_names": [
+        "google"
+      ],
+      "top_level_metadata_present": false
+    },
+    "pydantic": {
+      "version": "2.13.4",
+      "requires_dist": [
+        "annotated-types>=0.6.0",
+        "pydantic-core==2.46.4",
+        "typing-extensions>=4.14.1",
+        "typing-inspection>=0.4.2",
+        "email-validator>=2.0.0; extra == 'email'",
+        "tzdata; (python_version >= '3.9' and platform_system == 'Windows') and extra == 'timezone'"
+      ],
+      "extras": [],
+      "file_records": 113,
+      "top_level_names": [
+        "pydantic"
+      ],
+      "top_level_metadata_present": false
+    },
+    "pydantic-core": {
+      "version": "2.46.4",
+      "requires_dist": [
+        "typing-extensions>=4.14.1"
+      ],
+      "extras": [],
+      "file_records": 12,
+      "top_level_names": [
+        "pydantic_core"
+      ],
+      "top_level_metadata_present": false
+    },
+    "pygments": {
+      "version": "2.20.0",
+      "requires_dist": [
+        "colorama>=0.4.6; extra == 'windows-terminal'"
+      ],
+      "extras": [],
+      "file_records": 348,
+      "top_level_names": [
+        "pygments"
+      ],
+      "top_level_metadata_present": false
+    },
+    "pymdown-extensions": {
+      "version": "10.21.3",
+      "requires_dist": [
+        "markdown>=3.6",
+        "pyyaml",
+        "pygments>=2.19.1; extra == 'extra'"
+      ],
+      "extras": [],
+      "file_records": 49,
+      "top_level_names": [
+        "pymdownx"
+      ],
+      "top_level_metadata_present": false
+    },
+    "pytest": {
+      "version": "9.1.1",
+      "requires_dist": [
+        "colorama>=0.4; sys_platform == \"win32\"",
+        "exceptiongroup>=1; python_version < \"3.11\"",
+        "iniconfig>=1.0.1",
+        "packaging>=22",
+        "pluggy<2,>=1.5",
+        "pygments>=2.7.2",
+        "tomli>=1; python_version < \"3.11\"",
+        "argcomplete; extra == \"dev\"",
+        "attrs>=19.2; extra == \"dev\"",
+        "hypothesis>=3.56; extra == \"dev\"",
+        "mock; extra == \"dev\"",
+        "requests; extra == \"dev\"",
+        "setuptools; extra == \"dev\"",
+        "xmlschema; extra == \"dev\""
+      ],
+      "extras": [],
+      "file_records": 93,
+      "top_level_names": [
+        "_pytest",
+        "py",
+        "pytest"
+      ],
+      "top_level_metadata_present": true
+    },
+    "pytest-asyncio": {
+      "version": "1.4.0",
+      "requires_dist": [
+        "backports-asyncio-runner<2,>=1.1; python_version < \"3.11\"",
+        "pytest<10,>=8.4",
+        "typing-extensions>=4.12; python_version < \"3.13\"",
+        "sphinx>=5.3; extra == \"docs\"",
+        "sphinx-rtd-theme>=1; extra == \"docs\"",
+        "sphinx-tabs>=3.5; extra == \"docs\"",
+        "coverage>=6.2; extra == \"testing\"",
+        "hypothesis>=5.7.1; extra == \"testing\""
+      ],
+      "extras": [],
+      "file_records": 11,
+      "top_level_names": [
+        "pytest_asyncio"
+      ],
+      "top_level_metadata_present": true
+    },
+    "pytest-cov": {
+      "version": "7.1.0",
+      "requires_dist": [
+        "coverage[toml]>=7.10.6",
+        "pluggy>=1.2",
+        "pytest>=7",
+        "process-tests; extra == 'testing'",
+        "pytest-xdist; extra == 'testing'",
+        "virtualenv; extra == 'testing'"
+      ],
+      "extras": [],
+      "file_records": 11,
+      "top_level_names": [
+        "pytest_cov"
+      ],
+      "top_level_metadata_present": false
+    },
+    "python-dateutil": {
+      "version": "2.9.0.post0",
+      "requires_dist": [
+        "six >=1.5"
+      ],
+      "extras": [],
+      "file_records": 27,
+      "top_level_names": [
+        "dateutil"
+      ],
+      "top_level_metadata_present": true
+    },
+    "python-discovery": {
+      "version": "1.5.0",
+      "requires_dist": [
+        "filelock>=3.15.4",
+        "platformdirs<5,>=4.3.6"
+      ],
+      "extras": [],
+      "file_records": 18,
+      "top_level_names": [
+        "python_discovery"
+      ],
+      "top_level_metadata_present": false
+    },
+    "pyyaml": {
+      "version": "6.0.3",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 26,
+      "top_level_names": [
+        "_yaml",
+        "yaml"
+      ],
+      "top_level_metadata_present": true
+    },
+    "pyyaml-env-tag": {
+      "version": "1.1",
+      "requires_dist": [
+        "pyyaml"
+      ],
+      "extras": [],
+      "file_records": 8,
+      "top_level_names": [
+        "yaml_env_tag"
+      ],
+      "top_level_metadata_present": true
+    },
+    "referencing": {
+      "version": "0.37.0",
+      "requires_dist": [
+        "attrs>=22.2.0",
+        "rpds-py>=0.7.0",
+        "typing-extensions>=4.4.0; python_version < '3.13'"
+      ],
+      "extras": [],
+      "file_records": 21,
+      "top_level_names": [
+        "referencing"
+      ],
+      "top_level_metadata_present": false
+    },
+    "requests": {
+      "version": "2.34.2",
+      "requires_dist": [
+        "charset_normalizer<4,>=2",
+        "idna<4,>=2.5",
+        "urllib3<3,>=1.26",
+        "certifi>=2023.5.7",
+        "PySocks!=1.5.7,>=1.5.6; extra == \"socks\"",
+        "chardet<8,>=3.0.2; extra == \"use-chardet-on-py3\""
+      ],
+      "extras": [],
+      "file_records": 28,
+      "top_level_names": [
+        "requests"
+      ],
+      "top_level_metadata_present": true
+    },
+    "rich": {
+      "version": "15.0.0",
+      "requires_dist": [
+        "ipywidgets (>=7.5.1,<9) ; extra == \"jupyter\"",
+        "markdown-it-py (>=2.2.0)",
+        "pygments (>=2.13.0,<3.0.0)"
+      ],
+      "extras": [],
+      "file_records": 107,
+      "top_level_names": [
+        "rich"
+      ],
+      "top_level_metadata_present": false
+    },
+    "rpds-py": {
+      "version": "2026.6.3",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 11,
+      "top_level_names": [
+        "rpds"
+      ],
+      "top_level_metadata_present": false
+    },
+    "ruff": {
+      "version": "0.15.22",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 11,
+      "top_level_names": [
+        "ruff"
+      ],
+      "top_level_metadata_present": false
+    },
+    "shellingham": {
+      "version": "1.5.4",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 15,
+      "top_level_names": [
+        "shellingham"
+      ],
+      "top_level_metadata_present": true
+    },
+    "six": {
+      "version": "1.17.0",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 8,
+      "top_level_names": [
+        "six"
+      ],
+      "top_level_metadata_present": true
+    },
+    "starlette": {
+      "version": "1.3.1",
+      "requires_dist": [
+        "anyio<5,>=3.6.2",
+        "typing-extensions>=4.10.0; python_version < '3.13'",
+        "httpx2>=2.0.0; extra == 'full'",
+        "httpx<0.29.0,>=0.27.0; extra == 'full'",
+        "itsdangerous; extra == 'full'",
+        "jinja2; extra == 'full'",
+        "python-multipart>=0.0.18; extra == 'full'",
+        "pyyaml; extra == 'full'"
+      ],
+      "extras": [],
+      "file_records": 41,
+      "top_level_names": [
+        "starlette"
+      ],
+      "top_level_metadata_present": false
+    },
+    "tqdm": {
+      "version": "4.69.0",
+      "requires_dist": [
+        "colorama; platform_system == \"Windows\"",
+        "requests; extra == \"discord\"",
+        "envwrap; extra == \"discord\"",
+        "slack-sdk; extra == \"slack\"",
+        "envwrap; extra == \"slack\"",
+        "requests; extra == \"telegram\"",
+        "envwrap; extra == \"telegram\"",
+        "ipywidgets>=6; extra == \"notebook\""
+      ],
+      "extras": [],
+      "file_records": 46,
+      "top_level_names": [
+        "images",
+        "tqdm"
+      ],
+      "top_level_metadata_present": true
+    },
+    "ty": {
+      "version": "0.0.62",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 12,
+      "top_level_names": [
+        "ty"
+      ],
+      "top_level_metadata_present": false
+    },
+    "typer": {
+      "version": "0.27.0",
+      "requires_dist": [
+        "shellingham>=1.3.0",
+        "rich>=13.8.0",
+        "annotated-doc>=0.0.2",
+        "colorama; platform_system == \"Windows\""
+      ],
+      "extras": [],
+      "file_records": 43,
+      "top_level_names": [
+        "typer"
+      ],
+      "top_level_metadata_present": false
+    },
+    "typing-extensions": {
+      "version": "4.16.0",
+      "requires_dist": [],
+      "extras": [],
+      "file_records": 7,
+      "top_level_names": [
+        "typing_extensions"
+      ],
+      "top_level_metadata_present": false
+    },
+    "typing-inspection": {
+      "version": "0.4.2",
+      "requires_dist": [
+        "typing-extensions>=4.12.0"
+      ],
+      "extras": [],
+      "file_records": 11,
+      "top_level_names": [
+        "typing_inspection"
+      ],
+      "top_level_metadata_present": false
+    },
+    "urllib3": {
+      "version": "2.7.0",
+      "requires_dist": [
+        "brotli>=1.2.0; (platform_python_implementation == 'CPython') and extra == 'brotli'",
+        "brotlicffi>=1.2.0.0; (platform_python_implementation != 'CPython') and extra == 'brotli'",
+        "h2<5,>=4; extra == 'h2'",
+        "pysocks!=1.5.7,<2.0,>=1.5.6; extra == 'socks'",
+        "backports-zstd>=1.0.0; (python_version < '3.14') and extra == 'zstd'"
+      ],
+      "extras": [],
+      "file_records": 44,
+      "top_level_names": [
+        "urllib3"
+      ],
+      "top_level_metadata_present": false
+    },
+    "uvicorn": {
+      "version": "0.52.4",
+      "requires_dist": [
+        "click>=7.0",
+        "h11>=0.8",
+        "typing-extensions>=4.0; python_version < '3.11'",
+        "httptools>=0.8.0; extra == 'standard'",
+        "python-dotenv>=0.13; extra == 'standard'",
+        "pyyaml>=5.1; extra == 'standard'",
+        "uvloop>=0.15.1; (sys_platform != 'win32' and (sys_platform != 'cygwin' and platform_python_implementation != 'PyPy')) and extra == 'standard'",
+        "watchfiles>=0.20; extra == 'standard'",
+        "websockets>=13.0; extra == 'standard'"
+      ],
+      "extras": [],
+      "file_records": 51,
+      "top_level_names": [
+        "uvicorn"
+      ],
+      "top_level_metadata_present": false
+    },
+    "uvloop": {
+      "version": "0.22.1",
+      "requires_dist": [
+        "aiohttp>=3.10.5; extra == \"test\"",
+        "flake8~=6.1; extra == \"test\"",
+        "psutil; extra == \"test\"",
+        "pycodestyle~=2.11.0; extra == \"test\"",
+        "pyOpenSSL~=25.3.0; extra == \"test\"",
+        "mypy>=0.800; extra == \"test\"",
+        "setuptools>=60; extra == \"dev\"",
+        "Cython~=3.0; extra == \"dev\"",
+        "Sphinx~=4.1.2; extra == \"docs\"",
+        "sphinxcontrib-asyncio~=0.3.0; extra == \"docs\"",
+        "sphinx_rtd_theme~=0.5.2; extra == \"docs\""
+      ],
+      "extras": [],
+      "file_records": 65,
+      "top_level_names": [
+        "uvloop"
+      ],
+      "top_level_metadata_present": true
+    },
+    "virtualenv": {
+      "version": "21.7.0",
+      "requires_dist": [
+        "distlib<1,>=0.3.7",
+        "filelock<4,>=3.24.2; python_version >= '3.10'",
+        "filelock<=3.19.1,>=3.16.1; python_version < '3.10'",
+        "platformdirs<5,>=3.9.1",
+        "python-discovery>=1.4.2",
+        "typing-extensions>=4.13.2; python_version < '3.11'"
+      ],
+      "extras": [],
+      "file_records": 114,
+      "top_level_names": [
+        "virtualenv"
+      ],
+      "top_level_metadata_present": false
+    },
+    "watchdog": {
+      "version": "6.0.0",
+      "requires_dist": [
+        "PyYAML>=3.10; extra == \"watchmedo\""
+      ],
+      "extras": [],
+      "file_records": 37,
+      "top_level_names": [
+        "watchdog"
+      ],
+      "top_level_metadata_present": true
+    }
+  },
+  "resolved_count": 77,
+  "requirements_checked": [
+    {
+      "parent": "project",
+      "requirement": "typer>=0.12",
+      "name": "typer",
+      "version": "0.27.0"
+    },
+    {
+      "parent": "project",
+      "requirement": "pydantic>=2.7",
+      "name": "pydantic",
+      "version": "2.13.4"
+    },
+    {
+      "parent": "project",
+      "requirement": "jinja2>=3.1",
+      "name": "jinja2",
+      "version": "3.1.6"
+    },
+    {
+      "parent": "project",
+      "requirement": "httpx>=0.27",
+      "name": "httpx",
+      "version": "0.28.1"
+    },
+    {
+      "parent": "project",
+      "requirement": "grpcio>=1.81.0",
+      "name": "grpcio",
+      "version": "1.83.0"
+    },
+    {
+      "parent": "project",
+      "requirement": "grpcio-health-checking>=1.81.0",
+      "name": "grpcio-health-checking",
+      "version": "1.83.0"
+    },
+    {
+      "parent": "project",
+      "requirement": "pyyaml>=6.0",
+      "name": "pyyaml",
+      "version": "6.0.3"
+    },
+    {
+      "parent": "project",
+      "requirement": "fastapi>=0.141.1",
+      "name": "fastapi",
+      "version": "0.141.1"
+    },
+    {
+      "parent": "project",
+      "requirement": "uvicorn>=0.52.4",
+      "name": "uvicorn",
+      "version": "0.52.4"
+    },
+    {
+      "parent": "project",
+      "requirement": "uvloop>=0.21",
+      "name": "uvloop",
+      "version": "0.22.1"
+    },
+    {
+      "parent": "project",
+      "requirement": "asyncpg>=0.29",
+      "name": "asyncpg",
+      "version": "0.31.0"
+    },
+    {
+      "parent": "project",
+      "requirement": "huggingface_hub==1.28.0",
+      "name": "huggingface-hub",
+      "version": "1.28.0"
+    },
+    {
+      "parent": "project",
+      "requirement": "ruff>=0.15",
+      "name": "ruff",
+      "version": "0.15.22"
+    },
+    {
+      "parent": "project",
+      "requirement": "ty>=0.0.1a1",
+      "name": "ty",
+      "version": "0.0.62"
+    },
+    {
+      "parent": "project",
+      "requirement": "pytest>=8",
+      "name": "pytest",
+      "version": "9.1.1"
+    },
+    {
+      "parent": "project",
+      "requirement": "pytest-asyncio>=0.23",
+      "name": "pytest-asyncio",
+      "version": "1.4.0"
+    },
+    {
+      "parent": "project",
+      "requirement": "pytest-cov>=5",
+      "name": "pytest-cov",
+      "version": "7.1.0"
+    },
+    {
+      "parent": "project",
+      "requirement": "jsonschema>=4.23",
+      "name": "jsonschema",
+      "version": "4.26.0"
+    },
+    {
+      "parent": "project",
+      "requirement": "pre-commit>=4",
+      "name": "pre-commit",
+      "version": "4.6.1"
+    },
+    {
+      "parent": "project",
+      "requirement": "mkdocs-material>=9.6,<10",
+      "name": "mkdocs-material",
+      "version": "9.7.7"
+    },
+    {
+      "parent": "project",
+      "requirement": "pymdown-extensions>=10.14,<11",
+      "name": "pymdown-extensions",
+      "version": "10.21.3"
+    },
+    {
+      "parent": "typer",
+      "requirement": "shellingham>=1.3.0",
+      "name": "shellingham",
+      "version": "1.5.4"
+    },
+    {
+      "parent": "typer",
+      "requirement": "rich>=13.8.0",
+      "name": "rich",
+      "version": "15.0.0"
+    },
+    {
+      "parent": "typer",
+      "requirement": "annotated-doc>=0.0.2",
+      "name": "annotated-doc",
+      "version": "0.0.4"
+    },
+    {
+      "parent": "pydantic",
+      "requirement": "annotated-types>=0.6.0",
+      "name": "annotated-types",
+      "version": "0.7.0"
+    },
+    {
+      "parent": "pydantic",
+      "requirement": "pydantic-core==2.46.4",
+      "name": "pydantic-core",
+      "version": "2.46.4"
+    },
+    {
+      "parent": "pydantic",
+      "requirement": "typing-extensions>=4.14.1",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "pydantic",
+      "requirement": "typing-inspection>=0.4.2",
+      "name": "typing-inspection",
+      "version": "0.4.2"
+    },
+    {
+      "parent": "jinja2",
+      "requirement": "MarkupSafe>=2.0",
+      "name": "markupsafe",
+      "version": "3.0.3"
+    },
+    {
+      "parent": "httpx",
+      "requirement": "anyio",
+      "name": "anyio",
+      "version": "4.14.2"
+    },
+    {
+      "parent": "httpx",
+      "requirement": "certifi",
+      "name": "certifi",
+      "version": "2026.6.17"
+    },
+    {
+      "parent": "httpx",
+      "requirement": "httpcore==1.*",
+      "name": "httpcore",
+      "version": "1.0.9"
+    },
+    {
+      "parent": "httpx",
+      "requirement": "idna",
+      "name": "idna",
+      "version": "3.18"
+    },
+    {
+      "parent": "grpcio",
+      "requirement": "typing-extensions~=4.12",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "grpcio-health-checking",
+      "requirement": "protobuf<8.0.0,>=7.35.1",
+      "name": "protobuf",
+      "version": "7.35.1"
+    },
+    {
+      "parent": "grpcio-health-checking",
+      "requirement": "grpcio>=1.83.0",
+      "name": "grpcio",
+      "version": "1.83.0"
+    },
+    {
+      "parent": "fastapi",
+      "requirement": "starlette>=0.46.0",
+      "name": "starlette",
+      "version": "1.3.1"
+    },
+    {
+      "parent": "fastapi",
+      "requirement": "pydantic>=2.9.0",
+      "name": "pydantic",
+      "version": "2.13.4"
+    },
+    {
+      "parent": "fastapi",
+      "requirement": "typing-extensions>=4.8.0",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "fastapi",
+      "requirement": "typing-inspection>=0.4.2",
+      "name": "typing-inspection",
+      "version": "0.4.2"
+    },
+    {
+      "parent": "fastapi",
+      "requirement": "annotated-doc>=0.0.2",
+      "name": "annotated-doc",
+      "version": "0.0.4"
+    },
+    {
+      "parent": "uvicorn",
+      "requirement": "click>=7.0",
+      "name": "click",
+      "version": "8.4.2"
+    },
+    {
+      "parent": "uvicorn",
+      "requirement": "h11>=0.8",
+      "name": "h11",
+      "version": "0.16.0"
+    },
+    {
+      "parent": "huggingface-hub",
+      "requirement": "click<9.0.0,>=8.4.2",
+      "name": "click",
+      "version": "8.4.2"
+    },
+    {
+      "parent": "huggingface-hub",
+      "requirement": "filelock>=3.10.0",
+      "name": "filelock",
+      "version": "3.32.0"
+    },
+    {
+      "parent": "huggingface-hub",
+      "requirement": "fsspec>=2023.5.0",
+      "name": "fsspec",
+      "version": "2026.6.0"
+    },
+    {
+      "parent": "huggingface-hub",
+      "requirement": "hf-xet<2.0.0,>=1.5.2",
+      "name": "hf-xet",
+      "version": "1.5.2"
+    },
+    {
+      "parent": "huggingface-hub",
+      "requirement": "httpx<1,>=0.23.0",
+      "name": "httpx",
+      "version": "0.28.1"
+    },
+    {
+      "parent": "huggingface-hub",
+      "requirement": "packaging>=20.9",
+      "name": "packaging",
+      "version": "26.2"
+    },
+    {
+      "parent": "huggingface-hub",
+      "requirement": "pyyaml>=5.1",
+      "name": "pyyaml",
+      "version": "6.0.3"
+    },
+    {
+      "parent": "huggingface-hub",
+      "requirement": "tqdm>=4.42.1",
+      "name": "tqdm",
+      "version": "4.69.0"
+    },
+    {
+      "parent": "huggingface-hub",
+      "requirement": "typing-extensions>=4.1.0",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "pytest",
+      "requirement": "iniconfig>=1.0.1",
+      "name": "iniconfig",
+      "version": "2.3.0"
+    },
+    {
+      "parent": "pytest",
+      "requirement": "packaging>=22",
+      "name": "packaging",
+      "version": "26.2"
+    },
+    {
+      "parent": "pytest",
+      "requirement": "pluggy<2,>=1.5",
+      "name": "pluggy",
+      "version": "1.6.0"
+    },
+    {
+      "parent": "pytest",
+      "requirement": "pygments>=2.7.2",
+      "name": "pygments",
+      "version": "2.20.0"
+    },
+    {
+      "parent": "pytest-asyncio",
+      "requirement": "pytest<10,>=8.4",
+      "name": "pytest",
+      "version": "9.1.1"
+    },
+    {
+      "parent": "pytest-asyncio",
+      "requirement": "typing-extensions>=4.12",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "pytest-cov",
+      "requirement": "coverage[toml]>=7.10.6",
+      "name": "coverage",
+      "version": "7.15.2"
+    },
+    {
+      "parent": "pytest-cov",
+      "requirement": "pluggy>=1.2",
+      "name": "pluggy",
+      "version": "1.6.0"
+    },
+    {
+      "parent": "pytest-cov",
+      "requirement": "pytest>=7",
+      "name": "pytest",
+      "version": "9.1.1"
+    },
+    {
+      "parent": "jsonschema",
+      "requirement": "attrs>=22.2.0",
+      "name": "attrs",
+      "version": "26.1.0"
+    },
+    {
+      "parent": "jsonschema",
+      "requirement": "jsonschema-specifications>=2023.03.6",
+      "name": "jsonschema-specifications",
+      "version": "2025.9.1"
+    },
+    {
+      "parent": "jsonschema",
+      "requirement": "referencing>=0.28.4",
+      "name": "referencing",
+      "version": "0.37.0"
+    },
+    {
+      "parent": "jsonschema",
+      "requirement": "rpds-py>=0.25.0",
+      "name": "rpds-py",
+      "version": "2026.6.3"
+    },
+    {
+      "parent": "pre-commit",
+      "requirement": "cfgv>=2.0.0",
+      "name": "cfgv",
+      "version": "3.5.0"
+    },
+    {
+      "parent": "pre-commit",
+      "requirement": "identify>=1.0.0",
+      "name": "identify",
+      "version": "2.6.19"
+    },
+    {
+      "parent": "pre-commit",
+      "requirement": "nodeenv>=0.11.1",
+      "name": "nodeenv",
+      "version": "1.10.0"
+    },
+    {
+      "parent": "pre-commit",
+      "requirement": "pyyaml>=5.1",
+      "name": "pyyaml",
+      "version": "6.0.3"
+    },
+    {
+      "parent": "pre-commit",
+      "requirement": "virtualenv>=20.10.0",
+      "name": "virtualenv",
+      "version": "21.7.0"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "babel>=2.10",
+      "name": "babel",
+      "version": "2.18.0"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "backrefs>=5.7.post1",
+      "name": "backrefs",
+      "version": "8.0"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "colorama>=0.4",
+      "name": "colorama",
+      "version": "0.4.6"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "jinja2>=3.1",
+      "name": "jinja2",
+      "version": "3.1.6"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "markdown>=3.2",
+      "name": "markdown",
+      "version": "3.10.3"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "mkdocs-material-extensions>=1.3",
+      "name": "mkdocs-material-extensions",
+      "version": "1.3.1"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "mkdocs<2,>=1.6",
+      "name": "mkdocs",
+      "version": "1.6.1"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "paginate>=0.5",
+      "name": "paginate",
+      "version": "0.5.7"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "pygments>=2.16",
+      "name": "pygments",
+      "version": "2.20.0"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "pymdown-extensions>=10.2",
+      "name": "pymdown-extensions",
+      "version": "10.21.3"
+    },
+    {
+      "parent": "mkdocs-material",
+      "requirement": "requests>=2.30",
+      "name": "requests",
+      "version": "2.34.2"
+    },
+    {
+      "parent": "pymdown-extensions",
+      "requirement": "markdown>=3.6",
+      "name": "markdown",
+      "version": "3.10.3"
+    },
+    {
+      "parent": "pymdown-extensions",
+      "requirement": "pyyaml",
+      "name": "pyyaml",
+      "version": "6.0.3"
+    },
+    {
+      "parent": "rich",
+      "requirement": "markdown-it-py>=2.2.0",
+      "name": "markdown-it-py",
+      "version": "4.2.0"
+    },
+    {
+      "parent": "rich",
+      "requirement": "pygments<3.0.0,>=2.13.0",
+      "name": "pygments",
+      "version": "2.20.0"
+    },
+    {
+      "parent": "pydantic-core",
+      "requirement": "typing-extensions>=4.14.1",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "typing-inspection",
+      "requirement": "typing-extensions>=4.12.0",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "anyio",
+      "requirement": "idna>=2.8",
+      "name": "idna",
+      "version": "3.18"
+    },
+    {
+      "parent": "anyio",
+      "requirement": "typing_extensions>=4.5",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "httpcore",
+      "requirement": "certifi",
+      "name": "certifi",
+      "version": "2026.6.17"
+    },
+    {
+      "parent": "httpcore",
+      "requirement": "h11>=0.16",
+      "name": "h11",
+      "version": "0.16.0"
+    },
+    {
+      "parent": "starlette",
+      "requirement": "anyio<5,>=3.6.2",
+      "name": "anyio",
+      "version": "4.14.2"
+    },
+    {
+      "parent": "starlette",
+      "requirement": "typing-extensions>=4.10.0",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "jsonschema-specifications",
+      "requirement": "referencing>=0.31.0",
+      "name": "referencing",
+      "version": "0.37.0"
+    },
+    {
+      "parent": "referencing",
+      "requirement": "attrs>=22.2.0",
+      "name": "attrs",
+      "version": "26.1.0"
+    },
+    {
+      "parent": "referencing",
+      "requirement": "rpds-py>=0.7.0",
+      "name": "rpds-py",
+      "version": "2026.6.3"
+    },
+    {
+      "parent": "referencing",
+      "requirement": "typing-extensions>=4.4.0",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "parent": "virtualenv",
+      "requirement": "distlib<1,>=0.3.7",
+      "name": "distlib",
+      "version": "0.4.3"
+    },
+    {
+      "parent": "virtualenv",
+      "requirement": "filelock<4,>=3.24.2",
+      "name": "filelock",
+      "version": "3.32.0"
+    },
+    {
+      "parent": "virtualenv",
+      "requirement": "platformdirs<5,>=3.9.1",
+      "name": "platformdirs",
+      "version": "4.11.0"
+    },
+    {
+      "parent": "virtualenv",
+      "requirement": "python-discovery>=1.4.2",
+      "name": "python-discovery",
+      "version": "1.5.0"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "click>=7.0",
+      "name": "click",
+      "version": "8.4.2"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "ghp-import>=1.0",
+      "name": "ghp-import",
+      "version": "2.1.0"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "jinja2>=2.11.1",
+      "name": "jinja2",
+      "version": "3.1.6"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "markdown>=3.3.6",
+      "name": "markdown",
+      "version": "3.10.3"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "markupsafe>=2.0.1",
+      "name": "markupsafe",
+      "version": "3.0.3"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "mergedeep>=1.3.4",
+      "name": "mergedeep",
+      "version": "1.3.4"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "mkdocs-get-deps>=0.2.0",
+      "name": "mkdocs-get-deps",
+      "version": "0.2.2"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "packaging>=20.5",
+      "name": "packaging",
+      "version": "26.2"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "pathspec>=0.11.1",
+      "name": "pathspec",
+      "version": "1.1.1"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "pyyaml-env-tag>=0.1",
+      "name": "pyyaml-env-tag",
+      "version": "1.1"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "pyyaml>=5.1",
+      "name": "pyyaml",
+      "version": "6.0.3"
+    },
+    {
+      "parent": "mkdocs",
+      "requirement": "watchdog>=2.0",
+      "name": "watchdog",
+      "version": "6.0.0"
+    },
+    {
+      "parent": "requests",
+      "requirement": "charset_normalizer<4,>=2",
+      "name": "charset-normalizer",
+      "version": "3.5.1"
+    },
+    {
+      "parent": "requests",
+      "requirement": "idna<4,>=2.5",
+      "name": "idna",
+      "version": "3.18"
+    },
+    {
+      "parent": "requests",
+      "requirement": "urllib3<3,>=1.26",
+      "name": "urllib3",
+      "version": "2.7.0"
+    },
+    {
+      "parent": "requests",
+      "requirement": "certifi>=2023.5.7",
+      "name": "certifi",
+      "version": "2026.6.17"
+    },
+    {
+      "parent": "markdown-it-py",
+      "requirement": "mdurl~=0.1",
+      "name": "mdurl",
+      "version": "0.1.2"
+    },
+    {
+      "parent": "python-discovery",
+      "requirement": "filelock>=3.15.4",
+      "name": "filelock",
+      "version": "3.32.0"
+    },
+    {
+      "parent": "python-discovery",
+      "requirement": "platformdirs<5,>=4.3.6",
+      "name": "platformdirs",
+      "version": "4.11.0"
+    },
+    {
+      "parent": "ghp-import",
+      "requirement": "python-dateutil>=2.8.1",
+      "name": "python-dateutil",
+      "version": "2.9.0.post0"
+    },
+    {
+      "parent": "mkdocs-get-deps",
+      "requirement": "mergedeep>=1.3.4",
+      "name": "mergedeep",
+      "version": "1.3.4"
+    },
+    {
+      "parent": "mkdocs-get-deps",
+      "requirement": "platformdirs>=2.2.0",
+      "name": "platformdirs",
+      "version": "4.11.0"
+    },
+    {
+      "parent": "mkdocs-get-deps",
+      "requirement": "pyyaml>=5.1",
+      "name": "pyyaml",
+      "version": "6.0.3"
+    },
+    {
+      "parent": "pyyaml-env-tag",
+      "requirement": "pyyaml",
+      "name": "pyyaml",
+      "version": "6.0.3"
+    },
+    {
+      "parent": "python-dateutil",
+      "requirement": "six>=1.5",
+      "name": "six",
+      "version": "1.17.0"
+    }
+  ],
+  "stdlib_names": [
+    "__future__",
+    "_abc",
+    "_aix_support",
+    "_ast",
+    "_asyncio",
+    "_bisect",
+    "_blake2",
+    "_bz2",
+    "_codecs",
+    "_codecs_cn",
+    "_codecs_hk",
+    "_codecs_iso2022",
+    "_codecs_jp",
+    "_codecs_kr",
+    "_codecs_tw",
+    "_collections",
+    "_collections_abc",
+    "_compat_pickle",
+    "_compression",
+    "_contextvars",
+    "_crypt",
+    "_csv",
+    "_ctypes",
+    "_curses",
+    "_curses_panel",
+    "_datetime",
+    "_dbm",
+    "_decimal",
+    "_elementtree",
+    "_frozen_importlib",
+    "_frozen_importlib_external",
+    "_functools",
+    "_gdbm",
+    "_hashlib",
+    "_heapq",
+    "_imp",
+    "_io",
+    "_json",
+    "_locale",
+    "_lsprof",
+    "_lzma",
+    "_markupbase",
+    "_md5",
+    "_msi",
+    "_multibytecodec",
+    "_multiprocessing",
+    "_opcode",
+    "_operator",
+    "_osx_support",
+    "_overlapped",
+    "_pickle",
+    "_posixshmem",
+    "_posixsubprocess",
+    "_py_abc",
+    "_pydatetime",
+    "_pydecimal",
+    "_pyio",
+    "_pylong",
+    "_queue",
+    "_random",
+    "_scproxy",
+    "_sha1",
+    "_sha2",
+    "_sha3",
+    "_signal",
+    "_sitebuiltins",
+    "_socket",
+    "_sqlite3",
+    "_sre",
+    "_ssl",
+    "_stat",
+    "_statistics",
+    "_string",
+    "_strptime",
+    "_struct",
+    "_symtable",
+    "_thread",
+    "_threading_local",
+    "_tkinter",
+    "_tokenize",
+    "_tracemalloc",
+    "_typing",
+    "_uuid",
+    "_warnings",
+    "_weakref",
+    "_weakrefset",
+    "_winapi",
+    "_zoneinfo",
+    "abc",
+    "aifc",
+    "antigravity",
+    "argparse",
+    "array",
+    "ast",
+    "asyncio",
+    "atexit",
+    "audioop",
+    "base64",
+    "bdb",
+    "binascii",
+    "bisect",
+    "builtins",
+    "bz2",
+    "cProfile",
+    "calendar",
+    "cgi",
+    "cgitb",
+    "chunk",
+    "cmath",
+    "cmd",
+    "code",
+    "codecs",
+    "codeop",
+    "collections",
+    "colorsys",
+    "compileall",
+    "concurrent",
+    "configparser",
+    "contextlib",
+    "contextvars",
+    "copy",
+    "copyreg",
+    "crypt",
+    "csv",
+    "ctypes",
+    "curses",
+    "dataclasses",
+    "datetime",
+    "dbm",
+    "decimal",
+    "difflib",
+    "dis",
+    "doctest",
+    "email",
+    "encodings",
+    "ensurepip",
+    "enum",
+    "errno",
+    "faulthandler",
+    "fcntl",
+    "filecmp",
+    "fileinput",
+    "fnmatch",
+    "fractions",
+    "ftplib",
+    "functools",
+    "gc",
+    "genericpath",
+    "getopt",
+    "getpass",
+    "gettext",
+    "glob",
+    "graphlib",
+    "grp",
+    "gzip",
+    "hashlib",
+    "heapq",
+    "hmac",
+    "html",
+    "http",
+    "idlelib",
+    "imaplib",
+    "imghdr",
+    "importlib",
+    "inspect",
+    "io",
+    "ipaddress",
+    "itertools",
+    "json",
+    "keyword",
+    "lib2to3",
+    "linecache",
+    "locale",
+    "logging",
+    "lzma",
+    "mailbox",
+    "mailcap",
+    "marshal",
+    "math",
+    "mimetypes",
+    "mmap",
+    "modulefinder",
+    "msilib",
+    "msvcrt",
+    "multiprocessing",
+    "netrc",
+    "nis",
+    "nntplib",
+    "nt",
+    "ntpath",
+    "nturl2path",
+    "numbers",
+    "opcode",
+    "operator",
+    "optparse",
+    "os",
+    "ossaudiodev",
+    "pathlib",
+    "pdb",
+    "pickle",
+    "pickletools",
+    "pipes",
+    "pkgutil",
+    "platform",
+    "plistlib",
+    "poplib",
+    "posix",
+    "posixpath",
+    "pprint",
+    "profile",
+    "pstats",
+    "pty",
+    "pwd",
+    "py_compile",
+    "pyclbr",
+    "pydoc",
+    "pydoc_data",
+    "pyexpat",
+    "queue",
+    "quopri",
+    "random",
+    "re",
+    "readline",
+    "reprlib",
+    "resource",
+    "rlcompleter",
+    "runpy",
+    "sched",
+    "secrets",
+    "select",
+    "selectors",
+    "shelve",
+    "shlex",
+    "shutil",
+    "signal",
+    "site",
+    "smtplib",
+    "sndhdr",
+    "socket",
+    "socketserver",
+    "spwd",
+    "sqlite3",
+    "sre_compile",
+    "sre_constants",
+    "sre_parse",
+    "ssl",
+    "stat",
+    "statistics",
+    "string",
+    "stringprep",
+    "struct",
+    "subprocess",
+    "sunau",
+    "symtable",
+    "sys",
+    "sysconfig",
+    "syslog",
+    "tabnanny",
+    "tarfile",
+    "telnetlib",
+    "tempfile",
+    "termios",
+    "textwrap",
+    "this",
+    "threading",
+    "time",
+    "timeit",
+    "tkinter",
+    "token",
+    "tokenize",
+    "tomllib",
+    "trace",
+    "traceback",
+    "tracemalloc",
+    "tty",
+    "turtle",
+    "turtledemo",
+    "types",
+    "typing",
+    "unicodedata",
+    "unittest",
+    "urllib",
+    "uu",
+    "uuid",
+    "venv",
+    "warnings",
+    "wave",
+    "weakref",
+    "webbrowser",
+    "winreg",
+    "winsound",
+    "wsgiref",
+    "xdrlib",
+    "xml",
+    "xmlrpc",
+    "zipapp",
+    "zipfile",
+    "zipimport",
+    "zlib",
+    "zoneinfo"
+  ],
+  "dependency_import_names": [
+    "_pytest",
+    "_yaml",
+    "annotated_doc",
+    "annotated_types",
+    "anyio",
+    "asyncpg",
+    "attr",
+    "attrs",
+    "babel",
+    "backrefs",
+    "certifi",
+    "cfgv",
+    "charset_normalizer",
+    "click",
+    "colorama",
+    "coverage",
+    "dateutil",
+    "distlib",
+    "fastapi",
+    "filelock",
+    "fsspec",
+    "ghp_import",
+    "google",
+    "grpc",
+    "grpc_health",
+    "h11",
+    "hf_xet",
+    "httpcore",
+    "httpx",
+    "huggingface_hub",
+    "identify",
+    "idna",
+    "images",
+    "iniconfig",
+    "jinja2",
+    "jsonschema",
+    "jsonschema_specifications",
+    "markdown",
+    "markdown_it",
+    "markupsafe",
+    "material",
+    "materialx",
+    "mdurl",
+    "mergedeep",
+    "mkdocs",
+    "mkdocs_get_deps",
+    "nodeenv",
+    "packaging",
+    "paginate",
+    "pathspec",
+    "platformdirs",
+    "pluggy",
+    "pre_commit",
+    "py",
+    "pydantic",
+    "pydantic_core",
+    "pygments",
+    "pymdownx",
+    "pytest",
+    "pytest_asyncio",
+    "pytest_cov",
+    "python_discovery",
+    "referencing",
+    "requests",
+    "rich",
+    "rpds",
+    "ruff",
+    "shellingham",
+    "six",
+    "starlette",
+    "tqdm",
+    "ty",
+    "typer",
+    "typing_extensions",
+    "typing_inspection",
+    "urllib3",
+    "uvicorn",
+    "uvloop",
+    "virtualenv",
+    "watchdog",
+    "yaml",
+    "yaml_env_tag"
+  ],
+  "combined_import_names": [
+    "__future__",
+    "_abc",
+    "_aix_support",
+    "_ast",
+    "_asyncio",
+    "_bisect",
+    "_blake2",
+    "_bz2",
+    "_codecs",
+    "_codecs_cn",
+    "_codecs_hk",
+    "_codecs_iso2022",
+    "_codecs_jp",
+    "_codecs_kr",
+    "_codecs_tw",
+    "_collections",
+    "_collections_abc",
+    "_compat_pickle",
+    "_compression",
+    "_contextvars",
+    "_crypt",
+    "_csv",
+    "_ctypes",
+    "_curses",
+    "_curses_panel",
+    "_datetime",
+    "_dbm",
+    "_decimal",
+    "_elementtree",
+    "_frozen_importlib",
+    "_frozen_importlib_external",
+    "_functools",
+    "_gdbm",
+    "_hashlib",
+    "_heapq",
+    "_imp",
+    "_io",
+    "_json",
+    "_locale",
+    "_lsprof",
+    "_lzma",
+    "_markupbase",
+    "_md5",
+    "_msi",
+    "_multibytecodec",
+    "_multiprocessing",
+    "_opcode",
+    "_operator",
+    "_osx_support",
+    "_overlapped",
+    "_pickle",
+    "_posixshmem",
+    "_posixsubprocess",
+    "_py_abc",
+    "_pydatetime",
+    "_pydecimal",
+    "_pyio",
+    "_pylong",
+    "_pytest",
+    "_queue",
+    "_random",
+    "_scproxy",
+    "_sha1",
+    "_sha2",
+    "_sha3",
+    "_signal",
+    "_sitebuiltins",
+    "_socket",
+    "_sqlite3",
+    "_sre",
+    "_ssl",
+    "_stat",
+    "_statistics",
+    "_string",
+    "_strptime",
+    "_struct",
+    "_symtable",
+    "_thread",
+    "_threading_local",
+    "_tkinter",
+    "_tokenize",
+    "_tracemalloc",
+    "_typing",
+    "_uuid",
+    "_warnings",
+    "_weakref",
+    "_weakrefset",
+    "_winapi",
+    "_yaml",
+    "_zoneinfo",
+    "abc",
+    "aifc",
+    "annotated_doc",
+    "annotated_types",
+    "antigravity",
+    "anyio",
+    "argparse",
+    "array",
+    "ast",
+    "asyncio",
+    "asyncpg",
+    "atexit",
+    "attr",
+    "attrs",
+    "audioop",
+    "babel",
+    "backrefs",
+    "base64",
+    "bdb",
+    "binascii",
+    "bisect",
+    "builtins",
+    "bz2",
+    "cProfile",
+    "calendar",
+    "certifi",
+    "cfgv",
+    "cgi",
+    "cgitb",
+    "charset_normalizer",
+    "chunk",
+    "click",
+    "cmath",
+    "cmd",
+    "code",
+    "codecs",
+    "codeop",
+    "collections",
+    "colorama",
+    "colorsys",
+    "compileall",
+    "concurrent",
+    "configparser",
+    "contextlib",
+    "contextvars",
+    "copy",
+    "copyreg",
+    "coverage",
+    "crypt",
+    "csv",
+    "ctypes",
+    "curses",
+    "dataclasses",
+    "datetime",
+    "dateutil",
+    "dbm",
+    "decimal",
+    "difflib",
+    "dis",
+    "distlib",
+    "doctest",
+    "email",
+    "encodings",
+    "ensurepip",
+    "enum",
+    "errno",
+    "fastapi",
+    "faulthandler",
+    "fcntl",
+    "filecmp",
+    "fileinput",
+    "filelock",
+    "fnmatch",
+    "fractions",
+    "fsspec",
+    "ftplib",
+    "functools",
+    "gc",
+    "genericpath",
+    "getopt",
+    "getpass",
+    "gettext",
+    "ghp_import",
+    "glob",
+    "google",
+    "graphlib",
+    "grp",
+    "grpc",
+    "grpc_health",
+    "gzip",
+    "h11",
+    "hashlib",
+    "heapq",
+    "hf_xet",
+    "hmac",
+    "html",
+    "http",
+    "httpcore",
+    "httpx",
+    "huggingface_hub",
+    "identify",
+    "idlelib",
+    "idna",
+    "images",
+    "imaplib",
+    "imghdr",
+    "importlib",
+    "iniconfig",
+    "inspect",
+    "io",
+    "ipaddress",
+    "itertools",
+    "jinja2",
+    "json",
+    "jsonschema",
+    "jsonschema_specifications",
+    "keyword",
+    "lib2to3",
+    "linecache",
+    "locale",
+    "logging",
+    "lzma",
+    "mailbox",
+    "mailcap",
+    "markdown",
+    "markdown_it",
+    "markupsafe",
+    "marshal",
+    "material",
+    "materialx",
+    "math",
+    "mdurl",
+    "mergedeep",
+    "mimetypes",
+    "mkdocs",
+    "mkdocs_get_deps",
+    "mmap",
+    "modulefinder",
+    "msilib",
+    "msvcrt",
+    "multiprocessing",
+    "netrc",
+    "nis",
+    "nntplib",
+    "nodeenv",
+    "nt",
+    "ntpath",
+    "nturl2path",
+    "numbers",
+    "opcode",
+    "operator",
+    "optparse",
+    "os",
+    "ossaudiodev",
+    "packaging",
+    "paginate",
+    "pathlib",
+    "pathspec",
+    "pdb",
+    "pickle",
+    "pickletools",
+    "pipes",
+    "pkgutil",
+    "platform",
+    "platformdirs",
+    "plistlib",
+    "pluggy",
+    "poplib",
+    "posix",
+    "posixpath",
+    "pprint",
+    "pre_commit",
+    "profile",
+    "pstats",
+    "pty",
+    "pwd",
+    "py",
+    "py_compile",
+    "pyclbr",
+    "pydantic",
+    "pydantic_core",
+    "pydoc",
+    "pydoc_data",
+    "pyexpat",
+    "pygments",
+    "pymdownx",
+    "pytest",
+    "pytest_asyncio",
+    "pytest_cov",
+    "python_discovery",
+    "queue",
+    "quopri",
+    "random",
+    "re",
+    "readline",
+    "referencing",
+    "reprlib",
+    "requests",
+    "resource",
+    "rich",
+    "rlcompleter",
+    "rpds",
+    "ruff",
+    "runpy",
+    "sched",
+    "secrets",
+    "select",
+    "selectors",
+    "shellingham",
+    "shelve",
+    "shlex",
+    "shutil",
+    "signal",
+    "site",
+    "six",
+    "smtplib",
+    "sndhdr",
+    "socket",
+    "socketserver",
+    "spwd",
+    "sqlite3",
+    "sre_compile",
+    "sre_constants",
+    "sre_parse",
+    "ssl",
+    "starlette",
+    "stat",
+    "statistics",
+    "string",
+    "stringprep",
+    "struct",
+    "subprocess",
+    "sunau",
+    "symtable",
+    "sys",
+    "sysconfig",
+    "syslog",
+    "tabnanny",
+    "tarfile",
+    "telnetlib",
+    "tempfile",
+    "termios",
+    "textwrap",
+    "this",
+    "threading",
+    "time",
+    "timeit",
+    "tkinter",
+    "token",
+    "tokenize",
+    "tomllib",
+    "tqdm",
+    "trace",
+    "traceback",
+    "tracemalloc",
+    "tty",
+    "turtle",
+    "turtledemo",
+    "ty",
+    "typer",
+    "types",
+    "typing",
+    "typing_extensions",
+    "typing_inspection",
+    "unicodedata",
+    "unittest",
+    "urllib",
+    "urllib3",
+    "uu",
+    "uuid",
+    "uvicorn",
+    "uvloop",
+    "venv",
+    "virtualenv",
+    "warnings",
+    "watchdog",
+    "wave",
+    "weakref",
+    "webbrowser",
+    "winreg",
+    "winsound",
+    "wsgiref",
+    "xdrlib",
+    "xml",
+    "xmlrpc",
+    "yaml",
+    "yaml_env_tag",
+    "zipapp",
+    "zipfile",
+    "zipimport",
+    "zlib",
+    "zoneinfo"
+  ],
+  "excluded_file_records": 575,
+  "project_distribution": {
+    "name": "comet",
+    "version": "0.1.0",
+    "source_package": "comet"
+  },
+  "limits": [
+    "Closure is for this Linux aarch64 Python 3.12 marker environment and requested project plus dev extras. Other platforms or extras can select different distributions.",
+    "Metadata inventories do not prove that arbitrary runtime import hooks or dynamic module creation are complete. No dependency modules were imported for discovery.",
+    "Native extension names use this interpreter extension suffixes. Namespace package roots are inferred from recorded Python or extension files.",
+    "Version equality with uv.lock does not verify wheel content hashes or seal the environment."
+  ]
+}

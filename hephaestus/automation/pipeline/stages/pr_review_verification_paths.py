@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .pr_review_verification_publication_specs import _PUBLICATION_DIAGNOSTIC_TEST_NODES
+
 
 @dataclass(frozen=True)
 class _HostVerificationSpec:
@@ -93,6 +95,21 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "--tb=short",
         ),
         descr="review_worker_pool_host_profile",
+        additional_changed_paths=("hephaestus/automation/pipeline/worker_pool.py",),
+    ),
+    _HostVerificationSpec(
+        changed_path="tests/unit/automation/pipeline/test_worker_pool.py",
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            *_PUBLICATION_DIAGNOSTIC_TEST_NODES,
+            "-q",
+            "--tb=short",
+        ),
+        descr="review_worker_pool_publication_diagnostics",
         additional_changed_paths=("hephaestus/automation/pipeline/worker_pool.py",),
     ),
     _HostVerificationSpec(

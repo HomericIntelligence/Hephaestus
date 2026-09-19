@@ -238,9 +238,7 @@ class FinishedStage(Stage):
             if item.issue is None:
                 raise SourceWorkspaceError("terminal issue number is missing")
             root = Path(str(ctx.paths.repo_root))
-            manager = SourceWorkspaceManager(
-                root, repository=item.repo, base_dir=root / "build" / ".worktrees"
-            )
+            manager = SourceWorkspaceManager(root, repository=item.repo)
             terminal = manager.read_terminal_failure(item.issue, reference)
             reason = f"{terminal.cause}: {terminal.action}"
             category = terminal.creation_failure
@@ -394,6 +392,7 @@ class FinishedStage(Stage):
             repo=item.repo,
             op="remove_worktree",
             timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
             # Use the concrete worktree path: the cleanup worker constructs a
             # fresh WorktreeManager, so its in-memory issue map is empty.
             kwargs=kwargs,

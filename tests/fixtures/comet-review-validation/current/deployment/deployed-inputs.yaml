@@ -1,0 +1,301 @@
+version: 1
+
+production_candidates:
+  prefixes:
+    - clusters/
+    - cookbooks/
+    - deployment/contexts/
+    - deployment/k2-horizon/
+    - deployment/source-admissions/
+    - docker/
+    - migrations/
+    - ops/grafana/
+    - ops/postgres/
+    - scripts/
+    - src/
+    - vendor/sglang/
+    - vendor/sglang-0515/
+    - vendor/sglang-glm53/
+  files:
+    - .containerignore
+    - .dockerignore
+    - .gitattributes
+    - README.md
+    - deployment/control-build-constraints.in
+    - deployment/control-build-constraints.txt
+    - pyproject.toml
+    - schema/deployment-context.schema.json
+    - schema/source-admission.schema.json
+    - uv.lock
+    - uv.toml
+  exclude:
+    - docker/k2-sglang/**
+    - docker/vllm-k2/**
+    - docker/sglang-faststart.Dockerfile
+    - ops/grafana/README.md
+    - scripts/ci/**
+    - scripts/check_deployed_inputs.py
+    - scripts/check_deployment_context_inventory.py
+    - scripts/check-recycling-coverage.py
+    - scripts/build_vllm_k2_wheel.py
+    - scripts/configure-test-postgres-tls.sh
+    - scripts/criu_spike.sbatch
+    - scripts/criu_spike2.sbatch
+    - scripts/deployed_artifact_validators.py
+    - scripts/diagnose-test-postgres.sh
+    - scripts/derisk_smg.sbatch
+    - scripts/dev/**
+    - scripts/export_schemas.py
+    - scripts/generate-postgres-release-fixture.py
+    - scripts/build_k2_sglang_image.py
+    - scripts/k3_canary_response_probe.py
+    - scripts/k3_canary_routing_evidence.py
+    - scripts/loadtest.py
+    - scripts/m1_k3_verify_staged_artifacts.py
+    - scripts/nccl_checkpoint_probe.py
+    - scripts/nccl_checkpoint_probe.sbatch
+    - scripts/prepare-sglang-faststart.sh
+    - scripts/probe_k2_sglang_image.py
+    - scripts/preflight_vllm_k2_wheel.py
+    - scripts/validate-pr-policy.sh
+    - scripts/validate_vllm_k2_inputs.py
+    - vendor/sglang/README.md
+    - vendor/sglang-0515/README.md
+    - vendor/sglang-glm53/README.md
+
+validators:
+  - id: sglang-k2-contracts
+    check_name: sglang-k2-contracts
+    kind: repository-contract
+    tier: pr
+  - id: control-image
+    check_name: artifact-control-image
+    kind: oci-image
+  - id: smg-docker-image
+    check_name: artifact-smg-docker-image
+    kind: oci-image
+  - id: smg-enroot-image
+    check_name: artifact-smg-enroot-image
+    kind: artifact-fixture
+  - id: sglang-faststart-enroot-image
+    check_name: artifact-sglang-faststart-enroot-image
+    kind: artifact-fixture
+  - id: sglang-faststart-k2p-publisher
+    check_name: artifact-sglang-faststart-k2p-publisher
+    kind: artifact-fixture
+  - id: sglang-faststart-m1-publisher
+    check_name: artifact-sglang-faststart-m1-publisher
+    kind: artifact-fixture
+  - id: sglang-faststart-canary-publisher
+    check_name: artifact-sglang-faststart-canary-publisher
+    kind: artifact-fixture
+  - id: jit-seed-publisher
+    check_name: artifact-jit-seed-publisher
+    kind: artifact-fixture
+  - id: sglang-0515-enroot-image
+    check_name: artifact-sglang-0515-enroot-image
+    kind: artifact-fixture
+  - id: sglang-glm53-image-contracts
+    check_name: sglang-glm53-image-contracts
+    kind: repository-contract
+    tier: pr
+  - id: schema-contracts
+    check_name: schema-contracts
+    kind: repository-contract
+    tier: pr
+  - id: control-deployment-contracts
+    check_name: control-deployment-contracts
+    kind: repository-contract
+    tier: nightly
+  - id: viewer-deployment-contracts
+    check_name: viewer-deployment-contracts
+    kind: repository-contract
+    tier: nightly
+  - id: workflow-contracts
+    check_name: workflow-contracts
+    kind: repository-contract
+    tier: pr
+  - id: deployed-input-contracts
+    check_name: deployed-input-contracts
+    kind: repository-contract
+    tier: pr
+policies:
+  - id: control-image-context
+    component: control-plane
+    include:
+      - .containerignore
+      - .dockerignore
+    validators: [control-image]
+  - id: repository-archive
+    component: shared-deployment
+    include: [.gitattributes]
+    validators: [control-deployment-contracts, viewer-deployment-contracts]
+  - id: control-package
+    component: control-plane
+    include:
+      - README.md
+      - pyproject.toml
+      - src/**
+    exclude:
+      - src/comet/operational_context.py
+      - src/comet/k2_horizon.py
+      - src/comet/k2_source_admission.py
+      - src/comet/source_admission.py
+    validators:
+      - control-image
+      - control-deployment-contracts
+      - viewer-deployment-contracts
+  - id: cluster-runtime-data
+    component: control-plane
+    include: [clusters/**]
+    validators: [control-image, control-deployment-contracts]
+  - id: cookbook-runtime-data
+    component: control-plane
+    include: [cookbooks/**]
+    validators: [control-image, control-deployment-contracts]
+  - id: deployment-context-runtime-data
+    component: control-plane
+    include: [deployment/contexts/**]
+    validators: [control-image, schema-contracts, control-deployment-contracts]
+  - id: k2-horizon-runtime-data
+    component: control-plane
+    include:
+      - deployment/k2-horizon/**
+      - src/comet/k2_horizon.py
+      - src/comet/k2_source_admission.py
+    validators: [control-image]
+  - id: source-admission-runtime-data
+    component: control-plane
+    include:
+      - deployment/source-admissions/**
+      - schema/source-admission.schema.json
+      - src/comet/source_admission.py
+    validators: [control-image, schema-contracts]
+  - id: deployment-context-schema
+    component: control-plane
+    include: [schema/deployment-context.schema.json]
+    validators: [control-image, schema-contracts]
+  - id: database-migrations
+    component: shared-runtime
+    include: [migrations/**]
+    validators:
+      - control-image
+      - control-deployment-contracts
+      - viewer-deployment-contracts
+  - id: dependency-lock
+    component: shared-runtime
+    include: [uv.lock]
+    validators:
+      - control-image
+      - control-deployment-contracts
+      - viewer-deployment-contracts
+  - id: uv-project-config
+    component: shared-runtime
+    include: [uv.toml]
+    forbidden: true
+    validators: []
+  - id: control-image
+    component: control-plane
+    include: [docker/Dockerfile]
+    validators: [control-image]
+  - id: smg-docker
+    component: smg
+    include: [docker/smg.Dockerfile]
+    validators: [smg-docker-image]
+  - id: smg-build-inputs
+    component: smg
+    include:
+      - docker/smg-apt-packages-24.04.txt
+      - docker/smg-apt-packages-26.04.txt
+      - docker/smg-python-wheels.lock.json
+      - scripts/smg_wheelhouse.py
+      - scripts/verify-smg-wheel-metadata.py
+    validators:
+      - smg-docker-image
+      - smg-enroot-image
+  - id: control-deployment
+    component: control-plane
+    include:
+      - deployment/control-build-constraints.in
+      - deployment/control-build-constraints.txt
+      - scripts/hot-swap-gpu-monitors.sh
+      - scripts/install-control-venv.sh
+      - scripts/repair-core-permissions.py
+      - scripts/probe_slurm_identity.py
+      - scripts/pull-to-cluster.sh
+      - scripts/chaos_pass.py
+      - scripts/setup-engine-venvs.sh
+    validators: [control-deployment-contracts]
+  - id: smg-enroot
+    component: smg
+    include: [scripts/build-smg-image.sh]
+    validators: [smg-enroot-image]
+  - id: sglang-faststart
+    component: sglang-faststart
+    include:
+      - scripts/build-sglang-faststart-image.sh
+      - vendor/sglang/UPSTREAM.env
+      - vendor/sglang/patches/**
+    validators:
+      - sglang-faststart-enroot-image
+      - sglang-faststart-k2p-publisher
+      - sglang-faststart-m1-publisher
+  - id: sglang-faststart-k2p-publisher
+    component: sglang-faststart
+    include: [scripts/build-sglang-faststart-k2p.sbatch]
+    validators: [sglang-faststart-k2p-publisher]
+  - id: sglang-faststart-m1-publisher
+    component: sglang-faststart
+    include: [scripts/build-sglang-faststart-m1.sbatch]
+    validators: [sglang-faststart-m1-publisher]
+  - id: sglang-faststart-canary-publisher
+    component: sglang-canary
+    include: [scripts/sglang-faststart-canary.sbatch]
+    validators: [sglang-faststart-canary-publisher]
+  - id: jit-seed-publisher
+    component: runtime-cache
+    include:
+      - scripts/seed_jit_cache.sh
+      - src/comet/operational_context.py
+    validators:
+      - jit-seed-publisher
+      - control-image
+      - control-deployment-contracts
+      - viewer-deployment-contracts
+  - id: sglang-0515
+    component: sglang-0515
+    include:
+      - scripts/build-sglang-0515-queue-image.sh
+      - vendor/sglang-0515/SOURCE_SHA256
+      - vendor/sglang-0515/UPSTREAM.env
+      - vendor/sglang-0515/apply_queue_patch.py
+      - vendor/sglang-0515/patches/**
+    validators: [sglang-0515-enroot-image]
+  - id: sglang-glm53
+    component: sglang-glm53
+    include:
+      - scripts/build-sglang-glm53-image.sh
+      - vendor/sglang-glm53/SOURCE_SHA256
+      - vendor/sglang-glm53/UPSTREAM.env
+      - vendor/sglang-glm53/patches/**
+    validators: [sglang-glm53-image-contracts]
+  - id: viewer-config
+    component: viewer
+    include:
+      - ops/grafana/dashboards/**
+      - ops/grafana/grafana.ini
+      - ops/grafana/provision-comet-grafana-ro.sql
+      - ops/grafana/provisioning/**
+      - ops/grafana/refresh-comet-grafana-grants.sql
+      - ops/grafana/systemd/**
+    validators: [viewer-deployment-contracts]
+  - id: viewer-deployment
+    component: viewer
+    include:
+      - ops/postgres/rds-global-bundle.pem
+      - ops/postgres/rds-global-bundle.sha256
+      - scripts/backfill-secondary-dashboard-rollups.py
+      - scripts/backfill-telemetry-rollups.py
+      - scripts/psql-with-comet-dsn.sh
+      - scripts/pull-to-viewer.sh
+    validators: [viewer-deployment-contracts]

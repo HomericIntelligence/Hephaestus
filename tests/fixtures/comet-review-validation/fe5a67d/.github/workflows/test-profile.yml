@@ -1,0 +1,3628 @@
+name: test-profile
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full lowercase commit SHA to test
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  root:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate the source commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" != "workflow_dispatch" || "${EVENT_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Manual root validation must use the main workflow." >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The source commit must be a full lowercase hexadecimal SHA." >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - id: evidence
+        name: Prepare root evidence
+        shell: bash
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          umask 077
+          runner_temp="$(realpath -e -- "${RUNNER_TEMP}")"
+          evidence_directory="$(mktemp -d "${runner_temp}/comet-root-evidence.XXXXXX")"
+          evidence_directory="$(realpath -e -- "${evidence_directory}")"
+          case "${evidence_directory}" in
+            "${runner_temp}"/*) ;;
+            *) echo "::error::Root evidence directory escaped RUNNER_TEMP." >&2; exit 1 ;;
+          esac
+          test ! -L "${evidence_directory}"
+          test "$(stat -c %u -- "${evidence_directory}")" = "$(id -u)"
+          test "$(stat -c %a -- "${evidence_directory}")" = "700"
+          printf 'directory=%s\n' "${evidence_directory}" >> "${GITHUB_OUTPUT}"
+          printf 'device=%s\n' "$(stat -c %d -- "${evidence_directory}")" >> "${GITHUB_OUTPUT}"
+          printf 'inode=%s\n' "$(stat -c %i -- "${evidence_directory}")" >> "${GITHUB_OUTPUT}"
+          test ! -L /tmp
+          test "$(stat -c %u /tmp)" = 0
+          test "$(stat -c %a /tmp)" = 1777
+          execution_directory="$(mktemp -d /tmp/comet-root-execution.XXXXXX)"
+          chmod 755 -- "${execution_directory}"
+          printf 'execution_directory=%s\n' "${execution_directory}" >> "${GITHUB_OUTPUT}"
+          printf 'execution_device=%s\n' "$(stat -c %d -- "${execution_directory}")" >> "${GITHUB_OUTPUT}"
+          printf 'execution_inode=%s\n' "$(stat -c %i -- "${execution_directory}")" >> "${GITHUB_OUTPUT}"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - name: Install Bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap
+      - id: root-test
+        name: Run the complete root profile
+        shell: bash
+        env:
+          DIAGNOSTIC_TAIL_BYTES: "65536"
+          EVIDENCE_DIRECTORY: ${{ steps.evidence.outputs.directory }}
+          EVIDENCE_DEVICE: ${{ steps.evidence.outputs.device }}
+          EVIDENCE_INODE: ${{ steps.evidence.outputs.inode }}
+          EXECUTION_DIRECTORY: ${{ steps.evidence.outputs.execution_directory }}
+          EXECUTION_DEVICE: ${{ steps.evidence.outputs.execution_device }}
+          EXECUTION_INODE: ${{ steps.evidence.outputs.execution_inode }}
+          JUNIT_LIMIT_BYTES: "67108864"
+          OUTPUT_LIMIT_BYTES: "16777216"
+          PIPE_CLOSE_GRACE_SECONDS: "1"
+          PROCESS_TERM_GRACE_SECONDS: "5"
+          RESULT_LIMIT_BYTES: "2048"
+          RUNNER_TEMP: ${{ runner.temp }}
+          SOURCE_DIRECTORY: ${{ github.workspace }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_INVENTORY_LIMIT_BYTES: "16777216"
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          exec /usr/bin/python3 -I - <<'PY'
+          import array
+          import collections
+          import ctypes
+          import grp
+          import hashlib
+          import json
+          import math
+          import os
+          import pwd
+          import re
+          import selectors
+          import shutil
+          import signal
+          import socket
+          import stat
+          import struct
+          import subprocess
+          import sys
+          import tempfile
+          import time
+          from pathlib import Path
+
+          evidence = Path(os.environ["EVIDENCE_DIRECTORY"])
+          runner_temp = Path(os.environ["RUNNER_TEMP"])
+          source_directory = Path(os.environ["SOURCE_DIRECTORY"])
+          output_limit = int(os.environ["OUTPUT_LIMIT_BYTES"])
+          result_limit = int(os.environ["RESULT_LIMIT_BYTES"])
+          tail_limit = int(os.environ["DIAGNOSTIC_TAIL_BYTES"])
+          pipe_close_grace = float(os.environ.get("PIPE_CLOSE_GRACE_SECONDS", "1"))
+          term_grace = float(os.environ.get("PROCESS_TERM_GRACE_SECONDS", "5"))
+          if (
+              output_limit < 1
+              or result_limit != 2048
+              or tail_limit < 1
+              or not math.isfinite(pipe_close_grace)
+              or not math.isfinite(term_grace)
+              or not 0 < pipe_close_grace <= 30
+              or not 0 < term_grace <= 30
+          ):
+              raise SystemExit("root test process limits are invalid")
+          libc = ctypes.CDLL(None, use_errno=True)
+          if libc.prctl(36, 1, 0, 0, 0) != 0:
+              raise SystemExit("root test process cannot become a child subreaper")
+          if (
+              not evidence.is_absolute()
+              or not runner_temp.is_absolute()
+              or not source_directory.is_absolute()
+              or not source_directory.is_dir()
+              or evidence.parent != runner_temp
+              or source_directory == evidence
+              or evidence.name in ("", ".", "..")
+          ):
+              raise SystemExit("root evidence directory is not canonical under RUNNER_TEMP")
+          directory_flags = os.O_RDONLY
+          if hasattr(os, "O_CLOEXEC"):
+              directory_flags |= os.O_CLOEXEC
+          if hasattr(os, "O_DIRECTORY"):
+              directory_flags |= os.O_DIRECTORY
+          if hasattr(os, "O_NOFOLLOW"):
+              directory_flags |= os.O_NOFOLLOW
+
+          def open_and_bind_directory(
+              path: Path,
+          ) -> tuple[int, list[tuple[str, int, int, int, int]]]:
+              if not path.is_absolute() or any(
+                  component in ("", ".", "..") for component in path.parts[1:]
+              ):
+                  raise SystemExit("runner directory path is invalid")
+              descriptor = os.open("/", directory_flags)
+              bindings: list[tuple[str, int, int, int, int]] = []
+              try:
+                  for component in path.parts[1:]:
+                      next_descriptor = os.open(
+                          component,
+                          directory_flags,
+                          dir_fd=descriptor,
+                      )
+                      opened = os.fstat(next_descriptor)
+                      named = os.stat(
+                          component,
+                          dir_fd=descriptor,
+                          follow_symlinks=False,
+                      )
+                      if (
+                          not stat.S_ISDIR(named.st_mode)
+                          or (named.st_dev, named.st_ino)
+                          != (opened.st_dev, opened.st_ino)
+                      ):
+                          raise SystemExit("runner directory path is invalid")
+                      bindings.append(
+                          (
+                              component,
+                              opened.st_dev,
+                              opened.st_ino,
+                              opened.st_uid,
+                              opened.st_mode,
+                          )
+                      )
+                      os.close(descriptor)
+                      descriptor = next_descriptor
+                  return descriptor, bindings
+              except BaseException:
+                  os.close(descriptor)
+                  raise
+
+          try:
+              runner_descriptor, runner_path_bindings = open_and_bind_directory(
+                  runner_temp
+              )
+              evidence_descriptor = os.open(
+                  evidence.name, directory_flags, dir_fd=runner_descriptor
+              )
+          except OSError as error:
+              raise SystemExit("root evidence directory cannot be opened safely") from error
+          directory_status = os.fstat(evidence_descriptor)
+          expected_device = os.environ["EVIDENCE_DEVICE"]
+          expected_inode = os.environ["EVIDENCE_INODE"]
+          if (
+              not expected_device.isascii()
+              or not expected_device.isdecimal()
+              or not expected_inode.isascii()
+              or not expected_inode.isdecimal()
+              or (directory_status.st_dev, directory_status.st_ino)
+              != (int(expected_device), int(expected_inode))
+          ):
+              raise SystemExit("root evidence directory does not match the prepared identity")
+          directory_identity = (
+              directory_status.st_dev,
+              directory_status.st_ino,
+              directory_status.st_uid,
+              directory_status.st_mode,
+          )
+          if (
+              not stat.S_ISDIR(directory_status.st_mode)
+              or directory_status.st_uid != os.geteuid()
+              or stat.S_IMODE(directory_status.st_mode) != 0o700
+          ):
+              raise SystemExit("root evidence directory is not caller-private")
+
+          def check_directory_identity() -> None:
+              try:
+                  named = os.stat(
+                      evidence.name,
+                      dir_fd=runner_descriptor,
+                      follow_symlinks=False,
+                  )
+                  opened = os.fstat(evidence_descriptor)
+              except OSError as error:
+                  raise SystemExit(
+                      "root evidence directory changed during capture"
+                  ) from error
+              for observed in (named, opened):
+                  if (
+                      observed.st_dev,
+                      observed.st_ino,
+                      observed.st_uid,
+                      observed.st_mode,
+                  ) != directory_identity:
+                      raise SystemExit("root evidence directory changed during capture")
+
+          check_directory_identity()
+
+          def write_all(descriptor: int, data: bytes) -> None:
+              view = memoryview(data)
+              while view:
+                  written = os.write(descriptor, view)
+                  if written == 0:
+                      raise SystemExit("trusted evidence write did not progress")
+                  view = view[written:]
+
+          channel_names = (
+              "GITHUB_ENV",
+              "GITHUB_OUTPUT",
+              "GITHUB_PATH",
+              "GITHUB_STATE",
+              "GITHUB_STEP_SUMMARY",
+          )
+          try:
+              selected_account = pwd.getpwnam("nobody")
+              selected_group = grp.getgrnam("nogroup")
+          except KeyError as error:
+              raise SystemExit("root test isolation identity is unavailable") from error
+          selected_uid = selected_account.pw_uid
+          selected_gid = selected_group.gr_gid
+          if (
+              selected_uid != 65534
+              or selected_gid != 65534
+              or selected_account.pw_gid != 65534
+              or selected_account.pw_name != "nobody"
+              or selected_group.gr_name != "nogroup"
+          ):
+              raise SystemExit("root test isolation identity is invalid")
+          trusted_sudo = Path("/usr/bin/sudo")
+          trusted_bwrap = Path("/usr/bin/bwrap")
+          trusted_chown = Path("/usr/bin/chown")
+          trusted_chmod = Path("/usr/bin/chmod")
+          trusted_kill = Path("/usr/bin/kill")
+          trusted_python = Path("/usr/bin/python3")
+          trusted_setpriv = Path("/usr/bin/setpriv")
+          trusted_git = Path("/usr/bin/git")
+          for trusted_program in (
+              trusted_sudo,
+              trusted_bwrap,
+              trusted_chown,
+              trusted_chmod,
+              trusted_kill,
+              trusted_python,
+              trusted_setpriv,
+              trusted_git,
+          ):
+              trusted_status = trusted_program.stat(follow_symlinks=True)
+              if (
+                  not stat.S_ISREG(trusted_status.st_mode)
+                  or trusted_status.st_uid != 0
+                  or trusted_status.st_mode & 0o022
+              ):
+                  raise SystemExit("root test isolation program is invalid")
+
+          def executable_identity(program: Path) -> tuple[int, str]:
+              status = program.stat(follow_symlinks=True)
+              hasher = hashlib.sha256()
+              with program.open("rb") as handle:
+                  while chunk := handle.read(1024 * 1024):
+                      hasher.update(chunk)
+              return status.st_size, hasher.hexdigest()
+
+          def executable_version(program: Path) -> str:
+              result = subprocess.run(
+                  [str(program), "--version"],
+                  cwd="/",
+                  env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+                  timeout=30,
+                  check=True,
+              )
+              version = result.stdout.decode("ascii").strip()
+              if re.fullmatch(r"[ -~]{1,64}", version) is None:
+                  raise SystemExit("root test executable version is invalid")
+              return version
+
+          try:
+              trusted_python_target = trusted_python.resolve(strict=True)
+          except OSError as error:
+              raise SystemExit("root test Python interpreter target is unavailable") from error
+          trusted_python_target_status = trusted_python_target.stat(follow_symlinks=False)
+          if (
+              not stat.S_ISREG(trusted_python_target_status.st_mode)
+              or trusted_python_target_status.st_uid != 0
+              or trusted_python_target_status.st_mode & 0o022
+          ):
+              raise SystemExit("root test Python interpreter target is invalid")
+          trusted_python_descriptor = os.open(
+              trusted_python_target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+          )
+          trusted_bwrap_size, trusted_bwrap_sha256 = executable_identity(trusted_bwrap)
+          trusted_bwrap_version = executable_version(trusted_bwrap)
+          trusted_python_size, trusted_python_sha256 = executable_identity(trusted_python_target)
+          trusted_python_version = executable_version(trusted_python)
+          if not trusted_python_version.startswith("Python 3.12."):
+              raise SystemExit("root test Python interpreter is not version 3.12")
+          trusted_tool_identities = {
+              str(program): executable_identity(program)
+              for program in (
+                  trusted_sudo,
+                  trusted_bwrap,
+                  trusted_chown,
+                  trusted_chmod,
+                  trusted_kill,
+                  trusted_setpriv,
+                  trusted_git,
+              )
+          }
+          trusted_tool_descriptors = {
+              name: os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              for name in trusted_tool_identities
+          }
+
+          def verify_trusted_tools() -> None:
+              for name, identity in trusted_tool_identities.items():
+                  descriptor_status = os.fstat(trusted_tool_descriptors[name])
+                  named_status = os.stat(name, follow_symlinks=True)
+                  if (
+                      executable_identity(Path(name)) != identity
+                      or (descriptor_status.st_dev, descriptor_status.st_ino, descriptor_status.st_size)
+                      != (named_status.st_dev, named_status.st_ino, named_status.st_size)
+                  ):
+                      raise SystemExit("root trusted tool changed")
+              descriptor_status = os.fstat(trusted_python_descriptor)
+              named_status = trusted_python.stat(follow_symlinks=True)
+              if (
+                  executable_identity(trusted_python_target)
+                  != (trusted_python_size, trusted_python_sha256)
+                  or (descriptor_status.st_dev, descriptor_status.st_ino, descriptor_status.st_size)
+                  != (named_status.st_dev, named_status.st_ino, named_status.st_size)
+              ):
+                  raise SystemExit("root test Python interpreter changed")
+              descriptor_status = os.fstat(trusted_uv_descriptor)
+              named_status = trusted_uv_path.stat(follow_symlinks=True)
+              if (
+                  uv_identity() != trusted_uv_identity
+                  or (descriptor_status.st_dev, descriptor_status.st_ino, descriptor_status.st_size)
+                  != (named_status.st_dev, named_status.st_ino, named_status.st_size)
+              ):
+                  raise SystemExit("root test uv executable changed")
+          command_directory = runner_temp / "_runner_file_commands"
+          try:
+              command_directory_descriptor = os.open(
+                  command_directory.name,
+                  directory_flags,
+                  dir_fd=runner_descriptor,
+              )
+          except OSError as error:
+              raise SystemExit("runner command directory cannot be opened safely") from error
+          command_directory_status = os.fstat(command_directory_descriptor)
+          command_directory_mode = stat.S_IMODE(command_directory_status.st_mode)
+          if (
+              not stat.S_ISDIR(command_directory_status.st_mode)
+              or command_directory_status.st_uid != os.geteuid()
+              or command_directory_status.st_mode & 0o022
+          ):
+              raise SystemExit("runner command directory is not caller-controlled")
+          os.fchmod(command_directory_descriptor, 0o700)
+          command_directory_status = os.fstat(command_directory_descriptor)
+          command_directory_identity = (
+              command_directory_status.st_dev,
+              command_directory_status.st_ino,
+              command_directory_status.st_uid,
+              command_directory_status.st_mode,
+          )
+          if (
+              not stat.S_ISDIR(command_directory_status.st_mode)
+              or command_directory_status.st_uid != os.geteuid()
+              or stat.S_IMODE(command_directory_status.st_mode) != 0o700
+          ):
+              raise SystemExit("runner command directory is not caller-private")
+          channel_snapshots: dict[str, tuple[str, int, int, int, int, bytes]] = {}
+          for channel_name in channel_names:
+              channel_value = os.environ.get(channel_name)
+              if channel_value is None:
+                  continue
+              channel_path = Path(channel_value)
+              if (
+                  not channel_path.is_absolute()
+                  or channel_path.parent != command_directory
+                  or channel_path.name in ("", ".", "..")
+                  or channel_path.name in {
+                      snapshot[0] for snapshot in channel_snapshots.values()
+                  }
+              ):
+                  raise SystemExit("runner command file path is invalid")
+              flags = os.O_RDWR
+              if hasattr(os, "O_CLOEXEC"):
+                  flags |= os.O_CLOEXEC
+              if hasattr(os, "O_NOFOLLOW"):
+                  flags |= os.O_NOFOLLOW
+              descriptor = os.open(
+                  channel_path.name,
+                  flags,
+                  dir_fd=command_directory_descriptor,
+              )
+              status = os.fstat(descriptor)
+              if (
+                  not stat.S_ISREG(status.st_mode)
+                  or status.st_uid != os.geteuid()
+                  or status.st_size > 65536
+              ):
+                  raise SystemExit("runner command file is invalid")
+              chunks: list[bytes] = []
+              remaining = status.st_size
+              while remaining:
+                  chunk = os.read(descriptor, remaining)
+                  if not chunk:
+                      raise SystemExit("runner command file read is incomplete")
+                  chunks.append(chunk)
+                  remaining -= len(chunk)
+              content = b"".join(chunks)
+              original_mode = stat.S_IMODE(status.st_mode)
+              os.fchmod(descriptor, 0o600)
+              protected_status = os.fstat(descriptor)
+              if stat.S_IMODE(protected_status.st_mode) != 0o600:
+                  raise SystemExit("runner command file cannot be protected")
+              channel_snapshots[channel_name] = (
+                  channel_path.name,
+                  original_mode,
+                  status.st_dev,
+                  status.st_ino,
+                  descriptor,
+                  content,
+              )
+          def verify_tracked_source(checkout: Path) -> None:
+              source_sha = os.environ["SOURCE_SHA"]
+              if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+                  raise SystemExit("root source identity is invalid")
+              inventory_limit = int(os.environ["SOURCE_INVENTORY_LIMIT_BYTES"])
+              if not 0 < inventory_limit <= 16 * 1024 * 1024:
+                  raise SystemExit("root source inventory limit is invalid")
+              root_descriptor = os.open(checkout, directory_flags)
+              try:
+                  git_descriptor = os.open(
+                      ".git",
+                      directory_flags,
+                      dir_fd=root_descriptor,
+                  )
+                  objects_descriptor = os.open(
+                      "objects",
+                      directory_flags,
+                      dir_fd=git_descriptor,
+                  )
+              except OSError as error:
+                  raise SystemExit("root Git object directory is not canonical") from error
+              git_status = os.fstat(git_descriptor)
+              objects_status = os.fstat(objects_descriptor)
+              named_git = os.stat(
+                  ".git",
+                  dir_fd=root_descriptor,
+                  follow_symlinks=False,
+              )
+              named_objects = os.stat(
+                  "objects",
+                  dir_fd=git_descriptor,
+                  follow_symlinks=False,
+              )
+              if (
+                  not stat.S_ISDIR(named_git.st_mode)
+                  or not stat.S_ISDIR(named_objects.st_mode)
+                  or (named_git.st_dev, named_git.st_ino)
+                  != (git_status.st_dev, git_status.st_ino)
+                  or (named_objects.st_dev, named_objects.st_ino)
+                  != (objects_status.st_dev, objects_status.st_ino)
+              ):
+                  raise SystemExit("root Git object directory is not canonical")
+              object_directory = f"/proc/self/fd/{objects_descriptor}"
+              verification = Path(
+                  tempfile.mkdtemp(prefix="comet-root-git.", dir=runner_temp)
+              )
+              template = verification / "template"
+              repository = verification / "repository.git"
+              template.mkdir(mode=0o700)
+              base_environment = {
+                  "GIT_ALLOW_PROTOCOL": "file",
+                  "GIT_CONFIG_GLOBAL": "/dev/null",
+                  "GIT_CONFIG_NOSYSTEM": "1",
+                  "GIT_OPTIONAL_LOCKS": "0",
+                  "GIT_TERMINAL_PROMPT": "0",
+                  "LANG": "C",
+                  "PATH": "/usr/bin:/bin",
+              }
+              initialized = subprocess.run(
+                  [
+                      "/usr/bin/git",
+                      "--no-replace-objects",
+                      "init",
+                      "--bare",
+                      f"--template={template}",
+                      str(repository),
+                  ],
+                  check=False,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  env=base_environment,
+                  timeout=30,
+              )
+              if initialized.returncode != 0:
+                  raise SystemExit("private Git verification did not initialize")
+              git_environment = {
+                  **base_environment,
+                  "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(object_directory),
+                  "GIT_DIR": str(repository),
+                  "GIT_INDEX_FILE": str(verification / "index"),
+                  "GIT_WORK_TREE": str(checkout),
+              }
+
+              def git(*arguments: str, limit: int = 1024 * 1024) -> bytes:
+                  process = subprocess.Popen(
+                      ["/usr/bin/git", "--no-replace-objects", *arguments],
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.DEVNULL,
+                      env=git_environment,
+                      pass_fds=(objects_descriptor,),
+                      start_new_session=True,
+                  )
+                  assert process.stdout is not None
+                  output_descriptor = process.stdout.fileno()
+                  os.set_blocking(output_descriptor, False)
+                  output_selector = selectors.DefaultSelector()
+                  output_selector.register(output_descriptor, selectors.EVENT_READ)
+                  deadline = time.monotonic() + 60
+                  chunks: list[bytes] = []
+                  size = 0
+                  failed = False
+                  try:
+                      while True:
+                          remaining_time = deadline - time.monotonic()
+                          if remaining_time <= 0:
+                              failed = True
+                              break
+                          events = output_selector.select(min(remaining_time, 0.25))
+                          if not events:
+                              if process.poll() is not None:
+                                  chunk = os.read(
+                                      output_descriptor,
+                                      min(65536, limit + 1 - size),
+                                  )
+                                  if not chunk:
+                                      break
+                                  chunks.append(chunk)
+                                  size += len(chunk)
+                                  if size > limit:
+                                      failed = True
+                                      break
+                              continue
+                          chunk = os.read(
+                              output_descriptor,
+                              min(65536, limit + 1 - size),
+                          )
+                          if not chunk:
+                              break
+                          chunks.append(chunk)
+                          size += len(chunk)
+                          if size > limit:
+                              failed = True
+                              break
+                      if failed:
+                          os.killpg(process.pid, signal.SIGKILL)
+                      try:
+                          return_code = process.wait(
+                              timeout=max(0.1, deadline - time.monotonic())
+                          )
+                      except subprocess.TimeoutExpired:
+                          os.killpg(process.pid, signal.SIGKILL)
+                          process.wait(timeout=5)
+                          failed = True
+                  finally:
+                      output_selector.close()
+                      process.stdout.close()
+                      if process.poll() is None:
+                          os.killpg(process.pid, signal.SIGKILL)
+                          process.wait(timeout=5)
+                  if failed or return_code != 0:
+                      raise SystemExit("private Git verification failed")
+                  return b"".join(chunks)
+
+              if git("rev-parse", "--show-object-format").strip() != b"sha1":
+                  raise SystemExit("root source does not use SHA-1 objects")
+
+              def identities() -> tuple[bytes, bytes]:
+                  commit = git("rev-parse", f"{source_sha}^{{commit}}").strip()
+                  tree = git("rev-parse", f"{source_sha}^{{tree}}").strip()
+                  if commit != source_sha.encode("ascii") or re.fullmatch(
+                      rb"[0-9a-f]{40}", tree
+                  ) is None:
+                      raise SystemExit("root source object identity is invalid")
+                  git(
+                      "fsck",
+                      "--strict",
+                      "--no-dangling",
+                      "--no-reflogs",
+                      "--no-progress",
+                      source_sha,
+                  )
+                  return commit, tree
+
+              before = identities()
+              git("read-tree", source_sha)
+              inventory = git(
+                  "ls-tree",
+                  "-rz",
+                  "--full-tree",
+                  source_sha,
+                  limit=inventory_limit,
+              )
+              records = inventory.split(b"\0")
+              if not records or records[-1] != b"" or len(records) > 200000:
+                  raise SystemExit("root source tree inventory is invalid")
+              try:
+                  for record in records[:-1]:
+                      header, separator, path = record.partition(b"\t")
+                      fields = header.split(b" ")
+                      components = path.split(b"/")
+                      if (
+                          separator != b"\t"
+                          or len(fields) != 3
+                          or len(components) == 0
+                          or any(component in (b"", b".", b"..") for component in components)
+                          or re.fullmatch(rb"[0-7]{6}", fields[0]) is None
+                          or fields[1] not in (b"blob", b"commit")
+                          or re.fullmatch(rb"[0-9a-f]{40}", fields[2]) is None
+                      ):
+                          raise SystemExit("root source tree entry is invalid")
+                      mode = fields[0]
+                      if fields[1] == b"commit" or mode == b"160000":
+                          raise SystemExit("root source tree contains an unsupported gitlink")
+                      parent_descriptor = os.dup(root_descriptor)
+                      try:
+                          for component in components[:-1]:
+                              next_descriptor = os.open(
+                                  component,
+                                  directory_flags,
+                                  dir_fd=parent_descriptor,
+                              )
+                              os.close(parent_descriptor)
+                              parent_descriptor = next_descriptor
+                          name = components[-1]
+                          observed = os.stat(
+                              name,
+                              dir_fd=parent_descriptor,
+                              follow_symlinks=False,
+                          )
+                          if mode == b"120000":
+                              if not stat.S_ISLNK(observed.st_mode):
+                                  raise SystemExit("root tracked source type changed")
+                              data = os.readlink(name, dir_fd=parent_descriptor).encode(
+                                  "utf-8", "surrogateescape"
+                              )
+                              digest = hashlib.sha1(
+                                  f"blob {len(data)}\0".encode("ascii") + data,
+                                  usedforsecurity=False,
+                              ).hexdigest()
+                          else:
+                              if not stat.S_ISREG(observed.st_mode):
+                                  raise SystemExit("root tracked source type changed")
+                              executable = bool(observed.st_mode & 0o111)
+                              if executable != (mode == b"100755"):
+                                  raise SystemExit("root tracked source mode changed")
+                              file_flags = os.O_RDONLY
+                              if hasattr(os, "O_CLOEXEC"):
+                                  file_flags |= os.O_CLOEXEC
+                              if hasattr(os, "O_NOFOLLOW"):
+                                  file_flags |= os.O_NOFOLLOW
+                              file_descriptor = os.open(
+                                  name, file_flags, dir_fd=parent_descriptor
+                              )
+                              try:
+                                  hasher = hashlib.sha1(usedforsecurity=False)
+                                  hasher.update(
+                                      f"blob {observed.st_size}\0".encode("ascii")
+                                  )
+                                  remaining = observed.st_size
+                                  while True:
+                                      chunk = os.read(file_descriptor, 1024 * 1024)
+                                      if not chunk:
+                                          break
+                                      hasher.update(chunk)
+                                      remaining -= len(chunk)
+                                  if remaining != 0:
+                                      raise SystemExit("root tracked source read is incomplete")
+                                  digest = hasher.hexdigest()
+                              finally:
+                                  os.close(file_descriptor)
+                      finally:
+                          os.close(parent_descriptor)
+                      if digest.encode("ascii") != fields[2]:
+                          raise SystemExit("root tracked source bytes changed")
+              finally:
+                  os.close(root_descriptor)
+              if identities() != before:
+                  raise SystemExit("root source object identity changed")
+              os.close(objects_descriptor)
+              os.close(git_descriptor)
+
+
+          verify_tracked_source(source_directory)
+
+          trusted_uv = shutil.which("uv")
+          if trusted_uv is None or not Path(trusted_uv).is_absolute():
+              raise SystemExit("root test uv executable is unavailable")
+          trusted_uv_path = Path(trusted_uv).resolve(strict=True)
+          trusted_uv_status = trusted_uv_path.stat(follow_symlinks=True)
+          if (
+              not stat.S_ISREG(trusted_uv_status.st_mode)
+              or trusted_uv_status.st_uid not in (0, os.geteuid())
+              or trusted_uv_status.st_mode & 0o022
+              or not 0 < trusted_uv_status.st_size <= 256 * 1024 * 1024
+          ):
+              raise SystemExit("root test uv executable is invalid")
+
+          def uv_identity() -> tuple[int, int, int, str]:
+              status = trusted_uv_path.stat(follow_symlinks=True)
+              hasher = hashlib.sha256()
+              with trusted_uv_path.open("rb") as handle:
+                  while chunk := handle.read(1024 * 1024):
+                      hasher.update(chunk)
+              return status.st_dev, status.st_ino, status.st_size, hasher.hexdigest()
+
+          trusted_uv_identity = uv_identity()
+          trusted_uv_descriptor = os.open(
+              trusted_uv_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+          )
+          execution_directory = Path(os.environ["EXECUTION_DIRECTORY"])
+          execution_expected = (
+              int(os.environ["EXECUTION_DEVICE"]),
+              int(os.environ["EXECUTION_INODE"]),
+          )
+
+
+          def execution_identity() -> tuple[object, ...]:
+              if execution_directory.parent != Path("/tmp"):
+                  raise SystemExit("root execution directory must be directly below /tmp")
+              descriptor, bindings = open_and_bind_directory(execution_directory)
+              try:
+                  observed = os.fstat(descriptor)
+                  root_status = os.stat("/", follow_symlinks=False)
+                  temporary_status = os.stat("/tmp", follow_symlinks=False)
+                  if (
+                      root_status.st_uid != 0
+                      or root_status.st_mode & 0o022
+                      or not stat.S_ISDIR(temporary_status.st_mode)
+                      or temporary_status.st_uid != 0
+                      or stat.S_IMODE(temporary_status.st_mode) != 0o1777
+                      or observed.st_uid != os.geteuid()
+                      or stat.S_IMODE(observed.st_mode) != 0o755
+                      or (observed.st_dev, observed.st_ino) != execution_expected
+                  ):
+                      raise SystemExit("root execution directory is not safe")
+                  return (
+                      tuple(bindings),
+                      observed.st_gid,
+                      root_status.st_dev,
+                      root_status.st_ino,
+                      root_status.st_mode,
+                      temporary_status.st_dev,
+                      temporary_status.st_ino,
+                      temporary_status.st_mode,
+                  )
+              finally:
+                  os.close(descriptor)
+
+
+          execution_binding = execution_identity()
+          template = Path(tempfile.mkdtemp(prefix="comet-root-template.", dir=execution_directory))
+          staged_source = execution_directory / f"comet-root-source.{os.urandom(16).hex()}"
+          staging_environment = {
+              "GIT_ALLOW_PROTOCOL": "file",
+              "GIT_CONFIG_GLOBAL": "/dev/null",
+              "GIT_CONFIG_NOSYSTEM": "1",
+              "GIT_CONFIG_SYSTEM": "/dev/null",
+              "GIT_TERMINAL_PROMPT": "0",
+              "LANG": "C",
+              "LC_ALL": "C",
+              "PATH": "/usr/bin:/bin",
+          }
+          git_version_result = subprocess.run(
+              ["/usr/bin/git", "--version"],
+              cwd="/",
+              env=staging_environment,
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.DEVNULL,
+              timeout=30,
+              check=True,
+          )
+          git_version = git_version_result.stdout.decode("ascii").strip()
+          git_version_match = re.fullmatch(r"git version (\d+)\.(\d+)\.(\d+)", git_version)
+          if git_version_match is None or tuple(
+              int(part) for part in git_version_match.groups()
+          ) < (2, 43, 0):
+              raise SystemExit("root source staging requires Git 2.43.0 or later")
+          print(f"Root source staging uses {git_version}.", file=sys.stderr, flush=True)
+          source_origin_result = subprocess.run(
+              [
+                  "/usr/bin/git",
+                  "config",
+                  "--no-includes",
+                  "--file",
+                  str(source_directory / ".git" / "config"),
+                  "--get",
+                  "remote.origin.url",
+              ],
+              cwd="/",
+              env=staging_environment,
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.DEVNULL,
+              timeout=30,
+              check=False,
+          )
+          canonical_origin = "https://github.com/LLM360/comet.git"
+          allowed_origins = {
+              "https://github.com/LLM360/comet",
+              canonical_origin,
+          }
+          source_origin = source_origin_result.stdout.decode("utf-8").strip()
+          source_origins = subprocess.run(
+              [
+                  "/usr/bin/git", "config", "--no-includes", "--file",
+                  str(source_directory / ".git" / "config"), "--get-all", "remote.origin.url",
+              ],
+              cwd="/", env=staging_environment, stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=False,
+          )
+          if (
+              source_origin_result.returncode != 0
+              or source_origin not in allowed_origins
+              or source_origins.returncode != 0
+              or source_origins.stdout.splitlines() != [source_origin.encode("utf-8")]
+          ):
+              raise SystemExit("root source origin is not the selected canonical origin")
+          for arguments in (
+              [
+                  "clone",
+                  "--no-local",
+                  "--no-hardlinks",
+                  "--no-checkout",
+                  f"--template={template}",
+                  "--",
+                  source_directory.as_uri(),
+                  str(staged_source),
+              ],
+              ["-C", str(staged_source), "checkout", "--detach", "--force", os.environ["SOURCE_SHA"]],
+          ):
+              staged = subprocess.run(
+                  ["/usr/bin/git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", *arguments],
+                  cwd="/",
+                  env=staging_environment,
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  timeout=120,
+                  umask=0o022,
+                  check=False,
+              )
+              if staged.returncode != 0:
+                  raise SystemExit("root execution source staging failed")
+          for forbidden in ("shallow", "objects/info/alternates"):
+              if os.path.lexists(staged_source / ".git" / forbidden):
+                  raise SystemExit("root execution source has indirect or shallow history")
+          staged_origin = subprocess.run(
+              ["/usr/bin/git", "-C", str(staged_source), "remote", "set-url", "origin", canonical_origin],
+              cwd="/",
+              env=staging_environment,
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL,
+              timeout=30,
+              check=False,
+          )
+          if staged_origin.returncode != 0:
+                  raise SystemExit("root staging process did not set the canonical source origin")
+          staged_origins = subprocess.run(
+              ["/usr/bin/git", "-C", str(staged_source), "remote", "get-url", "--all", "origin"],
+              cwd="/", env=staging_environment, stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=False,
+          )
+          if staged_origins.returncode != 0 or staged_origins.stdout.splitlines() != [canonical_origin.encode("ascii")]:
+              raise SystemExit("root staged source origin is not the selected canonical origin")
+          for writable_leaf in (
+              staged_source / "build",
+              staged_source / "build" / "github-production-readback",
+              staged_source / ".pytest_cache",
+              staged_source / "site",
+          ):
+              writable_leaf.mkdir(mode=0o755, parents=True, exist_ok=True)
+              writable_leaf.chmod(0o755)
+          verify_tracked_source(staged_source)
+
+
+          def input_identity(path: Path, *, owner: int = os.geteuid()) -> tuple[object, ...]:
+              entries: list[tuple[object, ...]] = []
+
+              def inspect(descriptor: int, relative: str) -> None:
+                  opened = os.fstat(descriptor)
+                  if opened.st_uid != owner or opened.st_mode & 0o022:
+                      raise SystemExit("root execution input ownership or mode changed")
+                  entries.append(
+                      (relative, opened.st_dev, opened.st_ino, opened.st_uid, opened.st_gid, opened.st_mode)
+                  )
+                  for name in sorted(os.listdir(descriptor)):
+                      relative_name = f"{relative}/{name}"
+                      status = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                      if status.st_uid != owner:
+                          raise SystemExit("root execution input ownership changed")
+                      if stat.S_ISDIR(status.st_mode):
+                          child = os.open(name, directory_flags, dir_fd=descriptor)
+                          try:
+                              if (os.fstat(child).st_dev, os.fstat(child).st_ino) != (
+                                  status.st_dev,
+                                  status.st_ino,
+                              ):
+                                  raise SystemExit("root execution input identity changed")
+                              inspect(child, relative_name)
+                          finally:
+                              os.close(child)
+                      elif stat.S_ISLNK(status.st_mode):
+                          if relative_name.startswith("./.git/"):
+                              raise SystemExit("root execution Git metadata contains a link")
+                          entries.append(
+                              (
+                                  relative_name,
+                                  status.st_dev,
+                                  status.st_ino,
+                                  status.st_uid,
+                                  status.st_gid,
+                                  status.st_mode,
+                                  os.readlink(name, dir_fd=descriptor),
+                              )
+                          )
+                      elif stat.S_ISREG(status.st_mode) and not status.st_mode & 0o022:
+                          child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=descriptor)
+                          try:
+                              opened = os.fstat(child)
+                              if opened.st_uid != owner or opened.st_mode & 0o022:
+                                  raise SystemExit("root execution input ownership or mode changed")
+                              if (opened.st_dev, opened.st_ino) != (status.st_dev, status.st_ino):
+                                  raise SystemExit("root execution input identity changed")
+                              digest = hashlib.sha256()
+                              while chunk := os.read(child, 1024 * 1024):
+                                  digest.update(chunk)
+                              entries.append(
+                                  (
+                                      relative_name,
+                                      opened.st_dev,
+                                      opened.st_ino,
+                                      opened.st_uid,
+                                      opened.st_gid,
+                                      opened.st_mode,
+                                      opened.st_size,
+                                      digest.hexdigest(),
+                                  )
+                              )
+                          finally:
+                              os.close(child)
+                      else:
+                          raise SystemExit("root execution input type or mode is not safe")
+
+              descriptor = os.open(path, directory_flags)
+              try:
+                  inspect(descriptor, ".")
+              finally:
+                  os.close(descriptor)
+              return tuple(entries)
+
+          def dependency_input_manifest() -> bytes:
+              entries: list[tuple[object, ...]] = []
+              python_links: set[str] = set()
+              permitted_python_links = {
+                  "/venv/bin/python",
+                  "/venv/bin/python3",
+                  "/venv/bin/python3.12",
+              }
+              interpreter_identity = os.fstat(trusted_python_descriptor)
+
+              def inspect(descriptor: int, relative: str) -> None:
+                  opened_directory = os.fstat(descriptor)
+                  directory_mode = stat.S_IMODE(opened_directory.st_mode)
+                  if (
+                      not stat.S_ISDIR(opened_directory.st_mode)
+                      or opened_directory.st_uid != selected_uid
+                      or opened_directory.st_gid != selected_gid
+                      or directory_mode & 0o022
+                  ):
+                      raise SystemExit("root dependency manifest ownership or mode is invalid")
+                  entries.append(
+                      (
+                          relative,
+                          "directory",
+                          directory_mode,
+                          opened_directory.st_uid,
+                          opened_directory.st_gid,
+                          opened_directory.st_size,
+                          "",
+                          "",
+                      )
+                  )
+                  for name in sorted(os.listdir(descriptor)):
+                      child_relative = f"{relative}/{name}"
+                      named = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                      mode = stat.S_IMODE(named.st_mode)
+                      if named.st_uid != selected_uid or named.st_gid != selected_gid:
+                          raise SystemExit("root dependency manifest ownership or mode is invalid")
+                      if stat.S_ISDIR(named.st_mode):
+                          child = os.open(name, directory_flags, dir_fd=descriptor)
+                          try:
+                              opened = os.fstat(child)
+                              if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                                  raise SystemExit("root dependency manifest identity changed")
+                              inspect(child, child_relative)
+                          finally:
+                              os.close(child)
+                          continue
+                      if stat.S_ISREG(named.st_mode):
+                          if mode & 0o022:
+                              raise SystemExit("root dependency manifest ownership or mode is invalid")
+                          child = os.open(
+                              name,
+                              os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                              dir_fd=descriptor,
+                          )
+                          try:
+                              opened = os.fstat(child)
+                              if (
+                                  (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+                                  or opened.st_uid != selected_uid
+                                  or opened.st_gid != selected_gid
+                                  or stat.S_IMODE(opened.st_mode) != mode
+                                  or opened.st_size != named.st_size
+                              ):
+                                  raise SystemExit("root dependency manifest identity changed")
+                              digest = hashlib.sha256()
+                              while chunk := os.read(child, 1024 * 1024):
+                                  digest.update(chunk)
+                          finally:
+                              os.close(child)
+                          entries.append(
+                              (
+                                  child_relative,
+                                  "file",
+                                  mode,
+                                  opened.st_uid,
+                                  opened.st_gid,
+                                  opened.st_size,
+                                  "",
+                                  digest.hexdigest(),
+                              )
+                          )
+                          continue
+                      if stat.S_ISLNK(named.st_mode):
+                          target = os.readlink(name, dir_fd=descriptor)
+                          if child_relative in permitted_python_links:
+                              target_descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC, dir_fd=descriptor)
+                              try:
+                                  target_status = os.fstat(target_descriptor)
+                                  if (
+                                      not stat.S_ISREG(target_status.st_mode)
+                                      or (target_status.st_dev, target_status.st_ino)
+                                      != (interpreter_identity.st_dev, interpreter_identity.st_ino)
+                                  ):
+                                      raise SystemExit("root Python link target is invalid")
+                              finally:
+                                  os.close(target_descriptor)
+                              python_links.add(child_relative)
+                          elif target.startswith("/") or ".." in Path(target).parts:
+                              raise SystemExit("root dependency link escapes its input")
+                          entries.append(
+                              (
+                                  child_relative,
+                                  "link",
+                                  mode,
+                                  named.st_uid,
+                                  named.st_gid,
+                                  named.st_size,
+                                  target,
+                                  "",
+                              )
+                          )
+                          continue
+                      raise SystemExit("root dependency manifest has an unsupported type")
+
+              for retained_descriptor, relative in dependency_directory_descriptors:
+                  descriptor = os.dup(retained_descriptor)
+                  try:
+                      inspect(descriptor, relative)
+                  finally:
+                      os.close(descriptor)
+              if not python_links.issubset(permitted_python_links):
+                  raise SystemExit("root dependency manifest has an invalid Python link")
+              return (
+                  json.dumps(entries, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+                  + b"\n"
+              )
+
+          staged_bin = Path(tempfile.mkdtemp(prefix="comet-root-bin.", dir=execution_directory))
+          staged_bin.chmod(0o755)
+          staged_uv = staged_bin / "uv"
+          uv_descriptor = os.open(trusted_uv_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              uv_opened = os.fstat(uv_descriptor)
+              if (uv_opened.st_dev, uv_opened.st_ino, uv_opened.st_size) != trusted_uv_identity[:3]:
+                  raise SystemExit("root test uv executable changed before staging")
+              remaining = trusted_uv_identity[2]
+              with staged_uv.open("xb") as output:
+                  while chunk := os.read(uv_descriptor, min(1024 * 1024, remaining + 1)):
+                      if len(chunk) > remaining:
+                          raise SystemExit("root test uv size changed during staging")
+                      output.write(chunk)
+                      remaining -= len(chunk)
+              if remaining != 0:
+                  raise SystemExit("root test uv copy is not complete")
+          finally:
+              os.close(uv_descriptor)
+          staged_uv.chmod(0o755)
+          if hashlib.sha256(staged_uv.read_bytes()).hexdigest() != trusted_uv_identity[3]:
+              raise SystemExit("root test staged uv bytes changed")
+          staged_uv_binding = input_identity(staged_bin)
+
+          selected_directory = Path(
+              tempfile.mkdtemp(prefix="comet-root-selected.", dir=execution_directory)
+          )
+          selected_directory.chmod(0o700)
+          selected_directory_descriptor = os.open(selected_directory, directory_flags)
+          selected_directory_status = os.fstat(selected_directory_descriptor)
+          selected_directory_identity = (
+              selected_directory_status.st_dev,
+              selected_directory_status.st_ino,
+          )
+          selected_result_directory = selected_directory / "private"
+          selected_home_directory = selected_directory / "home"
+          selected_prepare_home_directory = selected_directory / "prepare-home"
+          selected_tmp_directory = selected_directory / "tmp"
+          selected_prepare_tmp_directory = selected_directory / "prepare-tmp"
+          selected_venv_directory = selected_directory / "venv"
+          selected_cache_directory = selected_directory / "uv-cache"
+          for selected_path in (
+              selected_result_directory, selected_home_directory,
+              selected_prepare_home_directory, selected_tmp_directory,
+              selected_prepare_tmp_directory, selected_venv_directory,
+              selected_cache_directory,
+          ):
+              selected_path.mkdir(mode=0o755)
+              selected_path.chmod(0o755)
+          selected_descriptor = os.open(selected_result_directory, directory_flags)
+          selected_status = os.fstat(selected_descriptor)
+          selected_identity = (selected_status.st_dev, selected_status.st_ino)
+          dependency_directory_descriptors = (
+              (os.open(selected_venv_directory, directory_flags), "/venv"),
+              (os.open(selected_cache_directory, directory_flags), "/uv-cache"),
+          )
+          isolation_environment = {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"}
+
+          def run_isolation_command(
+              arguments: list[str], *, check: bool = True, timeout: float = term_grace
+          ) -> subprocess.CompletedProcess[bytes]:
+              result = subprocess.run(
+                  [str(trusted_sudo), "--non-interactive", "--", *arguments],
+                  env=isolation_environment,
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  check=False,
+                  timeout=timeout,
+              )
+              if check and result.returncode != 0:
+                  raise SystemExit("root test isolation operation failed")
+              return result
+
+          writable_directories = {
+              "/workspace/build/github-production-readback": selected_directory / "github-production-readback",
+              "/workspace/.pytest_cache": selected_directory / "pytest-cache",
+              "/workspace/site": selected_directory / "site",
+          }
+          for writable_directory in writable_directories.values():
+              writable_directory.mkdir(mode=0o755)
+              writable_directory.chmod(0o755)
+          writable_directory_descriptors = {
+              writable_directory: os.open(writable_directory, directory_flags)
+              for writable_directory in writable_directories.values()
+          }
+          namespace_etc = Path(
+              tempfile.mkdtemp(prefix="comet-root-namespace-etc.", dir=execution_directory)
+          )
+          namespace_etc.chmod(0o755)
+          (namespace_etc / "passwd").write_text(
+              f"nobody:x:{selected_uid}:{selected_gid}:nobody:/outputs/home:/usr/sbin/nologin\n",
+              encoding="ascii",
+          )
+          (namespace_etc / "group").write_text(
+              f"nogroup:x:{selected_gid}:\n",
+              encoding="ascii",
+          )
+          (namespace_etc / "hosts").write_text("127.0.0.1 localhost\n::1 localhost\n", encoding="ascii")
+          (namespace_etc / "nsswitch.conf").write_text("passwd: files\ngroup: files\nhosts: files\n", encoding="ascii")
+          for namespace_file in (
+              namespace_etc / "passwd", namespace_etc / "group",
+              namespace_etc / "hosts", namespace_etc / "nsswitch.conf",
+          ):
+              namespace_file.chmod(0o644)
+          policy_directory = Path(tempfile.mkdtemp(prefix="comet-root-policy.", dir=execution_directory))
+          policy_directory.chmod(0o700)
+          supervisor = policy_directory / "namespace-supervisor.py"
+          selected_exec = policy_directory / "selected-exec.py"
+          supervisor.write_text(
+              """import ctypes
+          import json
+          import math
+          import os
+          import signal
+          import stat
+          import sys
+          import time
+
+          PR_SET_CHILD_SUBREAPER = 36
+          PR_SET_NO_NEW_PRIVS = 38
+          UID = 65534
+          GID = 65534
+          STATUS_LIMIT = 256
+          libc = ctypes.CDLL(None, use_errno=True)
+
+          def checked_record(path, expected):
+              descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+              opened = os.fstat(descriptor)
+              named = os.stat(path, follow_symlinks=False)
+              if (
+                  not stat.S_ISREG(opened.st_mode)
+                  or opened.st_uid != 0
+                  or opened.st_gid != 0
+                  or stat.S_IMODE(opened.st_mode) != 0o600
+                  or opened.st_nlink != 1
+                  or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+              ):
+                  raise SystemExit("namespace record is invalid")
+              if expected is not None and os.pread(descriptor, 2, 0) != expected:
+                  raise SystemExit("namespace control record is invalid")
+              return descriptor, (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid, opened.st_gid, opened.st_nlink)
+
+          def recheck(path, descriptor, identity):
+              opened = os.fstat(descriptor)
+              named = os.stat(path, follow_symlinks=False)
+              if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid, opened.st_gid, opened.st_nlink) != identity or (named.st_dev, named.st_ino) != identity[:2]:
+                  raise SystemExit("namespace record changed")
+
+          def status_write(descriptor, path, identity, selected, cleanup):
+              data = (json.dumps({"cleanup": cleanup, "schema": 1, "selected_exit_status": selected}, separators=(",", ":"), sort_keys=True) + "\\n").encode("utf-8")
+              if len(data) > STATUS_LIMIT:
+                  raise SystemExit("namespace status is too large")
+              recheck(path, descriptor, identity)
+              os.ftruncate(descriptor, 0)
+              if os.pwrite(descriptor, data, 0) != len(data):
+                  raise SystemExit("namespace status write is incomplete")
+              os.fsync(descriptor)
+              recheck(path, descriptor, identity)
+
+          def request(descriptor, path, identity):
+              recheck(path, descriptor, identity)
+              if os.pwrite(descriptor, b"1", 0) != 1:
+                  raise SystemExit("namespace termination write is incomplete")
+              os.fsync(descriptor)
+              recheck(path, descriptor, identity)
+              if os.pread(descriptor, 1, 0) != b"1":
+                  raise SystemExit("namespace termination request changed")
+
+          if len(sys.argv) != 6 or sys.argv[1] not in {"prepare", "final"}:
+              raise SystemExit("namespace supervisor arguments are invalid")
+          phase, control_path, status_path, term_text, command_text = sys.argv[1:]
+          term_grace = float(term_text)
+          if (
+              term_text != format(term_grace, ".17g")
+              or not math.isfinite(term_grace)
+              or not 0 < term_grace <= 30
+          ):
+              raise SystemExit("namespace termination grace is invalid")
+          command = json.loads(command_text)
+          if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+              raise SystemExit("namespace command is invalid")
+          if os.getuid() != 0 or os.getgid() != 0:
+              raise SystemExit("namespace supervisor is not root")
+          if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+              raise SystemExit("namespace supervisor cannot become a subreaper")
+          control, control_identity = checked_record(control_path, b"0")
+          status, status_identity = checked_record(status_path, b"")
+          requested = False
+
+          def on_signal(_signum, _frame):
+              global requested
+              requested = True
+
+          for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+              signal.signal(signum, on_signal)
+          pid = os.fork()
+          if pid == 0:
+              os.setpgrp()
+              os.close(control)
+              os.close(status)
+              os.execv("/usr/bin/setpriv", ["/usr/bin/setpriv", "--clear-groups", "--reuid=65534", "--regid=65534", "--no-new-privs", "--bounding-set=-all", "--ambient-caps=-all", "--inh-caps=-all", "/usr/bin/python3", "-I", "/policy/selected-exec.py", phase, *command])
+          pidfd = os.pidfd_open(pid)
+
+          def process_identity(selected_pid):
+              fields = open(f"/proc/{selected_pid}/stat", encoding="ascii").read().rsplit(")", 1)[1].split()
+              if len(fields) < 20:
+                  raise SystemExit("namespace process identity is incomplete")
+              return (selected_pid, int(fields[19]), int(fields[1]), int(fields[2]), int(fields[3]))
+
+          def process_exited(descriptor):
+              return os.waitid(
+                  os.P_PIDFD,
+                  descriptor,
+                  os.WEXITED | os.WNOHANG | os.WNOWAIT,
+              ) is not None
+
+          leader = process_identity(pid)
+          leader_ready_deadline = time.monotonic() + 1
+          while leader[3] != pid and time.monotonic() < leader_ready_deadline:
+              time.sleep(0.01)
+              leader = process_identity(pid)
+          if leader[3] != pid:
+              raise SystemExit("namespace leader process group is invalid")
+
+          def checked_group_signal(selected_signal):
+              if process_identity(pid) != leader or leader[3] != pid or process_exited(pidfd):
+                  raise SystemExit("namespace leader identity changed")
+              os.killpg(pid, selected_signal)
+
+          adopted = {}
+          descendant_seen = False
+
+          def inspect_children():
+              global descendant_seen
+              values = open(
+                  f"/proc/self/task/{os.getpid()}/children",
+                  encoding="ascii",
+              ).read().split()
+              live = []
+              for value in values:
+                  child_pid = int(value)
+                  if child_pid == pid:
+                      continue
+                  if child_pid not in adopted:
+                      identity = process_identity(child_pid)
+                      descriptor = os.pidfd_open(child_pid)
+                      if identity[2] != os.getpid() or process_identity(child_pid) != identity:
+                          os.close(descriptor)
+                          raise SystemExit("namespace descendant identity is invalid")
+                      adopted[child_pid] = (identity, descriptor)
+                      if identity[3:] != leader[3:]:
+                          descendant_seen = True
+                  identity, descriptor = adopted[child_pid]
+                  if process_exited(descriptor):
+                      waited, _wait_status = os.waitpid(child_pid, os.WNOHANG)
+                      if waited != child_pid:
+                          raise SystemExit("namespace supervisor did not reap the descendant")
+                      os.close(descriptor)
+                      del adopted[child_pid]
+                      continue
+                  if process_identity(child_pid) != identity or identity[2] != os.getpid():
+                      raise SystemExit("namespace descendant identity changed")
+                  live.append(child_pid)
+              return live
+
+          selected = None
+          cleanup = "clean"
+          termination_phase = "running"
+          phase_deadline = 0.0
+          stable_empty = 0
+          signaled = set()
+
+          def reap_leader():
+              global selected
+              if selected is not None or not process_exited(pidfd):
+                  return
+              if process_identity(pid) != leader:
+                  raise SystemExit("namespace leader identity changed")
+              waited, wait_status = os.waitpid(pid, os.WNOHANG)
+              if waited != pid:
+                  raise SystemExit("namespace supervisor did not reap the leader")
+              selected = os.waitstatus_to_exitcode(wait_status)
+
+          def signal_phase_processes(selected_signal):
+              if selected is None and leader not in signaled:
+                  checked_group_signal(selected_signal)
+                  signaled.add(leader)
+              for child_pid in inspect_children():
+                  identity, descriptor = adopted[child_pid]
+                  if identity not in signaled:
+                      signal.pidfd_send_signal(descriptor, selected_signal)
+                      signaled.add(identity)
+
+          try:
+              while True:
+                  recheck(control_path, control, control_identity)
+                  request_byte = os.pread(control, 2, 0)
+                  if request_byte not in (b"0", b"1"):
+                      raise SystemExit("namespace control record is invalid")
+                  if request_byte == b"1":
+                      requested = True
+                  reap_leader()
+                  if (requested or selected is not None) and termination_phase == "running":
+                      if requested:
+                          request(control, control_path, control_identity)
+                      termination_phase = "term"
+                      phase_deadline = time.monotonic() + term_grace
+                      signaled.clear()
+                  if termination_phase != "running":
+                      signal_phase_processes(
+                          signal.SIGTERM if termination_phase == "term" else signal.SIGKILL
+                      )
+                      children = inspect_children()
+                      if selected is not None and not children:
+                          stable_empty += 1
+                          if stable_empty >= 2:
+                              break
+                      else:
+                          stable_empty = 0
+                      if time.monotonic() >= phase_deadline:
+                          if termination_phase == "term":
+                              termination_phase = "kill"
+                              phase_deadline = time.monotonic() + term_grace
+                              signaled.clear()
+                          else:
+                              cleanup = "descendant_survived"
+                              break
+                  time.sleep(0.02)
+              if stable_empty < 2:
+                  cleanup = "descendant_survived"
+              elif descendant_seen and cleanup == "clean":
+                  cleanup = "descendant_terminated"
+          except (OSError, ValueError, UnicodeError, SystemExit):
+              cleanup = "inspection_failed"
+          finally:
+              for _identity, descriptor in adopted.values():
+                  try:
+                      os.close(descriptor)
+                  except OSError:
+                      cleanup = "inspection_failed"
+          try:
+              if selected is not None:
+                  status_write(status, status_path, status_identity, selected, cleanup)
+          finally:
+              os.close(control)
+              os.close(status)
+              os.close(pidfd)
+          raise SystemExit(selected if cleanup == "clean" and 0 <= selected <= 124 else 125)
+          """,
+              encoding="ascii",
+          )
+          supervisor.chmod(0o600)
+          dependency_check = policy_directory / "dependency-check.py"
+          dependency_check.write_text(
+              """import importlib.metadata
+          import os
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          if sys.version_info[:2] != (3, 12):
+              raise SystemExit("dependency environment does not use Python 3.12")
+          project = Path("/workspace/pyproject.toml")
+          scripts = tomllib.loads(project.read_text(encoding="utf-8")).get("project", {}).get("scripts", {})
+          if not isinstance(scripts, dict):
+              raise SystemExit("project scripts are invalid")
+          for distribution in ("comet", "pytest"):
+              if not importlib.metadata.version(distribution):
+                  raise SystemExit("dependency metadata is absent")
+          for name in [*scripts, "pytest"]:
+              executable = Path("/venv/bin") / name
+              if not executable.is_file() or not os.access(executable, os.X_OK):
+                  raise SystemExit("dependency executable is absent")
+          import comet
+          if not Path(comet.__file__).resolve().is_relative_to(Path("/workspace")):
+              raise SystemExit("installed Comet is not editable from the workspace")
+          """,
+              encoding="ascii",
+          )
+          dependency_check.chmod(0o600)
+          record_inspector = policy_directory / "record-inspector.py"
+          record_inspector.write_text(
+              """import json
+          import os
+          import stat
+          import sys
+
+          if len(sys.argv) not in (3, 4) or (
+              len(sys.argv) == 4 and sys.argv[3] != "control"
+          ):
+              raise SystemExit("record inspector arguments are invalid")
+          result = {}
+          selected_records = (
+              ("control", sys.argv[1], "request", 1),
+              ("status", sys.argv[2], "result.json", 256),
+          )
+          if len(sys.argv) == 4:
+              selected_records = selected_records[:1]
+          for label, directory_path, name, limit in selected_records:
+              directory = os.open(
+                  directory_path,
+                  os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+              )
+              try:
+                  directory_status = os.fstat(directory)
+                  directory_named = os.stat(directory_path, follow_symlinks=False)
+                  if (
+                      not stat.S_ISDIR(directory_status.st_mode)
+                      or directory_status.st_uid != 0
+                      or directory_status.st_gid != 0
+                      or stat.S_IMODE(directory_status.st_mode) != 0o700
+                      or (directory_status.st_dev, directory_status.st_ino)
+                      != (directory_named.st_dev, directory_named.st_ino)
+                      or os.listdir(directory) != [name]
+                  ):
+                      raise SystemExit("namespace record directory is invalid")
+                  descriptor = os.open(
+                      name,
+                      os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                      dir_fd=directory,
+                  )
+                  try:
+                      opened = os.fstat(descriptor)
+                      named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                      data = os.read(descriptor, limit + 1)
+                      if (
+                          not stat.S_ISREG(opened.st_mode)
+                          or opened.st_uid != 0
+                          or opened.st_gid != 0
+                          or stat.S_IMODE(opened.st_mode) != 0o600
+                          or opened.st_nlink != 1
+                          or opened.st_size > limit
+                          or len(data) != opened.st_size
+                          or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+                      ):
+                          raise SystemExit("namespace record is invalid")
+                      result[label] = {
+                          "data": data.hex(),
+                          "directory": [
+                              directory_status.st_dev,
+                              directory_status.st_ino,
+                              directory_status.st_mode,
+                              directory_status.st_uid,
+                              directory_status.st_gid,
+                          ],
+                          "file": [
+                              opened.st_dev,
+                              opened.st_ino,
+                              opened.st_mode,
+                              opened.st_uid,
+                              opened.st_gid,
+                              opened.st_nlink,
+                              opened.st_size,
+                          ],
+                      }
+                  finally:
+                      os.close(descriptor)
+              finally:
+                  os.close(directory)
+          print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+          """,
+              encoding="ascii",
+          )
+          record_inspector.chmod(0o600)
+          record_creator = policy_directory / "record-creator.py"
+          record_creator.write_text(
+              """import array
+          import json
+          import os
+          import socket
+          import stat
+          import sys
+
+          if len(sys.argv) != 8:
+              raise SystemExit("record creator arguments are invalid")
+          if os.geteuid() != 0 or os.getegid() != 0:
+              raise SystemExit("record creator is not root")
+          parent_text, device_text, inode_text, owner_text, phase, token, receiver_text = sys.argv[1:]
+          if (
+              phase not in {"prepare", "final"}
+              or len(token) != 32
+              or any(character not in "0123456789abcdef" for character in token)
+              or not all(value.isdecimal() for value in (device_text, inode_text, owner_text))
+          ):
+              raise SystemExit("record creator arguments are invalid")
+          parent_path = os.fsencode(parent_text)
+          if not parent_path.startswith(b"/tmp/") or b"/" in parent_path[5:]:
+              raise SystemExit("record creator parent is invalid")
+          if receiver_text != f"{parent_text}/.comet-root-{phase}-record-fds.{token}":
+              raise SystemExit("record creator receiver is invalid")
+          directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+          parent = os.open(parent_path, directory_flags)
+          try:
+              parent_status = os.fstat(parent)
+              if (
+                  not stat.S_ISDIR(parent_status.st_mode)
+                  or (parent_status.st_dev, parent_status.st_ino)
+                  != (int(device_text), int(inode_text))
+                  or parent_status.st_uid != int(owner_text)
+                  or stat.S_IMODE(parent_status.st_mode) != 0o755
+              ):
+                  raise SystemExit("record creator parent is invalid")
+              result = {}
+              descriptors = []
+              for label, name, initial in (
+                  ("control", "request", b"0"),
+                  ("status", "result.json", b""),
+              ):
+                  directory_name = f"comet-root-{phase}-{label}.{token}"
+                  os.mkdir(directory_name, 0o700, dir_fd=parent)
+                  directory = os.open(directory_name, directory_flags, dir_fd=parent)
+                  try:
+                      descriptor = os.open(
+                          name,
+                          os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          0o600,
+                          dir_fd=directory,
+                      )
+                      try:
+                          if initial and os.write(descriptor, initial) != len(initial):
+                              raise SystemExit("record creator write is incomplete")
+                          os.fsync(descriptor)
+                      except BaseException:
+                          os.close(descriptor)
+                          raise
+                      os.fsync(directory)
+                      descriptors.extend((directory, descriptor))
+                  except BaseException:
+                      os.close(directory)
+                      raise
+                  result[label] = directory_name
+              try:
+                  receiver = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+                  try:
+                      receiver.connect(receiver_text)
+                      sent = receiver.sendmsg(
+                          [b"R"],
+                          [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", descriptors))],
+                      )
+                      if sent != 1:
+                          raise SystemExit("record creator descriptor transfer is incomplete")
+                  finally:
+                      receiver.close()
+              finally:
+                  for descriptor in descriptors:
+                      os.close(descriptor)
+              print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+          finally:
+              os.close(parent)
+          """,
+              encoding="ascii",
+          )
+          record_creator.chmod(0o600)
+          selected_exec.write_text(
+              """import ctypes
+          import errno
+          import os
+          import socket
+          import sys
+
+          libc = ctypes.CDLL(None, use_errno=True)
+          if os.getresuid() != (65534, 65534, 65534) or os.getresgid() != (65534, 65534, 65534):
+              raise SystemExit("selected real, effective, or saved identity is invalid")
+          if os.getgroups():
+              raise SystemExit("selected supplementary groups are not empty")
+          if libc.prctl(38, 1, 0, 0, 0) != 0:
+              raise SystemExit("selected no_new_privs is invalid")
+          with open("/proc/self/status", encoding="ascii") as stream:
+              status = {line.split(":", 1)[0]: line.split(":", 1)[1].strip() for line in stream if ":" in line}
+          if status.get("Uid", "").split() != ["65534", "65534", "65534", "65534"]:
+              raise SystemExit("selected filesystem UID is invalid")
+          if status.get("Gid", "").split() != ["65534", "65534", "65534", "65534"]:
+              raise SystemExit("selected filesystem GID is invalid")
+          if any(status.get(name) != "0000000000000000" for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")):
+              raise SystemExit("selected capabilities are not empty")
+          if status.get("NoNewPrivs") != "1":
+              raise SystemExit("selected no_new_privs is not set")
+          for name in os.listdir("/proc/self/fd"):
+              descriptor = int(name)
+              if descriptor <= 2:
+                  continue
+              try:
+                  os.fstat(descriptor)
+              except OSError as error:
+                  if error.errno == errno.EBADF:
+                      continue
+                  raise
+              raise SystemExit("selected file descriptors are not reduced")
+          if len(sys.argv) < 3 or sys.argv[1] not in {"prepare", "final"}:
+              raise SystemExit("selected phase is invalid")
+          if sys.argv[1] == "final":
+              if socket.if_nametoindex("lo") <= 0:
+                  raise SystemExit("final namespace loopback is not up")
+              listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              listener.bind(("127.0.0.1", 0))
+              listener.listen(1)
+              client = socket.create_connection(listener.getsockname(), timeout=1)
+              server, _address = listener.accept()
+              client.close()
+              server.close()
+              listener.close()
+          os.execv(sys.argv[2], sys.argv[2:])
+          """,
+              encoding="ascii",
+          )
+          selected_exec.chmod(0o600)
+          policy_descriptors = {
+              path: os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              for path in (supervisor, selected_exec, dependency_check, record_inspector, record_creator)
+          }
+          run_isolation_command([
+              str(trusted_chown), "--no-dereference", "--recursive", "0:0", str(policy_directory),
+          ])
+          run_isolation_command([str(trusted_chmod), "0755", str(policy_directory)])
+          for policy_path in (supervisor, selected_exec, dependency_check, record_inspector, record_creator):
+              run_isolation_command([str(trusted_chown), "--no-dereference", "0:0", str(policy_path)])
+              run_isolation_command([str(trusted_chmod), "0644", str(policy_path)])
+          policy_identities = {
+              path: (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino, os.fstat(descriptor).st_size, hashlib.sha256(os.read(descriptor, 16 * 1024 * 1024)).hexdigest())
+              for path, descriptor in policy_descriptors.items()
+          }
+          for descriptor in policy_descriptors.values():
+              os.lseek(descriptor, 0, os.SEEK_SET)
+
+          def verify_policy_inputs() -> None:
+              for path, descriptor in policy_descriptors.items():
+                  named = path.stat(follow_symlinks=False)
+                  opened = os.fstat(descriptor)
+                  os.lseek(descriptor, 0, os.SEEK_SET)
+                  digest = hashlib.sha256(os.read(descriptor, 16 * 1024 * 1024)).hexdigest()
+                  os.lseek(descriptor, 0, os.SEEK_SET)
+                  if (
+                      (opened.st_dev, opened.st_ino, opened.st_size, digest) != policy_identities[path]
+                      or (named.st_dev, named.st_ino, named.st_size)
+                      != (opened.st_dev, opened.st_ino, opened.st_size)
+                      or named.st_uid != 0
+                      or named.st_gid != 0
+                      or stat.S_IMODE(named.st_mode) != 0o644
+                      or named.st_nlink != 1
+                  ):
+                      raise SystemExit("root namespace policy input changed")
+
+          def root_phase_snapshot(
+              records: dict[str, object], *, control_only: bool = False,
+              deadline: float | None = None,
+          ) -> dict[str, object]:
+              arguments = [
+                  str(trusted_sudo),
+                  "--non-interactive",
+                  "--",
+                  str(trusted_python),
+                  "-I",
+                  str(record_inspector),
+                  str(records["control_directory"]),
+                  str(records["status_directory"]),
+              ]
+              if control_only:
+                  arguments.append("control")
+              result = subprocess.run(
+                  arguments,
+                  cwd="/",
+                  env=isolation_environment,
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+                  timeout=remaining_timeout(deadline),
+                  check=False,
+              )
+              if result.returncode != 0 or not 0 < len(result.stdout) <= 4096:
+                  raise SystemExit("root namespace record inspection failed")
+              try:
+                  snapshot = json.loads(result.stdout)
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise SystemExit("root namespace record inspection is malformed") from error
+              if result.stdout != (
+                  json.dumps(snapshot, separators=(",", ":"), sort_keys=True) + "\n"
+              ).encode("utf-8"):
+                  raise SystemExit("root namespace record inspection is not canonical")
+              return snapshot
+
+          def remaining_timeout(deadline: float | None = None) -> float:
+              if deadline is None:
+                  return term_grace
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  raise TimeoutError
+              return remaining
+
+          def create_phase_records() -> dict[str, dict[str, object]]:
+              records_by_phase: dict[str, dict[str, object]] = {}
+              if execution_identity() != execution_binding:
+                  raise SystemExit("root execution directory changed before record creation")
+              verify_policy_inputs()
+              execution_status = execution_directory.stat(follow_symlinks=False)
+              for phase_name in ("prepare", "final"):
+                  token = os.urandom(16).hex()
+                  receiver_path = execution_directory / f".comet-root-{phase_name}-record-fds.{token}"
+                  receiver = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+                  try:
+                      receiver.bind(str(receiver_path))
+                      receiver_path.chmod(0o600)
+                      receiver.listen(1)
+                      receiver.settimeout(term_grace)
+                      result = subprocess.run(
+                          [
+                              str(trusted_sudo), "--non-interactive", "--",
+                              str(trusted_python), "-I", str(record_creator),
+                              str(execution_directory), str(execution_status.st_dev),
+                              str(execution_status.st_ino), str(os.geteuid()), phase_name,
+                              token, str(receiver_path),
+                          ],
+                          cwd="/",
+                          env=isolation_environment,
+                          stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL,
+                          timeout=term_grace,
+                          check=False,
+                      )
+                      if result.returncode != 0 or not 0 < len(result.stdout) <= 256:
+                          raise SystemExit("root namespace record creation failed")
+                      connection, _address = receiver.accept()
+                      try:
+                          credentials = connection.getsockopt(
+                              socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+                          )
+                          _peer_pid, peer_uid, peer_gid = struct.unpack("3i", credentials)
+                          payload, ancillary, flags, _address = connection.recvmsg(
+                              1, socket.CMSG_SPACE(4 * array.array("i").itemsize)
+                          )
+                      finally:
+                          connection.close()
+                  finally:
+                      receiver.close()
+                      receiver_path.unlink(missing_ok=True)
+                  descriptors = array.array("i")
+                  for level, kind, data in ancillary:
+                      if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                          descriptors.frombytes(data[: len(data) - (len(data) % descriptors.itemsize)])
+                  if (
+                      payload != b"R"
+                      or flags & socket.MSG_CTRUNC
+                      or peer_uid != 0
+                      or peer_gid != 0
+                      or len(descriptors) != 4
+                  ):
+                      for descriptor in descriptors:
+                          os.close(descriptor)
+                      raise SystemExit("root namespace record descriptor transfer is invalid")
+                  try:
+                      created = json.loads(result.stdout)
+                  except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                      for descriptor in descriptors:
+                          os.close(descriptor)
+                      raise SystemExit("root namespace record creation is malformed") from error
+                  if result.stdout != (
+                      json.dumps(created, separators=(",", ":"), sort_keys=True) + "\n"
+                  ).encode("utf-8") or created != {
+                      "control": f"comet-root-{phase_name}-control.{token}",
+                      "status": f"comet-root-{phase_name}-status.{token}",
+                  }:
+                      for descriptor in descriptors:
+                          os.close(descriptor)
+                      raise SystemExit("root namespace record creation is invalid")
+                  control_directory = execution_directory / created["control"]
+                  status_directory = execution_directory / created["status"]
+                  (
+                      control_directory_descriptor,
+                      control_descriptor,
+                      status_directory_descriptor,
+                      status_descriptor,
+                  ) = descriptors
+                  records_by_phase[phase_name] = {
+                      "control_directory": control_directory,
+                      "control_directory_descriptor": control_directory_descriptor,
+                      "control_descriptor": control_descriptor,
+                      "control_path": control_directory / "request",
+                      "status_directory": status_directory,
+                      "status_directory_descriptor": status_directory_descriptor,
+                      "status_descriptor": status_descriptor,
+                      "status_path": status_directory / "result.json",
+                  }
+              return records_by_phase
+
+          phase_records = create_phase_records()
+
+          def verify_phase_records(
+              phase_name: str, *, expect_status: bool, expected_request: bytes | None = None,
+              allow_missing_status: bool = False, control_only: bool = False,
+              deadline: float | None = None,
+          ) -> tuple[bytes, bytes]:
+              records = phase_records[phase_name]
+              verify_policy_inputs()
+              snapshot = root_phase_snapshot(
+                  records, control_only=control_only, deadline=deadline
+              )
+              expected_labels = {"control"} if control_only else {"control", "status"}
+              if set(snapshot) != expected_labels:
+                  raise SystemExit("root namespace record inspection is incomplete")
+              selected_records = (
+                  ("control", "control_directory_descriptor", "control_descriptor"),
+                  ("status", "status_directory_descriptor", "status_descriptor"),
+              )
+              if control_only:
+                  selected_records = selected_records[:1]
+              for label, directory_key, file_key in selected_records:
+                  directory_status = os.fstat(records[directory_key])
+                  file_status = os.fstat(records[file_key])
+                  if (
+                      not stat.S_ISDIR(directory_status.st_mode)
+                      or directory_status.st_uid != 0 or directory_status.st_gid != 0
+                      or stat.S_IMODE(directory_status.st_mode) != 0o700
+                      or not stat.S_ISREG(file_status.st_mode)
+                      or file_status.st_uid != 0 or file_status.st_gid != 0
+                      or stat.S_IMODE(file_status.st_mode) != 0o600 or file_status.st_nlink != 1
+                      or snapshot[label]["directory"] != [
+                          directory_status.st_dev,
+                          directory_status.st_ino,
+                          directory_status.st_mode,
+                          directory_status.st_uid,
+                          directory_status.st_gid,
+                      ]
+                      or snapshot[label]["file"] != [
+                          file_status.st_dev,
+                          file_status.st_ino,
+                          file_status.st_mode,
+                          file_status.st_uid,
+                          file_status.st_gid,
+                          file_status.st_nlink,
+                          file_status.st_size,
+                      ]
+                  ):
+                      raise SystemExit("root namespace record identity is invalid")
+              request_data = os.pread(records["control_descriptor"], 2, 0)
+              if bytes.fromhex(snapshot["control"]["data"]) != request_data:
+                  raise SystemExit("root namespace control record changed")
+              if request_data not in (b"0", b"1"):
+                  raise SystemExit("root namespace control record is invalid")
+              if expected_request is not None and request_data != expected_request:
+                  raise SystemExit("root namespace control request is unexpected")
+              if control_only:
+                  return request_data, b""
+              status_size = os.fstat(records["status_descriptor"]).st_size
+              status_data = os.pread(records["status_descriptor"], 257, 0)
+              if bytes.fromhex(snapshot["status"]["data"]) != status_data:
+                  raise SystemExit("root namespace status record changed")
+              if expect_status and not 0 < status_size <= 256:
+                  if not (allow_missing_status and status_size == 0):
+                      raise SystemExit("root namespace status record is invalid")
+              if not expect_status and status_size != 0:
+                  raise SystemExit("root namespace status record is not empty")
+              return request_data, status_data
+
+          def read_phase_status(
+              phase_name: str,
+              *,
+              allow_missing_status: bool = False,
+              deadline: float | None = None,
+          ) -> dict[str, object] | None:
+              def decode_status(data: bytes) -> dict[str, object]:
+                  try:
+                      value = json.loads(data)
+                  except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                      raise SystemExit("root namespace status record is malformed") from error
+                  if (
+                      not 0 < len(data) <= 256
+                      or data
+                      != (
+                          json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n"
+                      ).encode("utf-8")
+                      or set(value) != {"cleanup", "schema", "selected_exit_status"}
+                      or type(value["schema"]) is not int
+                      or value["schema"] != 1
+                      or value["cleanup"]
+                      not in {
+                          "clean",
+                          "descendant_terminated",
+                          "descendant_survived",
+                          "inspection_failed",
+                      }
+                      or type(value["selected_exit_status"]) is not int
+                      or isinstance(value["selected_exit_status"], bool)
+                      or not -64 <= value["selected_exit_status"] <= 255
+                  ):
+                      raise SystemExit("root namespace status record is inconsistent")
+                  return value
+
+              _request_data, data = verify_phase_records(
+                  phase_name,
+                  expect_status=True,
+                  allow_missing_status=allow_missing_status,
+                  deadline=deadline,
+              )
+              if not data and allow_missing_status:
+                  _request_data, data = verify_phase_records(
+                      phase_name,
+                      expect_status=True,
+                      allow_missing_status=True,
+                      deadline=deadline,
+                  )
+              if not data:
+                  return None
+              value = decode_status(data)
+              _request_data, stable_data = verify_phase_records(
+                  phase_name,
+                  expect_status=True,
+                  deadline=deadline,
+              )
+              if stable_data != data:
+                  decode_status(stable_data)
+                  raise SystemExit("root namespace status record changed")
+              return value
+          run_isolation_command(
+              [
+                  str(trusted_chown),
+                  "--no-dereference",
+                  "--recursive",
+                  f"{selected_uid}:{selected_gid}",
+                  str(staged_source),
+                  str(selected_directory),
+              ]
+          )
+          run_isolation_command([str(trusted_chmod), "0755", str(selected_directory)])
+          staged_source_binding = input_identity(staged_source, owner=selected_uid)
+          selected_directory_opened = os.fstat(selected_directory_descriptor)
+          if (
+              not stat.S_ISDIR(selected_directory_opened.st_mode)
+              or (selected_directory_opened.st_dev, selected_directory_opened.st_ino)
+              != selected_directory_identity
+              or selected_directory_opened.st_uid != selected_uid
+              or selected_directory_opened.st_gid != selected_gid
+              or stat.S_IMODE(selected_directory_opened.st_mode) != 0o755
+          ):
+              raise SystemExit("root test isolation parent directory is invalid")
+          for writable_descriptor in writable_directory_descriptors.values():
+              writable_status = os.fstat(writable_descriptor)
+              if (
+                  not stat.S_ISDIR(writable_status.st_mode)
+                  or writable_status.st_uid != selected_uid
+                  or writable_status.st_gid != selected_gid
+                  or stat.S_IMODE(writable_status.st_mode) != 0o755
+                  or os.listdir(writable_descriptor)
+              ):
+                  raise SystemExit("root writable source leaf is invalid")
+          selected_named = os.fstat(selected_descriptor)
+          if (
+              not stat.S_ISDIR(selected_named.st_mode)
+              or (selected_named.st_dev, selected_named.st_ino) != selected_identity
+              or selected_named.st_uid != selected_uid
+              or selected_named.st_gid != selected_gid
+              or stat.S_IMODE(selected_named.st_mode) != 0o755
+          ):
+              raise SystemExit("root test isolation directory is invalid")
+
+          junit = Path("/outputs/private/root-junit.xml")
+          test_command = [
+              "uv", "run", "--locked", "--extra", "dev", "python",
+              "scripts/ci/run-test-tier.py", "promotion", "--",
+              "--junitxml=<selected-private-directory>/root-junit.xml", "--durations=0",
+          ]
+          command = [
+              "/tools/uv", "run", "--locked", "--extra", "dev",
+              "--directory", "/workspace", "python",
+              "/workspace/scripts/ci/run-test-tier.py", "promotion", "--",
+              f"--junitxml={junit}", "--durations=0",
+          ]
+          selected_environment = {
+              "HOME": "/outputs/home",
+              "LANG": "C.UTF-8",
+              "LC_ALL": "C.UTF-8",
+              "LOGNAME": "nobody",
+              "PATH": "/venv/bin:/tools:/usr/bin:/bin",
+              "TMPDIR": "/tmp",
+              "USER": "nobody",
+              "UV_CACHE_DIR": "/uv-cache",
+              "UV_PROJECT_ENVIRONMENT": "/venv",
+              "UV_PYTHON": "/usr/bin/python3",
+              "UV_PYTHON_DOWNLOADS": "never",
+              "XDG_CACHE_HOME": "/outputs/home/.cache",
+              "XDG_CONFIG_HOME": "/outputs/home/.config",
+              "XDG_DATA_HOME": "/outputs/home/.local/share",
+          }
+          def namespace_command(
+              *, preparation: bool, command_override: list[str] | None = None
+          ) -> list[str]:
+              phase_name = "prepare" if preparation else "final"
+              records = phase_records[phase_name]
+              verify_phase_records(phase_name, expect_status=False, expected_request=b"0")
+              verify_policy_inputs()
+              command_environment = dict(selected_environment)
+              command_environment.update({"CI": "true", "GITHUB_ACTIONS": "true"})
+              if preparation:
+                  selected_command = [
+                      "/bin/sh", "-ec",
+                      "/tools/uv sync --locked --extra dev --directory /workspace; exec /venv/bin/python -I /policy/dependency-check.py",
+                  ]
+              else:
+                  command_environment.update(
+                      {
+                          "NO_COLOR": "1",
+                          "PYTHONPATH": "/workspace/src:/workspace",
+                          "PYTEST_ADDOPTS": "-o cache_dir=/workspace/.pytest_cache",
+                          "RUNNER_ARCH": os.environ.get("RUNNER_ARCH", "X64"),
+                          "RUNNER_OS": "Linux",
+                          "UV_NO_SYNC": "1",
+                          "UV_OFFLINE": "1",
+                      }
+                  )
+                  selected_command = command
+              result = [
+                  str(trusted_sudo), "--non-interactive", "--", str(trusted_bwrap),
+                  "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+                  "--unshare-cgroup", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
+                  "--cap-add", "CAP_SETUID", "--cap-add", "CAP_SETGID", "--cap-add", "CAP_SETPCAP",
+                  "--cap-add", "CAP_KILL", "--uid", "0", "--gid", "0", "--clearenv",
+                  "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+                  "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+                  "--dev", "/dev", "--proc", "/proc", "--dir", "/dev/shm", "--tmpfs", "/dev/shm",
+                  "--chmod", "1777", "/dev/shm", "--dir", "/etc", "--dir", "/etc/ssl", "--dir", "/policy",
+                  "--dir", "/tools", "--dir", "/workspace", "--dir", "/outputs", "--dir", "/venv",
+                  "--dir", "/uv-cache", "--dir", "/tmp",
+                  "--ro-bind", str(namespace_etc / "passwd"), "/etc/passwd",
+                  "--ro-bind", str(namespace_etc / "group"), "/etc/group",
+                  "--ro-bind", str(namespace_etc / "hosts"), "/etc/hosts",
+                  "--ro-bind", str(namespace_etc / "nsswitch.conf"), "/etc/nsswitch.conf",
+                  "--ro-bind", str(supervisor), "/policy/namespace-supervisor.py",
+                  "--ro-bind", str(selected_exec), "/policy/selected-exec.py",
+                  "--ro-bind", str(dependency_check), "/policy/dependency-check.py",
+                  "--bind", str(records["control_path"]), "/policy/termination-request",
+                  "--bind", str(records["status_path"]), "/policy/result.json",
+                  "--ro-bind", str(staged_uv), "/tools/uv",
+                  "--ro-bind", str(staged_source), "/workspace",
+                  "--bind", str(selected_result_directory), "/outputs/private",
+                  "--bind", str(selected_home_directory if not preparation else selected_prepare_home_directory), "/outputs/home",
+                  "--bind", str(selected_tmp_directory if not preparation else selected_prepare_tmp_directory), "/tmp",
+              ]
+              if Path("/etc/ssl").is_dir():
+                  result.extend(["--ro-bind", "/etc/ssl", "/etc/ssl"])
+              if Path("/etc/localtime").is_file():
+                  result.extend(["--ro-bind", "/etc/localtime", "/etc/localtime"])
+              if preparation:
+                  for resolver in ("/etc/resolv.conf", "/etc/gai.conf"):
+                      if Path(resolver).is_file():
+                          result.extend(["--ro-bind", resolver, resolver])
+                  result.extend(["--bind", str(selected_venv_directory), "/venv", "--bind", str(selected_cache_directory), "/uv-cache"])
+              else:
+                  result[4:4] = ["--unshare-net"]
+                  result.extend(["--ro-bind", str(selected_venv_directory), "/venv", "--ro-bind", str(selected_cache_directory), "/uv-cache"])
+                  result.extend(argument for destination, source in writable_directories.items() for argument in ("--bind", str(source), destination))
+              result.extend(argument for name, value in sorted(command_environment.items()) for argument in ("--setenv", name, value))
+              if command_override is not None:
+                  selected_command = command_override
+              result.extend([
+                  "--chdir", "/workspace", str(trusted_python), "-I",
+                  "/policy/namespace-supervisor.py", phase_name,
+                  "/policy/termination-request", "/policy/result.json",
+                  format(term_grace, ".17g"), json.dumps(selected_command, separators=(",", ":")),
+              ])
+              return result
+
+          interrupted_signal = 0
+
+          def handle_signal(signum: int, _frame: object) -> None:
+              global interrupted_signal
+              if not interrupted_signal:
+                  interrupted_signal = signum
+
+          def request_phase_termination(phase_name: str, *, deadline: float | None = None) -> bool:
+              records = phase_records[phase_name]
+              request_data, _status_data = verify_phase_records(
+                  phase_name,
+                  expect_status=False,
+                  control_only=True,
+                  deadline=deadline,
+              )
+              descriptor = records["control_descriptor"]
+              if request_data == b"1":
+                  return True
+              if os.pwrite(descriptor, b"1", 0) != 1:
+                  raise SystemExit("root namespace termination write is incomplete")
+              os.fsync(descriptor)
+              if os.pread(descriptor, 1, 0) != b"1":
+                  raise SystemExit("root namespace termination request changed")
+              verify_phase_records(
+                  phase_name,
+                  expect_status=False,
+                  expected_request=b"1",
+                  control_only=True,
+                  deadline=deadline,
+              )
+              return True
+
+          def process_snapshot(pid: int) -> tuple[tuple[int, int, int, int, int], str]:
+              record = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)
+              if len(record) != 2:
+                  raise ValueError
+              fields = record[1].split()
+              if len(fields) < 20:
+                  raise ValueError
+              identity = (pid, int(fields[19]), int(fields[1]), int(fields[2]), int(fields[3]))
+              return identity, fields[0]
+
+          def process_identity(pid: int) -> tuple[int, int, int, int, int]:
+              return process_snapshot(pid)[0]
+
+          handled_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+          previous_handlers = {
+              signum: signal.signal(signum, handle_signal) for signum in handled_signals
+          }
+          preparation_command = namespace_command(preparation=True)
+          preparation = subprocess.Popen(
+              preparation_command, cwd="/", env=isolation_environment, stdin=subprocess.DEVNULL,
+              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+              umask=0o002,
+          )
+          preparation_requested = False
+          preparation_pidfd = -1
+          preparation_identity = (preparation.pid, 0, 0, 0, 0)
+          preparation_adopted: dict[int, tuple[tuple[int, int, int, int, int], int]] = {}
+          preparation_cleanup_failure = False
+
+          def observe_preparation() -> bool:
+              if preparation_pidfd < 0:
+                  return preparation.poll() is not None
+              return os.waitid(
+                  os.P_PIDFD, preparation_pidfd, os.WEXITED | os.WNOHANG | os.WNOWAIT
+              ) is not None
+
+          def inspect_preparation_children() -> list[int]:
+              live = []
+              data = Path(f"/proc/self/task/{os.getpid()}/children").read_text(encoding="ascii")
+              for child in (int(value) for value in data.split()):
+                  if child == preparation.pid:
+                      continue
+                  if child not in preparation_adopted:
+                      identity = process_identity(child)
+                      descriptor = os.pidfd_open(child)
+                      if identity[2] != os.getpid() or process_identity(child) != identity:
+                          os.close(descriptor)
+                          raise ValueError
+                      preparation_adopted[child] = (identity, descriptor)
+                  identity, descriptor = preparation_adopted[child]
+                  if process_identity(child) != identity:
+                      raise ValueError
+                  if os.waitid(
+                      os.P_PIDFD, descriptor, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                  ) is not None:
+                      waited, _status = os.waitpid(child, os.WNOHANG)
+                      if waited != child:
+                          raise ValueError
+                      os.close(descriptor)
+                      del preparation_adopted[child]
+                  else:
+                      live.append(child)
+              return live
+
+          def emergency_stop_preparation() -> None:
+              global preparation_cleanup_failure
+              leader_group_proven = False
+              if preparation_pidfd >= 0:
+                  try:
+                      leader_exited = os.waitid(
+                          os.P_PIDFD,
+                          preparation_pidfd,
+                          os.WEXITED | os.WNOHANG | os.WNOWAIT,
+                      ) is not None
+                      if not leader_exited:
+                          if (
+                              preparation_identity[2:]
+                              != (os.getpid(), preparation.pid, preparation.pid)
+                              or process_identity(preparation.pid) != preparation_identity
+                          ):
+                              raise ValueError
+                          leader_group_proven = True
+                  except (OSError, ValueError, UnicodeError):
+                      preparation_cleanup_failure = True
+              else:
+                  preparation_cleanup_failure = True
+              if leader_group_proven:
+                  try:
+                      os.killpg(preparation.pid, signal.SIGKILL)
+                  except (OSError, ProcessLookupError):
+                      preparation_cleanup_failure = True
+                  try:
+                      signal.pidfd_send_signal(preparation_pidfd, signal.SIGKILL)
+                  except OSError:
+                      if os.waitid(
+                          os.P_PIDFD,
+                          preparation_pidfd,
+                          os.WEXITED | os.WNOHANG | os.WNOWAIT,
+                      ) is None:
+                          preparation_cleanup_failure = True
+              for identity, descriptor in tuple(preparation_adopted.values()):
+                  try:
+                      if process_identity(identity[0]) != identity:
+                          raise ValueError
+                      signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                  except (OSError, ValueError, UnicodeError):
+                      preparation_cleanup_failure = True
+
+          while preparation.poll() is None:
+              if interrupted_signal and not preparation_requested:
+                  preparation_deadline = time.monotonic() + (2 * term_grace) + 1
+                  normal_deadline = preparation_deadline - 1
+                  preparation_pending = True
+                  try:
+                      preparation_pending = request_phase_termination(
+                          "prepare", deadline=normal_deadline
+                      )
+                  except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired, TimeoutError):
+                      preparation_cleanup_failure = True
+                  if not preparation_pending:
+                      break
+                  preparation_requested = True
+                  try:
+                      preparation_pidfd = os.pidfd_open(preparation.pid)
+                      preparation_identity = process_identity(preparation.pid)
+                      if (
+                          preparation_identity[2:]
+                          != (os.getpid(), preparation.pid, preparation.pid)
+                          or process_identity(preparation.pid) != preparation_identity
+                      ):
+                          raise ValueError
+                  except (OSError, ValueError, UnicodeError):
+                      preparation_cleanup_failure = True
+                  cleanup_deadline = preparation_deadline
+                  stable_empty = 0
+                  emergency_sent = False
+                  while time.monotonic() < cleanup_deadline:
+                      try:
+                          children = inspect_preparation_children()
+                          exited = observe_preparation()
+                          if exited and not children:
+                              stable_empty += 1
+                              if stable_empty >= 2:
+                                  break
+                          else:
+                              stable_empty = 0
+                          if time.monotonic() >= normal_deadline:
+                              emergency_stop_preparation()
+                              emergency_sent = True
+                      except (OSError, ValueError, UnicodeError):
+                          preparation_cleanup_failure = True
+                      time.sleep(0.02)
+                  try:
+                      children = inspect_preparation_children()
+                      if observe_preparation() and not children:
+                          waited, status = os.waitpid(preparation.pid, os.WNOHANG)
+                          if waited == preparation.pid:
+                              preparation.returncode = os.waitstatus_to_exitcode(status)
+                          else:
+                              preparation_cleanup_failure = True
+                      else:
+                          preparation_cleanup_failure = True
+                  except (OSError, ValueError, UnicodeError):
+                      preparation_cleanup_failure = True
+                  finally:
+                      if preparation_pidfd >= 0:
+                          os.close(preparation_pidfd)
+                      for _identity, descriptor in preparation_adopted.values():
+                          os.close(descriptor)
+                  if preparation_cleanup_failure or preparation.returncode is None:
+                      raise SystemExit("root dependency preparation cleanup did not complete")
+                  if not emergency_sent and preparation.returncode is None:
+                      raise SystemExit("root dependency preparation cleanup did not complete")
+                  break
+              time.sleep(0.02)
+          preparation_return_code = preparation.wait()
+          if interrupted_signal:
+              raise SystemExit("an interrupt signal stopped root dependency preparation")
+          verify_trusted_tools()
+          verify_policy_inputs()
+          if uv_identity() != trusted_uv_identity:
+              raise SystemExit("root test uv executable changed after dependency preparation")
+          if preparation_return_code != 0:
+              raise SystemExit("root dependency preparation failed")
+          preparation_status = read_phase_status("prepare")
+          if preparation_status["cleanup"] != "clean" or preparation_status["selected_exit_status"] != 0:
+              raise SystemExit("root dependency preparation cleanup failed")
+          verify_tracked_source(source_directory)
+          verify_tracked_source(staged_source)
+          if execution_identity() != execution_binding:
+              raise SystemExit("root execution directory changed after dependency preparation")
+          if input_identity(staged_source, owner=selected_uid) != staged_source_binding:
+              raise SystemExit("root execution source changed after dependency preparation")
+          if input_identity(staged_bin) != staged_uv_binding:
+              raise SystemExit("root execution uv input changed after dependency preparation")
+          dependency_manifest = dependency_input_manifest()
+          dependency_manifest_sha256 = hashlib.sha256(dependency_manifest).hexdigest()
+          if dependency_input_manifest() != dependency_manifest:
+              raise SystemExit("root dependency manifest changed before final execution")
+          isolated_command = namespace_command(preparation=False)
+
+          process = subprocess.Popen(
+              isolated_command,
+              cwd="/",
+              env=isolation_environment,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              umask=0o002,
+              start_new_session=True,
+          )
+          assert process.stdout is not None
+          cleanup_state = "not_started"
+          cleanup_failure: str | None = None
+          escaped_descendant_observed = False
+
+          def record_cleanup_failure(code: str) -> None:
+              global cleanup_failure
+              if cleanup_failure is None:
+                  cleanup_failure = code
+
+          leader_pidfd = -1
+          leader_identity = (process.pid, 0, 0, 0, 0)
+          try:
+              leader_pidfd = os.pidfd_open(process.pid)
+              leader_identity = process_identity(process.pid)
+              if (
+                  leader_identity[2:] != (os.getpid(), process.pid, process.pid)
+                  or process_identity(process.pid) != leader_identity
+              ):
+                  record_cleanup_failure("identity_mismatch")
+          except (OSError, ValueError, UnicodeError):
+              record_cleanup_failure("inspection_error")
+
+          def observe_selected_leader() -> int | None:
+              observed = os.waitid(
+                  os.P_PIDFD, leader_pidfd, os.WEXITED | os.WNOHANG | os.WNOWAIT
+              )
+              if observed is None:
+                  return None
+              if observed.si_code == os.CLD_EXITED:
+                  return observed.si_status
+              return -observed.si_status
+
+          def reap_selected_leader(
+              identity: tuple[int, int, int, int, int], deadline: float
+          ) -> int | None:
+              while True:
+                  try:
+                      if process_identity(identity[0]) != identity:
+                          record_cleanup_failure("identity_mismatch")
+                          return None
+                      if observe_selected_leader() is not None:
+                          waited_pid, status = os.waitpid(identity[0], os.WNOHANG)
+                          if waited_pid == identity[0]:
+                              process.returncode = os.waitstatus_to_exitcode(status)
+                              return process.returncode
+                  except (OSError, ValueError, UnicodeError):
+                      record_cleanup_failure("unknown_exit_status")
+                      return None
+                  if time.monotonic() >= deadline:
+                      return None
+                  time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+
+          def child_pids() -> list[int]:
+              try:
+                  data = Path(
+                      f"/proc/self/task/{os.getpid()}/children"
+                  ).read_text(encoding="ascii")
+                  return [int(value) for value in data.split()]
+              except (OSError, UnicodeDecodeError, ValueError):
+                  record_cleanup_failure("inspection_error")
+                  raise
+
+          def group_exists(deadline: float) -> bool:
+              if observe_selected_leader() is None:
+                  return True
+              for entry in Path("/proc").iterdir():
+                  if time.monotonic() >= deadline:
+                      raise TimeoutError
+                  if not entry.name.isdecimal() or int(entry.name) == process.pid:
+                      continue
+                  try:
+                      identity, state = process_snapshot(int(entry.name))
+                      if identity[3] == process.pid and state != "Z":
+                          return True
+                  except FileNotFoundError:
+                      continue
+              return False
+
+          def signal_process(
+              identity: tuple[int, int, int, int, int],
+              pidfd: int,
+              selected_signal: signal.Signals,
+              deadline: float,
+              *,
+              group: bool = False,
+          ) -> None:
+              if group and identity[2:] != (os.getpid(), process.pid, process.pid):
+                  record_cleanup_failure("identity_mismatch")
+                  return
+              if process_identity(identity[0]) != identity:
+                  record_cleanup_failure("identity_mismatch")
+                  return
+              if not group:
+                  if identity[2] != os.getpid() or identity[0] not in child_pids():
+                      record_cleanup_failure("identity_mismatch")
+                      return
+                  if os.waitid(os.P_PIDFD, pidfd, os.WEXITED | os.WNOHANG | os.WNOWAIT):
+                      return
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  return
+              try:
+                  result = run_isolation_command(
+                      [
+                          str(trusted_kill),
+                          f"-{selected_signal.name.removeprefix('SIG')}",
+                          "--",
+                          str(-identity[0] if group else identity[0]),
+                      ],
+                      check=False,
+                      timeout=remaining,
+                  )
+              except subprocess.TimeoutExpired:
+                  record_cleanup_failure("command_timeout")
+                  if process_identity(identity[0]) != identity:
+                      record_cleanup_failure("identity_mismatch")
+                  return
+              if result.returncode != 0:
+                  if group:
+                      try:
+                          group_remains = group_exists(deadline)
+                      except TimeoutError:
+                          record_cleanup_failure("inspection_error")
+                          raise
+                      if not group_remains:
+                          return
+                  elif os.waitid(
+                      os.P_PIDFD, pidfd, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                  ) is not None:
+                      return
+                  if process_identity(identity[0]) != identity:
+                      record_cleanup_failure("identity_mismatch")
+                      return
+                  record_cleanup_failure("signal_error")
+
+          adopted: dict[int, tuple[tuple[int, int, int, int, int], int]] = {}
+
+          def inspect_adopted_children(deadline: float) -> list[int]:
+              global escaped_descendant_observed
+              live = []
+              for child in child_pids():
+                  if time.monotonic() >= deadline:
+                      raise TimeoutError
+                  if child == process.pid:
+                      continue
+                  if child not in adopted:
+                      try:
+                          identity = process_identity(child)
+                      except (FileNotFoundError, ProcessLookupError):
+                          continue
+                      try:
+                          descriptor = os.pidfd_open(child)
+                      except (FileNotFoundError, ProcessLookupError):
+                          continue
+                      try:
+                          valid = identity[2] == os.getpid() and process_identity(child) == identity
+                      except (FileNotFoundError, ProcessLookupError):
+                          reaped = False
+                          try:
+                              if os.waitid(
+                                  os.P_PIDFD, descriptor, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                              ) is not None:
+                                  waited, _ = os.waitpid(child, os.WNOHANG)
+                                  reaped = waited == child
+                          finally:
+                              os.close(descriptor)
+                          if reaped:
+                              continue
+                          raise
+                      except (OSError, ValueError, UnicodeError):
+                          os.close(descriptor)
+                          raise
+                      if not valid:
+                          os.close(descriptor)
+                          record_cleanup_failure("identity_mismatch")
+                          live.append(child)
+                          continue
+                      adopted[child] = (identity, descriptor)
+                  identity, descriptor = adopted[child]
+                  if os.waitid(
+                      os.P_PIDFD, descriptor, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                  ) is not None:
+                      waited, _ = os.waitpid(child, os.WNOHANG)
+                      if waited == child:
+                          os.close(descriptor)
+                          del adopted[child]
+                          continue
+                  if process_identity(child) != identity:
+                      record_cleanup_failure("identity_mismatch")
+                      live.append(child)
+                      continue
+                  live.append(child)
+              return live
+
+          def cleanup_selected_processes(
+              cleanup_deadline: float, *, cooperative_time_exhausted: bool,
+          ) -> tuple[str, int | None]:
+              leader_status = None
+              stable_empty = 0
+              term_deadline = min(cleanup_deadline, time.monotonic() + term_grace)
+              cleanup_phases = (
+                  ((signal.SIGKILL, cleanup_deadline),)
+                  if cooperative_time_exhausted
+                  else (
+                      (signal.SIGTERM, term_deadline),
+                      (signal.SIGKILL, cleanup_deadline),
+                  )
+              )
+              for selected_signal, deadline in cleanup_phases:
+                  group_signaled = False
+                  signaled: set[tuple[int, int, int, int, int]] = set()
+                  while time.monotonic() < deadline:
+                      try:
+                          children = inspect_adopted_children(deadline)
+                          group_live = group_exists(deadline)
+                          if group_live and not group_signaled:
+                              signal_process(
+                                  leader_identity, leader_pidfd, selected_signal,
+                                  deadline, group=True,
+                              )
+                              group_signaled = True
+                          for child in children:
+                              held = adopted.get(child)
+                              if held is not None and held[0] not in signaled:
+                                  signal_process(*held, selected_signal, deadline)
+                                  signaled.add(held[0])
+                          if not children and not group_live:
+                              stable_empty += 1
+                              if stable_empty >= 2:
+                                  break
+                          else:
+                              stable_empty = 0
+                      except subprocess.TimeoutExpired:
+                          record_cleanup_failure("command_timeout")
+                      except TimeoutError:
+                          break
+                      except (OSError, ValueError, UnicodeError):
+                          record_cleanup_failure("inspection_error")
+                          stable_empty = 0
+                      time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+                  if stable_empty >= 2:
+                      break
+              leader_status = reap_selected_leader(
+                  leader_identity, cleanup_deadline
+              )
+              if leader_status is None:
+                  record_cleanup_failure("unknown_exit_status")
+              if stable_empty < 2:
+                  record_cleanup_failure("unreaped_child")
+                  return "live_or_unknown", leader_status
+              return ("uncertain" if cleanup_failure else "complete"), leader_status
+
+          tail: collections.deque[bytes] = collections.deque()
+          tail_size = 0
+          output_bytes = 0
+          overflow = False
+          output_stalled = False
+          process_group_leaked = False
+          pipe_closed = False
+          pipe_closed_at: float | None = None
+          process_exited_at: float | None = None
+          namespace_return_code: int | None = None
+          cooperative_time_exhausted = False
+          selector = selectors.DefaultSelector()
+          selector.register(process.stdout, selectors.EVENT_READ)
+          try:
+              while True:
+                  if interrupted_signal or overflow or output_stalled:
+                      break
+                  try:
+                      ready = selector.select(timeout=0.1)
+                  except InterruptedError:
+                      continue
+                  for key, _ in ready:
+                      chunk = os.read(key.fileobj.fileno(), 65536)
+                      if not chunk:
+                          pipe_closed = True
+                          pipe_closed_at = pipe_closed_at or time.monotonic()
+                          selector.unregister(key.fileobj)
+                          break
+                      output_bytes += len(chunk)
+                      tail.append(chunk)
+                      tail_size += len(chunk)
+                      while tail and tail_size - len(tail[0]) >= tail_limit:
+                          tail_size -= len(tail.popleft())
+                      if tail_size > tail_limit:
+                          trim = tail_size - tail_limit
+                          tail[0] = tail[0][trim:]
+                          tail_size = tail_limit
+                      if output_bytes > output_limit:
+                          overflow = True
+                          break
+                  return_code = observe_selected_leader()
+                  now = time.monotonic()
+                  if return_code is not None and process_exited_at is None:
+                      process_exited_at = now
+                  if return_code is not None and namespace_return_code is None:
+                      namespace_status = read_phase_status(
+                          "final", allow_missing_status=True
+                      )
+                      if namespace_status is not None:
+                          namespace_return_code = namespace_status["selected_exit_status"]
+                  if return_code is not None and pipe_closed:
+                      break
+                  if (
+                      return_code is not None
+                      and process_exited_at is not None
+                      and now - process_exited_at > pipe_close_grace
+                  ) or (
+                      pipe_closed
+                      and pipe_closed_at is not None
+                      and now - pipe_closed_at > pipe_close_grace
+                  ):
+                      output_stalled = True
+          except (OSError, ValueError, UnicodeError):
+              record_cleanup_failure("inspection_error")
+          finally:
+              if interrupted_signal or overflow or output_stalled:
+                  try:
+                      cooperative_deadline = time.monotonic() + (2 * term_grace) + 1
+                      fresh_leader_return_code = observe_selected_leader()
+                      if (
+                          fresh_leader_return_code is None
+                          and request_phase_termination(
+                              "final", deadline=cooperative_deadline
+                          )
+                      ):
+                          while time.monotonic() < cooperative_deadline:
+                              ready = selector.select(timeout=0.02) if selector.get_map() else []
+                              for key, _ in ready:
+                                  chunk = os.read(key.fileobj.fileno(), 65536)
+                                  if not chunk:
+                                      pipe_closed = True
+                                      selector.unregister(key.fileobj)
+                                      continue
+                                  output_bytes += len(chunk)
+                                  tail.append(chunk)
+                                  tail_size += len(chunk)
+                                  while tail and tail_size - len(tail[0]) >= tail_limit:
+                                      tail_size -= len(tail.popleft())
+                                  if tail_size > tail_limit:
+                                      trim = tail_size - tail_limit
+                                      tail[0] = tail[0][trim:]
+                                      tail_size = tail_limit
+                              if observe_selected_leader() is not None and pipe_closed:
+                                  break
+                  except (
+                      OSError,
+                      ValueError,
+                      SystemExit,
+                      subprocess.TimeoutExpired,
+                      TimeoutError,
+                  ):
+                      record_cleanup_failure("inspection_error")
+                  cooperative_time_exhausted = time.monotonic() >= cooperative_deadline
+              selector.close()
+              process.stdout.close()
+              cleanup_deadline = time.monotonic() + (2 * term_grace) + 1
+              cleanup_state, namespace_return_code = cleanup_selected_processes(
+                  cleanup_deadline,
+                  cooperative_time_exhausted=cooperative_time_exhausted,
+              )
+              process_group_leaked = cleanup_state != "complete"
+              for signum, previous in previous_handlers.items():
+                  signal.signal(signum, previous)
+              if leader_pidfd >= 0:
+                  os.close(leader_pidfd)
+              for _identity, descriptor in adopted.values():
+                  os.close(descriptor)
+          return_code = None
+          try:
+              namespace_record = read_phase_status("final", allow_missing_status=True)
+              if namespace_record is None:
+                  if cleanup_state == "complete":
+                      cleanup_state = "uncertain"
+                  process_group_leaked = True
+                  record_cleanup_failure("unknown_exit_status")
+              else:
+                  return_code = namespace_record["selected_exit_status"]
+                  if namespace_record["cleanup"] == "inspection_failed":
+                      process_group_leaked = True
+                      record_cleanup_failure("inspection_error")
+                  elif namespace_record["cleanup"] == "descendant_survived":
+                      process_group_leaked = True
+                      record_cleanup_failure("unreaped_child")
+                  elif namespace_record["cleanup"] == "descendant_terminated":
+                      escaped_descendant_observed = True
+                  expected_namespace_return_code = (
+                      return_code
+                      if namespace_record["cleanup"] == "clean" and 0 <= return_code <= 124
+                      else 125
+                  )
+                  if namespace_return_code != expected_namespace_return_code:
+                      process_group_leaked = True
+                      record_cleanup_failure("unknown_exit_status")
+                      raise SystemExit("root namespace exit mapping disagrees")
+          except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError, SystemExit):
+              process_group_leaked = True
+              record_cleanup_failure("inspection_error")
+          try:
+              verify_tracked_source(source_directory)
+              verify_tracked_source(staged_source)
+              verify_trusted_tools()
+              verify_policy_inputs()
+              if execution_identity() != execution_binding:
+                  raise SystemExit("root execution directory changed after final execution")
+              if input_identity(staged_source, owner=selected_uid) != staged_source_binding:
+                  raise SystemExit("root execution source changed after final execution")
+              if input_identity(staged_bin) != staged_uv_binding:
+                  raise SystemExit("root execution uv input changed after final execution")
+              if dependency_input_manifest() != dependency_manifest:
+                  raise SystemExit("root dependency manifest changed after final execution")
+          except (OSError, ValueError, UnicodeError, SystemExit):
+              record_cleanup_failure("identity_mismatch")
+          tail_bytes = b"".join(tail)[-tail_limit:]
+          raw_tail_bytes = tail_bytes
+
+          def private_name(prefix: str) -> str:
+              return f".{prefix}.{os.urandom(16).hex()}"
+
+          def write_command_file(
+              directory_descriptor: int,
+              name: str,
+              mode: int,
+              content: bytes,
+          ) -> None:
+              temporary_name = private_name("comet-root-command")
+              flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+              if hasattr(os, "O_CLOEXEC"):
+                  flags |= os.O_CLOEXEC
+              if hasattr(os, "O_NOFOLLOW"):
+                  flags |= os.O_NOFOLLOW
+              descriptor = os.open(
+                  temporary_name,
+                  flags,
+                  mode,
+                  dir_fd=directory_descriptor,
+              )
+              installed = False
+              try:
+                  os.fchmod(descriptor, mode)
+                  write_all(descriptor, content)
+                  os.fsync(descriptor)
+                  os.replace(
+                      temporary_name,
+                      name,
+                      src_dir_fd=directory_descriptor,
+                      dst_dir_fd=directory_descriptor,
+                  )
+                  installed = True
+              finally:
+                  os.close(descriptor)
+                  if not installed:
+                      try:
+                          os.unlink(temporary_name, dir_fd=directory_descriptor)
+                      except FileNotFoundError:
+                          pass
+
+          def repair_visible_directory(
+              bindings: list[tuple[str, int, int, int, int]],
+          ) -> tuple[int, bool]:
+              descriptor = os.open("/", directory_flags)
+              tampered = False
+              try:
+                  for component, device, inode, owner, mode in bindings:
+                      try:
+                          current = os.stat(
+                              component,
+                              dir_fd=descriptor,
+                              follow_symlinks=False,
+                          )
+                      except FileNotFoundError:
+                          current = None
+                      matches = current is not None and (
+                          stat.S_ISDIR(current.st_mode)
+                          and (
+                              current.st_dev,
+                              current.st_ino,
+                              current.st_uid,
+                              current.st_mode,
+                          )
+                          == (device, inode, owner, mode)
+                      )
+                      if not tampered and matches:
+                          next_descriptor = os.open(
+                              component,
+                              directory_flags,
+                              dir_fd=descriptor,
+                          )
+                      else:
+                          tampered = True
+                          if owner != os.geteuid():
+                              raise SystemExit(
+                                  "runner directory path cannot be reconstructed"
+                              )
+                          if current is not None:
+                              os.rename(
+                                  component,
+                                  private_name("comet-root-selected-directory"),
+                                  src_dir_fd=descriptor,
+                                  dst_dir_fd=descriptor,
+                              )
+                          os.mkdir(
+                              component,
+                              stat.S_IMODE(mode),
+                              dir_fd=descriptor,
+                          )
+                          next_descriptor = os.open(
+                              component,
+                              directory_flags,
+                              dir_fd=descriptor,
+                          )
+                          os.fchmod(next_descriptor, stat.S_IMODE(mode))
+                          os.fsync(descriptor)
+                      os.close(descriptor)
+                      descriptor = next_descriptor
+                  return descriptor, tampered
+              except BaseException:
+                  os.close(descriptor)
+                  raise
+
+          def restore_runner_command_files() -> tuple[int, bool]:
+              visible_runner_descriptor, runner_path_tampered = (
+                  repair_visible_directory(runner_path_bindings)
+              )
+              visible_runner_status = os.fstat(visible_runner_descriptor)
+              if (
+                  not stat.S_ISDIR(visible_runner_status.st_mode)
+                  or visible_runner_status.st_uid != os.geteuid()
+                  or visible_runner_status.st_mode & 0o022
+              ):
+                  raise SystemExit("runner directory cannot be rebound safely")
+              try:
+                  named = os.stat(
+                      command_directory.name,
+                      dir_fd=visible_runner_descriptor,
+                      follow_symlinks=False,
+                  )
+              except FileNotFoundError:
+                  named = None
+              opened = os.fstat(command_directory_descriptor)
+              named_identity = None if named is None else (
+                  named.st_dev,
+                  named.st_ino,
+                  named.st_uid,
+                  named.st_mode,
+              )
+              if (
+                  not runner_path_tampered
+                  and named_identity == command_directory_identity
+                  and (
+                  opened.st_dev,
+                  opened.st_ino,
+                  opened.st_uid,
+                  opened.st_mode,
+                  )
+                  == command_directory_identity
+              ):
+                  tampered = False
+                  for (
+                      name,
+                      mode,
+                      device,
+                      inode,
+                      original_descriptor,
+                      content,
+                  ) in channel_snapshots.values():
+                      try:
+                          current = os.stat(
+                              name,
+                              dir_fd=command_directory_descriptor,
+                              follow_symlinks=False,
+                          )
+                      except FileNotFoundError:
+                          current = None
+                      if current is None or not stat.S_ISREG(current.st_mode) or (
+                          current.st_dev,
+                          current.st_ino,
+                      ) != (device, inode):
+                          tampered = True
+                      opened = os.fstat(original_descriptor)
+                      if (opened.st_dev, opened.st_ino) != (device, inode):
+                          raise SystemExit("runner command file changed identity")
+                      write_command_file(
+                          command_directory_descriptor,
+                          name,
+                          mode,
+                          content,
+                      )
+                      os.close(original_descriptor)
+                  os.fchmod(command_directory_descriptor, command_directory_mode)
+                  os.fsync(command_directory_descriptor)
+                  os.close(visible_runner_descriptor)
+                  return command_directory_descriptor, tampered
+
+              prepared_name = private_name("comet-root-command-directory")
+              os.mkdir(
+                  prepared_name,
+                  0o700,
+                  dir_fd=visible_runner_descriptor,
+              )
+              prepared_descriptor = os.open(
+                  prepared_name,
+                  directory_flags,
+                  dir_fd=visible_runner_descriptor,
+              )
+              installed = False
+              try:
+                  for (
+                      name,
+                      mode,
+                      _device,
+                      _inode,
+                      original_descriptor,
+                      content,
+                  ) in channel_snapshots.values():
+                      write_command_file(prepared_descriptor, name, mode, content)
+                      os.close(original_descriptor)
+                  os.fsync(prepared_descriptor)
+                  if named is not None:
+                      quarantine_name = private_name("comet-root-selected-command-directory")
+                      os.rename(
+                          command_directory.name,
+                          quarantine_name,
+                          src_dir_fd=visible_runner_descriptor,
+                          dst_dir_fd=visible_runner_descriptor,
+                      )
+                  os.rename(
+                      prepared_name,
+                      command_directory.name,
+                      src_dir_fd=visible_runner_descriptor,
+                      dst_dir_fd=visible_runner_descriptor,
+                  )
+                  os.fchmod(prepared_descriptor, command_directory_mode)
+                  os.fsync(visible_runner_descriptor)
+                  installed = True
+                  os.close(visible_runner_descriptor)
+                  return prepared_descriptor, True
+              finally:
+                  if not installed:
+                      os.close(prepared_descriptor)
+
+          trusted_output_descriptor = os.dup(channel_snapshots["GITHUB_OUTPUT"][4])
+          restored_command_directory_descriptor: int | None = None
+          try:
+              if uv_identity() != trusted_uv_identity:
+                  raise SystemExit("root test uv executable changed")
+              selected_parent_opened = os.fstat(selected_directory_descriptor)
+              if (
+                  not stat.S_ISDIR(selected_parent_opened.st_mode)
+                  or (selected_parent_opened.st_dev, selected_parent_opened.st_ino)
+                  != selected_directory_identity
+                  or selected_parent_opened.st_uid != selected_uid
+                  or selected_parent_opened.st_gid != selected_gid
+                  or stat.S_IMODE(selected_parent_opened.st_mode) != 0o755
+              ):
+                  raise SystemExit("root test isolation parent directory changed")
+              selected_opened = os.fstat(selected_descriptor)
+              if (
+                  not stat.S_ISDIR(selected_opened.st_mode)
+                  or (selected_opened.st_dev, selected_opened.st_ino) != selected_identity
+                  or selected_opened.st_uid != selected_uid
+                  or selected_opened.st_gid != selected_gid
+                  or stat.S_IMODE(selected_opened.st_mode) != 0o755
+              ):
+                  raise SystemExit("root test isolation directory changed")
+          except subprocess.TimeoutExpired:
+              record_cleanup_failure("command_timeout")
+          except (OSError, ValueError, UnicodeError, SystemExit):
+              record_cleanup_failure("identity_mismatch")
+          try:
+              restored_command_directory_descriptor, command_directory_tampered = (
+                  restore_runner_command_files()
+              )
+              if command_directory_tampered:
+                  record_cleanup_failure("identity_mismatch")
+          except (OSError, ValueError, UnicodeError, SystemExit):
+              record_cleanup_failure("identity_mismatch")
+          if restored_command_directory_descriptor is not None:
+              try:
+                  verify_tracked_source(source_directory)
+                  verify_tracked_source(staged_source)
+                  if execution_identity() != execution_binding:
+                      raise SystemExit("root execution directory changed")
+                  verify_trusted_tools()
+                  verify_policy_inputs()
+                  if input_identity(staged_source, owner=selected_uid) != staged_source_binding:
+                      raise SystemExit("root execution source changed")
+                  if input_identity(staged_bin) != staged_uv_binding:
+                      raise SystemExit("root execution uv input changed")
+                  if hashlib.sha256(dependency_input_manifest()).hexdigest() != dependency_manifest_sha256:
+                      raise SystemExit("root dependency manifest changed")
+              except (OSError, ValueError, UnicodeError, SystemExit):
+                  record_cleanup_failure("identity_mismatch")
+
+          def write_new(name: str, data: bytes) -> None:
+              flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+              if hasattr(os, "O_CLOEXEC"):
+                  flags |= os.O_CLOEXEC
+              if hasattr(os, "O_NOFOLLOW"):
+                  flags |= os.O_NOFOLLOW
+              descriptor = os.open(name, flags, 0o600, dir_fd=evidence_descriptor)
+              try:
+                  with os.fdopen(descriptor, "wb") as handle:
+                      handle.write(data)
+                      handle.flush()
+                      os.fsync(handle.fileno())
+              except OSError:
+                  record_cleanup_failure("evidence_write_error")
+                  raise
+
+          def copy_selected_junit() -> bool:
+              source_flags = os.O_RDONLY
+              if hasattr(os, "O_CLOEXEC"):
+                  source_flags |= os.O_CLOEXEC
+              if hasattr(os, "O_NOFOLLOW"):
+                  source_flags |= os.O_NOFOLLOW
+              try:
+                  source_descriptor = os.open(
+                      "root-junit.xml",
+                      source_flags,
+                      dir_fd=selected_descriptor,
+                  )
+              except FileNotFoundError:
+                  return False
+              try:
+                  source_status = os.fstat(source_descriptor)
+                  limit = int(os.environ["JUNIT_LIMIT_BYTES"])
+                  if (
+                      not stat.S_ISREG(source_status.st_mode)
+                      or source_status.st_uid != selected_uid
+                      or source_status.st_gid != selected_gid
+                      or source_status.st_mode & 0o022
+                      or source_status.st_size == 0
+                      or source_status.st_size > limit
+                  ):
+                      raise SystemExit("selected root JUnit evidence is invalid")
+                  chunks: list[bytes] = []
+                  remaining = source_status.st_size
+                  while remaining:
+                      chunk = os.read(source_descriptor, min(remaining, 1024 * 1024))
+                      if not chunk:
+                          raise SystemExit("selected root JUnit evidence is incomplete")
+                      chunks.append(chunk)
+                      remaining -= len(chunk)
+                  write_new("root-junit.xml", b"".join(chunks))
+                  return True
+              finally:
+                  os.close(source_descriptor)
+
+          def discard_staged_junit() -> None:
+              try:
+                  os.unlink("root-junit.xml", dir_fd=evidence_descriptor)
+              except FileNotFoundError:
+                  pass
+
+          junit_available = False
+          diagnostic_failure = (
+              cleanup_failure is not None
+              or return_code is None
+              or overflow
+              or output_stalled
+              or escaped_descendant_observed
+              or interrupted_signal != 0
+          )
+          try:
+              if not diagnostic_failure:
+                  junit_available = copy_selected_junit()
+                  if not junit_available:
+                      record_cleanup_failure("missing_junit")
+          except (OSError, ValueError, SystemExit):
+              record_cleanup_failure("evidence_write_error")
+          finally:
+              os.close(selected_descriptor)
+              os.close(selected_directory_descriptor)
+              for writable_descriptor in writable_directory_descriptors.values():
+                  os.close(writable_descriptor)
+              for dependency_descriptor, _relative in dependency_directory_descriptors:
+                  os.close(dependency_descriptor)
+          diagnostic_failure = (
+              cleanup_failure is not None
+              or return_code is None
+              or overflow
+              or output_stalled
+              or escaped_descendant_observed
+              or interrupted_signal != 0
+          )
+          if diagnostic_failure:
+              discard_staged_junit()
+          result = {
+              "execution": {
+                  "boundary_version": 2,
+                  "bwrap_path": str(trusted_bwrap),
+                  "bwrap_sha256": trusted_bwrap_sha256,
+                  "bwrap_size": trusted_bwrap_size,
+                  "bwrap_version": trusted_bwrap_version,
+                  "dependency_manifest_sha256": dependency_manifest_sha256,
+                  "isolation_gid": selected_gid,
+                  "isolation_group": "nogroup",
+                  "isolation_uid": selected_uid,
+                  "isolation_user": "nobody",
+                  "junit_transport": "selected-private-file",
+                  "launcher": ["/usr/bin/sudo", "/usr/bin/bwrap", "/usr/bin/python3"],
+                  "python_path": str(trusted_python),
+                  "python_sha256": trusted_python_sha256,
+                  "python_size": trusted_python_size,
+                  "python_version": trusted_python_version,
+                  "source_mount": "read-only-with-three-writable-leaves",
+                  "uv_sha256": trusted_uv_identity[3],
+                  "uv_size": trusted_uv_identity[2],
+                  "working_directory": "/workspace",
+              },
+              "exit_code": return_code,
+              "interrupted_signal": interrupted_signal,
+              "output_bytes": output_bytes,
+              "output_stalled": output_stalled,
+              "overflow": overflow,
+              "process_group_leaked": process_group_leaked,
+              "source_sha": os.environ["SOURCE_SHA"],
+              "test_command": test_command,
+              "workflow_sha": os.environ["WORKFLOW_SHA"],
+          }
+          if diagnostic_failure:
+              if overflow:
+                  supervisor_failure = "output_overflow"
+              elif output_stalled:
+                  supervisor_failure = "output_stalled"
+              elif interrupted_signal:
+                  supervisor_failure = "interrupted"
+              elif cleanup_failure is not None:
+                  supervisor_failure = cleanup_failure
+              elif escaped_descendant_observed:
+                  supervisor_failure = "escaped_descendant"
+              else:
+                  supervisor_failure = "unknown_exit_status"
+              result["cleanup_state"] = cleanup_state
+              result["supervisor_failure"] = supervisor_failure
+              diagnostic_tail_bytes = (
+                  f"supervisor_cleanup_failure={supervisor_failure}\n".encode("ascii")
+              )
+              tail_bytes = (tail_bytes + diagnostic_tail_bytes)[-tail_limit:]
+              raw_tail_bytes = diagnostic_tail_bytes
+          evidence_write_failed = False
+          result_bytes = (
+              json.dumps(result, separators=(",", ":"), sort_keys=True) + "\n"
+          ).encode("utf-8")
+          if len(result_bytes) > result_limit:
+              raise SystemExit("root command result exceeds its size limit")
+          try:
+              write_new("root-command-result.json", result_bytes)
+          except OSError:
+              record_cleanup_failure("evidence_write_error")
+              evidence_write_failed = True
+          try:
+              write_new("root-command-tail.txt", tail_bytes)
+          except OSError:
+              record_cleanup_failure("evidence_write_error")
+              evidence_write_failed = True
+          if evidence_write_failed:
+              discard_staged_junit()
+              raise SystemExit(1)
+          check_directory_identity()
+
+          raw_directory = Path(
+              tempfile.mkdtemp(prefix="comet-root-raw.", dir=runner_temp)
+          )
+          raw_directory.chmod(0o700)
+          raw_descriptor = os.open(raw_directory, directory_flags)
+
+          def copy_to_raw(name: str, limit: int, *, allow_empty: bool = False) -> None:
+              source_flags = os.O_RDONLY
+              if hasattr(os, "O_CLOEXEC"):
+                  source_flags |= os.O_CLOEXEC
+              if hasattr(os, "O_NOFOLLOW"):
+                  source_flags |= os.O_NOFOLLOW
+              source_descriptor = os.open(name, source_flags, dir_fd=evidence_descriptor)
+              try:
+                  source_status = os.fstat(source_descriptor)
+                  if (
+                      not stat.S_ISREG(source_status.st_mode)
+                      or source_status.st_uid != os.geteuid()
+                      or source_status.st_mode & 0o022
+                      or source_status.st_size > limit
+                      or (not allow_empty and source_status.st_size == 0)
+                  ):
+                      raise SystemExit("root raw evidence is invalid before upload")
+                  destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                  if hasattr(os, "O_CLOEXEC"):
+                      destination_flags |= os.O_CLOEXEC
+                  if hasattr(os, "O_NOFOLLOW"):
+                      destination_flags |= os.O_NOFOLLOW
+                  destination_descriptor = os.open(
+                      name,
+                      destination_flags,
+                      0o600,
+                      dir_fd=raw_descriptor,
+                  )
+                  try:
+                      remaining = source_status.st_size
+                      while remaining:
+                          chunk = os.read(source_descriptor, min(remaining, 1024 * 1024))
+                          if not chunk:
+                              raise SystemExit("root raw evidence ended before its size")
+                          write_all(destination_descriptor, chunk)
+                          remaining -= len(chunk)
+                      os.fsync(destination_descriptor)
+                  finally:
+                      os.close(destination_descriptor)
+              finally:
+                  os.close(source_descriptor)
+
+          def write_raw(name: str, data: bytes, limit: int) -> None:
+              if len(data) > limit:
+                  raise SystemExit("root raw evidence is invalid before upload")
+              destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+              if hasattr(os, "O_CLOEXEC"):
+                  destination_flags |= os.O_CLOEXEC
+              if hasattr(os, "O_NOFOLLOW"):
+                  destination_flags |= os.O_NOFOLLOW
+              destination_descriptor = os.open(
+                  name,
+                  destination_flags,
+                  0o600,
+                  dir_fd=raw_descriptor,
+              )
+              try:
+                  write_all(destination_descriptor, data)
+                  os.fsync(destination_descriptor)
+              finally:
+                  os.close(destination_descriptor)
+
+          copy_to_raw("root-command-result.json", result_limit)
+          if diagnostic_failure:
+              write_raw("root-command-tail.txt", raw_tail_bytes, tail_limit)
+          else:
+              copy_to_raw("root-command-tail.txt", tail_limit, allow_empty=True)
+          if junit_available:
+              copy_to_raw("root-junit.xml", int(os.environ["JUNIT_LIMIT_BYTES"]))
+          os.close(raw_descriptor)
+
+          (
+              output_name,
+              _output_mode,
+              output_device,
+              output_inode,
+              _original_descriptor,
+              original_output,
+          ) = channel_snapshots["GITHUB_OUTPUT"]
+          if restored_command_directory_descriptor is not None:
+              os.close(trusted_output_descriptor)
+              output_flags = os.O_WRONLY | os.O_APPEND
+              if hasattr(os, "O_CLOEXEC"):
+                  output_flags |= os.O_CLOEXEC
+              if hasattr(os, "O_NOFOLLOW"):
+                  output_flags |= os.O_NOFOLLOW
+              output_descriptor = os.open(
+                  output_name,
+                  output_flags,
+                  dir_fd=restored_command_directory_descriptor,
+              )
+          else:
+              output_status = os.fstat(trusted_output_descriptor)
+              if (
+                  not stat.S_ISREG(output_status.st_mode)
+                  or output_status.st_uid != os.geteuid()
+                  or output_status.st_mode & 0o022
+                  or (output_status.st_dev, output_status.st_ino)
+                  != (output_device, output_inode)
+              ):
+                  raise SystemExit("runner output file changed identity")
+              os.lseek(trusted_output_descriptor, 0, os.SEEK_END)
+              output_descriptor = trusted_output_descriptor
+          try:
+              if original_output and not original_output.endswith(b"\n"):
+                  write_all(output_descriptor, b"\n")
+              write_all(
+                  output_descriptor,
+                  f"raw_directory={raw_directory}\nraw_ready=true\n".encode("utf-8"),
+              )
+              os.fsync(output_descriptor)
+          finally:
+              os.close(output_descriptor)
+          if overflow:
+              print("Root test output exceeded its byte limit.", file=sys.stderr)
+              raise SystemExit(1)
+          if output_stalled or process_group_leaked:
+              print("Root test process group did not terminate cleanly.", file=sys.stderr)
+              raise SystemExit(1)
+          if escaped_descendant_observed:
+              print(
+                  "A root test descendant escaped from the selected process group.",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          if interrupted_signal:
+              print("Root test command was interrupted.", file=sys.stderr)
+              raise SystemExit(128 + interrupted_signal)
+          if cleanup_failure is not None:
+              print("Root test supervisor did not complete safely.", file=sys.stderr)
+              raise SystemExit(
+                  return_code if return_code is not None and 0 < return_code <= 125 else 1
+              )
+          if not junit_available and return_code == 0:
+              print("Root JUnit evidence is missing.", file=sys.stderr)
+              raise SystemExit(1)
+          raise SystemExit(return_code if 0 <= return_code <= 125 else 1)
+          PY
+      - name: Upload raw root evidence
+        if: ${{ always() && steps.root-test.outputs.raw_ready == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: root-test-profile-raw
+          path: |
+            ${{ steps.root-test.outputs.raw_directory }}/root-command-result.json
+            ${{ steps.root-test.outputs.raw_directory }}/root-command-tail.txt
+            ${{ steps.root-test.outputs.raw_directory }}/root-junit.xml
+          if-no-files-found: error
+          retention-days: 1
+
+  root-validation:
+    needs: root
+    if: ${{ always() }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - id: root-directories
+        name: Prepare trusted root directories
+        shell: bash
+        env:
+          ROOT_JOB_RESULT: ${{ needs.root.result }}
+          RUNNER_TEMP: ${{ runner.temp }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          input_directory="$(mktemp -d "${RUNNER_TEMP}/comet-root-input.XXXXXX")"
+          output_directory="$(mktemp -d "${RUNNER_TEMP}/comet-root-output.XXXXXX")"
+          diagnostic_directory="$(mktemp -d "${RUNNER_TEMP}/comet-root-diagnostic.XXXXXX")"
+          printf 'workflow_sha=%s\ntested_sha=%s\n' "${WORKFLOW_SHA}" "${SOURCE_SHA}" \
+            > "${diagnostic_directory}/source.txt"
+          printf 'root_job_result=%s\n' "${ROOT_JOB_RESULT}" \
+            > "${diagnostic_directory}/root-job-result.txt"
+          printf 'input=%s\n' "${input_directory}" >> "${GITHUB_OUTPUT}"
+          printf 'input_device=%s\n' "$(stat -c %d -- "${input_directory}")" >> "${GITHUB_OUTPUT}"
+          printf 'input_inode=%s\n' "$(stat -c %i -- "${input_directory}")" >> "${GITHUB_OUTPUT}"
+          printf 'output=%s\n' "${output_directory}" >> "${GITHUB_OUTPUT}"
+          printf 'output_device=%s\n' "$(stat -c %d -- "${output_directory}")" >> "${GITHUB_OUTPUT}"
+          printf 'output_inode=%s\n' "$(stat -c %i -- "${output_directory}")" >> "${GITHUB_OUTPUT}"
+          printf 'diagnostic=%s\n' "${diagnostic_directory}" >> "${GITHUB_OUTPUT}"
+          printf 'diagnostic_device=%s\n' "$(stat -c %d -- "${diagnostic_directory}")" >> "${GITHUB_OUTPUT}"
+          printf 'diagnostic_inode=%s\n' "$(stat -c %i -- "${diagnostic_directory}")" >> "${GITHUB_OUTPUT}"
+      - name: Download raw root evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: root-test-profile-raw
+          path: ${{ steps.root-directories.outputs.input }}
+      - name: Validate raw root evidence
+        if: ${{ always() }}
+        shell: bash
+        env:
+          DIAGNOSTIC_TAIL_BYTES: "65536"
+          DIAGNOSTIC_DEVICE: ${{ steps.root-directories.outputs.diagnostic_device }}
+          DIAGNOSTIC_DIRECTORY: ${{ steps.root-directories.outputs.diagnostic }}
+          DIAGNOSTIC_INODE: ${{ steps.root-directories.outputs.diagnostic_inode }}
+          EVIDENCE_DEVICE: ${{ steps.root-directories.outputs.input_device }}
+          EVIDENCE_DIRECTORY: ${{ steps.root-directories.outputs.input }}
+          EVIDENCE_INODE: ${{ steps.root-directories.outputs.input_inode }}
+          JUNIT_LIMIT_BYTES: "67108864"
+          OUTPUT_DIRECTORY: ${{ steps.root-directories.outputs.output }}
+          OUTPUT_DEVICE: ${{ steps.root-directories.outputs.output_device }}
+          OUTPUT_INODE: ${{ steps.root-directories.outputs.output_inode }}
+          OUTPUT_LIMIT_BYTES: "16777216"
+          RECEIPT_LIMIT_BYTES: "1024"
+          RESULT_LIMIT_BYTES: "2048"
+          ROOT_JOB_RESULT: ${{ needs.root.result }}
+          RUNNER_TEMP: ${{ runner.temp }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SUMMARY_LIMIT_BYTES: "8388608"
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: /usr/bin/python3 -I scripts/ci/validate-root-profile-evidence.py
+      - name: Upload root qualification evidence
+        if: ${{ success() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: root-test-profile-evidence
+          path: ${{ steps.root-directories.outputs.output }}
+          if-no-files-found: error
+      - name: Upload root diagnostic evidence
+        if: ${{ failure() && steps.root-directories.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: root-test-profile-diagnostics
+          retention-days: 1
+          path: ${{ steps.root-directories.outputs.diagnostic }}
+          if-no-files-found: error
+
+  postgres:
+    needs: root
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/postgres-tests.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+
+  contract-selection:
+    runs-on: ubuntu-24.04
+    outputs:
+      contract_matrix: ${{ steps.classify.outputs.contract_matrix }}
+    steps:
+      - name: Validate the source commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" != "workflow_dispatch" || "${EVENT_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Manual contract validation must use the main workflow." >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The source commit must be a full lowercase hexadecimal SHA." >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        env:
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: test "$(git rev-parse HEAD)" = "${WORKFLOW_SHA}"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - id: classify
+        name: Select promotion contracts
+        env:
+          CHANGES0: ${{ runner.temp }}/deployed-input-changes0
+        run: |
+          : > "${CHANGES0}"
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py classify --changes0 "${CHANGES0}" --profile promotion --github-output "${GITHUB_OUTPUT}"
+
+  contracts:
+    needs: contract-selection
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/contracts.yml
+    with:
+      matrix: ${{ needs.contract-selection.outputs.contract_matrix }}
+      ref: ${{ inputs.source_sha }}

@@ -828,11 +828,12 @@ class TestBranchPublication:
     def test_failed_push_revalidates_destination_before_remote_probe(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
-        """A hook-controlled origin change stops the publication probe."""
+        """A revalidation transport failure stops the publication probe."""
         git_utils_mocks.run.side_effect = subprocess.CalledProcessError(1, ["git", "push"])
-        revalidate_remote = Mock(side_effect=RuntimeError("origin changed"))
+        original_error = RuntimeError("origin changed")
+        revalidate_remote = Mock(side_effect=original_error)
 
-        with pytest.raises(RuntimeError, match="origin changed"):
+        with pytest.raises(BranchPublicationRemoteProbeError) as exc_info:
             push_head_to_branch(
                 "123-auto-impl",
                 "a" * 40,
@@ -841,6 +842,9 @@ class TestBranchPublication:
                 revalidate_remote=revalidate_remote,
             )
 
+        assert exc_info.value.failure_kind == "transport"
+        assert exc_info.value.__cause__ is original_error
+        assert "origin changed" not in str(exc_info.value)
         revalidate_remote.assert_called_once_with()
         assert git_utils_mocks.run.call_count == 1
 

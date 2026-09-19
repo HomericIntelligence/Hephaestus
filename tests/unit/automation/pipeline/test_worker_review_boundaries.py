@@ -16,15 +16,21 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import git_utils, implementation_writer
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
+from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import file_lock
+from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.test_source_worktree import _git, _repository
 
 
 def _pool(tmp_path: Path, shutdown: threading.Event) -> worker_pool.WorkerPool:
     return worker_pool.WorkerPool(
-        size=1, shutdown=shutdown, completion_q=queue.Queue(), lock_dir=tmp_path / "locks"
+        size=1,
+        shutdown=shutdown,
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
 
 
@@ -32,26 +38,16 @@ def test_source_rebase_metadata_does_not_reach_the_git_helper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A real rebase must use the closed helper contract after source admission."""
-    root, _, revision = _repository(tmp_path)
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _root=None: "/usr/bin/gh")
+    root, revision, base_revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     pool = _pool(tmp_path, threading.Event())
     rebase = create_autospec(git_utils.rebase_worktree_onto, return_value=False)
     monkeypatch.setattr(git_utils, "rebase_worktree_onto", rebase)
-    monkeypatch.setattr(worker_pool, "_required_git_signing_env", lambda *args, **kwargs: {})
+    monkeypatch.setattr(FakeSigningProvider, "environment", lambda *args, **kwargs: {})
     monkeypatch.setattr(
-        pool, "_authenticated_remote_revalidator", lambda **kwargs: lambda: ({}, ())
-    )
-    monkeypatch.setattr(
-        git_utils,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 1 if command[1:3] == ["merge-base", "--is-ancestor"] else 0, "", ""
-        ),
-    )
-    monkeypatch.setattr(pool, "_read_publish_head", lambda *_args, **_kwargs: revision)
-    monkeypatch.setattr(
-        pool, "_git_fetch_main", lambda _job: JobResult(ok=True, value={"head_sha": revision})
+        pool, "_git_fetch_main", lambda _job: JobResult(ok=True, value={"head_sha": base_revision})
     )
     job = GitJob(
         "repo",
@@ -81,7 +77,8 @@ def test_writer_creation_stops_while_its_handoff_lock_is_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool
 ) -> None:
     """A contended writer lock must not extend the job budget or delay shutdown."""
-    root, _, _ = _repository(tmp_path)
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _root=None: "/usr/bin/gh")
+    root, _, _ = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     shutdown = threading.Event()
     pool = _pool(tmp_path, shutdown)
@@ -132,7 +129,8 @@ def test_publication_timeout_keeps_the_recorded_local_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refresh: bool
 ) -> None:
     """An uncertain push must retain the exact local head without a second push."""
-    root, _, revision = _repository(tmp_path)
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _root=None: "/usr/bin/gh")
+    root, _, revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     clock = [100.0]
@@ -140,9 +138,6 @@ def test_publication_timeout_keeps_the_recorded_local_head(
     pool = _pool(tmp_path, threading.Event())
     monkeypatch.setattr(pool, "_verify_implementation_edit_scope", lambda *args, **kwargs: None)
     monkeypatch.setattr(pool, "_verify_scope_retraction", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        pool, "_authenticated_remote_revalidator", lambda **kwargs: lambda: ({}, ())
-    )
     monkeypatch.setattr(pool, "_writer_tracking_head", lambda *args, **kwargs: revision)
     local_heads: list[str] = []
     observed_receipts: list[str] = []

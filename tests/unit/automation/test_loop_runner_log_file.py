@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.automation import pipeline_cli as loop_runner
+from hephaestus.logging.formatters import JsonFormatter
 from hephaestus.logging.utils import setup_logging
 
 
@@ -151,11 +152,96 @@ def test_file_only_preserves_other_files_and_reuses_destination(tmp_path: Path) 
     logging.getLogger().addHandler(other)
     path = str(tmp_path / "loop.log")
     setup_logging(primary_stream=None, log_file=path)
+    owned = logging.getLogger().handlers[1]
     setup_logging(primary_stream=None, log_file=path, json_format=True)
-    assert len(logging.getLogger().handlers) == 2
+    assert logging.getLogger().handlers == [other, owned]
     logging.warning("record")
     assert "record" in (tmp_path / "other.log").read_text()
     assert json.loads(Path(path).read_text())["message"] == "record"
+
+
+def test_owned_file_can_change_from_json_to_text(tmp_path: Path) -> None:
+    """Apply the new format to subsequent records on the same handler."""
+    root = logging.getLogger()
+    path = tmp_path / "loop.log"
+    setup_logging(primary_stream=None, log_file=str(path), json_format=True)
+    owned = root.handlers[0]
+    logging.warning("first")
+
+    setup_logging(primary_stream=None, log_file=str(path), format_string="TEXT %(message)s")
+    logging.warning("second")
+
+    assert root.handlers == [owned]
+    lines = path.read_text().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["message"] == "first"
+    assert lines[1] == "TEXT second"
+
+
+@pytest.mark.parametrize("json_format", [False, True])
+def test_owned_file_formatter_updates_after_external_matching_handler(
+    tmp_path: Path, json_format: bool
+) -> None:
+    """Update the owned handler when an external handler precedes it."""
+    root = logging.getLogger()
+    path = tmp_path / "shared.log"
+    setup_logging(primary_stream=None, log_file=str(path), json_format=not json_format)
+    owned = root.handlers[0]
+    external = logging.FileHandler(path)
+    formatter = logging.Formatter("EXTERNAL %(message)s")
+    external.setFormatter(formatter)
+    root.removeHandler(owned)
+    root.addHandler(external)
+    root.addHandler(owned)
+
+    setup_logging(
+        primary_stream=None,
+        log_file=str(path),
+        json_format=json_format,
+        format_string="TEXT %(message)s",
+    )
+    logging.warning("record")
+
+    assert root.handlers == [external, owned]
+    assert external.formatter is formatter
+    lines = path.read_text().splitlines()
+    assert len(lines) == 2
+    assert lines[0] == "EXTERNAL record"
+    if json_format:
+        assert json.loads(lines[1])["message"] == "record"
+    else:
+        assert lines[1] == "TEXT record"
+
+
+@pytest.mark.parametrize("replace_owned", [False, True])
+@pytest.mark.parametrize("external_json", [False, True])
+def test_external_file_formatter_survives_setup_and_path_reuse(
+    tmp_path: Path, replace_owned: bool, external_json: bool
+) -> None:
+    """An external handler retains ownership even at a previously owned path."""
+    root = logging.getLogger()
+    path = tmp_path / "external.log"
+    if replace_owned:
+        setup_logging(primary_stream=None, log_file=str(path))
+        owned = root.handlers[0]
+        root.removeHandler(owned)
+        owned.close()
+    external = logging.FileHandler(path)
+    formatter = JsonFormatter() if external_json else logging.Formatter("EXTERNAL %(message)s")
+    external.setFormatter(formatter)
+    root.addHandler(external)
+
+    setup_logging(primary_stream=None, log_file=str(path), json_format=not external_json)
+    logging.warning("record")
+
+    assert root.handlers == [external]
+    assert external.formatter is formatter
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    if external_json:
+        assert json.loads(lines[0])["message"] == "record"
+    else:
+        assert lines[0] == "EXTERNAL record"
 
 
 def test_failed_target_keeps_root_handlers(tmp_path: Path) -> None:

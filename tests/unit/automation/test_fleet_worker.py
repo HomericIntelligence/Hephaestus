@@ -9,7 +9,9 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -951,8 +953,54 @@ def test_provider_write_deadline_applies_before_waiting_for_response(worker):
     assert time.monotonic() - started < 1
 
 
-def test_provider_cleanup_stops_descendants_after_leader_exit(worker):
+def _check_final_cleanup_read(
+    monkeypatch: pytest.MonkeyPatch,
+    proc_stat: Path,
+    error_type: type[OSError],
+    cleanup: Callable[[], None],
+) -> None:
+    """Check a controlled read failure after real child termination."""
+    original_read_text = Path.read_text
+    injected = False
+    error = error_type("controlled final process observation")
+
+    def read_final_stat(path: Path, *args: Any, **kwargs: Any) -> str:
+        nonlocal injected
+        if path == proc_stat:
+            injected = True
+            raise error
+        return original_read_text(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", read_final_stat)
+        try:
+            if error_type in {PermissionError, OSError}:
+                with pytest.raises(error_type) as failure:
+                    cleanup()
+                assert failure.value is error
+            else:
+                cleanup()
+        finally:
+            assert injected
+
+
+@pytest.mark.parametrize(
+    "cleanup_read_error",
+    [None, FileNotFoundError, ProcessLookupError, PermissionError, OSError],
+    ids=[
+        "normal",
+        "file-disappeared",
+        "process-disappeared",
+        "permission-denied",
+        "other-os-error",
+    ],
+)
+def test_provider_cleanup_stops_descendants_after_leader_exit(
+    worker, monkeypatch, cleanup_read_error
+):
     """Stop child execution even when PID 1 retains its zombie process record."""
+    if cleanup_read_error is not None and sys.platform != "linux":
+        pytest.skip("The controlled stat read requires Linux procfs.")
     result = worker.provider.request(
         "turn/start",
         {
@@ -973,7 +1021,7 @@ def test_provider_cleanup_stops_descendants_after_leader_exit(worker):
         if original_start is not None:
             try:
                 fields = proc_stat.read_text().rsplit(")", 1)[1].split()
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 return True
             # PID reuse and an unreaped zombie cannot run the original child.
             return fields[19] != original_start or fields[0] in {"Z", "X"}
@@ -990,6 +1038,7 @@ def test_provider_cleanup_stops_descendants_after_leader_exit(worker):
 
     timer = threading.Timer(5, emergency_cleanup)
     timer.start()
+    observed_stopped = False
     try:
         started = time.monotonic()
         worker.provider.close()
@@ -997,13 +1046,17 @@ def test_provider_cleanup_stops_descendants_after_leader_exit(worker):
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             if execution_stopped():
+                observed_stopped = True
                 break
             time.sleep(0.02)
         else:
             pytest.fail("provider descendant can still execute after cleanup")
     finally:
         timer.cancel()
-        emergency_cleanup()
+        if cleanup_read_error is None or not observed_stopped:
+            emergency_cleanup()
+        else:
+            _check_final_cleanup_read(monkeypatch, proc_stat, cleanup_read_error, emergency_cleanup)
 
 
 def test_controller_assignment_metadata_can_be_top_level(worker):

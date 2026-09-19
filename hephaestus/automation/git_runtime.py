@@ -23,6 +23,39 @@ from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subproc
 
 logger = logging.getLogger(__name__)
 
+_GIT_METADATA_LOCK_NAME = ".hephaestus-git-metadata.lock"
+
+
+def git_metadata_lock_path(repo_root: Path) -> Path:
+    """Return the cross-process lock guarding ``repo_root``'s Git metadata.
+
+    The sentinel belongs in ``.git`` so acquiring it never creates an
+    untracked file in a reusable checkout's worktree.  Linked worktrees
+    use a ``.git`` *file*, so resolve their ``commondir`` and share the
+    sentinel with the primary checkout.
+    """
+    git_entry = repo_root / ".git"
+    if not git_entry.is_file():
+        return git_entry / _GIT_METADATA_LOCK_NAME
+
+    gitdir_line = git_entry.read_text(encoding="utf-8").strip()
+    prefix = "gitdir: "
+    if not gitdir_line.startswith(prefix):
+        raise RuntimeError(f"Invalid Git directory reference: {git_entry}")
+    git_dir = Path(gitdir_line.removeprefix(prefix))
+    if not git_dir.is_absolute():
+        git_dir = repo_root / git_dir
+    git_dir = git_dir.resolve()
+
+    common_dir_file = git_dir / "commondir"
+    if common_dir_file.is_file():
+        common_dir = Path(common_dir_file.read_text(encoding="utf-8").strip())
+        if not common_dir.is_absolute():
+            common_dir = git_dir / common_dir
+        return common_dir.resolve() / _GIT_METADATA_LOCK_NAME
+    return git_dir / _GIT_METADATA_LOCK_NAME
+
+
 _operation_deadline_s: ContextVar[float | None] = ContextVar(
     "git_operation_deadline_s",
     default=None,
@@ -30,6 +63,14 @@ _operation_deadline_s: ContextVar[float | None] = ContextVar(
 _operation_shutdown: ContextVar[threading.Event | None] = ContextVar(
     "git_operation_shutdown", default=None
 )
+_operation_file_locks: ContextVar[frozenset[Path]] = ContextVar(
+    "git_operation_file_locks", default=frozenset()
+)
+
+
+def _canonical_lock_identity(path: Path) -> Path:
+    """Canonicalize a lock parent without resolving the lock entry."""
+    return path.parent.resolve(strict=False) / path.name
 
 
 @contextmanager
@@ -58,6 +99,17 @@ def current_operation_shutdown() -> threading.Event | None:
     return _operation_shutdown.get()
 
 
+@contextmanager
+def operation_file_lock_held(path: Path) -> Iterator[None]:
+    """Record a file lock that an outer operation scope already holds."""
+    normalized = _canonical_lock_identity(path)
+    token = _operation_file_locks.set(_operation_file_locks.get() | {normalized})
+    try:
+        yield
+    finally:
+        _operation_file_locks.reset(token)
+
+
 def remaining_operation_timeout(timeout: int | float | None) -> int | float | None:
     """Return the smaller per-child timeout or operation time that remains."""
     shutdown = current_operation_shutdown()
@@ -75,6 +127,12 @@ def remaining_operation_timeout(timeout: int | float | None) -> int | float | No
 @contextmanager
 def operation_file_lock(path: Path, *, require_exclusive: bool = False) -> Iterator[None]:
     """Hold a file lock within the active Git operation's time and stop limits."""
+    normalized = _canonical_lock_identity(path)
+    if normalized in _operation_file_locks.get():
+        remaining_operation_timeout(None)
+        yield
+        remaining_operation_timeout(None)
+        return
     shutdown = current_operation_shutdown()
     bounded = _operation_deadline_s.get() is not None or shutdown is not None
     with ExitStack() as stack:
@@ -101,7 +159,8 @@ def operation_file_lock(path: Path, *, require_exclusive: bool = False) -> Itera
                 continue
             break
         remaining_operation_timeout(None)
-        yield
+        with operation_file_lock_held(normalized):
+            yield
 
 
 def run(

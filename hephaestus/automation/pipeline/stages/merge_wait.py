@@ -3,7 +3,8 @@
 ``pr_review`` owns the loop's automated implementation-eligibility decision.
 This stage may perform one ordinary REST squash merge only after it observes
 the exact active-run reviewed head, an exclusive implementation-GO label, an
-open ``main`` PR, an explicitly absent auto-merge request, no unresolved
+open PR against the verified repository default branch, an explicitly absent
+auto-merge request, no unresolved
 review threads, and passing required status evidence for that head. It never
 enables, disables, adopts, or polls native auto-merge.
 
@@ -22,6 +23,7 @@ The implemented mini-state graph is:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import asdict
 from pathlib import Path
 
@@ -76,6 +78,8 @@ _MERGE_CYCLE_RECEIPT = "_merge_wait_cycle_receipt"
 _MERGE_CYCLE_RECEIPT_ERROR = "_merge_wait_cycle_receipt_error"
 _QUEUE_ADMITTED_HEAD = "merge_queue_admitted_head_sha"
 _QUEUE_ADMITTED_PROOF_GENERATION = "merge_queue_admitted_proof_generation"
+_QUEUE_RESIDENCE_DEADLINE_S = "merge_queue_residence_deadline_s"
+_QUEUE_RESIDENCE_POLLS = "merge_queue_residence_polls"
 
 
 def _merge_head(item: WorkItem) -> object:
@@ -147,14 +151,9 @@ class MergeWaitStage(Stage):
         proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        if item.attempts["merge"] >= ctx.budget("merge"):
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
         reviewed_head = item.payload.get("reviewed_pr_head_sha")
         if not isinstance(reviewed_head, str) or not reviewed_head:
             return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
-        deadline = self._matching_readiness_deadline_outcome(item, ctx)
-        if deadline is not None:
-            return deadline
         proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
         declined = item.payload.get(_DECLINED_READINESS_FINGERPRINT)
         if (
@@ -170,6 +169,19 @@ class MergeWaitStage(Stage):
             )
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
+        queue_admitted = (
+            item.payload.get(_QUEUE_ADMITTED_HEAD) == _merge_head(item)
+            and item.payload.get(_QUEUE_ADMITTED_PROOF_GENERATION) == proof_generation
+        )
+        deadline = (
+            self._matching_queue_deadline_outcome(item, ctx)
+            if queue_admitted
+            else self._matching_readiness_deadline_outcome(item, ctx)
+        )
+        if deadline is not None:
+            return deadline
+        if not queue_admitted and item.attempts["merge"] >= ctx.budget("merge"):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
         try:
             operation_deadline = item.payload.get(_MERGE_CYCLE_DEADLINE_S)
             if operation_deadline is None:
@@ -185,10 +197,7 @@ class MergeWaitStage(Stage):
                 declined_readiness_fingerprint=(tuple(declined) if declined is not None else None),
                 deadline_s=operation_deadline,
                 cancellation=ctx.cancellation,
-                queue_admitted=(
-                    item.payload.get(_QUEUE_ADMITTED_HEAD) == _merge_head(item)
-                    and item.payload.get(_QUEUE_ADMITTED_PROOF_GENERATION) == proof_generation
-                ),
+                queue_admitted=queue_admitted,
             )
         except ValueError:
             return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
@@ -258,18 +267,31 @@ class MergeWaitStage(Stage):
         if outcome == "required_checks_not_green":
             return StageOutcome(Disposition.BLOCKED, outcome)
         if outcome == "merge_queued":
+            item.payload.pop(_QUEUE_RESIDENCE_DEADLINE_S, None)
+            item.payload.pop(_QUEUE_RESIDENCE_POLLS, None)
             item.payload[_QUEUE_ADMITTED_HEAD] = receipt.request.merge_head_sha
             item.payload[_QUEUE_ADMITTED_PROOF_GENERATION] = receipt.request.proof_generation
+            self._clear_readiness_wait(item)
             item.state = MERGE
-            return self._park_for_readiness(item, ctx)
+            return self._park_for_queue(item, ctx, receipt.queue_residence_timeout_s)
         if outcome == "merge_queue_wait":
+            self._clear_readiness_wait(item)
             item.state = MERGE
-            return self._park_for_readiness(item, ctx)
+            return self._park_for_queue(item, ctx, receipt.queue_residence_timeout_s)
+        if outcome == "merge_queue_removed":
+            item.payload.pop(_QUEUE_ADMITTED_HEAD, None)
+            item.payload.pop(_QUEUE_ADMITTED_PROOF_GENERATION, None)
+            item.payload.pop(_QUEUE_RESIDENCE_DEADLINE_S, None)
+            item.payload.pop(_QUEUE_RESIDENCE_POLLS, None)
+            item.state = MERGE
+            return self._retry(item, ctx)
+        if outcome == "merge_queue_reconciliation_unavailable":
+            return StageOutcome(Disposition.FINISH_FAIL, outcome)
         if outcome in {"not_implementation_go", "reviewed_head_drift"}:
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome == "merge_conflicting":
             return self._post_review_rebase(item, outcome)
-        if outcome == "readiness_wait":
+        if outcome in {"readiness_wait", "required_checks_pending", "required_checks_unstable"}:
             if receipt.attempted and item.attempts["merge"] >= ctx.budget("merge"):
                 return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
             item.state = MERGE
@@ -320,6 +342,83 @@ class MergeWaitStage(Stage):
         if ctx.now() >= deadline:
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
         return None
+
+    @staticmethod
+    def _matching_queue_deadline_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+        """Fail closed when one matching queue-residence window has expired."""
+        deadline = item.payload.get(_QUEUE_RESIDENCE_DEADLINE_S)
+        if deadline is None:
+            return None
+        if (
+            isinstance(deadline, bool)
+            or not isinstance(deadline, (int, float))
+            or not math.isfinite(deadline)
+            or deadline <= 0
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_queue_residence_state_invalid")
+        if ctx.now() >= deadline:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_queue_residence_timeout")
+        return None
+
+    @staticmethod
+    def _clear_readiness_wait(item: WorkItem) -> None:
+        """Remove the shorter pre-admission readiness wait."""
+        for key in (
+            "merge_readiness_head_sha",
+            "merge_readiness_proof_generation",
+            "merge_readiness_deadline_s",
+            "merge_readiness_polls",
+        ):
+            item.payload.pop(key, None)
+
+    @staticmethod
+    def _park_for_queue(
+        item: WorkItem,
+        ctx: StageContext,
+        timeout_s: float | None,
+    ) -> StageOutcome:
+        """Retain one policy-derived wait for the admitted head and proof."""
+        merge_head = _merge_head(item)
+        proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
+        if (
+            not isinstance(merge_head, str)
+            or not merge_head
+            or item.payload.get(_QUEUE_ADMITTED_HEAD) != merge_head
+            or item.payload.get(_QUEUE_ADMITTED_PROOF_GENERATION) != proof_generation
+            or isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s <= 0
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_queue_residence_state_invalid")
+        deadline = item.payload.get(_QUEUE_RESIDENCE_DEADLINE_S)
+        polls = item.payload.get(_QUEUE_RESIDENCE_POLLS, 0)
+        now = ctx.now()
+        if (
+            isinstance(deadline, bool)
+            or (deadline is not None and not isinstance(deadline, (int, float)))
+            or (
+                isinstance(deadline, (int, float))
+                and (not math.isfinite(deadline) or deadline <= 0)
+            )
+            or isinstance(polls, bool)
+            or not isinstance(polls, int)
+            or polls < 0
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_queue_residence_state_invalid")
+        if deadline is None:
+            deadline = now + timeout_s
+            item.payload[_QUEUE_RESIDENCE_DEADLINE_S] = deadline
+        if now >= deadline:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_queue_residence_timeout")
+        delay = min(
+            _READINESS_WAIT_INITIAL_S * (2**polls),
+            _READINESS_WAIT_DELAY_CAP_S,
+            deadline - now,
+        )
+        item.payload[_QUEUE_RESIDENCE_POLLS] = polls + 1
+        item.payload["retry_delay_s"] = delay
+        return StageOutcome(Disposition.RETRY, "merge_readiness_wait")
 
     @staticmethod
     def _park_for_readiness(item: WorkItem, ctx: StageContext) -> StageOutcome:

@@ -11,11 +11,18 @@ import json
 import math
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
 from hephaestus.automation.pipeline.rebase_review import RebaseReviewProof
+from hephaestus.automation.pipeline.repository_validation import (
+    RepositoryValidationGap,
+    RepositoryValidationInvocation,
+    RepositoryValidationPlan,
+    RepositoryValidationReceipt,
+)
 from hephaestus.automation.pipeline.scope_retraction import (
     is_safe_scope_retraction_path,
     scope_retraction_paths_from_body,
@@ -36,6 +43,14 @@ _REMEDIATION_JOURNAL_MARKER_RE = re.compile(
     r"pr=[1-9][0-9]*:head=[0-9a-f]{40}(?:[0-9a-f]{24})?:"
     r"batch=[0-9a-f]{32}:seq=(?:0|[1-9][0-9]*) -->"
 )
+
+
+class MergeQueueReconciliation(StrEnum):
+    """Classify a validated live merge-queue entry read."""
+
+    PRESENT = "present"
+    REMOVED = "removed"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -863,9 +878,115 @@ class RebaseReviewPublished:
             raise ValueError("rebase publication result is invalid")
 
 
+@dataclass(frozen=True)
+class ReadRepositoryValidationCIRequest:
+    """Bind a CI read to one immutable validation invocation and deadline."""
+
+    invocation: RepositoryValidationInvocation
+    head_branch: str
+    deadline_s: float
+
+    def __post_init__(self) -> None:
+        """Reject an invalid invocation, source branch, or missing deadline."""
+        if (
+            type(self.invocation) is not RepositoryValidationInvocation
+            or replace(self.invocation) != self.invocation
+            or self.invocation.evidence_kind != "ci"
+            or not self.invocation.plan.execution_allowed
+        ):
+            raise ValueError("The CI invocation is invalid.")
+        if (
+            type(self.head_branch) is not str
+            or not 0 < len(self.head_branch) <= 1024
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.head_branch)
+        ):
+            raise ValueError("The CI source branch is invalid.")
+        self.head_branch.encode("utf-8", errors="strict")
+        if self.deadline_s is None:
+            raise ValueError("The CI request requires a deadline.")
+        _deadline(self.deadline_s)
+
+    @property
+    def plan(self) -> RepositoryValidationPlan:
+        """Return the immutable plan from this invocation."""
+        return self.invocation.plan
+
+    @property
+    def repository(self) -> str:
+        """Return the complete repository identity from the bound plan."""
+        return self.invocation.plan.repository
+
+    @property
+    def issue_number(self) -> int | None:
+        """Return the issue that owns this validation attempt."""
+        return self.invocation.plan.issue_number
+
+    @property
+    def pr_number(self) -> int:
+        """Return the pull request from the bound plan."""
+        return self.invocation.plan.pr_number
+
+
+@dataclass(frozen=True)
+class RepositoryValidationCIRead:
+    """Keep admitted receipts or terminal gaps with their exact request."""
+
+    request: ReadRepositoryValidationCIRequest
+    receipts: tuple[RepositoryValidationReceipt, ...] = ()
+    gaps: tuple[RepositoryValidationGap, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Reject mutable, unrelated, repeated, or malformed evidence."""
+        if (
+            type(self.request) is not ReadRepositoryValidationCIRequest
+            or replace(self.request) != self.request
+        ):
+            raise ValueError("The CI result request is invalid.")
+        if type(self.receipts) is not tuple or len(self.receipts) > 32:
+            raise ValueError("The CI result receipt inventory is invalid.")
+        plan = self.request.invocation.plan
+        checks = {check.check_id: check for check in plan.checks}
+        seen: set[str] = set()
+        for receipt in self.receipts:
+            if (
+                type(receipt) is not RepositoryValidationReceipt
+                or receipt.check_id not in self.request.invocation.check_ids
+                or receipt.check_id in seen
+            ):
+                raise ValueError("The CI receipt was not uniquely requested.")
+            check = checks[receipt.check_id]
+            expected = RepositoryValidationReceipt(
+                repository=plan.repository,
+                pr_number=plan.pr_number,
+                plan_id=plan.plan_id,
+                check_id=check.check_id,
+                reviewed_head=plan.reviewed_head,
+                reviewed_base=plan.reviewed_base,
+                argv=check.argv,
+                source_digests=check.source_digests,
+                evidence_kind="ci",
+                status=receipt.status,
+            )
+            if receipt != expected:
+                raise ValueError("The CI receipt does not match its request.")
+            seen.add(receipt.check_id)
+        if type(self.gaps) is not tuple or len(self.gaps) > 64:
+            raise ValueError("The CI result gap inventory is invalid.")
+        for gap in self.gaps:
+            if (
+                type(gap) is not RepositoryValidationGap
+                or type(gap.check_id) is not str
+                or gap.check_id not in {"*", *checks}
+                or type(gap.reason) is not str
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,95}", gap.reason) is None
+            ):
+                raise ValueError("The CI result gap is invalid.")
+
+
 type GitHubRequest = (
     ReadRateBudgetRequest
     | ReadCurrentPlanScopeRequest
+    | ReadRepositoryValidationCIRequest
     | InspectAdoptedRemediationPrStateRequest
     | InspectDirtyDirectPrStateRequest
     | InspectRebaseConflictRequest
@@ -903,6 +1024,7 @@ class GitHubJob:
             (
                 ReadRateBudgetRequest,
                 ReadCurrentPlanScopeRequest,
+                ReadRepositoryValidationCIRequest,
                 InspectAdoptedRemediationPrStateRequest,
                 InspectDirtyDirectPrStateRequest,
                 InspectRebaseConflictRequest,
@@ -929,6 +1051,7 @@ class GitHubJob:
                 InspectRebaseReviewRequest,
                 InspectAdoptedRemediationPrStateRequest,
                 ReadCurrentPlanScopeRequest,
+                ReadRepositoryValidationCIRequest,
             ),
         ) and (self.request.repository.rsplit("/", 1)[-1].casefold() != self.repo.casefold()):
             raise ValueError("dirty direct request repository does not match the job")
@@ -1064,6 +1187,7 @@ class MergeWaitCycleCompleted:
     readiness_fingerprint: tuple[str, ...] | None = None
     retryable: bool = False
     merge_sha: str | None = None
+    queue_residence_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         """Validate merge-cycle outcome metadata."""
@@ -1082,6 +1206,13 @@ class MergeWaitCycleCompleted:
             or any(character not in "0123456789abcdef" for character in self.merge_sha)
         ):
             raise ValueError("merge_sha must be a full commit SHA or None")
+        if self.queue_residence_timeout_s is not None and (
+            isinstance(self.queue_residence_timeout_s, bool)
+            or not isinstance(self.queue_residence_timeout_s, (int, float))
+            or not math.isfinite(self.queue_residence_timeout_s)
+            or self.queue_residence_timeout_s <= 0
+        ):
+            raise ValueError("queue_residence_timeout_s must be a finite positive number or None")
 
 
 @dataclass(frozen=True)
@@ -1166,6 +1297,7 @@ class ScopeExpansionDependenciesReconciled:
 type GitHubReceipt = (
     RateBudgetRead
     | CurrentPlanScopeRead
+    | RepositoryValidationCIRead
     | AdoptedRemediationPrStateRead
     | DirtyDirectPrStateRead
     | RebaseConflictInspected

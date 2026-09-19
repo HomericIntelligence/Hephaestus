@@ -8,11 +8,21 @@ import subprocess
 from datetime import UTC, datetime
 from threading import Event
 
+from .pipeline.merge_wait_admission import RequiredChecksDeferred
 from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_check_run_inventory import (
     _nullable_app_id,
     check_runs_for_head,
     check_suite_ids_for_head,
+)
+from .pipeline_github_check_run_validation import (
+    _CHECK_SUCCESS_CONCLUSIONS,
+    _ActiveCheckRun,
+    _check_run_app_id,
+    _CheckRunCandidate,
+    _CheckRunGroups,
+    _RequiredCheck,
+    _validated_check_run,
 )
 from .pipeline_github_commit_statuses import (
     _current_evidence_timestamp,
@@ -23,31 +33,11 @@ from .pipeline_github_contract import _PipelineGitHubHost
 logger = logging.getLogger(__name__)
 
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
-_GITHUB_TIMESTAMP_RE = re.compile(
-    r"\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d"
-    r"(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)"
-)
-_CHECK_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
-_CHECK_CONCLUSIONS = _CHECK_SUCCESS_CONCLUSIONS | frozenset(
-    {"action_required", "cancelled", "failure", "stale", "startup_failure", "timed_out"}
-)
-_RequiredCheck = tuple[str, int | None]
-_CheckRunCandidate = tuple[datetime, int, dict[str, object]]
-_CheckRunGroups = dict[_RequiredCheck, dict[int, list[_CheckRunCandidate]]]
 
 
 def _status_evidence_now_utc() -> datetime:
     """Return the current UTC time through a test-controlled seam."""
     return datetime.now(UTC)
-
-
-def _valid_app_id(value: object) -> int | None:
-    """Return a valid nullable GitHub App ID."""
-    if value is None:
-        return None
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    raise ValueError("GitHub App ID is malformed")
 
 
 def _check_run_required_matches(
@@ -77,67 +67,15 @@ def _check_run_required_matches(
     )
 
 
-def _check_run_app_id(check_run: dict[str, object]) -> int:
-    """Return the positive GitHub App identity for one Check Run."""
-    app = check_run.get("app")
-    if not isinstance(app, dict):
-        raise ValueError("Check Run has no application identity")
-    app_id = _valid_app_id(app.get("id"))
-    if app_id is None:
-        raise ValueError("Check Run has no application identity")
-    return app_id
-
-
-def _check_run_completion_time(value: object) -> tuple[str, datetime] | None:
-    """Return one raw completion time and its normalized UTC instant."""
-    if not isinstance(value, str) or _GITHUB_TIMESTAMP_RE.fullmatch(value) is None:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.utcoffset() is None:
-            return None
-        return value, parsed.astimezone(UTC)
-    except (ValueError, OverflowError):
-        return None
-
-
-def _validated_check_run(
-    check_run: dict[str, object], head_sha: str
-) -> tuple[int, int, str, str, str, datetime] | None:
-    """Return validated identity and terminal evidence for one matching run."""
-    try:
-        app_id = _check_run_app_id(check_run)
-    except ValueError:
-        logger.warning("Check Run for %s has no valid app identity", head_sha)
-        return None
-    check_run_id = check_run.get("id")
-    status = check_run.get("status")
-    conclusion = check_run.get("conclusion")
-    completion_time = _check_run_completion_time(check_run.get("completed_at"))
-    if (
-        not isinstance(check_run_id, int)
-        or isinstance(check_run_id, bool)
-        or check_run_id <= 0
-        or not isinstance(status, str)
-        or status != "completed"
-        or not isinstance(conclusion, str)
-        or conclusion not in _CHECK_CONCLUSIONS
-        or completion_time is None
-        or check_run.get("head_sha") != head_sha
-    ):
-        logger.warning("Check Run for %s has malformed terminal evidence", head_sha)
-        return None
-    raw_completed_at, completed_at = completion_time
-    return check_run_id, app_id, status, conclusion, raw_completed_at, completed_at
-
-
 def _check_run_snapshot(
-    check_runs: list[object],
+    check_runs: list[object] | None,
     head_sha: str,
     required_checks: frozenset[_RequiredCheck],
-    suite_inventory: tuple[tuple[int, int | None], ...],
+    suite_inventory: tuple[tuple[int, int | None], ...] | None,
 ) -> tuple[object, ...] | None:
     """Return global identity plus required-context result data."""
+    if check_runs is None or suite_inventory is None:
+        return None
     snapshot: list[tuple[object, ...]] = []
     required_contexts = {context for context, _app_id in required_checks}
     suite_apps = dict(suite_inventory)
@@ -167,7 +105,7 @@ def _check_run_snapshot(
         ):
             logger.warning("Check Run for %s has malformed snapshot identity", head_sha)
             return None
-        required_result: tuple[int, str, str, str] | None = None
+        required_result: tuple[int, str, str | None, str | None] | None = None
         if name in required_contexts:
             suite_app_id = suite_apps.get(check_suite_id)
             if (
@@ -184,8 +122,11 @@ def _check_run_snapshot(
             validated = _validated_check_run(check_run, head_sha)
             if validated is None:
                 return None
-            _run_id, app_id, status, conclusion, completed_at, _completion_utc = validated
-            required_result = app_id, status, conclusion, completed_at
+            if isinstance(validated, _ActiveCheckRun):
+                required_result = validated.app_id, validated.status, None, None
+            else:
+                _run_id, app_id, status, conclusion, completed_at, _completion_utc = validated
+                required_result = app_id, status, conclusion, completed_at
         snapshot.append(
             (
                 check_suite_id,
@@ -204,8 +145,8 @@ def _passing_check_run_requirements(
     head_sha: str,
     required_checks: frozenset[_RequiredCheck],
     now_utc: datetime,
-) -> frozenset[_RequiredCheck] | None:
-    """Return requirements proved by passing exact-head Check Runs."""
+) -> tuple[frozenset[_RequiredCheck], frozenset[_RequiredCheck]] | None:
+    """Return passing and pending requirements, or reject invalid evidence."""
     candidate_runs: _CheckRunGroups = {}
     seen_ids: set[int] = set()
     for check_run in check_runs:
@@ -219,14 +160,20 @@ def _passing_check_run_requirements(
         validated = _validated_check_run(check_run, head_sha)
         if validated is None:
             return None
-        check_run_id, app_id, _status, _conclusion, _raw_completed_at, completed_at = validated
+        candidate: _CheckRunCandidate | _ActiveCheckRun
+        if isinstance(validated, _ActiveCheckRun):
+            check_run_id, app_id = validated.run_id, validated.app_id
+            candidate = validated
+        else:
+            check_run_id, app_id, _status, _conclusion, _raw_completed_at, completed_at = validated
+            candidate = completed_at, check_run_id, check_run
         if check_run_id in seen_ids:
             logger.warning("Check Run for %s has no unambiguous identity", head_sha)
             return None
         seen_ids.add(check_run_id)
         for requirement in matches:
             runs_by_app = candidate_runs.setdefault(requirement, {})
-            runs_by_app.setdefault(app_id, []).append((completed_at, check_run_id, check_run))
+            runs_by_app.setdefault(app_id, []).append(candidate)
 
     return _passing_current_check_runs(candidate_runs, now_utc)
 
@@ -246,9 +193,10 @@ def _unique_current_check_run(
 def _passing_current_check_runs(
     current_runs: _CheckRunGroups,
     now_utc: datetime,
-) -> frozenset[_RequiredCheck] | None:
-    """Return passing requirements from unambiguous current Check Runs."""
+) -> tuple[frozenset[_RequiredCheck], frozenset[_RequiredCheck]] | None:
+    """Return passing and pending requirements from unambiguous runs."""
     matched_checks: set[_RequiredCheck] = set()
+    pending: set[_RequiredCheck] = set()
     for requirement, runs_by_app in current_runs.items():
         if requirement[1] is None and len(runs_by_app) != 1:
             logger.warning(
@@ -256,7 +204,12 @@ def _passing_current_check_runs(
                 requirement[0],
             )
             return None
-        check_run = _unique_current_check_run(next(iter(runs_by_app.values())), requirement[0])
+        candidates = next(iter(runs_by_app.values()))
+        completed = [run for run in candidates if not isinstance(run, _ActiveCheckRun)]
+        if len(completed) != len(candidates):
+            pending.add(requirement)
+            continue
+        check_run = _unique_current_check_run(completed, requirement[0])
         if check_run is None:
             return None
         conclusion = check_run.get("conclusion")
@@ -266,7 +219,21 @@ def _passing_current_check_runs(
         ):
             return None
         matched_checks.add(requirement)
-    return frozenset(matched_checks)
+    return frozenset(matched_checks), frozenset(pending)
+
+
+def _required_checks_result(
+    run_requirements: tuple[frozenset[_RequiredCheck], frozenset[_RequiredCheck]],
+    status_requirements: frozenset[_RequiredCheck] | None,
+    required_checks: frozenset[_RequiredCheck],
+) -> bool | RequiredChecksDeferred:
+    """Defer only when all requirements have passing or active evidence."""
+    passing, pending = run_requirements
+    if status_requirements is None or (passing | pending | status_requirements) != required_checks:
+        return False
+    if pending:
+        return RequiredChecksDeferred.PENDING
+    return True
 
 
 class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
@@ -279,8 +246,8 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         *,
         deadline_s: float,
         cancellation: Event,
-    ) -> bool:
-        """Return whether each effective requirement has passing exact-head evidence."""
+    ) -> bool | RequiredChecksDeferred:
+        """Only literal True permits admission; deferred results need another read."""
         if (
             self._repo_slug is None
             or _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None
@@ -342,14 +309,14 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         ) as exc:
             logger.warning("Check Runs stability read failed for %s: %s", head_sha, exc)
             return False
-        if (
-            second is None
-            or final_suite_inventory != suite_inventory
-            or _check_run_snapshot(second, head_sha, required_checks, suite_inventory)
-            != first_snapshot
-        ):
-            logger.warning("Check Suite or Check Run inventory changed for %s", head_sha)
+        second_snapshot = _check_run_snapshot(
+            second, head_sha, required_checks, final_suite_inventory
+        )
+        if second is None or second_snapshot is None:
             return False
+        if final_suite_inventory != suite_inventory or second_snapshot != first_snapshot:
+            logger.warning("Check Suite or Check Run inventory changed for %s", head_sha)
+            return RequiredChecksDeferred.UNSTABLE
         run_requirements = _passing_check_run_requirements(
             second,
             head_sha,
@@ -377,10 +344,7 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
         ) as exc:
             logger.warning("Commit-status stability read failed for %s: %s", head_sha, exc)
             return False
-        return (
-            status_requirements is not None
-            and (run_requirements | status_requirements) == required_checks
-        )
+        return _required_checks_result(run_requirements, status_requirements, required_checks)
 
     def _check_runs_for_head(
         self,

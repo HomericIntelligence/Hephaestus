@@ -166,6 +166,7 @@ class CircuitBreaker:
         self._last_failure_time: float = 0.0
         self._half_open_calls = 0
         self._half_open_successes = 0
+        self._generation = 0
         self._lock = threading.Lock()
 
     @property
@@ -182,6 +183,7 @@ class CircuitBreaker:
                 self._state = CircuitBreakerState.HALF_OPEN
                 self._half_open_calls = 0
                 self._half_open_successes = 0
+                self._generation += 1
                 logger.info(
                     "Circuit breaker '%s' transitioning to HALF_OPEN after %.1fs",
                     self.name,
@@ -230,8 +232,10 @@ class CircuitBreaker:
                         reason=CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED,
                     )
                 self._half_open_calls += 1
+            generation = self._generation
 
         # Execute outside the lock to avoid blocking other threads
+        success: bool | None = None
         try:
             result = func(*args, **kwargs)
         except Exception as exc:
@@ -241,60 +245,70 @@ class CircuitBreaker:
                 logger.debug(
                     "Circuit breaker '%s' ignoring non-service exception: %r", self.name, exc
                 )
-                self._release_half_open_slot()
                 raise
-            self._record_failure()
+            success = False
             raise
+        else:
+            success = True
+            return result
+        finally:
+            self._complete_admission(state, generation, success)
 
-        self._record_success()
-        return result
+    def _complete_admission(
+        self,
+        admitted_state: CircuitBreakerState,
+        admitted_generation: int,
+        success: bool | None,
+    ) -> None:
+        """Release and score an admission when its breaker phase is current.
 
-    def _release_half_open_slot(self) -> None:
-        """Give back a HALF_OPEN slot without scoring the call either way.
-
-        An ignored exception must not hold its probe slot: leaking it would
-        exhaust ``half_open_max_calls`` and wedge the breaker in HALF_OPEN,
-        rejecting every later probe with ``HALF_OPEN_EXHAUSTED``.
+        ``success`` is ``None`` when the function raises a cancellation, an
+        ignored exception, or an exception from the ignore predicate. These
+        exits release a HALF_OPEN slot but do not change service scoring.
         """
         with self._lock:
-            if self._state == CircuitBreakerState.HALF_OPEN and self._half_open_calls > 0:
+            if admitted_generation != self._generation:
+                return
+
+            if admitted_state is CircuitBreakerState.HALF_OPEN:
                 self._half_open_calls -= 1
 
-    def _record_success(self) -> None:
-        """Record a successful call (releases this call's half-open slot)."""
-        with self._lock:
-            if self._state == CircuitBreakerState.HALF_OPEN:
-                if self._half_open_calls > 0:
-                    self._half_open_calls -= 1
-                self._half_open_successes += 1
-                if self._half_open_successes < self.success_threshold:
-                    return
-                logger.info(
-                    "Circuit breaker '%s' closing after %d successful half-open call(s)",
-                    self.name,
-                    self._half_open_successes,
-                )
-            self._state = CircuitBreakerState.CLOSED
-            self._failure_count = 0
-            self._half_open_calls = 0
-            self._half_open_successes = 0
+            if success is None:
+                return
 
-    def _record_failure(self) -> None:
-        """Record a failed call (releases this call's half-open slot)."""
-        with self._lock:
+            if success:
+                if admitted_state is CircuitBreakerState.HALF_OPEN:
+                    self._half_open_successes += 1
+                    if self._half_open_successes < self.success_threshold:
+                        return
+                    logger.info(
+                        "Circuit breaker '%s' closing after %d successful half-open call(s)",
+                        self.name,
+                        self._half_open_successes,
+                    )
+                    self._generation += 1
+                self._state = CircuitBreakerState.CLOSED
+                self._failure_count = 0
+                self._half_open_calls = 0
+                self._half_open_successes = 0
+                return
+
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
-
-            if self._state == CircuitBreakerState.HALF_OPEN:
-                if self._half_open_calls > 0:
-                    self._half_open_calls -= 1
+            if admitted_state is CircuitBreakerState.HALF_OPEN:
                 self._state = CircuitBreakerState.OPEN
+                self._half_open_calls = 0
+                self._half_open_successes = 0
+                self._generation += 1
                 logger.warning(
                     "Circuit breaker '%s' re-opened after half-open failure",
                     self.name,
                 )
             elif self._failure_count >= self.failure_threshold:
                 self._state = CircuitBreakerState.OPEN
+                self._half_open_calls = 0
+                self._half_open_successes = 0
+                self._generation += 1
                 logger.warning(
                     "Circuit breaker '%s' opened after %d consecutive failures",
                     self.name,
@@ -302,13 +316,14 @@ class CircuitBreaker:
                 )
 
     def reset(self) -> None:
-        """Reset circuit breaker to closed state."""
+        """Reset circuit breaker to closed state and invalidate active calls."""
         with self._lock:
             self._state = CircuitBreakerState.CLOSED
             self._failure_count = 0
             self._half_open_calls = 0
             self._half_open_successes = 0
             self._last_failure_time = 0.0
+            self._generation += 1
             logger.info("Circuit breaker '%s' reset to CLOSED", self.name)
 
     def snapshot(self) -> dict[str, str | int | float]:

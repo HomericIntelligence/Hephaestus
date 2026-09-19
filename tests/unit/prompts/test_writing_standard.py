@@ -85,6 +85,7 @@ NON_AGENT_DIRECTION_TEMPLATES = (
     "pr_review/description.j2",
     "pr_review/nitpick_include.j2",
     "pr_review/nitpick_suppress.j2",
+    "pr_review/repository_validation.j2",
     "review_rubrics/full_sweep.j2",
     "review_rubrics/grading.j2",
     "review_rubrics/implementation_loop.j2",

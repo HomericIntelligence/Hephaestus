@@ -13,10 +13,13 @@ import json
 import logging
 import os
 import queue
+import stat
 import subprocess
+import sys
 import threading
 import uuid
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -24,6 +27,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.implementation_go_audit_receipt import PendingReviewFindingJournal
@@ -43,6 +47,7 @@ from hephaestus.automation.pipeline.github_jobs import (
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
+    BuildTestJob,
     GitJob,
     JobHandle,
     JobResult,
@@ -65,7 +70,14 @@ from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkI
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
+from hephaestus.automation.review_journal import (
+    CommentJournalReadError,
+    IssueComment,
+    render_current_plan,
+    render_pending_review,
+)
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED, STATE_PLAN_GO
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -91,6 +103,18 @@ def _agent_job(repo: str = "repo-a", issue: int = 1) -> AgentJob:
         timeout_s=10,
         descr="stub agent job",
     )
+
+
+def _reject_worker_output(_output: str) -> None:
+    """Raise a deterministic parse error for a worker result test."""
+    raise ValueError("invalid output")
+
+
+def _worker_diagnostic_streams(diagnostic_name: str, stream: str) -> tuple[str, str]:
+    """Put test output in the selected worker diagnostic stream."""
+    if diagnostic_name == "stdout_tail":
+        return stream, ""
+    return "", stream
 
 
 def _git(path: Path, *args: str) -> str:
@@ -289,6 +313,7 @@ def make_coordinator(
     github: FakeStageGitHub | None = None,
     github_job_runner: Any | None = None,
     enable_learn: bool = True,
+    agent: str = "claude",
 ) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
     """Build a Coordinator wired to fakes, with seeding scripted per pass."""
     config = PipelineConfig(
@@ -301,6 +326,7 @@ def make_coordinator(
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
         enable_learn=enable_learn,
+        agent=agent,
         projects_dir=tmp_path,
         rate_guard_enabled=False,
     )
@@ -311,6 +337,130 @@ def make_coordinator(
     )
     script_source_passes(coordinator, monkeypatch, seed_entries or [[]])
     return coordinator, pool, gh
+
+
+@pytest.mark.parametrize("failure", ["audit_write", "label_confirmation"])
+def test_restart_scope_rejection_retries_publication_without_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """A restart retries scope publication failures without a reviewer job."""
+
+    class FailFirstPublicationGitHub(FakeStageGitHub):
+        edit_count = 0
+        audit_count = 0
+
+        def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+            self.edit_count += 1
+            if failure == "label_confirmation" and self.edit_count == 1:
+                labels = self._issue_labels(issue_number)
+                labels.update(add)
+                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+                return
+            super().edit_labels(issue_number, add=add, remove=remove)
+
+        def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
+            self.audit_count += 1
+            if failure == "audit_write" and self.audit_count == 1:
+                raise OSError("audit write failed")
+            super().upsert_issue_comment(*args, **kwargs)
+
+    github = FailFirstPublicationGitHub(labels=[STATE_PLAN_GO])
+    github.comments[41] = [
+        render_current_plan("## Exact file scope and ownership\n- `tests/unit/one.py`"),
+        render_pending_review(revision=1),
+    ]
+    coordinator, pool, _ = make_coordinator(
+        tmp_path,
+        monkeypatch,
+        github=github,
+        agent="codex",
+    )
+    item = _issue_item(41, StageName.PLAN_REVIEW)
+
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=True)
+    coordinator._drain_queues()
+
+    assert item.state == "EVAL"
+    expected_labels = (
+        {STATE_PLAN_GO, STATE_PLAN_BLOCKED}
+        if failure == "label_confirmation"
+        else {STATE_PLAN_BLOCKED}
+    )
+    assert github.labels[41] == expected_labels
+    assert len(coordinator.timers) == 1
+    assert pool.submitted == []
+
+    _deadline, sequence, parked_item = coordinator.timers[0]
+    coordinator.timers[0] = (0.0, sequence, parked_item)
+    coordinator._wake_timers()
+    coordinator._drain_queues()
+
+    assert item.result is not None
+    assert item.result.reason == "blocked: plan scope is invalid"
+    assert github.labels[41] == {STATE_PLAN_BLOCKED}
+    assert github.comments[41][-1].endswith(STATE_PLAN_BLOCKED)
+    assert "plan_scope_invalid" in github.comments[41][-1]
+    assert pool.submitted == []
+
+
+def test_restart_scope_rejection_retries_second_journal_read_without_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retry a failed identity read without losing the scope rejection."""
+
+    class FailSecondReadGitHub(FakeStageGitHub):
+        read_count = 0
+
+        def issue_comments(self, issue_number: int) -> list[IssueComment]:
+            self.read_count += 1
+            if self.read_count == 2:
+                raise CommentJournalReadError("temporary journal read failure")
+            return super().issue_comments(issue_number)
+
+    github = FailSecondReadGitHub(labels=[STATE_PLAN_GO])
+    plan_body = render_current_plan("## Exact file scope and ownership\n- `tests/unit/one.py`")
+    github.comments[41] = [plan_body, render_pending_review(revision=1)]
+    coordinator, pool, _ = make_coordinator(
+        tmp_path,
+        monkeypatch,
+        github=github,
+        agent="codex",
+    )
+    item = _issue_item(41, StageName.PLAN_REVIEW)
+
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=True)
+    coordinator._drain_queues()
+
+    assert github.read_count == 2
+    assert item.result is None
+    assert item.state == "EVAL"
+    assert len(coordinator.timers) == 1
+    assert github.labels[41] == {STATE_PLAN_GO}
+    assert github.mutation_log == []
+    assert pool.submitted == []
+    assert item.attempts.get("plan_review_iter", 0) == 0
+    assert item.payload.get("review_round", 0) == 0
+
+    _deadline, sequence, parked_item = coordinator.timers[0]
+    coordinator.timers[0] = (0.0, sequence, parked_item)
+    coordinator._wake_timers()
+    coordinator._drain_queues()
+
+    assert item.result is not None
+    assert item.result.reason == "blocked: plan scope is invalid"
+    assert github.labels[41] == {STATE_PLAN_BLOCKED}
+    assert github.comments[41][0] == plan_body
+    audit = github.comments[41][-1]
+    assert audit.endswith(STATE_PLAN_BLOCKED)
+    assert "plan_scope_invalid" in audit
+    assert "## Files to Modify" in audit
+    assert [entry[0] for entry in github.mutation_log] == [
+        "edit_labels",
+        "gh_issue_upsert_comment",
+    ]
+    assert pool.submitted == []
+    assert item.attempts.get("plan_review_iter", 0) == 0
+    assert item.payload.get("review_round", 0) == 0
 
 
 def _issue_item(
@@ -1543,6 +1693,63 @@ class TestDryRun:
 class TestFailBackRouting:
     """The Disposition->action table's FAIL_BACK rows."""
 
+    def test_diagnostic_failure_reason_is_durable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raw worker failure becomes one safe durable terminal reason."""
+        del monkeypatch
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+        item = _issue_item(2797, StageName.IMPLEMENTATION)
+        item.state = "REBASE_WAIT"
+        credential_value = "DIAGNOSTIC_" + "VALUE"
+        job = GitJob(repo="repo-a", op="rebase", timeout_s=60)
+        handle = JobHandle(job=job, on_done_state="REBASE_WAIT")
+        claim_test_item(coordinator, item)
+        coordinator.in_flight[handle] = item
+        coordinator.inflight_per_repo[item.repo] = 1
+
+        coordinator._handle_completion(
+            handle,
+            JobResult(
+                ok=False,
+                error="publish failed: transport failure",
+                value={
+                    "failure_kind": "publish_transport_failed",
+                    "publication_failure_diagnostic": {
+                        "failure_kind": "publication",
+                        "phase": "push",
+                        "head_sha": "a" * 40,
+                        "returncode": 1,
+                        "exception_class": "CalledProcessError",
+                        "remote_state": "unchanged",
+                    },
+                },
+                stderr_tail=f"hook rejected api_key={credential_value}",
+            ),
+        )
+
+        assert item.result is not None
+        assert item.result.reason.startswith("implementation_rebase_failed: ")
+        assert "failure_kind=publication" in item.result.reason
+        assert "stderr=hook rejected api_key=<redacted>" in item.result.reason
+        assert credential_value not in item.result.reason
+        assert len(item.result.reason) <= 500
+        event_text = event_log_path.read_text()
+        assert credential_value not in event_text
+        assert "api_key=<redacted>" in event_text
+
     def test_merge_wait_late_thread_stand_down_is_terminal_not_rerouted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1665,6 +1872,23 @@ class TestFailBackRouting:
 
         assert item.stage is StageName.IMPLEMENTATION
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
+
+    def test_changed_plan_fail_back_forces_a_new_planning_epoch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The coordinator keeps plan drift through the planning handoff."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(4, StageName.PLAN_REVIEW)
+        coordinator._push_item(item, StageName.PLAN_REVIEW, enter=False)
+
+        coordinator._route(
+            claim_test_item(coordinator, item),
+            StageOutcome(Disposition.FAIL_BACK, "plan_changed"),
+        )
+
+        assert item.stage is StageName.PLANNING
+        assert len(coordinator.queues[StageName.PLANNING]) == 1
+        assert item.payload["update_plan_required"] is True
 
     def test_empty_pr_diff_routes_to_substantive_implementation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3701,6 +3925,87 @@ class TestImplementationAdmission:
 class TestDurableEventLog:
     """Optional JSONL event log mirrors the coordinator's in-memory event log."""
 
+    def test_event_log_write_rejects_symlink(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An event-log symlink cannot redirect diagnostic records."""
+        target = tmp_path / "target"
+        target.write_text("existing data\n", encoding="utf-8")
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        event_log_path.symlink_to(target)
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            coordinator._record_event("probe")
+
+        assert target.read_text(encoding="utf-8") == "existing data\n"
+        assert coordinator._event_log_disabled is True
+        assert any(
+            "failed to write pipeline event log" in record.message for record in caplog.records
+        )
+
+    def test_event_log_write_creates_private_regular_file(self, tmp_path: Path) -> None:
+        """A new event log is a private regular file owned by the process user."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+
+        coordinator._record_event("probe")
+
+        status = event_log_path.lstat()
+        assert stat.S_ISREG(status.st_mode)
+        assert stat.S_IMODE(status.st_mode) == 0o600
+        assert status.st_uid == os.geteuid()
+
+    def test_event_log_write_creates_missing_private_parent(self, tmp_path: Path) -> None:
+        """An explicit nested event path creates a secure missing parent."""
+        event_log_path = tmp_path / "nested" / "missing" / "pipeline-events.jsonl"
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+
+        coordinator._record_event("probe")
+
+        assert json.loads(event_log_path.read_text(encoding="utf-8"))["event"] == "probe"
+        assert coordinator._event_log_disabled is False
+        for directory in (event_log_path.parent.parent, event_log_path.parent):
+            status = directory.lstat()
+            assert stat.S_ISDIR(status.st_mode)
+            assert stat.S_IMODE(status.st_mode) == 0o700
+            assert status.st_uid == os.geteuid()
+
     def test_run_start_records_bounded_executable_provenance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4336,6 +4641,268 @@ class TestDurableEventLog:
         assert stdout_secret not in event_text
         assert stderr_secret not in event_text
         assert "<redacted>" in event_text
+
+    @pytest.mark.parametrize(
+        ("worker_path", "diagnostic_name"),
+        (
+            ("host_file", "stdout_tail"),
+            ("host_file", "stderr_tail"),
+            ("worker_result", "stdout_tail"),
+            ("worker_result", "stderr_tail"),
+            ("called_process", "stdout_tail"),
+            ("called_process", "stderr_tail"),
+            ("codex_parse_failure", "stdout_tail"),
+            ("codex_success", "stdout_tail"),
+            ("agent_parse_failure", "stdout_tail"),
+            ("agent_success", "stdout_tail"),
+            ("build_result", "stdout_tail"),
+            ("build_result", "stderr_tail"),
+        ),
+        ids=(
+            "host-file-stdout",
+            "host-file-stderr",
+            "worker-result-stdout",
+            "worker-result-stderr",
+            "called-process-stdout",
+            "called-process-stderr",
+            "codex-parse-failure",
+            "codex-success",
+            "agent-parse-failure",
+            "agent-success",
+            "build-result-stdout",
+            "build-result-stderr",
+        ),
+    )
+    def test_event_log_redacts_credentials_before_worker_tail_bounds(
+        self,
+        tmp_path: Path,
+        worker_path: str,
+        diagnostic_name: str,
+    ) -> None:
+        """Each worker path redacts a credential before its first tail bound."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        credential_value = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+        stream = f"api_key={credential_value}\n" + ("p" * 3980)
+        first_bounded_tail = stream[-4000:]
+        surviving_suffixes = tuple(
+            credential_value[index:]
+            for index in range(len(credential_value))
+            if credential_value[index:] in first_bounded_tail
+        )
+        assert len(credential_value) == 32
+        assert surviving_suffixes
+        stdout, stderr = _worker_diagnostic_streams(diagnostic_name, stream)
+
+        job: AgentJob | BuildTestJob
+        worker = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            if worker_path == "host_file":
+                source = tmp_path / "source"
+                scratch = tmp_path / "scratch"
+                source.mkdir()
+                scratch.mkdir()
+                stream_name = {"stdout_tail": "stdout", "stderr_tail": "stderr"}[diagnostic_name]
+                result = worker_pool_module._run_bounded_host_command(
+                    (
+                        sys.executable,
+                        "-c",
+                        "import sys; getattr(sys, sys.argv[1]).write(sys.argv[2])",
+                        stream_name,
+                        stream,
+                    ),
+                    validation_argv=("uv", "run", "pytest"),
+                    source=source,
+                    scratch=scratch,
+                    environment=dict(os.environ),
+                    timeout_s=10,
+                    shutdown=threading.Event(),
+                )
+                job = BuildTestJob("repo-a", source, ("uv", "run", "pytest"), 10)
+            elif worker_path == "worker_result":
+                job = BuildTestJob("repo-a", tmp_path, ("test-command",), 10)
+                first_result = JobResult(
+                    ok=False,
+                    error="rc=1",
+                    stdout_tail=stdout,
+                    stderr_tail=stderr,
+                )
+                with patch.object(worker, "_execute_job", return_value=first_result):
+                    result = worker._run(job)
+            elif worker_path == "called_process":
+                job = replace(_agent_job(issue=48), cwd=tmp_path)
+                failure = subprocess.CalledProcessError(
+                    1,
+                    ("agent",),
+                    output=stdout,
+                    stderr=stderr,
+                )
+                with (
+                    patch.object(worker_pool_module, "_validate_source_operation_job"),
+                    patch.object(
+                        worker_pool_module,
+                        "_agent_workspace_lease",
+                        return_value=nullcontext(tmp_path),
+                    ),
+                    patch.object(worker, "_invoke_agent", side_effect=failure),
+                ):
+                    result = worker._run_agent(job)
+            elif worker_path.startswith("codex_"):
+                parse = {
+                    "codex_parse_failure": _reject_worker_output,
+                    "codex_success": None,
+                }[worker_path]
+                job = replace(_agent_job(issue=48), agent="codex", cwd=tmp_path, parse=parse)
+                with (
+                    patch.object(
+                        worker_pool_module,
+                        "_uses_codex_implementation_adapter",
+                        return_value=True,
+                    ),
+                    patch.object(worker_pool_module, "validate_agent_execution_support"),
+                    patch.object(
+                        worker,
+                        "_run_codex_implementation",
+                        return_value=AgentRunResult(stream, "", "session-48"),
+                    ),
+                ):
+                    result = worker._invoke_agent(
+                        job,
+                        tmp_path,
+                        deadline_s=60.0,
+                        remaining_timeout=lambda: 10,
+                    )
+            elif worker_path.startswith("agent_"):
+                parse = {
+                    "agent_parse_failure": _reject_worker_output,
+                    "agent_success": None,
+                }[worker_path]
+                job = replace(_agent_job(issue=48), agent="codex", cwd=tmp_path, parse=parse)
+                breaker = MagicMock()
+                breaker.call.side_effect = lambda operation: operation()
+                with (
+                    patch.object(
+                        worker_pool_module,
+                        "_uses_codex_implementation_adapter",
+                        return_value=False,
+                    ),
+                    patch.object(worker_pool_module, "resolve_agent", return_value="codex"),
+                    patch.object(worker_pool_module, "validate_agent_execution_support"),
+                    patch.object(worker_pool_module, "get_circuit_breaker", return_value=breaker),
+                    patch.object(
+                        worker_pool_module,
+                        "run_agent_session",
+                        return_value=AgentRunResult(stream, "", "session-48"),
+                    ),
+                ):
+                    result = worker._invoke_agent(
+                        job,
+                        tmp_path,
+                        deadline_s=60.0,
+                        remaining_timeout=lambda: 10,
+                    )
+            else:
+                job = BuildTestJob("repo-a", tmp_path, ("test-command",), 10)
+                completed = subprocess.CompletedProcess(
+                    job.argv,
+                    1,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+                with (
+                    patch.object(worker_pool_module, "build_python_phase_env", return_value={}),
+                    patch.object(worker_pool_module, "run_subprocess", return_value=completed),
+                ):
+                    result = worker._run_build_test(job)
+        finally:
+            worker.shutdown()
+
+        pool = FakeWorkerPool()
+        pool.queue_result(result)
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                loops=1,
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(pool, None),
+            stages={StageName.PLANNING: StubStage()},
+            install_signals=False,
+        )
+
+        coordinator._submit(
+            claim_test_item(coordinator, _issue_item(48, StageName.PLANNING)),
+            JobRequest(job, "REVIEWED"),
+        )
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        complete = next(record for record in records if record["event"] == "complete")
+        durable_diagnostic = complete["fields"][-1]["diagnostics"][diagnostic_name]
+        assert credential_value not in durable_diagnostic
+        assert all(suffix not in durable_diagnostic for suffix in surviving_suffixes)
+        assert "api_key=<redacted>" in durable_diagnostic
+
+    def test_event_log_redacts_worker_pem_before_git_assignments(self, tmp_path: Path) -> None:
+        """A worker and its durable event mask a complete assigned PEM block."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        begin = "-----BEGIN " + "PRIVATE KEY" + "-----"
+        end = "-----END " + "PRIVATE KEY" + "-----"
+        key_material = "TEST ONLY PRIVATE KEY BODY"
+        stream = f"before\nclient_secret={begin}\n{key_material}\n{end}\nafter"
+        job = BuildTestJob("repo-a", tmp_path, ("test-command",), 10)
+        worker = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=queue.Queue(),
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            with patch.object(
+                worker,
+                "_execute_job",
+                return_value=JobResult(ok=False, error="rc=1", stderr_tail=stream),
+            ):
+                result = worker._run(job)
+        finally:
+            worker.shutdown()
+
+        assert key_material not in result.stderr_tail
+        assert result.stderr_tail == "before\nclient_secret=<redacted>\nafter"
+
+        pool = FakeWorkerPool()
+        pool.queue_result(result)
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                loops=1,
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(pool, None),
+            stages={StageName.PLANNING: StubStage()},
+            install_signals=False,
+        )
+        coordinator._submit(
+            claim_test_item(coordinator, _issue_item(49, StageName.PLANNING)),
+            JobRequest(job, "REVIEWED"),
+        )
+        coordinator._drain_completions()
+
+        event_text = event_log_path.read_text()
+        assert key_material not in event_text
+        assert "client_secret=<redacted>" in event_text
 
     def test_submit_forwards_claim_context_to_worker_pool(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -183,6 +183,24 @@ def build_git_signing_env(*, global_config: Path | None = None) -> dict[str, str
     return env
 
 
+def build_check_only_git_env() -> dict[str, str]:
+    """Keep the supplied candidate Git state without unrelated parent values."""
+    env = build_git_child_env()
+    values = {
+        "GIT_INDEX_FILE": os.environ.get("GIT_INDEX_FILE"),
+        "GIT_OBJECT_DIRECTORY": os.environ.get("GIT_OBJECT_DIRECTORY"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.environ.get("GIT_ALTERNATE_OBJECT_DIRECTORIES"),
+    }
+    for name, value in values.items():
+        if value is None:
+            continue
+        if not validate_environment_value(APPROVED_ENV_BY_NAME[name], value):
+            raise ValueError("The supplied check-only Git environment is invalid")
+        env[name] = value
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
+
+
 def build_remote_git_env() -> dict[str, str]:
     """Add approved GitHub credentials only for remote Git operations."""
     env = build_git_signing_env()
@@ -310,6 +328,7 @@ def with_correlation_id(environment: Mapping[str, str], trace_id: str | None) ->
 
 
 __all__ = [
+    "build_check_only_git_env",
     "build_claude_child_env",
     "build_codex_child_env",
     "build_codex_implementation_child_env",
