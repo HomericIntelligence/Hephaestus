@@ -134,9 +134,9 @@ class _Publication:
             0o600,
             dir_fd=parent,
         )
-        expected = node(os.fstat(descriptor))
-        self.files.append((parent, leaf, expected, ()))
         try:
+            expected = node(os.fstat(descriptor))
+            self.files.append((parent, leaf, expected, ()))
             offset = 0
             while offset < len(data):
                 remaining(self.deadline)

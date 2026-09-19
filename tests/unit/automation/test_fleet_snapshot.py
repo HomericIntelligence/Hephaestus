@@ -1892,3 +1892,142 @@ def test_receiver_closes_duplicate_when_initial_metadata_read_fails(
             if remaining_metadata is not None:
                 assert (remaining_metadata.st_dev, remaining_metadata.st_ino) == artifact_identity
                 real_close(owned_duplicate)
+
+
+class _PublicationMetadataProbe:
+    """Inject one metadata failure after a real output file is open."""
+
+    def __init__(self, leaf: Path, case: str) -> None:
+        """Keep real OS calls and the identity of the selected fixture file."""
+        self.leaf = leaf
+        self.case = case
+        self.real_fstat = os.fstat
+        self.real_close = os.close
+        self.real_rmdir = os.rmdir
+        self.descriptor: int | None = None
+        self.identity: tuple[int, int] | None = None
+        self.foreign_identity: tuple[int, int] | None = None
+        self.moved = leaf.parent.parent / "retained-open-file"
+        self.foreign_bytes = b"retain replacement data\n"
+        self.failure = OSError(errno.EIO, "controlled initial output metadata failure")
+        self.cleanup_failure = PermissionError(errno.EACCES, "controlled cleanup refusal")
+        self.metadata_failed = False
+        self.cleanup_refused = False
+
+    def fstat(self, descriptor: int) -> os.stat_result:
+        """Fail the first metadata probe of the real newly created output file."""
+        metadata = self.real_fstat(descriptor)
+        if self.descriptor is None and stat.S_ISREG(metadata.st_mode) and self.leaf.exists():
+            selected = self.leaf.lstat()
+            identity = (metadata.st_dev, metadata.st_ino)
+            if identity == (selected.st_dev, selected.st_ino):
+                self.descriptor = descriptor
+                self.identity = identity
+                if self.case == "foreign-replacement":
+                    self.leaf.rename(self.moved)
+                    self.leaf.write_bytes(self.foreign_bytes)
+                    foreign = self.leaf.lstat()
+                    self.foreign_identity = (foreign.st_dev, foreign.st_ino)
+                if self.case != "control":
+                    self.metadata_failed = True
+                    raise self.failure
+        return metadata
+
+    def rmdir(self, path: Any, *, dir_fd: int | None = None) -> None:
+        """Refuse cleanup only for this test's newly created output directory."""
+        if self.case == "cleanup-refused" and self.metadata_failed:
+            selected = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+            output = self.leaf.parent.lstat()
+            if (selected.st_dev, selected.st_ino) == (output.st_dev, output.st_ino):
+                self.cleanup_refused = True
+                raise self.cleanup_failure
+        self.real_rmdir(path, dir_fd=dir_fd)
+
+    def close_fixture_leak(self) -> None:
+        """Close only an inode-confirmed fixture leak after the product assertions."""
+        if self.descriptor is not None:
+            metadata = _snapshot_duplicate_metadata(self.descriptor, self.real_fstat)
+            if metadata is not None:
+                assert (metadata.st_dev, metadata.st_ino) == self.identity
+                self.real_close(self.descriptor)
+
+
+@pytest.mark.parametrize("operation", ["export", "restore"])
+@pytest.mark.parametrize(
+    "case", ["control", "metadata-fails", "cleanup-refused", "foreign-replacement"]
+)
+def test_publication_closes_file_when_initial_metadata_read_fails(
+    source: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    case: str,
+) -> None:
+    """Close the output handle and report any output whose cleanup is uncertain."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    target = tmp_path / "new-output"
+    leaf = target / ("source.tar" if operation == "export" else ".gitignore")
+    caller = tmp_path / "caller-data"
+    caller.mkdir(mode=0o700)
+    (caller / "sentinel").write_bytes(b"retain caller data\n")
+    source_before = tree_state(source)
+    artifact_before = tree_state(artifact)
+    caller_before = tree_state(caller)
+    probe = _PublicationMetadataProbe(leaf, case)
+    result: dict[str, Any] | Path | None = None
+    diagnostic = ""
+
+    def publish_output() -> dict[str, Any] | Path:
+        if operation == "export":
+            return export_snapshot(source, target, reference="snapshot-1", policy=policy)
+        return restore_snapshot(artifact, target, commitment=commitment, policy=policy)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fstat", probe.fstat)
+            patch.setattr(os, "rmdir", probe.rmdir)
+            if case == "control":
+                result = publish_output()
+            else:
+                with pytest.raises(SnapshotError) as caught:
+                    publish_output()
+                assert caught.value.__cause__ is probe.failure
+                diagnostic = "".join(traceback.format_exception(caught.value))
+
+        assert probe.descriptor is not None, "the fixture did not reach the new output handle"
+        assert probe.metadata_failed == (case != "control")
+        closed = _snapshot_duplicate_metadata(probe.descriptor, probe.real_fstat) is None
+        assert tree_state(source) == source_before
+        assert tree_state(artifact) == artifact_before
+        assert tree_state(caller) == caller_before
+
+        if case == "control":
+            if operation == "export":
+                assert result == commitment
+                verify_snapshot(target, commitment=commitment, policy=policy)
+            else:
+                assert result == target
+                assert (target / "recipe.txt").read_bytes() == b"working\n"
+                assert (target / "new.txt").read_bytes() == b"untracked\x00content\n"
+        else:
+            assert result is None
+            assert str(probe.failure) in diagnostic
+            assert any("cleanup" in note for note in getattr(probe.failure, "__notes__", []))
+            assert sorted(path.name for path in target.iterdir()) == [leaf.name]
+            assert stat.S_IMODE(target.stat().st_mode) == 0o700
+            retained = probe.moved if case == "foreign-replacement" else leaf
+            metadata = retained.lstat()
+            assert (metadata.st_dev, metadata.st_ino) == probe.identity
+            assert stat.S_ISREG(metadata.st_mode)
+            assert stat.S_IMODE(metadata.st_mode) == 0o600
+            assert retained.read_bytes() == b""
+        if case == "cleanup-refused":
+            assert probe.cleanup_refused, "the fixture did not reach output-directory cleanup"
+            assert str(probe.cleanup_failure) in diagnostic
+        if case == "foreign-replacement":
+            assert leaf.read_bytes() == probe.foreign_bytes
+            metadata = leaf.lstat()
+            assert (metadata.st_dev, metadata.st_ino) == probe.foreign_identity
+        assert closed, "publication left its new regular-file descriptor open"
+    finally:
+        probe.close_fixture_leak()
