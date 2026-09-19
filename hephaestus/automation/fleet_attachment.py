@@ -165,8 +165,10 @@ class AttachmentEndpoint:
         self.binding_digest = binding_digest(lease)
         self.path = supervisor.journal.directory.resolve() / f"a-{lease_id[:12]}.sock"
         self._stopped = threading.Event()
+        self.ready = threading.Event()
         self._connection_lock = threading.Lock()
         self._connection: socket.socket | None = None
+        self._identity: os.stat_result | None = None
         self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             self._listener.bind(str(self.path))
@@ -175,11 +177,12 @@ class AttachmentEndpoint:
             self._listener.listen(1)
             self._listener.settimeout(0.25)
         except BaseException:
-            self._listener.close()
+            self.close()
             raise
 
     def serve_once(self) -> None:
         """Serve one attachment; a failed or detached stream never disposes a lease."""
+        self.ready.set()
         while not self._stopped.is_set():
             try:
                 channel, _ = self._listener.accept()
@@ -248,7 +251,10 @@ class AttachmentEndpoint:
         self._listener.close()
         with contextlib.suppress(FileNotFoundError):
             current = self.path.lstat()
-            if (current.st_dev, current.st_ino) == (self._identity.st_dev, self._identity.st_ino):
+            if self._identity is not None and (current.st_dev, current.st_ino) == (
+                self._identity.st_dev,
+                self._identity.st_ino,
+            ):
                 self.path.unlink()
 
 

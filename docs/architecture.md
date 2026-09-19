@@ -2958,6 +2958,9 @@ combine those task owners.
 
 [`WorkerJournal`](../hephaestus/automation/fleet_journal.py) records command
 intent before provider dispatch and retains uncertain outcomes for recovery.
+It also records an unresolved runtime attempt before provider startup. A recorded
+PID or confirmed cleanup resolves that marker. Failed initialization or PID
+recording with uncertain cleanup keeps restart blocked for reconciliation.
 These private receipts cannot authorize a replacement task. Public facts contain
 bounded activity metadata. Prompts, tool requests, answers, and credentials stay
 on private worker storage and attachments.
@@ -2999,6 +3002,22 @@ The registry checks private socket directories against all configured workspaces
 the supervisor persists declared private roots and checks future mounts and
 unresolved leases against them. Metadata alone cannot prove containment.
 
+[`ContainedRuntime`](../hephaestus/automation/fleet_runtime.py) is the local
+startup and shutdown owner for this fixed resource set. The CLI selects it
+with an optional private `--contained-config` file. It checks retained worker
+ownership and the complete assignment inventory, prepares inert leases, and
+serves the attachment endpoints before starting the shared provider. A complete
+unchanged inventory of unstarted leases retains its identities across restart.
+Active, uncertain, partial, or changed inventories require reconciliation.
+The configuration has no task or command authority.
+
+The runtime closes the provider and attachment streams with finite waits. It
+attempts all acquired local cleanup after a partial failure. A live endpoint
+thread or failed engine attachment cleanup keeps the supervisor journal writer
+owned. Cleanup can be retried for those local resources. This does not retry
+container creation, attachment, or removal. Containers and workspaces remain
+reserved until the existing causal disposal path confirms their release.
+
 For a worker with a fixed environment registry, cancellation also requires the
 matching `ContainedExecSupervisor`. The worker checks the immutable lease before
 disposal, verifies the supervisor's causal disposal receipt, and retains a private
@@ -3015,8 +3034,8 @@ completed turn also retains its container and does not complete the issue.
 Native macOS and shared Linux session admission remain disabled by
 [`fleet_isolation`](../hephaestus/automation/fleet_isolation.py).
 The next execution gates must prove restricted thread startup, normal tool
-routing, and cold-resume ownership through this attachment. The default CLI does
-not provision a supervisor or admit a contained session. Preserve the disabled
+routing, and cold-resume ownership through this attachment. The optional CLI
+configuration provisions the supervisor but does not enable admission. Preserve the disabled
 local fallback. The [Fleet worker design and runbook](fleet-worker.md)
 records the supported contracts, bounded probes, and remaining gates.
 

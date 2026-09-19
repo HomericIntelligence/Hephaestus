@@ -34,6 +34,16 @@ def _private_directory(path: Path) -> Path:
     return path.resolve(strict=True)
 
 
+def _stop_attachment(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+
+
 class PodmanEngine:
     """Use a fixed executable, private environment, and explicit owned Unix socket."""
 
@@ -192,18 +202,26 @@ class PodmanEngine:
 
     def close(self) -> None:
         """Close local attachment processes without declaring contained work stopped."""
+        failures: list[BaseException] = []
+        retained = []
         for process in self.attachments:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=2)
+            process_failures: list[BaseException] = []
+            try:
+                _stop_attachment(process)
+            except BaseException as error:
+                process_failures.append(error)
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
-                    stream.close()
-        self.attachments.clear()
+                    try:
+                        stream.close()
+                    except BaseException as error:
+                        process_failures.append(error)
+            if process_failures:
+                retained.append(process)
+                failures.extend(process_failures)
+        self.attachments = retained
+        if failures:
+            raise BaseExceptionGroup("engine_attachment_cleanup_failed", failures)
 
 
 def _read(path: Path) -> str:
