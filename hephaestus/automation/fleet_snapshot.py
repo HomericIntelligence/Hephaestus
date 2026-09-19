@@ -296,9 +296,9 @@ def _read_regular_at(
 ) -> tuple[bytes, int]:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     descriptors = [os.dup(descriptor)]
-    root_id = _identity(os.fstat(descriptors[0]))
     bindings: list[tuple[int, str, tuple[int, ...]]] = []
     try:
+        root_id = _identity(os.fstat(descriptors[0]))
         for part in name.split("/")[:-1]:
             parent = descriptors[-1]
             descriptor = os.open(part, flags | os.O_DIRECTORY, dir_fd=parent)

@@ -15,6 +15,7 @@ import tarfile
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1793,3 +1794,101 @@ def test_artifact_membership_scan_stops_at_refusal_or_deadline(
             assert all(1 <= len(scan.names) <= 2 for scan in scans)
             diagnostic = "".join(traceback.format_exception(caught.value))
             assert "operation deadline" in diagnostic
+
+
+def _snapshot_duplicate_metadata(
+    descriptor: int, fstat: Callable[[int], os.stat_result]
+) -> os.stat_result | None:
+    """Return real handle metadata, or None only when the handle is closed."""
+    try:
+        return fstat(descriptor)
+    except OSError as error:
+        if error.errno != errno.EBADF:
+            raise
+        return None
+
+
+@pytest.mark.parametrize("operation", ["verify", "restore"])
+@pytest.mark.parametrize("metadata_fails", [False, True], ids=["control", "metadata-fails"])
+def test_receiver_closes_duplicate_when_initial_metadata_read_fails(
+    source: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    metadata_fails: bool,
+) -> None:
+    """A receiver closes its duplicate after a failed initial metadata read."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    destination = tmp_path / "restored"
+    caller = tmp_path / "caller-data"
+    caller.mkdir(mode=0o700)
+    (caller / "sentinel").write_bytes(b"retain caller data\n")
+    source_before = tree_state(source)
+    artifact_before = tree_state(artifact)
+    caller_before = tree_state(caller)
+    before = tree_state(tmp_path)
+    metadata = artifact.stat()
+    artifact_identity = (metadata.st_dev, metadata.st_ino)
+    real_dup = os.dup
+    real_fstat = os.fstat
+    real_close = os.close
+    owned_duplicate: int | None = None
+    initial_probe_seen = False
+    failure_count = 0
+    failure = OSError(errno.EIO, "controlled initial duplicate metadata failure")
+
+    def duplicate(descriptor: int) -> int:
+        nonlocal owned_duplicate
+        result = real_dup(descriptor)
+        metadata = real_fstat(descriptor)
+        if owned_duplicate is None and (metadata.st_dev, metadata.st_ino) == artifact_identity:
+            owned_duplicate = result
+        return result
+
+    def probe(descriptor: int) -> os.stat_result:
+        nonlocal initial_probe_seen, failure_count
+        if descriptor == owned_duplicate and not initial_probe_seen:
+            initial_probe_seen = True
+            if metadata_fails:
+                failure_count += 1
+                raise failure
+        return real_fstat(descriptor)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "dup", duplicate)
+            patch.setattr(os, "fstat", probe)
+            if metadata_fails:
+                with pytest.raises(SnapshotError) as caught:
+                    receive_snapshot(operation, artifact, destination, commitment, policy)
+                assert str(failure) in "".join(traceback.format_exception(caught.value))
+            else:
+                receive_snapshot(operation, artifact, destination, commitment, policy)
+
+        assert owned_duplicate is not None, "the receiver did not duplicate the artifact handle"
+        assert initial_probe_seen, "the receiver did not inspect the duplicated handle"
+        assert failure_count == int(metadata_fails)
+        closed = _snapshot_duplicate_metadata(owned_duplicate, real_fstat) is None
+
+        assert tree_state(source) == source_before
+        assert tree_state(artifact) == artifact_before
+        assert tree_state(caller) == caller_before
+        if metadata_fails or operation == "verify":
+            assert not destination.exists()
+            assert tree_state(tmp_path) == before
+        else:
+            assert (destination / "recipe.txt").read_bytes() == b"working\n"
+            assert sorted(path.name for path in destination.iterdir()) == [
+                ".gitignore",
+                "mode.sh",
+                "new.txt",
+                "recipe.txt",
+            ]
+        assert closed, "the receiver left its duplicated artifact descriptor open"
+    finally:
+        # Release a fixture-owned leak only after the product assertion fails.
+        if owned_duplicate is not None:
+            remaining_metadata = _snapshot_duplicate_metadata(owned_duplicate, real_fstat)
+            if remaining_metadata is not None:
+                assert (remaining_metadata.st_dev, remaining_metadata.st_ino) == artifact_identity
+                real_close(owned_duplicate)
