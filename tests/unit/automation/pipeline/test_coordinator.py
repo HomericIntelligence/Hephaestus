@@ -146,6 +146,26 @@ def _writer_repository(tmp_path: Path) -> tuple[Path, str]:
     return repo, revision
 
 
+def _complete_rebase_discovery(coordinator: Coordinator, handle: JobHandle, item: WorkItem) -> None:
+    """Complete the source read before inspecting the rebase request."""
+    assert isinstance(handle.job, GitJob)
+    assert handle.job.op == "discover_pending_rebase"
+    receipt = item.payload["_impl_source_receipt"]
+    assert hasattr(receipt, "to_dict")
+    coordinator._handle_completion(
+        handle,
+        JobResult(
+            ok=True,
+            value={
+                "discovery_request_id": handle.job.kwargs["discovery_request_id"],
+                "source_workspace": item.payload["_impl_source_workspace"],
+                "source_receipt": receipt.to_dict(),
+                "rebase_recovery_candidate": None,
+            },
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class _CallerState:
     """Store the complete caller state that intake must preserve."""
@@ -2101,6 +2121,8 @@ class TestImplementationAdmission:
             "branch": branch,
             "base_sha": base_revision,
         }
+        discovery_handle, _discovery_result = coordinator.completion_q.get_nowait()
+        _complete_rebase_discovery(coordinator, discovery_handle, item)
         rebase_handle, _rebase_result = coordinator.completion_q.get_nowait()
         assert isinstance(rebase_handle.job, GitJob)
         assert rebase_handle.job.op == "rebase"
@@ -2217,7 +2239,9 @@ class TestImplementationAdmission:
                 "issue_body": "Continue after a clean restart.",
             },
         )
-        coordinator._ctx_for(item).paths.source_workspaces = source_manager
+        paths = coordinator._ctx_for(item).paths
+        paths.repo_root = repo
+        paths.source_workspaces = source_manager
         worktree_handle = JobHandle(job=second_job, on_done_state="DIRTY_DECISION_WAIT")
         claim_test_item(coordinator, item)
         coordinator.in_flight[worktree_handle] = item
@@ -2225,6 +2249,8 @@ class TestImplementationAdmission:
 
         coordinator._handle_completion(worktree_handle, restarted_result)
 
+        discovery_handle, _discovery_result = coordinator.completion_q.get_nowait()
+        _complete_rebase_discovery(coordinator, discovery_handle, item)
         rebase_handle, _rebase_result = coordinator.completion_q.get_nowait()
         assert isinstance(rebase_handle.job, GitJob)
         assert rebase_handle.job.op == "rebase"
@@ -2323,7 +2349,9 @@ class TestImplementationAdmission:
                 "issue_body": "Continue after a clean adopted restart.",
             },
         )
-        coordinator._ctx_for(item).paths.source_workspaces = source_manager
+        paths = coordinator._ctx_for(item).paths
+        paths.repo_root = repo
+        paths.source_workspaces = source_manager
         worktree_handle = JobHandle(job=job, on_done_state="DIRTY_DECISION_WAIT")
         claim_test_item(coordinator, item)
         coordinator.in_flight[worktree_handle] = item
@@ -2331,6 +2359,8 @@ class TestImplementationAdmission:
 
         coordinator._handle_completion(worktree_handle, restarted_result)
 
+        discovery_handle, _discovery_result = coordinator.completion_q.get_nowait()
+        _complete_rebase_discovery(coordinator, discovery_handle, item)
         rebase_handle, _rebase_result = coordinator.completion_q.get_nowait()
         assert isinstance(rebase_handle.job, GitJob)
         assert rebase_handle.job.op == "rebase"

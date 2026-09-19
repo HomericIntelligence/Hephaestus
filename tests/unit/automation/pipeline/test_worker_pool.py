@@ -71,6 +71,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     ReplyJournalAppended,
 )
 from hephaestus.automation.pipeline.host_capabilities import (
+    CapabilityRequestTarget,
     SigningConfigurationError,
     WorkerCapabilities,
 )
@@ -15772,19 +15773,52 @@ class TestGitOps:
         )
         relative_path = "tests/test_gateway_lifecycle.py"
         source = checkout / relative_path
+        binding = WorkspaceBinding.source(
+            cwd=checkout,
+            reusable_root=checkout,
+            repository="test/repo",
+            ownership_key="test/repo:7:impl",
+            item_number=7,
+            lane=SourceLane.IMPLEMENTATION,
+            revision=expected_remote_sha,
+            generation=0,
+            detached=False,
+        )
+        capability_target = CapabilityRequestTarget(
+            "test/repo",
+            7,
+            1007,
+            checkout,
+            checkout,
+            expected_remote_sha,
+            "rebase",
+            "scratch",
+            "a" * 32,
+            workspace=binding,
+            generation=1,
+        )
         rebase_job = GitJob(
             repo="test/repo",
             op="rebase",
             timeout_s=60,
+            workspace=binding,
+            capability_target=capability_target,
             kwargs={
                 "cwd": checkout,
                 "base_branch": "main",
                 "remote": "origin",
+                "issue_number": 7,
+                "pr_number": 1007,
                 "publish_rebased_head": True,
                 "branch": "7-auto-impl",
                 "expected_remote_sha": expected_remote_sha,
                 "rebase_reason": "review_conflict",
             },
+        )
+        record_source = Mock(
+            side_effect=lambda head: replace(
+                binding, revision=head, generation=binding.generation + 1
+            )
         )
 
         with (
@@ -15797,9 +15831,10 @@ class TestGitOps:
                 return_value=(os.environ.copy(), ()),
             ),
         ):
-            paused = pool._git_rebase(rebase_job, record_source=Mock())
+            paused = pool._git_rebase(rebase_job, record_source=record_source)
 
             assert paused.ok is False
+            record_source.assert_not_called()
             assert paused.error == "mechanical rebase hit conflicts; resolution required"
             assert isinstance(paused.value, dict)
             assert paused.value["conflict_paths"] == (relative_path,)
@@ -15820,7 +15855,16 @@ class TestGitOps:
                 key: value for key, value in paused.value.items() if key != "rebased"
             }
             continuation_kwargs.update(
-                {"cwd": checkout, "remote": "origin", "branch": "7-auto-impl"}
+                {
+                    "cwd": checkout,
+                    "remote": "origin",
+                    "branch": "7-auto-impl",
+                    "publish_rebased_head": True,
+                    "expected_head_sha": expected_remote_sha,
+                    "rebase_reason": "review_conflict",
+                    "pr_number": 1007,
+                    "direct_scope_reservation": None,
+                }
             )
             validation_job = GitJob(
                 repo="test/repo",
@@ -15853,14 +15897,22 @@ class TestGitOps:
             assert validated.value["conflict_resolution"] == "resolved_content"
             assert status_after_validation == status_before_validation
 
+            continuation_target = replace(
+                capability_target,
+                expected_head_sha=expected_remote_sha,
+                request_id="b" * 32,
+                generation=2,
+            )
             continued = pool._git_continue_rebase(
                 GitJob(
                     repo="test/repo",
                     op="continue_rebase",
                     timeout_s=60,
+                    workspace=binding,
+                    capability_target=continuation_target,
                     kwargs=continuation_kwargs,
                 ),
-                record_source=Mock(),
+                record_source=record_source,
             )
 
         assert continued.ok is True
@@ -15880,6 +15932,7 @@ class TestGitOps:
             == ""
         )
         published_sha = str(continued.value["head_sha"])
+        record_source.assert_called_once_with(published_sha)
         assert (
             subprocess.run(
                 ["git", "ls-remote", "origin", "refs/heads/7-auto-impl"],
