@@ -22458,14 +22458,37 @@ class TestShutdownReapsSubprocess:
         with pytest.raises(ProcessLookupError):
             os.kill(child_pid, 0)
 
+    @pytest.mark.parametrize("global_settings", ["absent", "invalid", "valid"])
     def test_shutdown_terminates_registered_pi_adapter_subprocess_fast(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
+        global_settings: str,
     ) -> None:
         """A registered Pi adapter exposes its child to worker-pool cleanup."""
+        test_home = tmp_path / "test-home"
+        test_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+        if global_settings != "absent":
+            settings = test_home / ".pi" / "agent" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            settings.write_text(
+                "{invalid"
+                if global_settings == "invalid"
+                else json.dumps(
+                    {
+                        "defaultProvider": "fixture-provider",
+                        "defaultModel": "fixture-model",
+                        "defaultThinkingLevel": "high",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            settings.chmod(0o600)
+        pi_dir = tmp_path / "isolated-pi"
+        pi_dir.mkdir(mode=0o700)
         sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
 
         class Adapter:
@@ -22530,6 +22553,7 @@ class TestShutdownReapsSubprocess:
             timeout_s=60,
             session_agent="implementer",
             cwd=tmp_path,
+            pi_dir=pi_dir,
             execution_request=request,
         )
 
