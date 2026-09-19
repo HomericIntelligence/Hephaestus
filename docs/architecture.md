@@ -2932,3 +2932,30 @@ routing, and cold-resume ownership through this attachment. The default CLI does
 not provision a supervisor or admit a contained session. Preserve the disabled
 local fallback. The [Fleet worker design and runbook](fleet-worker.md)
 records the supported contracts, bounded probes, and remaining gates.
+
+### Private retained build logs
+
+The separate
+[`BuildArtifactServer`](../hephaestus/automation/fleet_build_artifact_server.py)
+serves terminal build output over authenticated loopback HTTPS. Agamemnon
+retains work admission and durable decisions. Odysseus reads logs through
+Agamemnon. This service does not change the worker socket, metrics interface,
+or execution gates.
+
+[`ArtifactCatalog`](../hephaestus/automation/fleet_build_artifacts.py) loads
+explicit private registrations before the listener starts. Each registration
+pins the receipt, complete identity, admitted build attempt, worker allocation
+and generation, snapshot, and terminal log commitment. The loader checks fixed
+member bytes and retains an immutable historical view in memory. HTTP requests
+cannot select a file path, add a registration, or change that view.
+
+Pages use the existing `hi/fleet/build-logs/v1` schema and UTF-8 byte cursors.
+The service always reports `truncated=true` because the current producer
+receipt does not prove complete original capture. `complete` means retained
+EOF. A log read does not verify current source, prove cleanup, or set
+`collectionVerified`.
+
+The [private build-log runbook](fleet-build-artifacts.md) specifies file
+ownership, explicit TLS trust, bearer delivery, bounded operation, and restart.
+Producer registration and actual Agamemnon-to-service deployment remain
+separate gates. Keep controller log reads disabled until those gates pass.
