@@ -123,6 +123,17 @@ class TestLoadCoverageThreshold:
             load_coverage_threshold(tmp_path)
         assert exc.value.code == 1
 
+    def test_invalid_toml_exits_with_parse_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _write_pyproject(tmp_path, "[tool.coverage\n")
+
+        with pytest.raises(SystemExit) as exc:
+            load_coverage_threshold(tmp_path)
+
+        assert exc.value.code == 1
+        assert "Could not parse" in capsys.readouterr().err
+
 
 class TestExtractCovPath:
     """Tests for extract_cov_path()."""
@@ -141,6 +152,51 @@ class TestExtractCovPath:
         with pytest.raises(SystemExit) as exc:
             extract_cov_path(tmp_path)
         assert exc.value.code == 1
+
+    def test_invalid_workflow_yaml_exits_with_parse_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        workflow_path = tmp_path / ".github" / "workflows" / "nightly-tests.yml"
+        workflow_path.parent.mkdir(parents=True)
+        workflow_path.write_text("jobs: [\n")
+
+        with pytest.raises(SystemExit) as exc:
+            extract_cov_path(tmp_path)
+
+        assert exc.value.code == 1
+        assert "Could not parse" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "workflow",
+        [
+            "{}\n",
+            "jobs: []\n",
+            "jobs:\n  unit-coverage: []\n",
+            "jobs:\n  unit-coverage:\n    steps: {}\n",
+            "jobs:\n  unit-coverage:\n    steps:\n      - not-a-mapping\n",
+            "jobs:\n  unit-coverage:\n    steps:\n      - run: 123\n",
+        ],
+        ids=[
+            "missing-jobs",
+            "jobs-not-mapping",
+            "coverage-job-not-mapping",
+            "steps-not-list",
+            "step-not-mapping",
+            "run-not-string",
+        ],
+    )
+    def test_invalid_workflow_shapes_exit_without_cov_path(
+        self, tmp_path: Path, workflow: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        workflow_path = tmp_path / ".github" / "workflows" / "nightly-tests.yml"
+        workflow_path.parent.mkdir(parents=True)
+        workflow_path.write_text(workflow)
+
+        with pytest.raises(SystemExit) as exc:
+            extract_cov_path(tmp_path)
+
+        assert exc.value.code == 1
+        assert "No --cov=<path> found" in capsys.readouterr().err
 
 
 class TestExtractCovFailUnder:
@@ -367,6 +423,107 @@ class TestCheckDocConfigConsistency:
         assert result == 1
         assert "DEFINITION_OF_DONE.md" in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        ("case", "expected_message"),
+        [
+            ("missing-agents", "AGENTS.md not found"),
+            ("missing-dod", "DEFINITION_OF_DONE.md not found"),
+            ("missing-readme", "README.md not found"),
+            ("readme-cov-mismatch", "--cov path mismatch"),
+            ("addopts-mismatch", "--cov-fail-under mismatch"),
+            ("test-count-mismatch", "Test count mismatch"),
+        ],
+    )
+    def test_reports_public_consistency_error_formats(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        case: str,
+        expected_message: str,
+    ) -> None:
+        self._setup_valid_repo(tmp_path)
+        skip_test_count = True
+
+        if case == "missing-agents":
+            (tmp_path / "AGENTS.md").unlink()
+        elif case == "missing-dod":
+            (tmp_path / "docs" / "DEFINITION_OF_DONE.md").unlink()
+        elif case == "missing-readme":
+            (tmp_path / "README.md").unlink()
+        elif case == "readme-cov-mismatch":
+            (tmp_path / "README.md").write_text("Run pytest --cov=other-package")
+        elif case == "addopts-mismatch":
+            _write_pyproject(
+                tmp_path,
+                _minimal_pyproject(
+                    fail_under=80,
+                    addopts='addopts = ["--cov=hephaestus", "--cov-fail-under=70"]',
+                ),
+            )
+        else:
+            (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus\nWe have 1 tests.")
+            monkeypatch.setattr(
+                "hephaestus.validation.doc_config.collect_actual_test_count",
+                lambda _repo_root: 100,
+            )
+            skip_test_count = False
+
+        assert check_doc_config_consistency(tmp_path, skip_test_count=skip_test_count) == 1
+        assert expected_message in capsys.readouterr().err
+
+    def test_verbose_reports_matching_addopts_threshold(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _write_pyproject(
+            tmp_path,
+            _minimal_pyproject(
+                fail_under=80,
+                addopts='addopts = ["--cov=hephaestus", "--cov-fail-under=80"]',
+            ),
+        )
+        _write_nightly_coverage_workflow(tmp_path, "hephaestus")
+        (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
+        (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus")
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "DEFINITION_OF_DONE.md").write_text(
+            "`--cov-fail-under=80` and drops total under 80%."
+        )
+
+        assert check_doc_config_consistency(tmp_path, verbose=True, skip_test_count=True) == 0
+        assert "PASS: addopts --cov-fail-under matches" in capsys.readouterr().out
+
+    def test_verbose_reports_unavailable_test_count(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._setup_valid_repo(tmp_path)
+        monkeypatch.setattr(
+            "hephaestus.validation.doc_config.collect_actual_test_count",
+            lambda _repo_root: None,
+        )
+
+        assert check_doc_config_consistency(tmp_path, verbose=True) == 0
+        assert "SKIP: Could not collect actual test count" in capsys.readouterr().out
+
+    def test_verbose_reports_matching_test_count(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._setup_valid_repo(tmp_path)
+        (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus\nWe have 100 tests.")
+        monkeypatch.setattr(
+            "hephaestus.validation.doc_config.collect_actual_test_count",
+            lambda _repo_root: 100,
+        )
+
+        assert check_doc_config_consistency(tmp_path, verbose=True) == 0
+        assert "PASS: README.md test count is within" in capsys.readouterr().out
+
     def test_verbose_on_pass(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         self._setup_valid_repo(tmp_path)
         check_doc_config_consistency(tmp_path, verbose=True, skip_test_count=True)
@@ -407,6 +564,38 @@ class TestMain:
             ],
         )
         assert main() == 0
+
+    def test_json_reports_matching_test_count(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _write_pyproject(tmp_path, _minimal_pyproject(fail_under=80))
+        _write_nightly_coverage_workflow(tmp_path, "hephaestus")
+        (tmp_path / "AGENTS.md").write_text("We maintain 80%+ test coverage.")
+        (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus\nWe have 100 tests.")
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "DEFINITION_OF_DONE.md").write_text(
+            "`--cov-fail-under=80` and drops total under 80%."
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-check-doc-config", "--repo-root", str(tmp_path), "--json"],
+        )
+        monkeypatch.setattr(
+            "hephaestus.validation.doc_config.collect_actual_test_count",
+            lambda _repo_root: 100,
+        )
+
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload == {
+            "errors": [],
+            "exit_code": 0,
+            "expected_threshold": 80,
+            "passed": True,
+        }
 
     def test_mismatch_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=90))
