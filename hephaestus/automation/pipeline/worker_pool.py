@@ -37,7 +37,7 @@ from contextlib import (
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PureWindowsPath
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import hephaestus.agents.runtime as agent_runtime
 import hephaestus.automation.claude_invoke as claude_invoke
@@ -89,11 +89,18 @@ from hephaestus.agents.workspace import (
 )
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
+from hephaestus.automation.first_publication_recovery import FirstPublicationStore
 from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
 from hephaestus.automation.git_runtime import (
     current_operation_shutdown,
     operation_file_lock,
     operation_file_lock_held,
+)
+from hephaestus.automation.host_capabilities import (
+    QuotaLifecycleError,
+    UnavailableQuotaBackend,
+    hdiutil_create_argv,
+    quota_backed_volume,
 )
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
@@ -111,9 +118,12 @@ from hephaestus.automation.pipeline.diagnostics import (
 from hephaestus.automation.pipeline.git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
+    FIRST_PUBLICATION_CHECK_ARGV,
     IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_METADATA_MAX_BYTES,
     IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
+    FirstPublicationRecord,
+    PendingRebaseRecord,
     validate_git_repository_validation,
 )
 from hephaestus.automation.pipeline.github_jobs import (
@@ -125,6 +135,13 @@ from hephaestus.automation.pipeline.github_jobs import (
     InspectDirtyDirectPrStateRequest,
     InspectRebaseConflictRequest,
     RebaseConflictInspected,
+)
+from hephaestus.automation.pipeline.host_capabilities import (
+    CapabilityReceiptTarget,
+    HostCapabilityRead,
+    HostCapabilityReceipt,
+    SigningConfigurationError,
+    WorkerCapabilities,
 )
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
@@ -147,6 +164,7 @@ from hephaestus.automation.pipeline.jobs import (
     CompactJob,
     DirtyDirectPlanInput,
     GitJob,
+    HostCapabilityJob,
     JobHandle,
     JobResult,
     ProcessFailureMetadata,
@@ -204,6 +222,7 @@ from hephaestus.automation.pyxis_artifact_io import (
     CrossNodePathBinding,
     bind_cross_node_root,
 )
+from hephaestus.automation.rebase_recovery import PendingRebaseStore
 from hephaestus.automation.rebase_review_verification import verify_rebase_tree
 from hephaestus.automation.remediation_prepublication import (
     RemediationPretestCandidate,
@@ -294,7 +313,6 @@ from hephaestus.config.child_environments import (
     build_git_signing_env,
     build_host_verification_env,
     build_python_phase_env,
-    read_approved_parent_env,
 )
 from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.io.utils import write_secure
@@ -428,6 +446,18 @@ def _ordered_git_diagnostics(*values: object) -> str:
     return bounded_pipeline_diagnostic(
         "\n".join(bounded_pipeline_diagnostic(value, limit=per_value_limit) for value in nonempty),
         limit=_TAIL,
+    )
+
+
+def _retain_publication_failure(result: JobResult, prior: JobResult | None) -> JobResult:
+    """Keep earlier push evidence without replacing the later outcome or cause."""
+    if prior is None:
+        return result
+    return replace(
+        result,
+        stdout_tail=_ordered_git_diagnostics(prior.stdout_tail, result.stdout_tail),
+        stderr_tail=_ordered_git_diagnostics(prior.stderr_tail, result.stderr_tail),
+        process_failure=result.process_failure or prior.process_failure,
     )
 
 
@@ -1111,7 +1141,7 @@ def _agent_exception_result(exc: Exception) -> JobResult:
     )
 
 
-class _HostVerificationBoundaryError(RuntimeError):
+class _HostVerificationBoundaryError(QuotaLifecycleError):
     """Raised when a host verification cannot keep PR code contained."""
 
 
@@ -1121,6 +1151,15 @@ class _RebaseSigningEnvironmentError(RuntimeError):
 
 class _RebaseConflictContextError(RuntimeError):
     """Raised when conflict context is incomplete or unsafe to retain."""
+
+
+class _PendingRebaseRemoteReadError(RuntimeError):
+    """Carry a failed remote observation through retained-source admission."""
+
+    def __init__(self, result: JobResult) -> None:
+        """Keep the original failure without treating it as remote drift."""
+        super().__init__(result.error)
+        self.result = result
 
 
 def _validated_conflict_path(cwd: Path, path: str) -> Path:
@@ -1992,73 +2031,22 @@ def _linux_resource_limited_command(command: tuple[str, ...], *, timeout_s: int)
 
 
 def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
-    """Return the valid blank HFS+ image creation argv for quota scratch."""
-    return (
-        "/usr/bin/hdiutil",
-        "create",
-        "-size",
-        f"{_HOST_VERIFICATION_SCRATCH_MAX_BYTES // (1024 * 1024)}m",
-        "-fs",
-        "HFS+",
-        "-quiet",
-        str(image),
-    )
+    """Return the common fixed-size quota image command."""
+    return hdiutil_create_argv(image, _HOST_VERIFICATION_SCRATCH_MAX_BYTES)
 
 
 @contextmanager
 def _quota_backed_volume(root: Path, image_name: str, mountpoint: Path) -> Iterator[Path]:
-    """Mount a fixed-size disposable volume at an already-created mountpoint."""
-    if sys.platform != "darwin":
-        raise _HostVerificationBoundaryError("unsupported_host_verification_boundary")
-    hdiutil = Path("/usr/bin/hdiutil")
-    if not hdiutil.is_file() or not os.access(hdiutil, os.X_OK):
-        raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
-    image = root / image_name
-    create = subprocess.run(
-        _hdiutil_create_argv(image),
-        capture_output=True,
-        timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
-        check=False,
-        env=read_approved_parent_env(),
-    )
-    if create.returncode != 0:
-        raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
-    attached = False
-    try:
-        attach = subprocess.run(
-            (str(hdiutil), "attach", "-nobrowse", "-mountpoint", str(mountpoint), str(image)),
-            capture_output=True,
-            timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
-            check=False,
-            env=read_approved_parent_env(),
-        )
-        if attach.returncode != 0:
-            raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
-        attached = True
-        yield mountpoint
-    finally:
-        if attached:
-            # This mount is a fresh per-command scratch image.  A completed
-            # child can leave a brief busy reference, so retry one bounded
-            # forced detach after a timeout, OS error, or nonzero result.
-            # Retrying here avoids accumulating mounted images in a
-            # long-running validation loop while still failing closed when
-            # cleanup cannot be confirmed.
-            for _attempt in range(2):
-                try:
-                    detach = subprocess.run(
-                        (str(hdiutil), "detach", "-force", str(mountpoint)),
-                        capture_output=True,
-                        timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
-                        check=False,
-                        env=read_approved_parent_env(),
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    continue
-                if detach.returncode == 0:
-                    break
-            else:
-                raise _HostVerificationBoundaryError("host_verification_quota_cleanup_failed")
+    """Use the common quota lifecycle with the existing execution limits."""
+    with quota_backed_volume(
+        root,
+        image_name,
+        mountpoint,
+        maximum_bytes=_HOST_VERIFICATION_SCRATCH_MAX_BYTES,
+        timeout_s=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+        error_type=_HostVerificationBoundaryError,
+    ) as mounted:
+        yield mounted
 
 
 @contextmanager
@@ -2754,14 +2742,6 @@ def _controlled_git_signing_env(
     for index, (key, value) in enumerate(injected.items()):
         env[f"GIT_CONFIG_KEY_{index}"] = key
         env[f"GIT_CONFIG_VALUE_{index}"] = value
-    return env
-
-
-def _required_git_signing_env(cwd: Path, *, timeout: int) -> dict[str, str]:
-    """Return the validated signing environment or surface a typed Git-job error."""
-    env = _controlled_git_signing_env(cwd, timeout=timeout)
-    if isinstance(env, JobResult):
-        raise _RebaseSigningEnvironmentError(env.error or "host signing configuration unavailable")
     return env
 
 
@@ -4788,6 +4768,7 @@ class WorkerPool:
         host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
         host_verification_pyxis_placement: PyxisExecutionPlacement | None = None,
+        host_capabilities: WorkerCapabilities | None = None,
         podman_machine: str | None = None,
         run_identity: str = "unknown",
         git_lock_timeout: int = 7200,
@@ -4818,6 +4799,7 @@ class WorkerPool:
             host_verification_pyxis_authority: Host-owned image provenance file.
             host_verification_pyxis_quota_root: Private capacity-bounded filesystem.
             host_verification_pyxis_placement: Optional host-selected allocation and node.
+            host_capabilities: Explicit quota capability contract for host probes.
             podman_machine: Selected connection for the verified local CI runner.
             run_identity: Bounded identity for holder diagnostics from this run.
             git_lock_timeout: Maximum passive wait for an ordinary Git job.
@@ -4859,6 +4841,7 @@ class WorkerPool:
         self._host_verification_pyxis_authority = host_verification_pyxis_authority
         self._host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
         self._host_verification_pyxis_placement = host_verification_pyxis_placement
+        self._host_capabilities = host_capabilities
 
     @contextmanager
     def _repo_lock(
@@ -4970,7 +4953,13 @@ class WorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | CompactJob
+        | AthenaSkillJob
+        | HostCapabilityJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -5096,7 +5085,13 @@ class WorkerPool:
 
     def _run(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | CompactJob
+        | AthenaSkillJob
+        | HostCapabilityJob,
         claim_key: str = "",
         claim_stage: str = "",
         remediation_owner_id: int | None = None,
@@ -5184,7 +5179,13 @@ class WorkerPool:
 
     def _execute_job(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | CompactJob
+        | AthenaSkillJob
+        | HostCapabilityJob,
         start: float,
         reserve_pretest: Callable[[], None],
     ) -> JobResult:
@@ -5198,6 +5199,8 @@ class WorkerPool:
             result = self._run_agent(job, deadline_s=deadline_s, reserve_pretest=reserve_pretest)
         elif isinstance(job, BuildTestJob):
             result = self._run_build_test(job)
+        elif isinstance(job, HostCapabilityJob):
+            result = self._run_host_capability(job)
         elif isinstance(job, GitJob):
             result = self._run_git(job)
         elif isinstance(job, GitHubJob):
@@ -5207,6 +5210,121 @@ class WorkerPool:
         else:
             raise TypeError(f"unknown job type {type(job)}")
         return result
+
+    def _run_host_capability(self, job: HostCapabilityJob) -> JobResult:
+        """Probe one explicit capability without starting source verification."""
+        receipt: HostCapabilityReceipt | None = None
+        verified_receipt: HostCapabilityReceipt | None = None
+        try:
+            replace(job)
+            deadline = _PreparationDeadline(
+                min(job.deadline_s, time.monotonic() + job.timeout_s),
+                time.monotonic,
+                self._shutdown,
+            )
+            deadline.remaining()
+            binding = job.target.workspace
+            if (
+                job.target.phase != "pr_review"
+                or binding.reusable_root is None
+                or binding.repository is None
+                or binding.reusable_root.resolve(strict=True) != binding.reusable_root
+                or binding.cwd.resolve(strict=True) != binding.cwd
+            ):
+                raise SourceWorkspaceError("The capability source identity is invalid.")
+            manager = SourceWorkspaceManager(
+                binding.reusable_root, repository=binding.repository, base_dir=binding.cwd.parent
+            )
+            with manager.acquire(binding, allowed_tools="Read,Glob,Grep", deadline=deadline):
+                head = git_utils.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=binding.cwd,
+                    timeout=deadline.remaining(),
+                    env=_controlled_git_env(),
+                ).stdout.strip()
+                capabilities = self._host_capabilities
+                backend = None if capabilities is None else capabilities.quota_backend
+                if backend is None:
+                    backend = UnavailableQuotaBackend()
+                target = CapabilityReceiptTarget(
+                    job.target,
+                    binding.reusable_root,
+                    binding.reusable_root.stat().st_dev,
+                    capabilities.execution_boundary_id
+                    if capabilities is not None
+                    else "unavailable",
+                    head,
+                    backend=backend.backend_id,
+                )
+                receipt = backend.preflight(target, deadline=deadline)
+                if type(receipt) is not HostCapabilityReceipt or receipt.target != target:
+                    raise ValueError("The capability receipt source target changed.")
+                replace(receipt)
+                verified_receipt = receipt
+                deadline.remaining()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            if verified_receipt is not None:
+                return JobResult(
+                    ok=False,
+                    error="host_verification_capability_operation_stopped",
+                    interrupted=isinstance(error, InterruptedError),
+                    value=HostCapabilityRead(
+                        job.target,
+                        receipt=verified_receipt,
+                        failure=(
+                            "operation_cancelled"
+                            if isinstance(error, InterruptedError)
+                            else "operation_deadline"
+                        ),
+                    ),
+                    stdout_tail=verified_receipt.stdout_tail,
+                    stderr_tail=verified_receipt.stderr_tail,
+                )
+            return JobResult(
+                ok=False,
+                error="host_verification_capability_source_unavailable",
+                interrupted=isinstance(error, InterruptedError),
+                value=HostCapabilityRead(job.target, failure="source_unavailable"),
+            )
+        return JobResult(
+            ok=receipt.available,
+            error=None if receipt.available else receipt.token,
+            value=HostCapabilityRead(job.target, receipt=receipt),
+            stdout_tail=receipt.stdout_tail,
+            stderr_tail=receipt.stderr_tail,
+        )
+
+    def _signing_environment(
+        self, cwd: Path, *, timeout: int, private_metadata: bool = False
+    ) -> dict[str, str] | JobResult:
+        """Require an explicit provider before any signed Git mutation."""
+        capabilities = self._host_capabilities
+        provider = None if capabilities is None else capabilities.signing_provider
+        try:
+            if provider is None:
+                raise SigningConfigurationError("The signing provider is unavailable.")
+            environment = provider.environment(
+                cwd, timeout=timeout, private_metadata=private_metadata
+            )
+            if not isinstance(environment, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                for key, value in environment.items()
+            ):
+                raise SigningConfigurationError("The signing environment is invalid.")
+            return dict(environment)
+        except SigningConfigurationError as error:
+            return JobResult(
+                ok=False,
+                error=redact_diagnostic_text(str(error))[:_ERR_MAX],
+                value={"failure_kind": "signing_configuration"},
+            )
+
+    def _required_signing_environment(self, cwd: Path, *, timeout: int) -> dict[str, str]:
+        """Preserve the existing typed failure at the rebase operation boundary."""
+        environment = self._signing_environment(cwd, timeout=timeout)
+        if isinstance(environment, JobResult):
+            raise _RebaseSigningEnvironmentError(environment.error or "Signing is unavailable.")
+        return environment
 
     def discard_remediation_pretest_successes(self, claim_key: str, *, owner_id: int) -> None:
         """Release completion authority when its coordinator permit ends."""
@@ -5624,7 +5742,13 @@ class WorkerPool:
 
     def _persist_evidence_receipt(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | CompactJob
+        | AthenaSkillJob
+        | HostCapabilityJob,
         result: JobResult,
         claim_key: str,
         claim_stage: str,
@@ -5704,6 +5828,8 @@ class WorkerPool:
                     ),
                 }
             )
+        elif isinstance(job, HostCapabilityJob):
+            payload.update({"job_type": "host_capability", "purpose": job.target.purpose})
         elif isinstance(job, GitJob):
             payload.update(_git_evidence_fields(job, result))
         elif isinstance(job, GitHubJob):
@@ -6208,6 +6334,30 @@ class WorkerPool:
         if job.immutable_source:
             if not _is_full_commit_sha(job.expected_head_sha):
                 return JobResult(ok=False, error="immutable_source_requires_full_head_sha")
+            if job.capability_target is not None:
+                capability = self._run_host_capability(
+                    HostCapabilityJob(
+                        job.capability_target.repository,
+                        job.capability_target,
+                        job.timeout_s,
+                        deadline_s=time.monotonic() + job.timeout_s,
+                    )
+                )
+                if not capability.ok:
+                    return JobResult(
+                        ok=False,
+                        error=capability.error,
+                        value={
+                            **(capability.value if isinstance(capability.value, dict) else {}),
+                            "head_sha": job.expected_head_sha,
+                            "immutable_source": True,
+                            "failure_kind": "runner",
+                            "platform": sys.platform,
+                            "status": "failed",
+                        },
+                        stdout_tail=capability.stdout_tail,
+                        stderr_tail=capability.stderr_tail,
+                    )
             return self._run_immutable_build_test(job)
         argv = job.argv
         environment = build_python_phase_env(job.cwd)
@@ -6779,8 +6929,35 @@ class WorkerPool:
         try:
             validate_git_repository_validation(job)
         except (AttributeError, TypeError, ValueError):
-            return JobResult(ok=False, error="repository_validation_metadata_invalid")
-        return self._run_validated_git(job)
+            result = JobResult(ok=False, error="repository_validation_metadata_invalid")
+        else:
+            result = self._run_validated_git(job)
+        if job.op == "discover_first_publication":
+            value = result.value if isinstance(result.value, dict) else {}
+            return replace(
+                result,
+                value={
+                    **value,
+                    "publication_discovery_request_id": job.kwargs.get(
+                        "publication_discovery_request_id"
+                    ),
+                    "repository": job.transport_repository,
+                    "issue_number": job.kwargs.get("issue_number"),
+                },
+            )
+        if job.op == "commit_push" and "publication_recovery_request_id" in job.kwargs:
+            value = result.value if isinstance(result.value, dict) else {}
+            return replace(
+                result,
+                value={
+                    **value,
+                    "publication_recovery_request_id": job.kwargs[
+                        "publication_recovery_request_id"
+                    ],
+                    "first_publication_candidate": job.kwargs.get("first_publication_candidate"),
+                },
+            )
+        return result
 
     def _run_validated_git(self, job: GitJob) -> JobResult:
         """Run validated Git metadata through the existing lock and error paths."""
@@ -7273,6 +7450,10 @@ class WorkerPool:
 
     def _dispatch_locked_git(self, job: GitJob) -> JobResult:
         """Dispatch one Git job while both repository locks are held."""
+        if job.op == "discover_first_publication":
+            return self._discover_first_publication(job)
+        if job.op == "discover_pending_rebase":
+            return self._discover_pending_rebase(job)
         if job.op == "prepare_repository_validation":
             return self._prepare_repository_validation_source(job)
         if job.op in {
@@ -7284,6 +7465,234 @@ class WorkerPool:
         }:
             return self._run_source_git_operation(job)
         return self._dispatch_git_op(job)
+
+    def _discover_first_publication(self, job: GitJob) -> JobResult:
+        """Read retained publication under the current implementation lane lease."""
+        identity = {
+            "publication_discovery_request_id": job.kwargs.get("publication_discovery_request_id"),
+            "repository": job.transport_repository,
+            "issue_number": job.kwargs.get("issue_number"),
+        }
+        try:
+            issue = job.kwargs.get("issue_number")
+            root = job.kwargs.get("repo_root")
+            request_id = identity["publication_discovery_request_id"]
+            if (
+                type(issue) is not int
+                or issue < 1
+                or not isinstance(root, (str, Path))
+                or job.workspace is not None
+                or job.deadline_s is None
+                or type(request_id) is not str
+                or re.fullmatch(r"[0-9a-f]{32}", request_id) is None
+            ):
+                raise ValueError("The first-publication discovery identity is invalid.")
+            manager = SourceWorkspaceManager(Path(root), repository=job.repo)
+            deadline = _PreparationDeadline(job.deadline_s, time.monotonic, self._shutdown)
+            with manager._acquire_lane(issue, SourceLane.IMPLEMENTATION, deadline):
+                store = FirstPublicationStore(manager.common_dir, deadline=deadline)
+                candidate = store.candidate(issue)
+                if candidate is None:
+                    pre_intent = self._first_publication_pre_intent(job, manager, deadline)
+                    if store.candidate(issue) is not None:
+                        raise ValueError("The first-publication state changed during discovery.")
+                    result = JobResult(
+                        ok=True,
+                        value={
+                            **identity,
+                            "first_publication_candidate": None,
+                            **({"first_publication_pre_intent": True} if pre_intent else {}),
+                        },
+                    )
+                else:
+                    source = self._first_publication_discovery_source(
+                        job, manager, candidate, deadline
+                    )
+                    if store.candidate(issue) != candidate:
+                        raise ValueError(
+                            "The first-publication candidate changed during discovery."
+                        )
+                    return JobResult(
+                        ok=True,
+                        value={
+                            **identity,
+                            "first_publication_candidate": candidate.operation_id,
+                            **source,
+                        },
+                    )
+            if (
+                pre_intent
+                and not job.kwargs.get("publication_resume_state")
+                and not job.kwargs.get("publication_manual_rebase")
+            ):
+                return self._first_publication_rebase_handoff(job, manager, result)
+            return result
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            return JobResult(
+                ok=False,
+                value={**identity, "failure_kind": "validation_runner"},
+                error=redact_diagnostic_text(str(error))[:_ERR_MAX],
+                interrupted=isinstance(error, InterruptedError),
+            )
+
+    def _first_publication_rebase_handoff(
+        self, job: GitJob, manager: SourceWorkspaceManager, result: JobResult
+    ) -> JobResult:
+        """Read pending local rebase work through its existing source owner."""
+        receipt = manager._require_receipt(
+            int(job.kwargs["issue_number"]), SourceLane.IMPLEMENTATION
+        )
+        discovery = self._discover_pending_rebase(
+            replace(job, kwargs={**job.kwargs, "branch": receipt.branch, "pr_number": None})
+        )
+        if not discovery.ok:
+            raise ValueError(discovery.error or "Pending rebase discovery failed.")
+        candidate = discovery.value["rebase_recovery_candidate"]
+        if candidate is None:
+            return result
+        if discovery.value.get("rebase_publication_mode") != "none":
+            raise ValueError("The pending rebase requires a separate publication recovery route.")
+        return replace(
+            result,
+            value={
+                **result.value,
+                "first_publication_rebase_candidate": candidate,
+                "source_workspace": discovery.value["source_workspace"],
+                "source_receipt": discovery.value["source_receipt"],
+            },
+        )
+
+    def _first_publication_pre_intent(
+        self, job: GitJob, manager: SourceWorkspaceManager, deadline: _PreparationDeadline
+    ) -> bool:
+        """Classify retained source without granting writer or rebase permission."""
+        issue = int(job.kwargs["issue_number"])
+        receipt = manager._read_receipt(issue, SourceLane.IMPLEMENTATION)
+        if receipt is None:
+            return False
+        if receipt.repository not in {job.repo, job.transport_repository}:
+            raise ValueError("The first-publication source repository changed.")
+        manager = SourceWorkspaceManager(manager.repo_root, repository=receipt.repository)
+        manager._reject_foreign_owner(receipt, issue, SourceLane.IMPLEMENTATION)
+        if receipt.detached:
+            return False
+        if job.kwargs.get("branch") and job.kwargs["branch"] != receipt.branch:
+            raise ValueError("The first-publication source branch changed.")
+        if (
+            receipt.path.is_symlink()
+            or not manager._path_is_registered_to_repository(receipt.path, deadline=deadline)
+            or manager._head_revision(receipt.path, deadline=deadline) != receipt.revision
+            or manager._head_branch(receipt.path, deadline=deadline)
+            != f"refs/heads/{receipt.branch}"
+        ):
+            return True
+        bound = replace(
+            job, kwargs={**job.kwargs, "branch": receipt.branch, "cwd": str(receipt.path)}
+        )
+        path, identity = self._initial_start_identity(bound)
+        started = self._initial_record_matches(path, identity)
+        if started is None:
+            started = self._initial_record_matches(path.with_suffix(".pending.json"), identity)
+        if manager._require_receipt(issue, SourceLane.IMPLEMENTATION) != receipt:
+            raise ValueError("The first-publication source changed during discovery.")
+        return started is None or started["head_sha"] != receipt.revision
+
+    @staticmethod
+    def _first_publication_discovery_source(
+        job: GitJob,
+        manager: SourceWorkspaceManager,
+        candidate: FirstPublicationRecord,
+        deadline: _PreparationDeadline,
+    ) -> dict[str, Any]:
+        """Bind candidate facts to an independently read current source receipt."""
+        receipt = manager._require_receipt(candidate.issue_number, SourceLane.IMPLEMENTATION)
+        if receipt.repository not in {job.repo, job.transport_repository}:
+            raise ValueError("The first-publication source repository changed.")
+        manager = SourceWorkspaceManager(manager.repo_root, repository=receipt.repository)
+        manager._reject_foreign_owner(receipt, candidate.issue_number, SourceLane.IMPLEMENTATION)
+        binding = manager._binding(receipt)
+        if (
+            candidate.repository != job.transport_repository
+            or candidate.scheduler_repository != job.repo
+            or candidate.workspace != binding
+            or candidate.branch != receipt.branch
+            or (job.kwargs.get("branch") and job.kwargs["branch"] != receipt.branch)
+            or not manager._physical_matches_receipt(receipt, deadline=deadline)
+        ):
+            raise ValueError("The first-publication candidate does not match the current source.")
+        tree = git_utils.run(
+            ["git", "rev-parse", "--verify", "HEAD^{tree}"],
+            cwd=receipt.path,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        if tree != candidate.tree_sha:
+            raise ValueError("The first-publication source tree changed.")
+        return {"source_workspace": binding.to_dict(), "source_receipt": receipt.to_dict()}
+
+    def _discover_pending_rebase(self, job: GitJob) -> JobResult:
+        """Read an untrusted candidate under current source ownership."""
+        try:
+            issue = job.kwargs.get("issue_number")
+            branch = job.kwargs.get("branch")
+            root = job.kwargs.get("repo_root")
+            if type(issue) is not int or issue < 1 or not isinstance(root, (str, Path)):
+                raise ValueError("The rebase discovery identity is invalid.")
+            if not isinstance(branch, str) or not branch or job.deadline_s is None:
+                raise ValueError("The rebase discovery branch or deadline is missing.")
+            manager = SourceWorkspaceManager(Path(root), repository=job.repo)
+            receipt = manager._require_receipt(issue, SourceLane.IMPLEMENTATION)
+            if receipt.repository not in {job.repo, job.transport_repository}:
+                raise ValueError("The rebase discovery source repository changed.")
+            manager = SourceWorkspaceManager(Path(root), repository=receipt.repository)
+            binding = receipt.to_binding(manager.repo_root)
+            if binding.schema_version != 1 or binding.detached:
+                raise ValueError("The rebase discovery source is not a clean writer.")
+            deadline = _PreparationDeadline(job.deadline_s, time.monotonic, self._shutdown)
+            with manager.acquire(binding, deadline=deadline):
+                if receipt.branch != branch:
+                    raise ValueError("The rebase discovery branch changed.")
+                candidate = PendingRebaseStore(manager.common_dir, deadline=deadline).candidate(
+                    issue
+                )
+                if candidate is not None and (
+                    candidate.request.repository != job.transport_repository
+                    or candidate.request.pr_number != job.kwargs.get("pr_number")
+                    or candidate.branch != branch
+                    or candidate.resulting_workspace != binding
+                ):
+                    raise ValueError("The pending rebase candidate identity changed.")
+                if candidate is not None:
+                    tree = git_utils.run(
+                        ["git", "rev-parse", "--verify", "HEAD^{tree}"],
+                        cwd=binding.cwd,
+                        timeout=job.timeout_s,
+                    ).stdout.strip()
+                    if tree != candidate.resulting_tree_sha:
+                        raise ValueError("The pending rebase tree changed.")
+                return JobResult(
+                    ok=True,
+                    value={
+                        "discovery_request_id": job.kwargs.get("discovery_request_id"),
+                        "rebase_recovery_candidate": (
+                            candidate.request.request_id if candidate is not None else None
+                        ),
+                        "rebase_publication_mode": (
+                            candidate.publication_mode if candidate is not None else None
+                        ),
+                        "source_workspace": binding.to_dict(),
+                        "source_receipt": receipt.to_dict(),
+                    },
+                )
+        except (OSError, RuntimeError, ValueError, SourceWorkspaceError) as error:
+            return JobResult(
+                ok=False,
+                value={
+                    "discovery_request_id": job.kwargs.get("discovery_request_id"),
+                    "failure_kind": "validation_runner",
+                },
+                error=redact_diagnostic_text(str(error))[:_ERR_MAX],
+                interrupted=isinstance(error, InterruptedError),
+            )
 
     @staticmethod
     def _branch_publication_error(
@@ -7525,6 +7934,7 @@ class WorkerPool:
                 paused_head_sha=(
                     job.kwargs.get("paused_head_sha")
                     if job.op in {"validate_rebase_conflict", "continue_rebase"}
+                    and job.rebase_recovery_candidate is None
                     else None
                 ),
                 deadline=deadline,
@@ -7552,6 +7962,8 @@ class WorkerPool:
         deadline: _PreparationDeadline,
     ) -> JobResult:
         """Keep the local source receipt if a later publication fails."""
+        if job.rebase_recovery_candidate is not None:
+            return self._resume_pending_rebase(job, manager, binding, deadline)
         recorded: tuple[WorkspaceBinding, SourceWorkspaceReceipt] | None = None
 
         def record_source(head: str) -> WorkspaceBinding:
@@ -7584,6 +7996,311 @@ class WorkerPool:
         value["source_workspace"] = current.to_dict()
         value["source_receipt"] = receipt.to_dict()
         return replace(result, value=value)
+
+    def _admit_pending_rebase(
+        self, job: GitJob, binding: WorkspaceBinding, store: PendingRebaseStore
+    ) -> PendingRebaseRecord:
+        """Revalidate retained operation identity without granting a mutation."""
+        candidate = job.rebase_recovery_candidate
+        if candidate is None or binding.item_number is None:
+            raise ValueError("The pending rebase candidate is missing.")
+        record = store.read(binding.item_number, candidate)
+        policy = self._select_rebase_policy(job.repo)
+        reservation = self._initial_reservation_base(job, {"branch": job.kwargs.get("branch")})
+        expected_mode = (
+            "existing" if job.kwargs.get("publish_rebased_head") or reservation else "none"
+        )
+        if (
+            record is None
+            or record.phase not in {"pending_validation", "publication_intent"}
+            or record.request.repository != job.transport_repository
+            or record.scheduler_repository != job.repo
+            or record.request.issue_number != job.kwargs.get("issue_number")
+            or record.request.pr_number != job.kwargs.get("pr_number")
+            or record.branch != job.kwargs.get("branch")
+            or record.resulting_workspace != binding
+            or record.publication_mode != expected_mode
+            or record.policy_name != (policy.name if policy is not None else None)
+            or (
+                reservation is not None
+                and (
+                    reservation != record.remote_head_sha
+                    or reservation != record.request.expected_head_sha
+                )
+            )
+        ):
+            raise ValueError("The pending rebase operation identity changed.")
+        self._authenticated_remote_git_configuration(
+            cwd=binding.cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
+        )
+        tree = git_utils.run(
+            ["git", "rev-parse", "--verify", "HEAD^{tree}"],
+            cwd=binding.cwd,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        if tree != record.resulting_tree_sha or not git_utils.is_clean_working_tree(
+            binding.cwd, timeout=job.timeout_s
+        ):
+            raise ValueError("The pending rebase source changed.")
+        fetched = self._git_fetch_main(job)
+        if (
+            not fetched.ok
+            or not isinstance(fetched.value, dict)
+            or fetched.value.get("head_sha") != record.target_base_sha
+        ):
+            raise ValueError("The pending rebase base changed.")
+        self._admit_pending_rebase_remote(job, binding, record)
+        return record
+
+    def _admit_pending_rebase_remote(
+        self, job: GitJob, binding: WorkspaceBinding, record: PendingRebaseRecord
+    ) -> str | None:
+        """Check the observed head without changing the retained publication lease."""
+        if record.publication_mode == "none":
+            return None
+        allowed = {record.remote_head_sha}
+        if record.phase == "publication_intent":
+            allowed.add(binding.revision)
+        requested = job.kwargs.get("expected_remote_sha")
+        reservation = self._initial_reservation_base(job, {"branch": record.branch})
+        if reservation is not None:
+            if (
+                reservation != record.remote_head_sha
+                or reservation != record.request.expected_head_sha
+                or job.kwargs.get("expected_head_sha") != binding.revision
+            ):
+                raise ValueError("The pending rebase reservation or source changed.")
+            if "expected_remote_sha" not in job.kwargs:
+                requested = reservation
+        if requested not in allowed:
+            raise ValueError("The pending rebase requested remote lease changed.")
+        remote = self._read_remote_branch_head(
+            binding.cwd,
+            remote="origin",
+            branch=record.branch,
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        if isinstance(remote, JobResult) and not remote.ok:
+            raise _PendingRebaseRemoteReadError(remote)
+        if not isinstance(remote, str) or remote not in allowed:
+            raise ValueError("The pending rebase remote head changed.")
+        return remote
+
+    def _refresh_pending_rebase_source(
+        self,
+        job: GitJob,
+        manager: SourceWorkspaceManager,
+        binding: WorkspaceBinding,
+        store: PendingRebaseStore,
+        record: PendingRebaseRecord,
+        deadline: _PreparationDeadline,
+    ) -> None:
+        """Reject changes to the admitted record and source after fresh checks."""
+        if self._admit_pending_rebase(job, binding, store) != record:
+            raise ValueError("The pending rebase record changed during validation.")
+        receipt = manager._require_receipt(record.request.issue_number, SourceLane.IMPLEMENTATION)
+        manager._reject_foreign_owner(
+            receipt, record.request.issue_number, SourceLane.IMPLEMENTATION
+        )
+        if (
+            manager.common_dir != store.common_dir
+            or receipt.to_binding(manager.repo_root) != binding
+            or receipt.branch != record.branch
+            or not manager._physical_matches_receipt(receipt, deadline=deadline)
+            or manager._require_receipt(record.request.issue_number, SourceLane.IMPLEMENTATION)
+            != receipt
+        ):
+            raise ValueError("The pending rebase source ownership changed during validation.")
+
+    def _resume_pending_rebase(
+        self,
+        job: GitJob,
+        manager: SourceWorkspaceManager,
+        binding: WorkspaceBinding,
+        deadline: _PreparationDeadline,
+    ) -> JobResult:
+        """Repeat checks at retained B under the source lease without another rebase."""
+        structural: JobResult | None = None
+        try:
+            store = PendingRebaseStore(manager.common_dir, deadline=deadline)
+            record = self._admit_pending_rebase(job, binding, store)
+            self._required_signing_environment(binding.cwd, timeout=job.timeout_s)
+            source_sha = binding.revision
+            if not isinstance(source_sha, str):
+                raise ValueError("The pending rebase source revision is missing.")
+            structural = self._rebase_structural_receipts(job, binding, source_sha)
+            if structural is not None and not structural.ok:
+                return self._rebase_resume_source_result(structural, manager, binding)
+            policy = self._select_rebase_policy(job.repo)
+            semantic = self._validate_rebased_tree(binding.cwd, policy=policy)
+            self._refresh_pending_rebase_source(job, manager, binding, store, record, deadline)
+            if semantic is not None:
+                return self._rebase_resume_source_result(
+                    self._retain_rebase_execution(semantic, structural), manager, binding
+                )
+            metadata = (
+                None
+                if self._is_retained_initial_fast_forward(job, binding, record)
+                else self._verify_rebased_commit_metadata(
+                    binding.cwd, base_sha=record.target_base_sha, timeout=job.timeout_s
+                )
+            )
+            self._refresh_pending_rebase_source(job, manager, binding, store, record, deadline)
+            if metadata is not None:
+                return self._rebase_resume_source_result(
+                    self._retain_rebase_execution(metadata, structural), manager, binding
+                )
+            completed = self._publish_pending_rebase(job, binding, store, record)
+            return self._rebase_resume_source_result(
+                self._retain_rebase_execution(completed, structural), manager, binding
+            )
+        except _PendingRebaseRemoteReadError as error:
+            prior = error.result
+            value = dict(prior.value) if isinstance(prior.value, dict) else {}
+            value.setdefault("failure_kind", "validation_runner")
+            failure = replace(
+                prior,
+                value=value,
+                error=bounded_pipeline_diagnostic(prior.error, limit=_ERR_MAX),
+                stdout_tail=bounded_pipeline_diagnostic(prior.stdout_tail, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(prior.stderr_tail, limit=_TAIL),
+            )
+            return self._rebase_resume_source_result(
+                self._retain_rebase_execution(failure, structural), manager, binding
+            )
+        except (_RebaseSigningEnvironmentError, _RemoteGitAuthenticationError) as error:
+            return self._rebase_resume_source_result(
+                self._retain_rebase_execution(_git_environment_failure_result(error), structural),
+                manager,
+                binding,
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            SourceWorkspaceError,
+            subprocess.SubprocessError,
+        ) as error:
+            failure = JobResult(
+                ok=False,
+                value={"failure_kind": "validation_runner"},
+                error=redact_diagnostic_text(str(error))[:_ERR_MAX],
+                interrupted=isinstance(error, InterruptedError),
+            )
+            return self._rebase_resume_source_result(
+                self._retain_rebase_execution(failure, structural), manager, binding
+            )
+
+    @staticmethod
+    def _is_retained_initial_fast_forward(
+        job: GitJob, binding: WorkspaceBinding, record: PendingRebaseRecord
+    ) -> bool:
+        """Prove that initial preparation reached the captured base without replay."""
+        original = record.request.expected_head_sha
+        captured = record.target_base_sha
+        if (
+            job.op != "rebase"
+            or record.operation != "rebase"
+            or record.resulting_workspace != binding
+            or binding.revision != captured
+            or original == captured
+        ):
+            return False
+        ancestry = git_utils.run(
+            ["git", "merge-base", "--is-ancestor", original, captured],
+            cwd=binding.cwd,
+            check=False,
+            timeout=job.timeout_s,
+        )
+        return ancestry.returncode == 0
+
+    @staticmethod
+    def _rebase_resume_source_result(
+        result: JobResult, manager: SourceWorkspaceManager, binding: WorkspaceBinding
+    ) -> JobResult:
+        """Retain source evidence without advancing its generation a second time."""
+        if binding.item_number is None:
+            raise ValueError("The pending rebase source item is missing.")
+        receipt = manager._require_receipt(binding.item_number, SourceLane.IMPLEMENTATION)
+        if receipt.to_binding(manager.repo_root) != binding:
+            raise ValueError("The pending rebase source receipt changed.")
+        value = dict(result.value) if isinstance(result.value, dict) else {}
+        return replace(
+            result,
+            value={
+                **value,
+                "head_sha": binding.revision,
+                "source_workspace": binding.to_dict(),
+                "source_receipt": receipt.to_dict(),
+            },
+        )
+
+    def _publish_pending_rebase(
+        self,
+        job: GitJob,
+        binding: WorkspaceBinding,
+        store: PendingRebaseStore,
+        record: PendingRebaseRecord,
+    ) -> JobResult:
+        """Read back publication intent before the existing exact-lease writer."""
+        source_sha = binding.revision
+        if not isinstance(source_sha, str):
+            raise ValueError("The pending rebase result is missing.")
+        if job.kwargs.get("direct_scope_reservation") is not None:
+            path, identity = self._initial_start_identity(job)
+            with _interruptible_file_lock(
+                path.with_suffix(".lock"),
+                shutdown=self._shutdown,
+                timeout_s=float(cast(float, git_utils.remaining_operation_timeout(job.timeout_s))),
+            ):
+                return self._complete_retained_initial_start(
+                    job,
+                    JobResult(ok=True, value={"rebased": True, "head_sha": source_sha}),
+                    path,
+                    identity,
+                    (store, record),
+                )
+        published = record.publication_mode == "existing"
+        remote = self._admit_pending_rebase_remote(job, binding, record)
+        if published and remote != source_sha:
+            remote_head = record.remote_head_sha
+            if not isinstance(remote_head, str):
+                raise ValueError("The pending rebase remote lease is missing.")
+            publishing = replace(record, phase="publication_intent")
+            store.write(publishing, expected=record)
+            record = publishing
+            revalidate = self._authenticated_remote_revalidator(
+                cwd=binding.cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
+            )
+            remote_env, remote_config = revalidate()
+            failure = self._publish_rebased_head(
+                job,
+                branch=record.branch,
+                expected_remote_sha=remote_head,
+                cwd=binding.cwd,
+                source_sha=source_sha,
+                remote_env=remote_env,
+                remote_config=remote_config,
+                revalidate_remote=revalidate,
+            )
+            if failure is not None:
+                return failure
+        result = JobResult(
+            ok=True, value={"rebased": True, "published": published, "head_sha": source_sha}
+        )
+        if not published:
+            path, identity = self._initial_start_identity(job)
+            with _interruptible_file_lock(
+                path.with_suffix(".lock"),
+                shutdown=self._shutdown,
+                timeout_s=float(cast(float, git_utils.remaining_operation_timeout(job.timeout_s))),
+            ):
+                result = self._record_initial_start(job, result, path, identity)
+            if not result.ok:
+                return result
+        store.write(replace(record, phase="complete"), expected=record)
+        return result
 
     def _dispatch_source_git_operation(
         self, job: GitJob, record_source: Callable[[str], WorkspaceBinding]
@@ -8065,6 +8782,8 @@ class WorkerPool:
         result: JobResult,
         path: Path,
         identity: dict[str, object],
+        *,
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord] | None = None,
     ) -> JobResult:
         """Move only the exact reserved remote head to the prepared local head."""
         original = self._initial_reservation_base(job, identity)
@@ -8073,20 +8792,6 @@ class WorkerPool:
         target = result.value.get("head_sha")
         if not _is_full_commit_sha(target):
             raise SourceWorkspaceError("initial reservation target is invalid")
-        transition_path = path.with_suffix(".reservation.json")
-        transition_identity = {**identity, "reservation_base_sha": original}
-        previous = self._initial_record_matches(transition_path, transition_identity)
-        if previous is not None and previous["head_sha"] != target:
-            raise SourceWorkspaceError("initial reservation transition changed")
-        write_secure(
-            transition_path,
-            json.dumps({**transition_identity, "head_sha": target}, sort_keys=True) + "\n",
-        )
-        descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
         cwd = Path(str(job.kwargs["cwd"]))
         branch = str(identity["branch"])
         manager = SourceWorkspaceManager(Path(str(job.kwargs["repo_root"])), repository=job.repo)
@@ -8099,6 +8804,10 @@ class WorkerPool:
             or owner.branch != branch
             or owner.path != cwd
             or not manager._physical_matches_receipt(owner)
+            or (
+                recovery is not None
+                and owner.to_binding(manager.repo_root) != recovery[1].resulting_workspace
+            )
         ):
             return JobResult(
                 ok=False,
@@ -8111,16 +8820,10 @@ class WorkerPool:
             )
         published = False
         try:
-            remote = self._read_remote_branch_head(
-                cwd,
-                remote="origin",
-                branch=branch,
-                expected_repo=job.transport_repository,
-                timeout=job.timeout_s,
+            remote = self._prepare_initial_reservation_publication(
+                job, path, identity, str(target), recovery
             )
             if remote != target:
-                if remote != original:
-                    raise SourceWorkspaceError("initial reservation remote head changed")
                 revalidate = self._authenticated_remote_revalidator(
                     cwd=cwd,
                     expected_repo=job.transport_repository,
@@ -8171,6 +8874,79 @@ class WorkerPool:
             },
         )
 
+    def _prepare_initial_reservation_publication(
+        self,
+        job: GitJob,
+        path: Path,
+        identity: dict[str, object],
+        target: str,
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord] | None,
+    ) -> str:
+        """Check prior intent before a new transition can permit publication."""
+        original = self._initial_reservation_base(job, identity)
+        if original is None:
+            raise SourceWorkspaceError("initial reservation is missing")
+        transition_path = path.with_suffix(".reservation.json")
+        transition_identity = {**identity, "reservation_base_sha": original}
+        previous = self._initial_record_matches(transition_path, transition_identity)
+        if previous is not None and previous["head_sha"] != target:
+            raise SourceWorkspaceError("initial reservation transition changed")
+        prior_intent = previous is not None
+        if recovery is not None:
+            store, record = recovery
+            if (
+                store.read(record.request.issue_number, record.request.request_id) != record
+                or record.publication_mode != "existing"
+                or record.remote_head_sha != original
+                or record.request.expected_head_sha != original
+                or record.request.repository != job.transport_repository
+                or record.branch != identity["branch"]
+                or record.resulting_workspace is None
+                or record.resulting_workspace.revision != target
+                or record.resulting_workspace.cwd != Path(str(job.kwargs["cwd"]))
+                or record.phase not in {"pending_validation", "publication_intent"}
+            ):
+                raise SourceWorkspaceError("initial reservation recovery identity changed")
+            prior_intent = record.phase == "publication_intent"
+            tree = git_utils.run(
+                ["git", "rev-parse", "--verify", "HEAD^{tree}"],
+                cwd=record.resulting_workspace.cwd,
+                timeout=job.timeout_s,
+            ).stdout.strip()
+            if tree != record.resulting_tree_sha or not git_utils.is_clean_working_tree(
+                record.resulting_workspace.cwd, timeout=job.timeout_s
+            ):
+                raise SourceWorkspaceError("initial reservation source changed")
+        remote = self._read_remote_branch_head(
+            Path(str(job.kwargs["cwd"])),
+            remote="origin",
+            branch=str(identity["branch"]),
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        if not isinstance(remote, str) or (
+            remote != original and (remote != target or not prior_intent)
+        ):
+            raise SourceWorkspaceError("initial reservation remote head changed")
+        if recovery is not None:
+            store, record = recovery
+            store.write(replace(record, phase="publication_intent"), expected=record)
+        write_secure(
+            transition_path,
+            json.dumps({**transition_identity, "head_sha": target}, sort_keys=True) + "\n",
+        )
+        descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        if self._initial_record_matches(transition_path, transition_identity) != {
+            **transition_identity,
+            "head_sha": target,
+        }:
+            raise SourceWorkspaceError("initial reservation transition readback failed")
+        return remote
+
     def _run_initial_rebase(
         self,
         job: GitJob,
@@ -8183,8 +8959,79 @@ class WorkerPool:
         reservation = self._initial_reservation_base(job, identity)
         if reservation is not None and reservation != job.kwargs.get("expected_head_sha"):
             return JobResult(ok=False, error="initial reservation source head changed")
+        if not job.kwargs.get("publish_rebased_head"):
+            return self._run_local_initial_start(job, path, identity, record_source=record_source)
         result = self._git_rebase_once(job, record_source=record_source)
         return self._record_initial_start(job, result, path, identity)
+
+    def _run_local_initial_start(
+        self,
+        job: GitJob,
+        path: Path,
+        identity: dict[str, object],
+        *,
+        record_source: Callable[[str], WorkspaceBinding],
+    ) -> JobResult:
+        """Retain B through the existing locked initial-start owner."""
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord] | None = None
+
+        def retain_pending(store: PendingRebaseStore, record: PendingRebaseRecord) -> None:
+            nonlocal recovery
+            recovery = store, record
+
+        operation = (
+            self._git_continue_rebase_once if job.op == "continue_rebase" else self._git_rebase_once
+        )
+        result = operation(job, record_source=record_source, retain_pending=retain_pending)
+        if recovery is None or not result.ok:
+            return self._record_initial_start(job, result, path, identity)
+        return self._complete_retained_initial_start(job, result, path, identity, recovery)
+
+    def _complete_retained_initial_start(
+        self,
+        job: GitJob,
+        result: JobResult,
+        path: Path,
+        identity: dict[str, object],
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord],
+    ) -> JobResult:
+        """Complete retained B only after the locked start owner saves it."""
+        store, record = recovery
+        try:
+            reservation = self._initial_reservation_base(job, identity)
+            if (
+                record.publication_mode != ("existing" if reservation else "none")
+                or record.phase not in {"pending_validation", "publication_intent"}
+                or record.resulting_workspace is None
+                or not isinstance(result.value, dict)
+                or result.value.get("head_sha") != record.resulting_workspace.revision
+                or store.read(record.request.issue_number, record.request.request_id) != record
+            ):
+                raise ValueError("The local initial-start recovery context changed.")
+            saved = self._record_initial_start(job, result, path, identity, recovery=recovery)
+            result = self._retain_rebase_execution(saved, result)
+            if not result.ok:
+                value = dict(result.value) if isinstance(result.value, dict) else {}
+                return replace(result, value={**value, "failure_kind": "validation_runner"})
+            started = self._initial_record_matches(path, identity)
+            if started is None or started["head_sha"] != record.resulting_workspace.revision:
+                raise ValueError("The initial-start record readback failed.")
+            if reservation is not None:
+                record = replace(record, phase="publication_intent")
+            store.write(replace(record, phase="complete"), expected=record)
+            return result
+        except (OSError, RuntimeError, ValueError, SourceWorkspaceError) as error:
+            value = dict(result.value) if isinstance(result.value, dict) else {}
+            return replace(
+                result,
+                ok=False,
+                value={**value, "failure_kind": "validation_runner"},
+                error=(
+                    "Local initial-start persistence failed: "
+                    f"{redact_diagnostic_text(str(error))[:_ERR_MAX]}"
+                ),
+                interrupted=isinstance(error, InterruptedError),
+            )
 
     def _record_initial_start(
         self,
@@ -8192,6 +9039,8 @@ class WorkerPool:
         result: JobResult,
         path: Path,
         identity: dict[str, object],
+        *,
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord] | None = None,
     ) -> JobResult:
         """Save the successful start before an implementation agent can run."""
         if not result.ok or not isinstance(result.value, dict):
@@ -8199,7 +9048,7 @@ class WorkerPool:
         head = result.value.get("head_sha")
         if not _is_full_commit_sha(head):
             return JobResult(ok=False, error="initial implementation result head is invalid")
-        result = self._publish_initial_reservation(job, result, path, identity)
+        result = self._publish_initial_reservation(job, result, path, identity, recovery=recovery)
         if not result.ok:
             return result
         write_secure(path, json.dumps({**identity, "head_sha": head}, sort_keys=True) + "\n")
@@ -8275,8 +9124,9 @@ class WorkerPool:
                         cast(float, git_utils.remaining_operation_timeout(job.timeout_s))
                     ),
                 ):
-                    return self._record_initial_start(
-                        job, self._git_rebase_once(job, record_source=record_source), path, identity
+                    self._initial_reservation_base(job, identity)
+                    return self._run_local_initial_start(
+                        job, path, identity, record_source=record_source
                     )
             except InterruptedError:
                 raise
@@ -8490,7 +9340,12 @@ class WorkerPool:
         return None
 
     def _writer_rebase_conflict(
-        self, job: GitJob, base_sha: str, signing_env: dict[str, str]
+        self,
+        job: GitJob,
+        base_sha: str,
+        signing_env: dict[str, str],
+        *,
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord],
     ) -> JobResult:
         """Preserve the current conflict policy after a failed Git replay."""
         publish = bool(job.kwargs.get("publish_rebased_head", False))
@@ -8499,9 +9354,14 @@ class WorkerPool:
         expected = str(job.kwargs.get("expected_remote_sha" if publish else "expected_head_sha"))
         reason = job.kwargs.get("rebase_reason")
         resolve_conflicts = bool(job.kwargs.get("resolve_conflicts", False))
+        policy = self._select_rebase_policy(job.repo)
+        if (reason == "manual" and not resolve_conflicts) or (
+            policy is not None and policy.allow_unrebased_writer_fallback
+        ):
+            aborted = self._abort_pending_rebase(job, recovery, signing_env)
+            if aborted is not None:
+                return aborted
         if reason == "manual" and not resolve_conflicts:
-            if self._read_publish_head(cwd, timeout=job.timeout_s) != expected:
-                return JobResult(ok=False, error="manual rebase abort did not restore the head")
             return JobResult(
                 ok=False,
                 error="rebase conflict restart required",
@@ -8511,20 +9371,7 @@ class WorkerPool:
                     "head_sha": expected,
                 },
             )
-        policy = self._select_rebase_policy(job.repo)
         if policy is not None and policy.allow_unrebased_writer_fallback:
-            aborted = git_utils.run(
-                ["git", "rebase", "--abort"],
-                cwd=cwd,
-                check=False,
-                timeout=job.timeout_s,
-                env=signing_env,
-            )
-            if aborted.returncode != 0:
-                return JobResult(
-                    ok=False,
-                    error="cannot abort writer rebase for current-head fallback",
-                )
             fallback = self._verify_noop_writer_rebase(
                 cwd,
                 remote="origin",
@@ -8556,8 +9403,218 @@ class WorkerPool:
             error="mechanical rebase hit conflicts; resolution required",
         )
 
+    def _abort_pending_rebase(
+        self,
+        job: GitJob,
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord],
+        signing_env: dict[str, str],
+    ) -> JobResult | None:
+        """Read back terminal restoration after one successful, verified abort."""
+        store, intent = recovery
+        stdout_tail = stderr_tail = ""
+        try:
+            aborted = git_utils.run(
+                ["git", "rebase", "--abort"],
+                cwd=intent.request.checkout_path,
+                check=False,
+                timeout=job.timeout_s,
+                env=signing_env,
+            )
+            stdout_tail = redact_diagnostic_text(aborted.stdout or "")[-_ERR_MAX:]
+            stderr_tail = redact_diagnostic_text(aborted.stderr or "")[-_ERR_MAX:]
+            if aborted.returncode != 0:
+                raise ValueError(
+                    f"The checked rebase abort failed with status {aborted.returncode}."
+                )
+            tree = self._verify_aborted_rebase_source(job, store, intent)
+            terminal = replace(
+                intent,
+                schema_version=2,
+                phase="aborted",
+                restored_workspace=intent.request.workspace,
+                restored_tree_sha=tree,
+            )
+            store.write(terminal, expected=intent)
+            return None
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            if isinstance(error, subprocess.TimeoutExpired):
+                stdout_tail = (
+                    bounded_pipeline_diagnostic(error.stdout, limit=_ERR_MAX) or stdout_tail
+                )
+                stderr_tail = (
+                    bounded_pipeline_diagnostic(error.stderr, limit=_ERR_MAX) or stderr_tail
+                )
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "validation_runner"},
+                error=(
+                    "Rebase conflict; terminal abort is unverified: "
+                    f"{redact_diagnostic_text(str(error))[:_ERR_MAX]}"
+                ),
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+                interrupted=isinstance(error, InterruptedError),
+            )
+
+    def _verify_aborted_rebase_source(
+        self, job: GitJob, store: PendingRebaseStore, intent: PendingRebaseRecord
+    ) -> str:
+        """Verify restored A, its tree, and unchanged source ownership under the lease."""
+        workspace = intent.request.workspace
+        deadline = store.deadline
+        if not isinstance(deadline, _PreparationDeadline):
+            raise ValueError("The aborted rebase source deadline is unavailable.")
+        if workspace.repository is None or workspace != job.workspace:
+            raise ValueError("The aborted rebase workspace request changed.")
+        manager = SourceWorkspaceManager(
+            intent.request.repository_root, repository=workspace.repository
+        )
+        receipt = manager._require_receipt(intent.request.issue_number, SourceLane.IMPLEMENTATION)
+        manager._reject_foreign_owner(
+            receipt, intent.request.issue_number, SourceLane.IMPLEMENTATION
+        )
+        if (
+            manager.common_dir != store.common_dir
+            or manager._binding(receipt) != workspace
+            or receipt.branch != intent.branch
+        ):
+            raise ValueError("The aborted rebase source receipt changed.")
+        for name in ("rebase-merge", "rebase-apply"):
+            raw_path = git_utils.run(
+                ["git", "rev-parse", "--git-path", name],
+                cwd=workspace.cwd,
+                timeout=job.timeout_s,
+            ).stdout.strip()
+            if not raw_path:
+                raise ValueError("The aborted rebase metadata path is unavailable.")
+            try:
+                (workspace.cwd / raw_path).lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError("The aborted source still has rebase metadata.")
+        expected_tree = git_utils.run(
+            ["git", "rev-parse", "--verify", f"{intent.request.expected_head_sha}^{{tree}}"],
+            cwd=workspace.cwd,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        tree = git_utils.run(
+            ["git", "rev-parse", "--verify", "HEAD^{tree}"],
+            cwd=workspace.cwd,
+            timeout=job.timeout_s,
+        ).stdout.strip()
+        if not _is_full_commit_sha(tree) or tree != expected_tree:
+            raise ValueError("The aborted rebase tree changed.")
+        if intent.publication_mode == "existing":
+            checked = self._verify_noop_writer_rebase(
+                workspace.cwd,
+                remote="origin",
+                branch=intent.branch,
+                expected_repo=job.transport_repository,
+                expected_remote_sha=intent.request.expected_head_sha,
+                timeout=job.timeout_s,
+            )
+            if not checked.ok:
+                raise ValueError(checked.error or "The aborted rebase remote changed.")
+        if manager._require_receipt(
+            intent.request.issue_number, SourceLane.IMPLEMENTATION
+        ) != receipt or not manager._physical_matches_receipt(receipt, deadline=deadline):
+            raise ValueError("The aborted source is not the clean original checkout.")
+        return tree
+
+    def _begin_rebase_recovery(
+        self, job: GitJob, base_sha: str
+    ) -> tuple[PendingRebaseStore, PendingRebaseRecord] | JobResult:
+        """Read back mutation intent under the admitted source lease."""
+        try:
+            request = job.capability_target
+            if request is None or request.workspace != job.workspace:
+                raise ValueError("The pending rebase source request is missing.")
+            self._authenticated_remote_git_configuration(
+                cwd=request.checkout_path,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            remaining = git_utils.remaining_operation_timeout(job.timeout_s)
+            if remaining is None:
+                raise ValueError("The pending rebase deadline is missing.")
+            deadline = _PreparationDeadline(
+                time.monotonic() + remaining, time.monotonic, self._shutdown
+            )
+            manager = SourceWorkspaceManager(
+                request.repository_root, repository=job.transport_repository
+            )
+            store = PendingRebaseStore(manager.common_dir, deadline=deadline)
+            policy = self._select_rebase_policy(job.repo)
+            publish = bool(job.kwargs.get("publish_rebased_head", False))
+            reservation = self._initial_reservation_base(job, {"branch": job.kwargs.get("branch")})
+            if reservation is not None and reservation != request.expected_head_sha:
+                raise ValueError("The initial reservation source head changed.")
+            record = PendingRebaseRecord(
+                request=request,
+                operation=job.op,
+                scheduler_repository=job.repo,
+                branch=str(job.kwargs.get("branch") or ""),
+                destination=f"https://github.com/{job.transport_repository}.git",
+                publication_mode="existing" if publish or reservation else "none",
+                remote_head_sha=(
+                    (reservation or job.kwargs.get("expected_remote_sha"))
+                    if publish or reservation
+                    else None
+                ),
+                target_base_sha=base_sha,
+                policy_name=policy.name if policy is not None else None,
+                phase="intent",
+            )
+            store.write(record, expected=None)
+            return store, record
+        except (OSError, RuntimeError, ValueError) as error:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "validation_runner"},
+                error=(
+                    f"Pending rebase intent failed: {redact_diagnostic_text(str(error))[:_ERR_MAX]}"
+                ),
+                interrupted=isinstance(error, InterruptedError),
+            )
+
+    @staticmethod
+    def _record_rebase_result(
+        job: GitJob,
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord],
+        workspace: WorkspaceBinding,
+    ) -> PendingRebaseRecord | JobResult:
+        """Read back the resulting source before capability execution."""
+        store, intent = recovery
+        try:
+            tree = git_utils.run(
+                ["git", "rev-parse", "--verify", "HEAD^{tree}"],
+                cwd=workspace.cwd,
+                timeout=job.timeout_s,
+            ).stdout.strip()
+            pending = replace(
+                intent,
+                phase="pending_validation",
+                resulting_workspace=workspace,
+                resulting_tree_sha=tree,
+            )
+            return store.write(pending, expected=intent)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "validation_runner"},
+                error=(
+                    f"Pending rebase result failed: {redact_diagnostic_text(str(error))[:_ERR_MAX]}"
+                ),
+                interrupted=isinstance(error, InterruptedError),
+            )
+
     def _git_rebase_once(
-        self, job: GitJob, *, record_source: Callable[[str], WorkspaceBinding]
+        self,
+        job: GitJob,
+        *,
+        record_source: Callable[[str], WorkspaceBinding],
+        retain_pending: Callable[[PendingRebaseStore, PendingRebaseRecord], None] | None = None,
     ) -> JobResult:
         """Rebase an admitted writer onto the exact fetched main commit."""
         target = self._prepare_writer_rebase_source(job)
@@ -8571,24 +9628,36 @@ class WorkerPool:
         cwd = Path(str(job.kwargs.get("cwd") or ""))
         branch = str(job.kwargs.get("branch") or "")
         expected = str(job.kwargs.get("expected_remote_sha" if publish else "expected_head_sha"))
-        reason = job.kwargs.get("rebase_reason")
-        resolve_conflicts = bool(job.kwargs.get("resolve_conflicts", False))
-        signing_env = _required_git_signing_env(cwd, timeout=job.timeout_s)
+        signing_env = self._required_signing_environment(cwd, timeout=job.timeout_s)
+        recovery = self._begin_rebase_recovery(job, base_sha)
+        if isinstance(recovery, JobResult):
+            return recovery
         result = git_utils.rebase_worktree_onto(
             cwd=cwd,
             base_branch="main",
             remote="origin",
             base_sha=base_sha,
-            preserve_conflicts=reason != "manual" or resolve_conflicts,
+            preserve_conflicts=True,
             timeout=job.timeout_s,
             env=signing_env,
         )
         if not result:
-            return self._writer_rebase_conflict(job, base_sha, signing_env)
+            return self._retain_rebase_intent(
+                self._writer_rebase_conflict(job, base_sha, signing_env, recovery=recovery),
+                recovery[1],
+            )
         source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
-        record_source(source_sha)
+        resulting_workspace = record_source(source_sha)
+        retained = self._record_rebase_result(job, recovery, resulting_workspace)
+        if isinstance(retained, JobResult):
+            return retained
+        if retain_pending is not None:
+            retain_pending(recovery[0], retained)
+        structural = self._rebase_structural_receipts(job, resulting_workspace, source_sha)
+        if structural is not None and not structural.ok:
+            return structural
         record = (
             self._prepare_rebase_review_publication(
                 job, base_sha=base_sha, source_head=expected, resulting_head=source_sha
@@ -8597,7 +9666,7 @@ class WorkerPool:
             else None
         )
         if isinstance(record, JobResult):
-            return record
+            return self._retain_rebase_execution(record, structural)
         if publish:
             revalidate = self._authenticated_remote_revalidator(
                 cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
@@ -8612,14 +9681,22 @@ class WorkerPool:
                 remote_env=remote_env,
                 remote_config=remote_config,
                 revalidate_remote=revalidate,
+                recovery=(recovery[0], retained),
             )
             if publication is not None:
-                return publication
+                return self._retain_rebase_execution(publication, structural)
         completed = JobResult(
             ok=True,
-            value={"rebased": True, "published": publish, "head_sha": source_sha},
+            value={
+                "rebased": True,
+                "published": publish,
+                "head_sha": source_sha,
+                **(structural.value if structural is not None else {}),
+            },
         )
-        return self._retain_rebase_review(job, completed, record)
+        return self._retain_rebase_execution(
+            self._retain_rebase_review(job, completed, record), structural
+        )
 
     def _inspect_rebase_review_record(self, job: GitJob, record: object) -> bool:
         """Read fresh authenticated audit, record, label, and PR evidence."""
@@ -9417,8 +10494,122 @@ class WorkerPool:
             )
         )
         if result.ok:
-            return None
+            return result
         return self._annotate_rebase_policy_failure(result, policy, "structural validation")
+
+    def _rebase_structural_receipts(
+        self, job: GitJob, workspace: WorkspaceBinding, source_sha: str
+    ) -> JobResult | None:
+        """Bind required capability and execution evidence to the resulting source."""
+        policy = self._select_rebase_policy(job.repo)
+        if policy is None:
+            return None
+        request = job.capability_target
+        receipt: HostCapabilityReceipt | None = None
+        verified_receipt: HostCapabilityReceipt | None = None
+        try:
+            replace(job)
+            if (
+                request is None
+                or request.phase != "rebase"
+                or request.workspace != job.workspace
+                or request.repository != job.transport_repository
+                or type(workspace) is not WorkspaceBinding
+                or workspace.revision != source_sha
+                or workspace.generation < request.workspace.generation
+                or replace(
+                    request.workspace,
+                    revision=source_sha,
+                    generation=workspace.generation,
+                )
+                != workspace
+                or workspace.cwd.resolve(strict=True) != request.checkout_path
+                or workspace.reusable_root is None
+                or workspace.reusable_root.resolve(strict=True) != request.repository_root
+            ):
+                raise ValueError("The rebase capability source binding is invalid.")
+            replace(request)
+            remaining = git_utils.remaining_operation_timeout(job.timeout_s)
+            if remaining is None:
+                raise ValueError("The rebase capability deadline is unavailable.")
+            expires = time.monotonic() + float(remaining)
+            if job.deadline_s is not None:
+                expires = min(expires, job.deadline_s)
+            deadline = _PreparationDeadline(expires, time.monotonic, self._shutdown)
+            deadline.remaining()
+            capabilities = self._host_capabilities
+            backend = None if capabilities is None else capabilities.quota_backend
+            if backend is None:
+                backend = UnavailableQuotaBackend()
+            target = CapabilityReceiptTarget(
+                request,
+                request.repository_root,
+                request.repository_root.stat().st_dev,
+                capabilities.execution_boundary_id if capabilities is not None else "unavailable",
+                source_sha,
+                backend=backend.backend_id,
+            )
+            receipt = backend.preflight(target, deadline=deadline)
+            if type(receipt) is not HostCapabilityReceipt or receipt.target != target:
+                receipt = None
+                raise ValueError("The rebase capability receipt target changed.")
+            replace(receipt)
+            verified_receipt = receipt
+            deadline.remaining()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            return JobResult(
+                ok=False,
+                value={
+                    "failure_kind": "validation_runner",
+                    "capability_receipt": verified_receipt,
+                },
+                error=redact_diagnostic_text(str(error))[:_ERR_MAX],
+                interrupted=isinstance(error, InterruptedError),
+            )
+        if not receipt.available:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "validation_runner", "capability_receipt": receipt},
+                error=receipt.token,
+                stdout_tail=receipt.stdout_tail,
+                stderr_tail=receipt.stderr_tail,
+            )
+        execution = self._run_rebase_structural_validation(
+            workspace.cwd, timeout=job.timeout_s, policy=policy
+        )
+        if execution is None:
+            return JobResult(ok=False, error="Required rebase execution evidence is missing.")
+        evidence = {
+            "capability_receipt": receipt,
+            "structural_execution_receipt": execution,
+        }
+        if not execution.ok:
+            value = dict(execution.value) if isinstance(execution.value, dict) else {}
+            return replace(execution, value={**value, **evidence})
+        if (
+            not isinstance(execution.value, dict)
+            or execution.value.get("head_sha") != source_sha
+            or execution.value.get("immutable_source") is not True
+        ):
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "validation_runner", **evidence},
+                error="The rebase execution evidence does not match the resulting head.",
+            )
+        return JobResult(ok=True, value=evidence)
+
+    @staticmethod
+    def _retain_rebase_execution(result: JobResult, structural: JobResult | None) -> JobResult:
+        """Keep validated execution evidence without changing a later failure cause."""
+        if structural is None or not isinstance(structural.value, dict):
+            return result
+        evidence = {
+            key: structural.value[key]
+            for key in ("capability_receipt", "structural_execution_receipt")
+            if key in structural.value
+        }
+        value = dict(result.value) if isinstance(result.value, dict) else {}
+        return replace(result, value={**value, **evidence})
 
     def _git_continue_rebase(
         self, job: GitJob, *, record_source: Callable[[str], WorkspaceBinding]
@@ -9437,6 +10628,11 @@ class WorkerPool:
             ):
                 if not local_manual and (path.exists() or path.is_symlink()):
                     return JobResult(ok=False, error="initial implementation is already recorded")
+                self._initial_reservation_base(job, identity)
+                if not job.kwargs.get("publish_rebased_head"):
+                    return self._run_local_initial_start(
+                        job, path, identity, record_source=record_source
+                    )
                 return self._record_initial_start(
                     job,
                     self._git_continue_rebase_once(job, record_source=record_source),
@@ -9478,8 +10674,139 @@ class WorkerPool:
             )
         return None
 
+    @staticmethod
+    def _retain_rebase_intent(result: JobResult, intent: PendingRebaseRecord) -> JobResult:
+        """Attach an untrusted selector only to a known paused conflict receipt."""
+        if result.error in {
+            "mechanical rebase hit conflicts; resolution required",
+            "rebase conflict resolution required: additional conflicts found",
+        } and isinstance(result.value, dict):
+            return replace(
+                result,
+                value={**result.value, "rebase_recovery_intent_id": intent.request.request_id},
+            )
+        return result
+
+    def _admit_paused_rebase_intent(
+        self, job: GitJob, *, base_sha: str, expected_remote_sha: str
+    ) -> tuple[PendingRebaseStore, PendingRebaseRecord] | JobResult:
+        """Match retained intent after independent paused-source admission."""
+        try:
+            request = job.capability_target
+            candidate = job.kwargs.get("rebase_recovery_intent_id")
+            if (
+                request is None
+                or request.workspace != job.workspace
+                or not isinstance(candidate, str)
+                or re.fullmatch(r"[0-9a-f]{32}", candidate) is None
+            ):
+                raise ValueError("The paused rebase intent selector is missing or invalid.")
+            remaining = git_utils.remaining_operation_timeout(job.timeout_s)
+            if remaining is None:
+                raise ValueError("The paused rebase deadline is missing.")
+            deadline = _PreparationDeadline(
+                time.monotonic() + remaining, time.monotonic, self._shutdown
+            )
+            manager = SourceWorkspaceManager(
+                request.repository_root, repository=job.transport_repository
+            )
+            store = PendingRebaseStore(manager.common_dir, deadline=deadline)
+            intent = store.read(request.issue_number, candidate)
+            policy = self._select_rebase_policy(job.repo)
+            publish = bool(job.kwargs.get("publish_rebased_head", True))
+            reservation = self._initial_reservation_base(job, {"branch": job.kwargs.get("branch")})
+            if reservation is not None and reservation != expected_remote_sha:
+                raise ValueError("The paused reservation source head changed.")
+            remote_required = publish or reservation is not None
+            if (
+                intent is None
+                or intent.phase != "intent"
+                or intent.request.repository != job.transport_repository
+                or intent.scheduler_repository != job.repo
+                or intent.request.issue_number != request.issue_number
+                or intent.request.pr_number != request.pr_number
+                or intent.request.workspace != job.workspace
+                or intent.branch != job.kwargs.get("branch")
+                or intent.destination != f"https://github.com/{job.transport_repository}.git"
+                or intent.target_base_sha != base_sha
+                or intent.policy_name != (policy.name if policy is not None else None)
+                or intent.publication_mode != ("existing" if remote_required else "none")
+                or intent.remote_head_sha != (expected_remote_sha if remote_required else None)
+                or intent.request.expected_head_sha != expected_remote_sha
+            ):
+                raise ValueError("The retained intent does not match the admitted continuation.")
+            if reservation is not None:
+                remote_error = self._validate_rebase_continuation_remote(
+                    job,
+                    cwd=request.checkout_path,
+                    branch=intent.branch,
+                    remote="origin",
+                    expected_remote_sha=reservation,
+                    publish=True,
+                )
+                if remote_error is not None:
+                    return remote_error
+            return store, intent
+        except (OSError, RuntimeError, ValueError) as error:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "validation_runner"},
+                error=(
+                    f"Paused rebase intent failed: {redact_diagnostic_text(str(error))[:_ERR_MAX]}"
+                ),
+                interrupted=isinstance(error, InterruptedError),
+            )
+
+    def _continue_retained_rebase(
+        self,
+        job: GitJob,
+        *,
+        cwd: Path,
+        remote: str,
+        base_sha: str,
+        expected_remote_sha: str,
+        paths: tuple[str, ...],
+        record_source: Callable[[str], WorkspaceBinding],
+        retain_pending: Callable[[PendingRebaseStore, PendingRebaseRecord], None] | None = None,
+    ) -> tuple[str, WorkspaceBinding, tuple[PendingRebaseStore, PendingRebaseRecord]] | JobResult:
+        """Continue admitted edits and retain the resulting source before validation."""
+        recovery = self._admit_paused_rebase_intent(
+            job, base_sha=base_sha, expected_remote_sha=expected_remote_sha
+        )
+        if isinstance(recovery, JobResult):
+            return recovery
+        continued = self._continue_rebase_process(
+            cwd,
+            remote=remote,
+            expected_repo=job.transport_repository,
+            base_sha=base_sha,
+            expected_remote_sha=expected_remote_sha,
+            paths=paths,
+            timeout=job.timeout_s,
+        )
+        if continued is not None:
+            return self._retain_rebase_intent(continued, recovery[1])
+        completed = self._completed_rebase_head(
+            cwd,
+            expected_remote_sha=expected_remote_sha,
+            timeout=job.timeout_s,
+            record_source=record_source,
+        )
+        if isinstance(completed, JobResult):
+            return completed
+        retained = self._record_rebase_result(job, recovery, completed[1])
+        if isinstance(retained, JobResult):
+            return retained
+        if retain_pending is not None:
+            retain_pending(recovery[0], retained)
+        return completed[0], completed[1], (recovery[0], retained)
+
     def _git_continue_rebase_once(
-        self, job: GitJob, *, record_source: Callable[[str], WorkspaceBinding]
+        self,
+        job: GitJob,
+        *,
+        record_source: Callable[[str], WorkspaceBinding],
+        retain_pending: Callable[[PendingRebaseStore, PendingRebaseRecord], None] | None = None,
     ) -> JobResult:
         """Validate edit-only conflict output, finish policy rebase, and lease-publish."""
         parsed = self._parse_rebase_continuation(job)
@@ -9521,41 +10848,31 @@ class WorkerPool:
         )
         if edits is not None:
             return edits
-        continued = self._continue_rebase_process(
-            cwd,
+        completed_source = self._continue_retained_rebase(
+            job,
+            cwd=cwd,
             remote=remote,
-            expected_repo=job.transport_repository,
             base_sha=base_sha,
             expected_remote_sha=expected_remote_sha,
             paths=paths,
-            timeout=job.timeout_s,
-        )
-        if continued is not None:
-            return continued
-        source_sha = self._completed_rebase_head(
-            cwd,
-            expected_remote_sha=expected_remote_sha,
-            timeout=job.timeout_s,
             record_source=record_source,
+            retain_pending=retain_pending,
         )
-        if isinstance(source_sha, JobResult):
-            return source_sha
+        if isinstance(completed_source, JobResult):
+            return completed_source
+        source_sha, resulting_workspace, recovery = completed_source
         policy = self._select_rebase_policy(job.repo)
-        structural = self._run_rebase_structural_validation(
-            cwd,
-            timeout=job.timeout_s,
-            policy=policy,
-        )
-        if structural is not None:
+        structural = self._rebase_structural_receipts(job, resulting_workspace, source_sha)
+        if structural is not None and not structural.ok:
             return structural
         semantic = self._validate_rebased_tree(cwd, policy=policy)
         if semantic is not None:
-            return semantic
+            return self._retain_rebase_execution(semantic, structural)
         metadata = self._verify_rebased_commit_metadata(
             cwd, base_sha=base_sha, timeout=job.timeout_s
         )
         if metadata is not None:
-            return metadata
+            return self._retain_rebase_execution(metadata, structural)
         record = (
             self._prepare_rebase_review_publication(
                 job, base_sha=base_sha, source_head=expected_remote_sha, resulting_head=source_sha
@@ -9564,7 +10881,7 @@ class WorkerPool:
             else None
         )
         if isinstance(record, JobResult):
-            return record
+            return self._retain_rebase_execution(record, structural)
         if publish:
             revalidate_remote = self._authenticated_remote_revalidator(
                 cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
@@ -9579,9 +10896,10 @@ class WorkerPool:
                 remote_env=remote_env,
                 remote_config=remote_config,
                 revalidate_remote=revalidate_remote,
+                recovery=recovery,
             )
             if publication is not None:
-                return publication
+                return self._retain_rebase_execution(publication, structural)
         completed = JobResult(
             ok=True,
             value={
@@ -9589,9 +10907,12 @@ class WorkerPool:
                 "published": publish,
                 "head_sha": source_sha,
                 "rebase_policy": policy.name if policy is not None else None,
+                **(structural.value if structural is not None else {}),
             },
         )
-        return self._retain_rebase_review(job, completed, record)
+        return self._retain_rebase_execution(
+            self._retain_rebase_review(job, completed, record), structural
+        )
 
     def _completed_rebase_head(
         self,
@@ -9600,15 +10921,34 @@ class WorkerPool:
         expected_remote_sha: str,
         timeout: int,
         record_source: Callable[[str], WorkspaceBinding],
-    ) -> str | JobResult:
+    ) -> tuple[str, WorkspaceBinding] | JobResult:
         """Read and record the rewritten head after rebase continuation."""
         source_sha = self._read_publish_head(cwd, timeout=timeout)
         if isinstance(source_sha, JobResult):
             return source_sha
         if source_sha == expected_remote_sha:
             return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
-        record_source(source_sha)
-        return source_sha
+        return source_sha, record_source(source_sha)
+
+    @staticmethod
+    def _write_rebase_publication_phase(
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord],
+        phase: Literal["publication_intent", "complete"],
+    ) -> PendingRebaseRecord | JobResult:
+        """Read back one publication phase without losing the retained source on failure."""
+        store, prior = recovery
+        try:
+            return store.write(replace(prior, phase=phase), expected=prior)
+        except (OSError, RuntimeError, ValueError) as error:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "validation_runner"},
+                error=(
+                    f"Rebase {phase} persistence failed: "
+                    f"{redact_diagnostic_text(str(error))[:_ERR_MAX]}"
+                ),
+                interrupted=isinstance(error, InterruptedError),
+            )
 
     def _publish_rebased_head(
         self,
@@ -9621,8 +10961,14 @@ class WorkerPool:
         remote_env: dict[str, str],
         remote_config: tuple[str, ...],
         revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]],
+        recovery: tuple[PendingRebaseStore, PendingRebaseRecord] | None = None,
     ) -> JobResult | None:
         """Publish one rebased head or translate its exact failure."""
+        if recovery is not None:
+            publishing = self._write_rebase_publication_phase(recovery, "publication_intent")
+            if isinstance(publishing, JobResult):
+                return publishing
+            recovery = recovery[0], publishing
         try:
             git_utils.push_head_to_branch(
                 branch,
@@ -9640,7 +10986,47 @@ class WorkerPool:
             git_utils.BranchPublicationRemoteProbeError,
         ) as exc:
             return self._branch_publication_error(exc, head_sha=source_sha)
+        if recovery is not None:
+            completed = self._write_rebase_publication_phase(recovery, "complete")
+            if isinstance(completed, JobResult):
+                return completed
         return None
+
+    def _conflict_validation_requires_remote(
+        self, job: GitJob, *, expected_remote_sha: str, branch: str
+    ) -> bool | JobResult:
+        """Permit a local read only with complete source and publication context."""
+        fields = {
+            "publish_rebased_head",
+            "expected_head_sha",
+            "rebase_reason",
+            "pr_number",
+            "direct_scope_reservation",
+        }
+        present = fields.intersection(job.kwargs)
+        if not present:
+            return True
+        publish = job.kwargs.get("publish_rebased_head")
+        pr = job.kwargs.get("pr_number")
+        reason = job.kwargs.get("rebase_reason")
+        if (
+            present != fields
+            or type(publish) is not bool
+            or job.kwargs.get("expected_head_sha") != expected_remote_sha
+            or not isinstance(reason, str)
+            or reason not in {"manual", "implementation_start", "review_conflict"}
+            or (pr is not None and (type(pr) is not int or pr <= 0))
+            or publish != (pr is not None)
+            or (reason == "review_conflict" and pr is None)
+        ):
+            return JobResult(ok=False, error="rebase conflict publication context is invalid")
+        try:
+            reservation = self._initial_reservation_base(job, {"branch": branch})
+        except SourceWorkspaceError as error:
+            return JobResult(ok=False, error=str(error))
+        if reservation is not None and reservation != expected_remote_sha:
+            return JobResult(ok=False, error="rebase conflict reservation source changed")
+        return publish is True or reservation is not None
 
     def _git_validate_rebase_conflict(self, job: GitJob) -> JobResult:
         """Classify agent edits without changing Git state."""
@@ -9658,19 +11044,21 @@ class WorkerPool:
             index_snapshot,
             paused_head_sha,
         ) = parsed
-        remote_head = self._read_remote_branch_head(
-            cwd,
+        requires_remote = self._conflict_validation_requires_remote(
+            job, expected_remote_sha=expected_remote_sha, branch=branch
+        )
+        if isinstance(requires_remote, JobResult):
+            return requires_remote
+        remote_error = self._validate_rebase_continuation_remote(
+            job,
+            cwd=cwd,
             remote=remote,
             branch=branch,
-            expected_repo=job.transport_repository,
-            timeout=job.timeout_s,
+            expected_remote_sha=expected_remote_sha,
+            publish=requires_remote,
         )
-        if isinstance(remote_head, JobResult):
-            return remote_head
-        if remote_head != expected_remote_sha:
-            return JobResult(
-                ok=False, error="remote writer head changed during conflict resolution"
-            )
+        if remote_error is not None:
+            return remote_error
         classification = self._classify_rebase_conflict_edits(
             cwd,
             remote=remote,
@@ -9907,7 +11295,7 @@ class WorkerPool:
         timeout: int,
     ) -> JobResult | None:
         """Stage only validated conflicts and let Git continue the policy rebase."""
-        env = _controlled_git_signing_env(cwd, timeout=timeout)
+        env = self._signing_environment(cwd, timeout=timeout)
         if isinstance(env, JobResult):
             return env
         env["GIT_EDITOR"] = "true"
@@ -10633,9 +12021,9 @@ class WorkerPool:
                 )
                 if not paths.add_paths and not paths.update_paths:
                     raise SourceWorkspaceError("dirty direct turn has no changes")
-                signing = _controlled_git_signing_env(binding.cwd, timeout=job.timeout_s)
+                signing = self._signing_environment(binding.cwd, timeout=job.timeout_s)
                 if isinstance(signing, JobResult):
-                    raise SourceWorkspaceError("dirty direct signing environment is unavailable")
+                    return signing
                 if _dirty_worktree_content_snapshot(binding.cwd, timeout=job.timeout_s) != snapshot:
                     raise SourceWorkspaceError("dirty direct content changed before stage")
                 _stage_commit_paths(paths, binding.cwd, job.timeout_s, env=signing)
@@ -12666,6 +14054,12 @@ class WorkerPool:
                     self._shutdown,
                 )
                 if (
+                    "first_publication_candidate" in job.kwargs
+                    or "publication_recovery_request_id" in job.kwargs
+                ):
+                    with manager.acquire(binding, deadline=deadline):
+                        return self._recover_first_publication(job, manager, deadline)
+                if (
                     "remediation_pretest_input" in job.kwargs
                     or "remediation_pretest_record_sha256" in job.kwargs
                 ):
@@ -12680,18 +14074,9 @@ class WorkerPool:
                     )
                 )
                 if "expected_remote_sha" not in job.kwargs:
-                    result = self._git_commit_ordinary_writer(job, recovery_stack, record)
-                    if isinstance(result.value, dict) and "source_workspace" in result.value:
-                        return replace(
-                            result,
-                            value={
-                                **result.value,
-                                "source_receipt": manager._require_receipt(
-                                    issue, SourceLane.IMPLEMENTATION
-                                ).to_dict(),
-                            },
-                        )
-                    return result
+                    return self._git_commit_owned_ordinary_writer(
+                        job, recovery_stack, record, manager=manager, deadline=deadline
+                    )
                 initial_head = self._read_publish_head(Path(path), timeout=job.timeout_s)
                 if not isinstance(initial_head, str):
                     raise SourceWorkspaceError("implementation publication head is unavailable")
@@ -12744,6 +14129,32 @@ class WorkerPool:
             },
         )
 
+    def _git_commit_owned_ordinary_writer(
+        self,
+        job: GitJob,
+        recovery_stack: ExitStack,
+        record: Callable[[str], WorkspaceBinding],
+        *,
+        manager: SourceWorkspaceManager,
+        deadline: _PreparationDeadline,
+    ) -> JobResult:
+        """Check retained state and attach the current source receipt under its lease."""
+        pending = self._first_publication_pending_failure(job, manager, deadline)
+        if pending is not None:
+            return pending
+        result = self._git_commit_ordinary_writer(job, recovery_stack, record)
+        if isinstance(result.value, dict) and "source_workspace" in result.value:
+            return replace(
+                result,
+                value={
+                    **result.value,
+                    "source_receipt": manager._require_receipt(
+                        job.kwargs["issue_number"], SourceLane.IMPLEMENTATION
+                    ).to_dict(),
+                },
+            )
+        return result
+
     def _git_commit_ordinary_writer(
         self,
         job: GitJob,
@@ -12782,6 +14193,34 @@ class WorkerPool:
         elif current.revision != head:
             raise SourceWorkspaceError("implementation publication result head changed")
         return replace(result, value={**receipt, "source_workspace": current.to_dict()})
+
+    @staticmethod
+    def _first_publication_pending_failure(
+        job: GitJob, manager: SourceWorkspaceManager, deadline: _PreparationDeadline
+    ) -> JobResult | None:
+        """Block ordinary replay before a commit can change retained source state."""
+        try:
+            pending = FirstPublicationStore(manager.common_dir, deadline=deadline).candidate(
+                job.kwargs["issue_number"]
+            )
+        except InterruptedError:
+            raise
+        except (OSError, ValueError) as error:
+            return JobResult(
+                ok=False,
+                error=redact_diagnostic_text(f"first publication blocked: {error}")[:_ERR_MAX],
+                value={"first_publication_failure": "admission_or_storage"},
+            )
+        if pending is None:
+            return None
+        return JobResult(
+            ok=False,
+            error="first publication requires admitted recovery",
+            value={
+                "first_publication_failure": "pending",
+                "first_publication_candidate": pending.operation_id,
+            },
+        )
 
     def _git_commit_pretest_candidate(
         self, job: GitJob, manager: SourceWorkspaceManager, recovery_stack: ExitStack
@@ -13833,8 +15272,8 @@ class WorkerPool:
             )
         return None
 
-    @staticmethod
     def _commit_if_changes_with_controlled_signing(
+        self,
         job: GitJob,
         commit_args: tuple[int, Path, str],
         allowed_paths: Collection[str] | None,
@@ -13857,7 +15296,7 @@ class WorkerPool:
             git_message_timeout = min(git_message_timeout, int(operation_timeout))
 
         def signing_env_factory() -> dict[str, str]:
-            signing_env = _controlled_git_signing_env(
+            signing_env = self._signing_environment(
                 commit_args[1],
                 timeout=cast(int, operation_timeout),
                 private_metadata=isinstance(
@@ -14091,6 +15530,8 @@ class WorkerPool:
         baseline = self._writer_tracking_head(worktree_path, branch, timeout=job.timeout_s)
         if isinstance(baseline, JobResult):
             return baseline
+        if baseline is None:
+            return self._publish_first_writer(job, branch, worktree_path, source_sha)
         try:
             git_utils.push_branch(
                 branch,
@@ -14111,6 +15552,464 @@ class WorkerPool:
                 refresh_phase=None,
             )
         return self._writer_publication_receipt("published", source_sha, baseline, source_sha)
+
+    def _recover_first_publication(
+        self, job: GitJob, manager: SourceWorkspaceManager, deadline: _PreparationDeadline
+    ) -> JobResult:
+        """Revalidate and publish the retained commit without creating another commit."""
+        prior: JobResult | None = None
+        try:
+            store = FirstPublicationStore(manager.common_dir, deadline=deadline)
+            record = self._admit_first_publication_recovery(job, manager, store, deadline)
+            if isinstance(record, JobResult):
+                return record
+            source = self._recheck_first_publication_recovery(job, manager, store, record, deadline)
+            head = cast(str, record.workspace.revision)
+            validation = self._validate_first_publication_recovery(job, record, deadline)
+            prior = validation
+            source = self._recheck_first_publication_recovery(job, manager, store, record, deadline)
+            if not validation.ok:
+                return validation
+            observed = self._observe_first_publication_recovery(job, record, deadline)
+            if isinstance(observed, JobResult):
+                return _retain_publication_failure(observed, prior)
+            if record.phase == "complete":
+                result = self._writer_publication_receipt("published", head, None, head)
+            else:
+                if observed is None:
+                    retry = self._retry_first_publication(job, record, deadline)
+                    prior = _retain_publication_failure(retry or JobResult(ok=True), prior)
+                    if not prior.ok:
+                        return prior
+                source = self._recheck_first_publication_recovery(
+                    job, manager, store, record, deadline
+                )
+                receipt = manager._require_receipt(record.issue_number, SourceLane.IMPLEMENTATION)
+                result = self._complete_first_publication(
+                    job, manager, record, receipt, store, deadline
+                )
+            result = _retain_publication_failure(result, prior)
+            prior = result
+            # Network observations cannot replace source and operation checks.
+            source = self._recheck_first_publication_recovery(
+                job,
+                manager,
+                store,
+                replace(record, phase="complete") if result.ok else record,
+                deadline,
+            )
+            if isinstance(result.value, dict):
+                result = replace(
+                    result,
+                    value={
+                        **result.value,
+                        **source,
+                        "first_publication_validation": validation.value,
+                    },
+                )
+            return result
+        except InterruptedError:
+            raise
+        except (_RemoteGitAuthenticationError, _RebaseSigningEnvironmentError) as error:
+            return _retain_publication_failure(_git_environment_failure_result(error), prior)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            return self._first_publication_recovery_failure(error, prior)
+
+    def _validate_first_publication_recovery(
+        self, job: GitJob, record: FirstPublicationRecord, deadline: _PreparationDeadline
+    ) -> JobResult:
+        """Run current publication checks under the retained source lease."""
+        hephaestus = job.transport_repository.casefold() == "homericintelligence/hephaestus"
+        argv = (
+            FIRST_PUBLICATION_CHECK_ARGV if hephaestus else job.kwargs.get("publication_test_argv")
+        )
+        if argv is not None and (
+            type(argv) is not tuple
+            or not argv
+            or any(type(part) is not str or not part or "\0" in part for part in argv)
+        ):
+            raise ValueError("The first-publication validation command is invalid.")
+        result = (
+            JobResult(ok=True)
+            if argv is None
+            else self._execute_build_test(
+                BuildTestJob(
+                    repo=job.repo,
+                    cwd=record.workspace.cwd,
+                    argv=argv,
+                    timeout_s=max(1, int(deadline.remaining())),
+                    verified_runner_source_revision=(
+                        record.workspace.revision if hephaestus else None
+                    ),
+                    descr="first_publication_validation",
+                )
+            )
+        )
+        return replace(
+            result,
+            value={
+                "argv": argv,
+                "head_sha": record.workspace.revision,
+                "tree_sha": record.tree_sha,
+                "publication_recovery_request_id": job.kwargs["publication_recovery_request_id"],
+            },
+        )
+
+    def _recheck_first_publication_recovery(
+        self,
+        job: GitJob,
+        manager: SourceWorkspaceManager,
+        store: FirstPublicationStore,
+        record: FirstPublicationRecord,
+        deadline: _PreparationDeadline,
+    ) -> dict[str, Any]:
+        """Check source ownership and the retained operation after external work."""
+        source = self._first_publication_discovery_source(job, manager, record, deadline)
+        if store.candidate(record.issue_number) != record:
+            raise ValueError("The first-publication operation changed during recovery.")
+        return source
+
+    @staticmethod
+    def _first_publication_recovery_failure(error: Exception, prior: JobResult | None) -> JobResult:
+        """Retain earlier push evidence when a later admission or deadline fails."""
+        returncode, exception_class, stdout_tail, stderr_tail = _git_exception_diagnostics(error)
+        return _retain_publication_failure(
+            JobResult(
+                ok=False,
+                value={"first_publication_failure": "recovery_admission"},
+                error=(
+                    "timeout"
+                    if isinstance(error, SourceWorkspacePreparationError)
+                    else redact_diagnostic_text(str(error))[:_ERR_MAX]
+                ),
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+                process_failure=ProcessFailureMetadata(
+                    exception_class=exception_class, returncode=returncode
+                ),
+            ),
+            prior,
+        )
+
+    def _observe_first_publication_recovery(
+        self, job: GitJob, record: FirstPublicationRecord, deadline: _PreparationDeadline
+    ) -> str | JobResult | None:
+        """Reject another remote head or a missing completed publication."""
+        observed = self._read_remote_branch_state(
+            record.workspace.cwd,
+            remote="origin",
+            branch=record.branch,
+            expected_repo=job.transport_repository,
+            timeout=max(1, int(deadline.remaining())),
+        )
+        if isinstance(observed, JobResult):
+            return observed
+        if record.phase == "complete" and observed != record.workspace.revision:
+            raise ValueError("The completed first-publication remote head changed.")
+        if observed not in {None, record.workspace.revision}:
+            raise ValueError("Another remote head blocks first-publication recovery.")
+        return observed
+
+    def _admit_first_publication_recovery(
+        self,
+        job: GitJob,
+        manager: SourceWorkspaceManager,
+        store: FirstPublicationStore,
+        deadline: _PreparationDeadline,
+    ) -> FirstPublicationRecord | JobResult:
+        """Use current source, scope, main, and signing facts for one candidate."""
+        for key in ("first_publication_candidate", "publication_recovery_request_id"):
+            value = job.kwargs.get(key)
+            if type(value) is not str or re.fullmatch(r"[0-9a-f]{32}", value) is None:
+                raise ValueError("The first-publication recovery request is invalid.")
+        if any(
+            key in job.kwargs
+            for key in (
+                "expected_remote_sha",
+                "writer_refresh",
+                "remediation_pretest_input",
+                "remediation_pretest_record_sha256",
+                "scope_retraction_paths",
+            )
+        ):
+            raise ValueError("First-publication recovery cannot use another publication route.")
+        record = store.candidate(job.kwargs["issue_number"])
+        if (
+            record is None
+            or record.operation_id != job.kwargs["first_publication_candidate"]
+            or record.workspace != job.workspace
+        ):
+            raise ValueError("The first-publication recovery candidate changed.")
+        self._first_publication_discovery_source(job, manager, record, deadline)
+        paths = job.kwargs.get("allowed_paths")
+        if (
+            type(paths) is not tuple
+            or not paths
+            or (record.allowed_paths is not None and paths != record.allowed_paths)
+        ):
+            raise ValueError("The first-publication approved scope changed or is unavailable.")
+        scope = self._first_publication_recovery_scope(job, record, paths)
+        if scope is not None:
+            return scope
+        self._required_signing_environment(record.workspace.cwd, timeout=job.timeout_s)
+        raw = git_utils.run(
+            ["git", "cat-file", "-p", cast(str, record.workspace.revision)],
+            cwd=record.workspace.cwd,
+            timeout=job.timeout_s,
+        ).stdout
+        if "\ngpgsig " not in f"\n{raw}" or "Signed-off-by:" not in raw:
+            raise ValueError("The first-publication signing metadata is unavailable.")
+        return record
+
+    def _first_publication_recovery_scope(
+        self, job: GitJob, record: FirstPublicationRecord, paths: tuple[str, ...]
+    ) -> JobResult | None:
+        """Check independent current PR paths and retained-base paths against fresh scope."""
+        worktree = record.workspace.cwd
+        fetch_job = replace(job, kwargs={**job.kwargs, "cwd": str(worktree)})
+        main = self._git_fetch_main(fetch_job)
+        if not main.ok or not isinstance(main.value, dict):
+            return main
+        head = cast(str, record.workspace.revision)
+        for revision in (record.scope_base_sha, head):
+            git_utils.run(
+                ["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+                cwd=worktree,
+                timeout=job.timeout_s,
+            )
+        ancestry = git_utils.run(
+            ["git", "merge-base", "--is-ancestor", record.scope_base_sha, head],
+            cwd=worktree,
+            timeout=job.timeout_s,
+            check=False,
+        )
+        if ancestry.returncode != 0:
+            raise ValueError("The retained publication base is not an ancestor of its head.")
+        bases = git_utils.run(
+            ["git", "merge-base", "--all", str(main.value["head_sha"]), head],
+            cwd=worktree,
+            timeout=job.timeout_s,
+        ).stdout.split()
+        if len(bases) != 1 or not _is_full_commit_sha(bases[0]):
+            raise ValueError("The current publication merge base is ambiguous.")
+        path, identity = self._initial_start_identity(fetch_job)
+        started = self._initial_record_matches(path, identity)
+        if started is not None and started["head_sha"] != record.scope_base_sha:
+            raise ValueError("The retained publication base conflicts with the start record.")
+        for base in (bases[0], record.scope_base_sha):
+            failure = self._verify_implementation_edit_scope(
+                replace(job, kwargs={**job.kwargs, "scope_history_base_sha": base}),
+                worktree,
+                allowed_paths=paths,
+            )
+            if failure is not None:
+                return failure
+        return None
+
+    def _retry_first_publication(
+        self, job: GitJob, record: FirstPublicationRecord, deadline: _PreparationDeadline
+    ) -> JobResult | None:
+        """Publish the same head only while its remote ref is absent."""
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=record.workspace.cwd,
+            expected_repo=job.transport_repository,
+            timeout=max(1, int(deadline.remaining())),
+        )
+        try:
+            git_utils.publish_branch_if_absent(
+                record.branch,
+                cast(str, record.workspace.revision),
+                record.workspace.cwd,
+                timeout=max(1, int(deadline.remaining())),
+                env=remote_env,
+                remote_config=remote_config,
+            )
+        except InterruptedError:
+            raise
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            return self._writer_publication_failure(
+                job,
+                record.workspace.cwd,
+                record.branch,
+                cast(str, record.workspace.revision),
+                None,
+                failure=error,
+                refresh_phase=None,
+            )
+        return None
+
+    def _first_publication_record(
+        self,
+        job: GitJob,
+        branch: str,
+        worktree: Path,
+        head: str,
+        deadline: _PreparationDeadline,
+    ) -> tuple[SourceWorkspaceManager, FirstPublicationRecord] | JobResult:
+        """Bind the current leased source without treating its receipt as publication."""
+        manager, original = self._source_git_manager(job)
+        issue = job.kwargs["issue_number"]
+        receipt = manager._require_receipt(issue, SourceLane.IMPLEMENTATION)
+        manager._reject_foreign_owner(receipt, issue, SourceLane.IMPLEMENTATION)
+        current = manager._binding(receipt)
+        if (
+            current.cwd != worktree
+            or current.revision != head
+            or receipt.branch != branch
+            or replace(current, revision=original.revision, generation=original.generation)
+            != original
+            or not manager._physical_matches_receipt(receipt, deadline=deadline)
+        ):
+            raise ValueError("The first-publication source changed.")
+        paths = job.kwargs.get("allowed_paths")
+        if paths is not None and not isinstance(paths, (tuple, list, set, frozenset)):
+            raise ValueError("The first-publication scope is unavailable.")
+        scope_failure = self._verify_implementation_edit_scope(job, worktree, allowed_paths=paths)
+        if scope_failure is not None:
+            return scope_failure
+        tree = git_utils.run(
+            ["git", "rev-parse", "--verify", "HEAD^{tree}"],
+            cwd=worktree,
+            timeout=max(1, int(deadline.remaining())),
+            env=_controlled_git_env(),
+        ).stdout.strip()
+        scope_base = job.kwargs.get(
+            "scope_history_base_sha", job.kwargs.get("publish_base_sha", original.revision)
+        )
+        if not isinstance(scope_base, str):
+            raise ValueError("The first-publication scope base is unavailable.")
+        record = FirstPublicationRecord(
+            operation_id=uuid.uuid4().hex,
+            repository=job.transport_repository,
+            scheduler_repository=job.repo,
+            issue_number=issue,
+            branch=branch,
+            destination=f"https://github.com/{job.transport_repository}.git",
+            workspace=current,
+            tree_sha=tree,
+            scope_base_sha=scope_base,
+            allowed_paths=tuple(sorted(paths)) if paths is not None else None,
+            phase="publication_intent",
+        )
+        if manager._require_receipt(issue, SourceLane.IMPLEMENTATION) != receipt:
+            raise ValueError("The first-publication source receipt changed.")
+        return manager, record
+
+    def _publish_first_writer(
+        self, job: GitJob, branch: str, worktree: Path, head: str
+    ) -> JobResult:
+        """Retain exact intent before one absent-only implementation publication."""
+        deadline = _PreparationDeadline(
+            job.deadline_s or time.monotonic() + job.timeout_s, time.monotonic, self._shutdown
+        )
+        prior: JobResult | None = None
+        try:
+            bound = self._first_publication_record(job, branch, worktree, head, deadline)
+            if isinstance(bound, JobResult):
+                return bound
+            manager, record = bound
+            store = FirstPublicationStore(manager.common_dir, deadline=deadline)
+            observed = self._read_remote_branch_state(
+                worktree,
+                remote="origin",
+                branch=branch,
+                expected_repo=job.transport_repository,
+                timeout=max(1, int(deadline.remaining())),
+            )
+            if observed is not None:
+                return JobResult(
+                    ok=False,
+                    error="first publication requires confirmed remote absence",
+                    value={"first_publication_failure": "remote_not_absent"},
+                    stdout_tail=observed.stdout_tail if isinstance(observed, JobResult) else "",
+                    stderr_tail=observed.stderr_tail if isinstance(observed, JobResult) else "",
+                    process_failure=observed.process_failure
+                    if isinstance(observed, JobResult)
+                    else None,
+                )
+            store.write(record, expected=None)
+            receipt = manager._require_receipt(record.issue_number, SourceLane.IMPLEMENTATION)
+            if manager._binding(
+                receipt
+            ) != record.workspace or not manager._physical_matches_receipt(
+                receipt, deadline=deadline
+            ):
+                raise ValueError("The first-publication source changed before push.")
+            remote_env, remote_config = self._authenticated_remote_git_configuration(
+                cwd=worktree,
+                expected_repo=job.transport_repository,
+                timeout=max(1, int(deadline.remaining())),
+            )
+            try:
+                git_utils.publish_branch_if_absent(
+                    branch,
+                    head,
+                    worktree,
+                    timeout=max(1, int(deadline.remaining())),
+                    env=remote_env,
+                    remote_config=remote_config,
+                )
+            except InterruptedError:
+                raise
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                result = self._writer_publication_failure(
+                    job, worktree, branch, head, None, failure=error, refresh_phase=None
+                )
+                if not result.ok:
+                    return result
+                prior = result
+            return _retain_publication_failure(
+                self._complete_first_publication(job, manager, record, receipt, store, deadline),
+                prior,
+            )
+        except (InterruptedError, SourceWorkspacePreparationError):
+            raise
+        except _RemoteGitAuthenticationError as error:
+            return _retain_publication_failure(_git_environment_failure_result(error), prior)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            returncode, exception_class, stdout_tail, stderr_tail = _git_exception_diagnostics(
+                error
+            )
+            return _retain_publication_failure(
+                JobResult(
+                    ok=False,
+                    error=redact_diagnostic_text(f"first publication blocked: {error}")[:_ERR_MAX],
+                    value={"first_publication_failure": "admission_or_storage"},
+                    stdout_tail=stdout_tail,
+                    stderr_tail=stderr_tail,
+                    process_failure=ProcessFailureMetadata(
+                        exception_class=exception_class, returncode=returncode
+                    ),
+                ),
+                prior,
+            )
+
+    def _complete_first_publication(
+        self,
+        job: GitJob,
+        manager: SourceWorkspaceManager,
+        record: FirstPublicationRecord,
+        receipt: SourceWorkspaceReceipt,
+        store: FirstPublicationStore,
+        deadline: _PreparationDeadline,
+    ) -> JobResult:
+        """Verify the remote and unchanged source before durable completion."""
+        head = cast(str, record.workspace.revision)
+        observed = self._read_remote_branch_head(
+            record.workspace.cwd,
+            remote="origin",
+            branch=record.branch,
+            expected_repo=job.transport_repository,
+            timeout=max(1, int(deadline.remaining())),
+        )
+        if isinstance(observed, JobResult):
+            return observed
+        if observed != head or not manager._physical_matches_receipt(receipt, deadline=deadline):
+            raise ValueError("The first-publication completion is unverified.")
+        if manager._require_receipt(record.issue_number, SourceLane.IMPLEMENTATION) != receipt:
+            raise ValueError("The first-publication source receipt changed after push.")
+        store.write(replace(record, phase="complete"), expected=record)
+        return self._writer_publication_receipt("published", head, None, head)
 
     def _refresh_writer_publication(
         self,
@@ -14277,12 +16176,26 @@ class WorkerPool:
             returncode=push_returncode,
         )
         try:
-            observed = self._read_remote_branch_head(
+            reader = (
+                self._read_remote_branch_state
+                if baseline is None and refresh_phase is None and not direct_reservation
+                else self._read_remote_branch_head
+            )
+            observed = reader(
                 worktree,
                 remote="origin",
                 branch=branch,
                 expected_repo=job.transport_repository,
                 timeout=job.timeout_s,
+            )
+        except InterruptedError:
+            raise
+        except _RemoteGitAuthenticationError as exc:
+            return replace(
+                _git_environment_failure_result(exc),
+                stdout_tail=push_stdout,
+                stderr_tail=_ordered_git_diagnostics(push_stderr, str(exc)),
+                process_failure=push_failure,
             )
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             returncode, exception_class, probe_stdout, probe_stderr = _git_exception_diagnostics(
@@ -14304,6 +16217,8 @@ class WorkerPool:
             )
         if isinstance(observed, JobResult):
             state, remote_head = "probe_failed", None
+        elif observed is None:
+            state, remote_head = "remote_absent", None
         else:
             remote_head = observed
             state = (
@@ -14402,6 +16317,27 @@ class WorkerPool:
         timeout: int,
     ) -> str | JobResult:
         """Read one exact remote branch head without updating local refs."""
+        observed = self._read_remote_branch_state(
+            worktree_path,
+            remote=remote,
+            branch=branch,
+            expected_repo=expected_repo,
+            timeout=timeout,
+        )
+        if observed is None:
+            return JobResult(ok=False, error="cannot verify remote writer head")
+        return observed
+
+    def _read_remote_branch_state(
+        self,
+        worktree_path: Path,
+        *,
+        remote: str,
+        branch: str,
+        expected_repo: str,
+        timeout: int,
+    ) -> str | JobResult | None:
+        """Distinguish confirmed absence from a failed authenticated read."""
         expected_ref = f"refs/heads/{branch}"
         remote_env, remote_config = self._authenticated_remote_git_configuration(
             cwd=worktree_path,
@@ -14409,12 +16345,14 @@ class WorkerPool:
             timeout=timeout,
         )
         try:
-            fields = git_utils.run(
+            output = git_utils.run(
                 ["git", *remote_config, "ls-remote", "--refs", remote, expected_ref],
                 cwd=worktree_path,
                 timeout=timeout,
                 env=remote_env,
-            ).stdout.split()
+            ).stdout
+        except InterruptedError:
+            raise
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             returncode, exception_class, stdout_tail, stderr_tail = _git_exception_diagnostics(exc)
             value: dict[str, object] = {"exception_class": exception_class}
@@ -14431,6 +16369,9 @@ class WorkerPool:
                     returncode=returncode,
                 ),
             )
+        if output == "":
+            return None
+        fields = output.split()
         if len(fields) != 2 or not _is_full_commit_sha(fields[0]) or fields[1] != expected_ref:
             return JobResult(ok=False, error="cannot verify remote writer head")
         return fields[0]

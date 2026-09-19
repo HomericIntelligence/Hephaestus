@@ -12,6 +12,7 @@ import pytest
 
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.pipeline.jobs import JobHandle
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
@@ -37,6 +38,7 @@ class _RecordingWorkerPool(FakeWorkerPool):
         host_verification_pyxis_sha256: str | None = None,
         host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
+        host_capabilities: WorkerCapabilities | None = None,
         podman_machine: str | None = None,
         *,
         git_lock_timeout: int,
@@ -55,6 +57,7 @@ class _RecordingWorkerPool(FakeWorkerPool):
         self.host_verification_pyxis_sha256 = host_verification_pyxis_sha256
         self.host_verification_pyxis_authority = host_verification_pyxis_authority
         self.host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
+        self.host_capabilities = host_capabilities
         self.podman_machine = podman_machine
         self.git_lock_timeout = git_lock_timeout
 
@@ -109,6 +112,9 @@ def test_coordinator_uses_independent_main_and_learning_capacities(
     assert coordinator.pool.host_verification_pyxis_sha256 is None
     assert coordinator.pool.host_verification_pyxis_authority is None
     assert coordinator.pool.host_verification_pyxis_quota_root is None
+    assert isinstance(coordinator.pool.host_capabilities, WorkerCapabilities)
+    assert coordinator.pool.host_capabilities.execution_boundary_id == config.run_identity
+    assert coordinator.pool.host_capabilities.signing_provider is not None
     assert coordinator.pool.podman_machine is None
     assert coordinator.pool.git_lock_timeout == config.git_lock_timeout
 

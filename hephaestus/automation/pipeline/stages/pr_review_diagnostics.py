@@ -35,20 +35,34 @@ def host_verification_failure_comment(
 ) -> tuple[str, str]:
     """Return the exact-head marker and bounded host-failure comment."""
     head = str(diagnostic.get("head_sha") or "")
-    verification_id = verification.descr if verification is not None else "unknown"
+    rebase = diagnostic.get("operation") == "rebase"
+    verification_id = (
+        verification.descr if verification is not None else "rebase" if rebase else "unknown"
+    )
     marker = f"{_HOST_VERIFICATION_FAILURE_COMMENT_PREFIX}{head}:{verification_id} -->"
     raw_argv = diagnostic.get("argv")
     argv = raw_argv if isinstance(raw_argv, (list, tuple)) else ()
     command = shlex.join(str(part) for part in argv)
     path = str(diagnostic.get("path") or "")
+    labels = (
+        "The PR verdict labels did not change."
+        if diagnostic.get("labels_unchanged") is True
+        else "The source-verdict result is separate from this host diagnostic."
+    )
+    summary = (
+        "[auto-msg] A required host capability is unavailable. The fixed check did not start. "
+        if diagnostic.get("capability_failure") is True
+        else "[auto-msg] The fixed host-verification command failed before source review. "
+    )
+    if rebase:
+        summary = "[auto-msg] A required rebase host operation is blocked. "
     sections = [
         marker,
         "### Host verification failed",
         "",
-        "[auto-msg] The fixed host-verification command failed before source review. "
-        + "The PR remains `state:implementation-no-go`.",
+        summary + labels,
         "",
-        "**Reviewed head**",
+        "**Source head**" if rebase else "**Reviewed head**",
         "",
         _indented_diagnostic(head),
         "",
@@ -58,6 +72,21 @@ def host_verification_failure_comment(
     ]
     if path:
         sections.extend(["", "**Affected path**", "", _indented_diagnostic(path)])
+    for title, key in (
+        ("Capability step", "failed_step"),
+        ("Purpose", "purpose"),
+        ("Receipt", "receipt_id"),
+        ("Retained inspection directory", "retained_root"),
+        ("Operating-system error", "operating_system_error"),
+        ("Exception type", "exception_type"),
+        ("Return code", "return_code"),
+        ("Cleanup state", "cleanup_state"),
+        ("Receipt storage error", "persistence_error"),
+        ("Storage exception type", "persistence_exception_type"),
+    ):
+        value = diagnostic.get(key)
+        if value is not None and value != "":
+            sections.extend(["", f"**{title}**", "", _indented_diagnostic(value)])
     sections.extend(
         [
             "",

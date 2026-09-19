@@ -2016,6 +2016,76 @@ signing, and commit creation. Pipeline stages put immutable issue title and
 body values in each job. The Git worker calls this neutral commit interface;
 it does not fetch issue data through an old commit adapter.
 
+### Host capability ownership
+
+The coordinator supplies quota and signing providers through
+`WorkerCapabilities`. The pure contracts in `pipeline/host_capabilities.py`
+define requests, receipts, and provider interfaces. Host operations in
+`automation/host_capabilities.py` own platform selection, filesystem access,
+commands, receipt storage, and the quota cache.
+
+A request binds the repository, issue, optional PR, source workspace, head,
+attempt generation, purpose, and request ID. The worker adds the canonical
+root, device, backend, execution boundary, and observed source head to the
+receipt target. The signing provider calls the existing controlled signing
+validator and preserves its failure cause.
+
+Quota receipts are stored under
+`build/.issue_implementer/host-capability-receipts/`. Storage uses a private
+lock, atomic replacement, and exact readback. The cache key includes the
+canonical root, device, capability, backend, execution boundary, and process
+ID. A cache hit creates a new receipt for the current request. Stored
+receipts do not supply cache authority to a new process.
+
+### Pending rebase records
+
+The host-side `PendingRebaseStore` owns durable recovery records. It stores
+them in `hephaestus-source-workspaces/pending-rebases` under the canonical
+Git common directory. The store rejects unsafe ownership, permissions,
+symlinks, and namespace replacement. Existing protected parent directories
+do not need private permissions. The recovery directory must have mode
+`0700`; its record lock must have mode `0600`.
+
+Each write compares the complete prior record before it replaces that
+record. Creation also checks for another active record for the same issue.
+A short file lock protects these checks, the durable write, and its exact
+readback. Lock waits use the caller's absolute deadline. The store does not
+run Git commands or make network requests while it holds this lock.
+
+Discovery returns recovery data, not execution permission. An unresolved
+`intent` or multiple active records require operator recovery. Completed
+and aborted records remain stored but do not select active recovery work.
+The worker must validate source ownership and the current repository state
+before it can use a recovery record to continue an operation.
+
+### First-publication recovery
+
+The existing `commit_push` worker owns first publication. A local no-PR rebase
+does not publish a branch. Before an absent-only push, the worker stores and
+reads back the intended commit, tree, source ownership, destination, branch,
+scope, and operation identity. The
+[`FirstPublicationStore`](../hephaestus/automation/first_publication_recovery.py)
+uses a separate `first-publications` namespace under the source manager's
+protected Git-common state directory. It does not use a rebase record as
+publication permission.
+
+Discovery supplies an untrusted candidate. The
+[`worker`](../hephaestus/automation/pipeline/worker_pool.py) checks current
+source ownership, clean head and tree, signing metadata, approved paths, and
+authenticated remote state before recovery. It checks both the current
+merge-base diff and the retained-start diff against current approved paths.
+It repeats publication validation without another writer, commit, or rebase.
+
+Confirmed remote absence permits a conditional push with normal hooks. The
+exact intended remote head permits completion after durable intent is checked.
+A competing head or failed observation blocks. Completed records remain
+available for a fresh request-bound callback; they do not permit another push.
+The existing
+[`implementation stage`](../hephaestus/automation/pipeline/stages/implementation.py)
+accepts that callback before it advances to PR creation. An ambiguous crash
+before valid intent requires operator recovery. No recovery record grants
+source-review approval or merge authority.
+
 ### Job kinds
 
 Every job that can read repository source carries a provider-neutral

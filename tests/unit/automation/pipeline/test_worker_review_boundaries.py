@@ -16,15 +16,21 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import git_utils, implementation_writer
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
+from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import file_lock
+from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.test_source_worktree import _git, _repository
 
 
 def _pool(tmp_path: Path, shutdown: threading.Event) -> worker_pool.WorkerPool:
     return worker_pool.WorkerPool(
-        size=1, shutdown=shutdown, completion_q=queue.Queue(), lock_dir=tmp_path / "locks"
+        size=1,
+        shutdown=shutdown,
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path / "locks",
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
 
 
@@ -32,13 +38,14 @@ def test_source_rebase_metadata_does_not_reach_the_git_helper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A real rebase must use the closed helper contract after source admission."""
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _root=None: "/usr/bin/gh")
     root, revision, base_revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
     pool = _pool(tmp_path, threading.Event())
     rebase = create_autospec(git_utils.rebase_worktree_onto, return_value=False)
     monkeypatch.setattr(git_utils, "rebase_worktree_onto", rebase)
-    monkeypatch.setattr(worker_pool, "_required_git_signing_env", lambda *args, **kwargs: {})
+    monkeypatch.setattr(FakeSigningProvider, "environment", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         pool, "_git_fetch_main", lambda _job: JobResult(ok=True, value={"head_sha": base_revision})
     )
@@ -70,6 +77,7 @@ def test_writer_creation_stops_while_its_handoff_lock_is_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool
 ) -> None:
     """A contended writer lock must not extend the job budget or delay shutdown."""
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _root=None: "/usr/bin/gh")
     root, _, _ = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     shutdown = threading.Event()
@@ -121,6 +129,7 @@ def test_publication_timeout_keeps_the_recorded_local_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refresh: bool
 ) -> None:
     """An uncertain push must retain the exact local head without a second push."""
+    monkeypatch.setattr(worker_pool, "_trusted_gh_executable", lambda _root=None: "/usr/bin/gh")
     root, _, revision = _repository(tmp_path, origin_repository="repo")
     manager = SourceWorkspaceManager(root, repository="repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")

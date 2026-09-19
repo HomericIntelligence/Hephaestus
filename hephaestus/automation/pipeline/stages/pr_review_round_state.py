@@ -2,6 +2,19 @@
 
 from ..work_item import WorkItem
 
+_HOST_EXECUTION_PAYLOAD_KEYS = (
+    "host_verification_receipts",
+    "host_verification_repository_profile",
+    "host_verification_existing_changed_paths",
+    "host_verification_failure",
+    "host_verification_pending",
+    "host_verification_workspace",
+    "host_capability_request",
+    "host_capability_result",
+    "host_capability_failure",
+    "host_capability_verification",
+)
+
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
 _ROUND_PAYLOAD_KEYS = (
@@ -38,11 +51,14 @@ _ROUND_PAYLOAD_KEYS = (
     "repository_validation_ci_request",
     "repository_validation_local_request",
     "repository_validation_failure",
-    "host_verification_receipts",
-    "host_verification_repository_profile",
-    "host_verification_failure",
-    "host_verification_pending",
+    *_HOST_EXECUTION_PAYLOAD_KEYS,
 )
+
+
+def _clear_host_execution_state(item: WorkItem) -> None:
+    """Remove transient execution state without changing source review evidence."""
+    for key in _HOST_EXECUTION_PAYLOAD_KEYS:
+        item.payload.pop(key, None)
 
 
 def _clear_round_review_state(item: WorkItem) -> None:

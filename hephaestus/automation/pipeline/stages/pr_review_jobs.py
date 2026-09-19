@@ -92,6 +92,11 @@ class PrReviewJobs(
             "repository_validation_ci_request",
             "repository_validation_local_request",
             "repository_validation_failure",
+            "host_verification_workspace",
+            "host_capability_request",
+            "host_capability_result",
+            "host_capability_failure",
+            "host_capability_verification",
         ):
             item.payload.pop(key, None)
         if item.pr is not None:
@@ -312,26 +317,6 @@ class PrReviewJobs(
             descr="verify_pr_review_checkout",
         )
         return JobRequest(job, on_done_state=REVIEW_CHECKOUT_WAIT)
-
-    @staticmethod
-    def _submit_host_verification(
-        item: WorkItem, ctx: StageContext, verification: _HostVerificationSpec
-    ) -> JobRequest:
-        """Submit one fixed host command from the immutable review plan."""
-        # Callbacks run before ``on_done_state``; keep an ownership marker.
-        item.payload[_HOST_VERIFICATION_PENDING] = verification.descr
-        return JobRequest(
-            BuildTestJob(
-                repo=item.repo,
-                cwd=_worktree_path(item, ctx),
-                argv=verification.argv,
-                timeout_s=HOST_VERIFICATION_TIMEOUT_S,
-                expected_head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
-                immutable_source=True,
-                descr=verification.descr,
-            ),
-            on_done_state=HOST_VERIFICATION_WAIT,
-        )
 
     def _submit_review_job(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Create the agent job after the checkout/head barrier succeeds."""
@@ -841,14 +826,14 @@ class PrReviewJobs(
         verification: _HostVerificationSpec | None,
         reason: str,
     ) -> StepResult:
-        """Durably reject a failed host test without entering audit retries."""
+        """Separate a recoverable runner fault from a source validation failure."""
         receipts = item.payload.get("host_verification_receipts")
         receipt = (
             receipts[-1]
             if isinstance(receipts, list) and receipts and isinstance(receipts[-1], dict)
             else None
         )
-        diagnostic = {
+        diagnostic: dict[str, object] = {
             "argv": list(verification.argv) if verification is not None else [],
             "path": ((verification.changed_path or "") if verification is not None else ""),
             "head_sha": str(item.payload.get("reviewed_pr_head_sha") or ""),
@@ -870,6 +855,27 @@ class PrReviewJobs(
             ),
         }
         item.payload["host_verification_failure"] = diagnostic
+        failure_kind = receipt.get("failure_kind") if isinstance(receipt, dict) else None
+        # A runner fault is not evidence of a source defect. Keep PR verdict
+        # labels unchanged so a later run can retry the same reviewed head.
+        if failure_kind == "runner" and (
+            isinstance(receipt, dict)
+            and receipt.get("head_sha") == diagnostic["head_sha"]
+            and receipt.get("source_head_mismatch") is not True
+        ):
+            diagnostic["labels_unchanged"] = True
+            pr_number = cast(int, item.pr)
+            if not publish_host_verification_failure(
+                ctx.github, pr_number, verification, diagnostic, logger
+            ):
+                return self._cleanup_review_worktree_then(
+                    item,
+                    StageOutcome(Disposition.BLOCKED, "host_verification_comment_failed"),
+                )
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.BLOCKED, "host_verification_runner_blocked"),
+            )
         no_go_outcome = PrReviewGate._write_no_go(item, ctx)
         if no_go_outcome is not None:
             if isinstance(no_go_outcome, StageOutcome):
@@ -891,7 +897,6 @@ class PrReviewJobs(
         # Only a confirmed fixed-tool validation failure may be repaired by
         # the implementation agent. UV/sandbox/bootstrap errors share a
         # nonzero process status but are operator remediation, not code work.
-        failure_kind = receipt.get("failure_kind") if isinstance(receipt, dict) else None
         if failure_kind in {"test", "validation"}:
             detail = (
                 "Host verification failed for "
@@ -1033,6 +1038,8 @@ class PrReviewJobs(
         self, item: WorkItem, result: JobResult, ctx: StageContext
     ) -> None:
         """Store one completed job result for the current review wait state."""
+        if self._consume_host_capability_result(item, result, ctx):
+            return
         if self._consume_repository_validation_preparation(item, result):
             return
         if self._consume_repository_validation_ci_result(item, result):

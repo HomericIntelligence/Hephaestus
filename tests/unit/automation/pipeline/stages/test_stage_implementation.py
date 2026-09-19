@@ -281,6 +281,38 @@ def _step_after_plan_scope(stage: ImplementationStage, item: Any, ctx: Any) -> A
     request = stage.step(item, ctx)
     assert isinstance(request, JobRequest)
     _complete_plan_scope_read(stage, item, ctx, request)
+    result = stage.step(item, ctx)
+    if (
+        isinstance(result, JobRequest)
+        and isinstance(result.job, GitJob)
+        and result.job.op == "discover_first_publication"
+    ):
+        stage.on_job_done(item, _publication_discovery_result(result.job), ctx)
+        return stage.step(item, ctx)
+    return result
+
+
+def _publication_discovery_result(job: GitJob) -> JobResult:
+    """Complete the actual discovery request for a fixture with no retained operation."""
+    assert job.op == "discover_first_publication"
+    assert job.workspace is None
+    return JobResult(
+        ok=True,
+        value={
+            "publication_discovery_request_id": job.kwargs["publication_discovery_request_id"],
+            "repository": job.transport_repository,
+            "issue_number": job.kwargs["issue_number"],
+            "first_publication_candidate": None,
+        },
+    )
+
+
+def _step_after_publication_discovery(stage: ImplementationStage, item: Any, ctx: Any) -> Any:
+    """Drive the no-candidate exchange before asserting ordinary gate behavior."""
+    request = stage.step(item, ctx)
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, GitJob)
+    stage.on_job_done(item, _publication_discovery_result(request.job), ctx)
     return stage.step(item, ctx)
 
 
@@ -415,6 +447,39 @@ def _write_runner_swap_git(
     return fake_bin, swap_marker
 
 
+def _rebase_discovery_result(job: GitJob, item: Any) -> JobResult:
+    """Return a matching read result without granting mutation or capability authority."""
+    assert job.op == "discover_pending_rebase"
+    assert job.workspace is None
+    assert job.capability_target is None
+    assert job.rebase_recovery_candidate is None
+    request_id = job.kwargs["discovery_request_id"]
+    assert isinstance(request_id, str) and request_id
+    binding = WorkspaceBinding.from_dict(item.payload["_impl_source_workspace"])
+    return JobResult(
+        ok=True,
+        value={
+            "discovery_request_id": request_id,
+            "source_workspace": binding.to_dict(),
+            "source_receipt": _writer_receipt(item, binding).to_dict(),
+            "rebase_recovery_candidate": None,
+        },
+    )
+
+
+def _consume_rebase_discovery(stage: Any, item: Any, ctx: Any) -> None:
+    """Complete the actual read exchange before inspecting the next mutation request."""
+    attempts = dict(item.attempts)
+    generation = item.payload.get("rebase_capability_generation")
+    request = stage.step(item, ctx)
+    assert isinstance(request, JobRequest), request
+    assert isinstance(request.job, GitJob)
+    stage.on_job_done(item, _rebase_discovery_result(request.job, item), ctx)
+    item.state = request.on_done_state
+    assert item.attempts == attempts
+    assert item.payload.get("rebase_capability_generation") == generation
+
+
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 60) -> Any:
     """Drive a stage through the canonical FakeWorkerPool until an outcome."""
     entry = stage.on_enter(item, ctx)
@@ -426,6 +491,10 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             item.state = result.next_state
             continue
         if isinstance(result, JobRequest):
+            if isinstance(result.job, GitJob) and result.job.op == "discover_first_publication":
+                pool._scripted.appendleft(_publication_discovery_result(result.job))
+            if isinstance(result.job, GitJob) and result.job.op == "discover_pending_rebase":
+                pool._scripted.appendleft(_rebase_discovery_result(result.job, item))
             if isinstance(result.job, GitHubJob) and isinstance(
                 result.job.request, ReadCurrentPlanScopeRequest
             ):
@@ -768,6 +837,26 @@ class TestGate:
         assert result.note == "plan_not_go"
         assert github.mutation_log == []  # gate reads only
 
+    def test_gate_discovers_first_publication_before_source_preparation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restarted issue must find retained publication before a new writer."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=7, state="GATE")
+        item.branch = ""
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest), "Discovery must precede source preparation"
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "discover_first_publication"
+        assert result.job.kwargs["issue_number"] == 7
+        assert result.job.workspace is None
+        assert item.branch == "", "A new branch must not hide the retained source branch"
+        assert github.mutation_log == []
+
     def test_gate_plan_go_proceeds_to_worktree(self, make_ctx: Any, make_work_item: Any) -> None:
         """state:plan-go admits the item and defaults the branch name."""
         stage = ImplementationStage()
@@ -775,7 +864,7 @@ class TestGate:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=7, state="GATE")
 
-        result = stage.step(item, ctx)
+        result = _step_after_publication_discovery(stage, item, ctx)
 
         assert isinstance(result, Continue)
         assert result.next_state == "WORKTREE_WAIT"
@@ -830,7 +919,7 @@ class TestGate:
         item = make_work_item(issue=7, state="GATE")
         item.branch = "7-auto-impl-direct-abc123"
 
-        result = stage.step(item, ctx)
+        result = _step_after_publication_discovery(stage, item, ctx)
 
         assert isinstance(result, Continue)
         assert result.next_state == "WORKTREE_WAIT"
@@ -940,7 +1029,7 @@ class TestGate:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=7, state="GATE")
 
-        result = stage.step(item, ctx)
+        result = _step_after_publication_discovery(stage, item, ctx)
 
         assert isinstance(result, Continue)
         assert result.next_state == "WORKTREE_WAIT"
@@ -1279,6 +1368,7 @@ class TestGate:
         item.worktree = "/tmp/implementation-writer"
 
         binding = _prepared_writer(item)
+        _consume_rebase_discovery(stage, item, ctx)
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
@@ -1517,11 +1607,14 @@ class TestGate:
         """A second host conflict still gets its own bounded agent turn."""
         stage = ImplementationStage()
         ctx = make_ctx()
-        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+        item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.payload["rebase_reason"] = "manual"
         item.attempts["implement"] = ctx.budget("implement")
         item.attempts["rebase_conflict"] = 1
 
         _prepared_writer(item)
+        _consume_rebase_discovery(stage, item, ctx)
+        item.state = "REBASE_CONTINUE_WAIT"
         stage.on_job_done(
             item,
             JobResult(
@@ -2323,7 +2416,7 @@ class TestAgentErrorPingPongBound:
         item = make_work_item(issue=7, state="GATE")
         item.payload["agent_error_failback"] = True
 
-        result = stage.step(item, ctx)
+        result = _step_after_publication_discovery(stage, item, ctx)
 
         assert isinstance(result, Continue)
         assert result.next_state == "WORKTREE_WAIT"
@@ -2957,6 +3050,7 @@ class TestWorktreeAndAdvise:
         assert dirty == Continue(next_state="REBASE_WAIT")
 
         item.state = dirty.next_state
+        _consume_rebase_discovery(stage, item, make_ctx())
         rebase = stage.step(item, make_ctx())
         assert isinstance(rebase, JobRequest)
         assert isinstance(rebase.job, GitJob)
@@ -7408,8 +7502,10 @@ class TestFullWalks:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         assert [h.job.descr for h in pool.submitted] == [
+            "discover_first_publication",
             "claim_dirty_direct_continuation",
             "create_worktree",
+            "discover_pending_rebase",
             "rebase_implementation_writer",
             "advise",
             "implement",
@@ -7458,8 +7554,10 @@ class TestFullWalks:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         assert [h.job.descr for h in pool.submitted] == [
+            "discover_first_publication",
             "claim_dirty_direct_continuation",
             "create_worktree",
+            "discover_pending_rebase",
             "rebase_implementation_writer",
             "implement",
             "pre_pr_tests",
@@ -7524,17 +7622,19 @@ class TestFullWalks:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         assert [handle.job.descr for handle in pool.submitted] == [
+            "discover_first_publication",
             "claim_dirty_direct_continuation",
             "create_worktree",
+            "discover_pending_rebase",
             "rebase_implementation_writer",
             "implement",
             "pre_pr_tests",
             "pre_pr_tests_native_fallback",
             "commit_push",
         ]
-        assert pool.submitted[4].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
-        assert pool.submitted[4].job.verified_runner_source_revision == "a" * 40
-        assert pool.submitted[5].job.argv == PRE_PR_TEST_ARGV
+        assert pool.submitted[6].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert pool.submitted[6].job.verified_runner_source_revision == "a" * 40
+        assert pool.submitted[7].job.argv == PRE_PR_TEST_ARGV
         assert item.pr == 1001
         assert (
             "`uv run pytest tests -q --tb=short` — passed "
@@ -9258,3 +9358,256 @@ def test_adopted_head_fetch_failure_stops_without_git_retry(
     assert not item.payload.get("git_error_retries")
     assert not item.payload.get("source_workspace_terminal")
     assert ctx.github.mutation_log == []
+
+
+@pytest.mark.parametrize(
+    "case", ["missing_id", "none_workspace", "list_workspace", "foreign_id", "interrupted"]
+)
+def test_rebase_discovery_callback_cannot_enter_generic_completion(
+    make_ctx: Any, make_work_item: Any, case: str
+) -> None:
+    """Malformed or foreign reads cannot complete a rebase or replace its source."""
+    stage, ctx = ImplementationStage(), make_ctx()
+    item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+    item.branch = "1-repair"
+    item.payload["rebase_reason"] = "manual"
+    request = stage.step(item, ctx)
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, GitJob)
+    assert request.job.op == "discover_pending_rebase"
+    owner = request.job
+    value: dict[str, Any] = {
+        "discovery_request_id": owner.kwargs["discovery_request_id"],
+        "source_workspace": None,
+        "source_receipt": None,
+        "rebase_recovery_candidate": None,
+        "head_sha": "b" * 40,
+        "rebased": True,
+    }
+    if case == "missing_id":
+        value.pop("discovery_request_id")
+    elif case == "list_workspace":
+        value["source_workspace"] = []
+    elif case == "foreign_id":
+        value["discovery_request_id"] = "f" * 32
+    stage.on_job_done(item, JobResult(ok=True, value=value, interrupted=case == "interrupted"), ctx)
+    assert not item.payload.get("rebase_complete")
+    assert "_impl_source_workspace" not in item.payload
+    assert "_impl_source_revision" not in item.payload
+    assert "rebase_error" not in item.payload
+    if case == "foreign_id":
+        assert item.payload["rebase_discovery_pending"] == owner
+    else:
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.BLOCKED
+    assert ctx.github.mutation_log == []
+
+
+@pytest.mark.parametrize("prior", ["pending", "checked", "failed"])
+def test_rebase_discovery_entry_clears_only_transient_read_ownership(
+    make_ctx: Any, make_work_item: Any, prior: str
+) -> None:
+    """A new stage entry repeats discovery and rejects the old callback."""
+    stage, ctx = ImplementationStage(), make_ctx()
+    item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+    item.branch = "1-repair"
+    item.payload["rebase_reason"] = "manual"
+    first = stage.step(item, ctx)
+    assert isinstance(first, JobRequest)
+    assert isinstance(first.job, GitJob)
+    old_id = first.job.kwargs["discovery_request_id"]
+    if prior != "pending":
+        item.payload.pop("rebase_discovery_pending")
+        item.payload[f"rebase_discovery_{prior}"] = True
+    item.payload["rebase_failure_diagnostic"] = {"cause": "quota unavailable"}
+    restarted = ImplementationStage()
+    assert restarted.on_enter(item, ctx) is None
+    following = restarted.step(item, ctx)
+    assert isinstance(following, JobRequest), following
+    assert isinstance(following.job, GitJob)
+    assert following.job.op == "discover_pending_rebase"
+    assert following.job.kwargs["discovery_request_id"] != old_id
+    snapshot = deepcopy(item.payload)
+    restarted.on_job_done(item, JobResult(ok=True, value={"discovery_request_id": old_id}), ctx)
+    assert item.payload == snapshot
+    assert item.payload["rebase_failure_diagnostic"] == {"cause": "quota unavailable"}
+    assert ctx.github.mutation_log == []
+
+
+@pytest.mark.parametrize("continued", [False, True], ids=["initial", "continued"])
+@pytest.mark.parametrize("pr_number", [None, 1001], ids=["before-pr", "with-pr"])
+def test_rebase_submission_binds_fresh_capability_attempt(
+    make_ctx: Any, make_work_item: Any, continued: bool, pr_number: int | None
+) -> None:
+    """Each rebase request retains the accepted input source and a fresh attempt."""
+    from hephaestus.automation.pipeline.host_capabilities import CapabilityRequestTarget
+
+    stage = ImplementationStage()
+    ctx = make_ctx()
+    item = make_work_item(
+        issue=1,
+        pr=pr_number,
+        state="REBASE_CONTINUE_WAIT" if continued else "REBASE_WAIT",
+    )
+    item.payload["rebase_reason"] = "implementation_start" if pr_number is None else "manual"
+    input_head = "c" * 40 if continued else "a" * 40
+    binding = _prepared_writer(item, revision=input_head)
+    if continued:
+        item.payload.update(
+            {
+                "rebase_conflict_agent_complete": True,
+                "rebase_conflict_validation_result": "resolved_content",
+                "rebase_expected_remote_sha": "a" * 40,
+                "rebase_paused_head_sha": input_head,
+                "rebase_base_sha": "b" * 40,
+                "rebase_conflict_paths": ("file.py",),
+                "rebase_conflict_snapshot": {"file.py": "before"},
+                "rebase_conflict_index_snapshot": "1" * 64,
+            }
+        )
+    else:
+        _consume_rebase_discovery(stage, item, ctx)
+
+    first = stage.step(item, ctx)
+    assert isinstance(first, JobRequest)
+    assert isinstance(first.job, GitJob)
+    target = first.job.capability_target
+    assert isinstance(target, CapabilityRequestTarget)
+    assert target.workspace == binding
+    assert target.expected_head_sha == input_head
+    assert target.pr_number == pr_number
+    assert target.issue_number == item.issue
+    assert target.repository == f"{ctx.org}/{item.repo}"
+    assert target.repository_root == Path(ctx.paths.repo_root)
+    assert target.checkout_path == binding.cwd
+    assert target.phase == "rebase"
+    assert target.purpose == "scratch"
+    if continued:
+        assert first.job.kwargs["expected_remote_sha"] == "a" * 40
+        assert target.expected_head_sha != first.job.kwargs["expected_remote_sha"]
+        item.payload["rebase_conflict_agent_complete"] = True
+    second = stage.step(item, ctx)
+    assert isinstance(second, JobRequest)
+    assert isinstance(second.job, GitJob)
+    following = second.job.capability_target
+    assert isinstance(following, CapabilityRequestTarget)
+    assert following.request_id != target.request_id
+    assert following.generation > target.generation
+    assert following.workspace == binding
+
+
+@pytest.mark.parametrize(
+    "comment_fails", [False, True], ids=["comment-published", "comment-failed"]
+)
+@pytest.mark.parametrize("pr_number", [None, 1001], ids=["issue", "pr"])
+@pytest.mark.parametrize("state", ["REBASE_WAIT", "REBASE_CONTINUE_WAIT"])
+@pytest.mark.parametrize(
+    "failure_kind",
+    [
+        "signing_configuration",
+        "validation_runner",
+        "validation",
+        "semantic_validation",
+        "publication",
+    ],
+)
+def test_rebase_runner_failure_blocks_without_a_source_verdict(
+    make_ctx: Any,
+    make_work_item: Any,
+    state: str,
+    failure_kind: str,
+    comment_fails: bool,
+    pr_number: int | None,
+) -> None:
+    """Host setup failures block recovery without changing source verdicts or budgets."""
+    from hephaestus.automation.pipeline.host_capabilities import (
+        CapabilityReceiptTarget,
+        CapabilityRequestTarget,
+        HostCapabilityReceipt,
+    )
+
+    stage = ImplementationStage()
+    ctx = make_ctx()
+    item = make_work_item(issue=1, pr=pr_number, state=state)
+    item.payload["rebase_reason"] = "manual"
+    binding = _prepared_writer(item)
+    attempts = dict(item.attempts)
+    result_head = "b" * 40 if failure_kind == "validation_runner" else "a" * 40
+    value = _worktree_receipt(item, revision=result_head, failure_kind=failure_kind)
+    if failure_kind == "validation_runner":
+        request = CapabilityRequestTarget(
+            f"{ctx.org}/{item.repo}",
+            1,
+            pr_number,
+            Path("/tmp/repo"),
+            binding.cwd,
+            "a" * 40,
+            "rebase",
+            "scratch",
+            "b" * 32,
+            workspace=binding,
+            generation=1,
+        )
+        target = CapabilityReceiptTarget(
+            request,
+            Path("/tmp/repo"),
+            1,
+            "test-boundary",
+            result_head,
+            backend="hdiutil-v1",
+        )
+        value["capability_receipt"] = HostCapabilityReceipt(
+            False,
+            "host_verification_quota_detach_failed",
+            "detach",
+            "scratch",
+            "c" * 32,
+            target=target,
+            cleanup_state="retained",
+            retained_root="/tmp/repo/build/.host-verification/retained",
+        )
+    with patch.object(
+        ctx.github,
+        "upsert_issue_comment",
+        wraps=ctx.github.upsert_issue_comment,
+        side_effect=RuntimeError("Comment publication failed.") if comment_fails else None,
+    ) as publish:
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, value=value, error="Host operation failed.", stderr_tail="cause"),
+            ctx,
+        )
+        assert item.payload["_impl_source_revision"] == result_head
+        outcome = stage.step(item, ctx)
+    assert isinstance(outcome, StageOutcome)
+    recoverable = failure_kind in {"signing_configuration", "validation_runner"}
+    assert outcome.disposition == (Disposition.BLOCKED if recoverable else Disposition.FINISH_FAIL)
+    assert item.attempts == attempts
+    assert all(name == "gh_issue_upsert_comment" for name, _args in ctx.github.mutation_log)
+    assert "review_audit" not in item.payload
+    if recoverable:
+        publish.assert_called_once()
+        number, marker, body = publish.call_args.args
+        assert number == (item.pr or item.issue)
+        assert result_head in marker
+        assert "Host operation failed." in body
+        assert result_head in body
+        assert item.payload["rebase_diagnostic_published"] is (not comment_fails)
+        if failure_kind == "validation_runner":
+            for evidence in (
+                "detach",
+                "retained",
+                "scratch",
+                "c" * 32,
+                "/tmp/repo/build/.host-verification/retained",
+            ):
+                assert evidence in body
+    else:
+        publish.assert_not_called()
+    if failure_kind == "validation_runner":
+        diagnostic = item.payload["rebase_failure_diagnostic"]
+        assert diagnostic["failed_step"] == "detach"
+        assert diagnostic["cleanup_state"] == "retained"
+        assert diagnostic["retained_root"] == "/tmp/repo/build/.host-verification/retained"
+        assert diagnostic["source_head_sha"] == result_head
