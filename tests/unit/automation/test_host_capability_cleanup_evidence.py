@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.automation import host_capabilities as capabilities
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.host_capabilities import QUOTA_UNAVAILABLE_TOKEN
 from tests.unit.automation.test_host_capabilities import _request, _runner
 
@@ -80,9 +81,7 @@ def test_preflight_partial_setup_retains_owned_root_and_primary_failure(
     run.assert_not_called()
     stored = json.loads(
         (
-            tmp_path
-            / "build/.issue_implementer/host-capability-receipts"
-            / f"{receipt.receipt_id}.json"
+            tmp_path / DEFAULT_STATE_DIR / "host-capability-receipts" / f"{receipt.receipt_id}.json"
         ).read_text()
     )
     assert stored["receipt"]["cleanup_state"] == "retained"

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import hephaestus.automation.pipeline.host_verification_pyxis as host_verification_pyxis
 from hephaestus.automation.direct_review_recovery import _write_receipt
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.diagnostics import redact_diagnostic_text
 from hephaestus.automation.pipeline.host_capabilities import (
     QUOTA_AVAILABLE_TOKEN,
@@ -384,7 +385,7 @@ def _receipt_directory(
     try:
         info = os.fstat(descriptor)
         identities = [(info.st_dev, info.st_ino)]
-        for component in ("build", ".issue_implementer", "host-capability-receipts"):
+        for component in (*Path(DEFAULT_STATE_DIR).parts, "host-capability-receipts"):
             if create:
                 with suppress(FileExistsError):
                     os.mkdir(component, 0o700, dir_fd=descriptor)

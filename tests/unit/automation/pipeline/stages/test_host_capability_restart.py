@@ -16,6 +16,7 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.host_capabilities import HdiutilQuotaBackend
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.host_capabilities import HostCapabilityRead, WorkerCapabilities
 from hephaestus.automation.pipeline.jobs import BuildTestJob, HostCapabilityJob
 from hephaestus.automation.pipeline.routing import Disposition
@@ -107,9 +108,7 @@ def test_fresh_stage_and_worker_probe_before_releasing_execution(
             assert not receipt.cached
             assert runner.call_count == (1 if not attempt else 3)
             path = (
-                root
-                / "build/.issue_implementer/host-capability-receipts"
-                / f"{receipt.receipt_id}.json"
+                root / DEFAULT_STATE_DIR / "host-capability-receipts" / f"{receipt.receipt_id}.json"
             )
             stored = json.loads(path.read_bytes())
             assert stored["target"]["source_head_sha"] == head

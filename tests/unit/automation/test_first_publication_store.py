@@ -61,14 +61,16 @@ def test_complete_record_survives_reopen_for_lost_callback(tmp_path: Path) -> No
     store = _store(common)
     assert store.candidate(9) is None
     assert not (common / "hephaestus-source-workspaces").exists()
-    assert store.write(record, expected=None) == record
+    written = store.write(record, expected=None)
+    assert written == record
     namespace = common / "hephaestus-source-workspaces/first-publications"
     path = namespace / f"9-{record.operation_id}.json"
     assert stat.S_IMODE(namespace.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert json.loads(path.read_bytes()) == record.to_dict()
     complete = replace(record, phase="complete")
-    assert store.write(complete, expected=record) == complete
+    written = store.write(complete, expected=record)
+    assert written == complete
     retained = path.read_bytes()
     reopened = _store(common)
     assert reopened.candidate(9) == complete

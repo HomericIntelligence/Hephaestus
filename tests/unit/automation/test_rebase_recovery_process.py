@@ -118,7 +118,8 @@ def _intent_checkpoint(
         assert record.publication_mode == "existing"
         assert record.remote_head_sha == case.original
         if boundary == "after_intent":
-            assert write(store, record, expected=expected) == record
+            written = write(store, record, expected=expected)
+            assert written == record
         return stopped()
 
     patch.setattr(PendingRebaseStore, "write", checkpoint)

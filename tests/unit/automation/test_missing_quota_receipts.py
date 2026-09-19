@@ -15,6 +15,7 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import git_utils
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.host_capabilities import (
     QUOTA_UNAVAILABLE_TOKEN,
@@ -108,11 +109,7 @@ def test_missing_quota_provider_retains_failure_evidence(
         assert receipt.target.source_head_sha == head
         assert receipt.cleanup_state == "not_started"
         execution.assert_not_called()
-        path = (
-            root
-            / "build/.issue_implementer/host-capability-receipts"
-            / f"{receipt.receipt_id}.json"
-        )
+        path = root / DEFAULT_STATE_DIR / "host-capability-receipts" / f"{receipt.receipt_id}.json"
         if storage_fails:
             assert receipt.persistence_error == "Controlled receipt storage failure."
             assert receipt.persistence_exception_type == "OSError"

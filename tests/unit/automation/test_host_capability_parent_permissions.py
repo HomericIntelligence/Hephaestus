@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from hephaestus.automation.host_capabilities import HdiutilQuotaBackend
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from tests.unit.automation.test_host_capabilities import _request, _runner
 
 
@@ -40,7 +41,7 @@ def test_preflight_accepts_protected_shared_build_without_chmod(tmp_path: Path) 
     assert receipt.available
     assert [call.args[0][1] for call in run.call_args_list] == ["create", "attach", "detach"]
     assert stat.S_IMODE(build.stat().st_mode) == 0o755
-    state = build / ".issue_implementer" / "host-capability-receipts"
+    state = tmp_path / DEFAULT_STATE_DIR / "host-capability-receipts"
     assert stat.S_IMODE(state.stat().st_mode) == 0o700
     assert stat.S_IMODE((state / f"{receipt.receipt_id}.json").stat().st_mode) == 0o600
 

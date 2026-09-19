@@ -29,6 +29,7 @@ from hephaestus.automation.github_api.diff import (
     _validate_comments_to_diff,
     normalize_review_finding_records,
 )
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.github_jobs import (
     EnsureScopeExpansionChildrenRequest,
     FrozenJson,
@@ -9311,7 +9312,7 @@ def test_host_capability_restart_clears_only_transient_ownership(
     value = _capability_callback_value(submitted, tmp_path, available=True)
     item.payload["host_capability_result"] = value
     item.payload["host_capability_failure"] = "old-error"
-    receipt_file = tmp_path / "build/.issue_implementer/host-capability-receipts/retained.json"
+    receipt_file = tmp_path / DEFAULT_STATE_DIR / "host-capability-receipts/retained.json"
     receipt_file.parent.mkdir(parents=True, mode=0o700)
     receipt_file.write_text("retained", encoding="utf-8")
     if reset == "round":

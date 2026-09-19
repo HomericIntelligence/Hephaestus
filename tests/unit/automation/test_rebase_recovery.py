@@ -3911,15 +3911,18 @@ def test_abort_store_retains_terminal_evidence_without_a_resume_candidate(
         remote_head_sha="a" * 40 if mode == "existing" else None,
     )
     store = _store(common)
-    assert store.write(intent, expected=None) == intent
+    written = store.write(intent, expected=None)
+    assert written == intent
     aborted = _aborted_record(intent)
-    assert store.write(aborted, expected=intent) == aborted
+    written = store.write(aborted, expected=intent)
+    assert written == aborted
     del store
     restarted = _store(common)
     assert restarted.read(1, intent.request.request_id) == aborted
     assert restarted.candidate(1) is None
     next_intent = replace(intent, request=replace(intent.request, request_id="0" * 32))
-    assert restarted.write(next_intent, expected=None) == next_intent
+    written = restarted.write(next_intent, expected=None)
+    assert written == next_intent
     assert restarted.read(1, intent.request.request_id) == aborted
     with pytest.raises(ValueError):
         restarted.candidate(1)
@@ -4089,9 +4092,11 @@ def test_pending_store_retains_durable_phases_and_rejects_stale_advancement(tmp_
     intent = _record(tmp_path)
     store = _store(common)
     assert store.read(1, intent.request.request_id) is None
-    assert store.write(intent, expected=None) == intent
+    written = store.write(intent, expected=None)
+    assert written == intent
     pending = _record(tmp_path, phase="pending_validation")
-    assert store.write(pending, expected=intent) == pending
+    written = store.write(pending, expected=intent)
+    assert written == pending
     del store
     restarted = _store(common)
     assert restarted.read(1, intent.request.request_id) == pending
@@ -4100,9 +4105,11 @@ def test_pending_store_retains_durable_phases_and_rejects_stale_advancement(tmp_
     with pytest.raises(ValueError):
         restarted.write(publishing, expected=intent)
     assert restarted.read(1, intent.request.request_id) == pending
-    assert restarted.write(publishing, expected=pending) == publishing
+    written = restarted.write(publishing, expected=pending)
+    assert written == publishing
     complete = replace(publishing, phase="complete")
-    assert restarted.write(complete, expected=publishing) == complete
+    written = restarted.write(complete, expected=publishing)
+    assert written == complete
     assert restarted.candidate(1) is None
     assert restarted.read(1, intent.request.request_id) == complete
     assert "review" not in complete.to_dict()
@@ -4142,7 +4149,8 @@ def test_pending_store_uses_owned_source_parent_and_private_namespace(
             store.write(record, expected=None)
         assert stat.S_IMODE(manager.state_dir.stat().st_mode) == original_mode
         return
-    assert store.write(record, expected=None) == record
+    written = store.write(record, expected=None)
+    assert written == record
     assert stat.S_IMODE(manager.state_dir.stat().st_mode) == original_mode
     namespace = manager.state_dir / "pending-rebases"
     assert stat.S_IMODE(namespace.stat().st_mode) == 0o700
@@ -4254,7 +4262,8 @@ def test_pending_store_accepts_only_nonwritable_owned_parents(tmp_path: Path, mo
     parent.chmod(mode)
     record = _record(tmp_path)
     if mode == 0o755:
-        assert _store(common).write(record, expected=None) == record
+        written = _store(common).write(record, expected=None)
+        assert written == record
     else:
         with pytest.raises(ValueError):
             _store(common).write(record, expected=None)
@@ -4408,13 +4417,15 @@ def test_pending_store_requires_the_publication_phase_only_when_requested(
     store.write(pending, expected=intent)
     complete = replace(pending, phase="complete")
     if mode == "none":
-        assert store.write(complete, expected=pending) == complete
+        written = store.write(complete, expected=pending)
+        assert written == complete
     else:
         with pytest.raises(ValueError):
             store.write(complete, expected=pending)
         publishing = replace(pending, phase="publication_intent")
         store.write(publishing, expected=pending)
-        assert store.write(complete, expected=publishing) == complete
+        written = store.write(complete, expected=publishing)
+        assert written == complete
 
 
 @pytest.mark.parametrize(

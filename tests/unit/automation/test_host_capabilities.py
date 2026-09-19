@@ -15,6 +15,7 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.host_capabilities import HdiutilQuotaBackend, PyxisQuotaBackend
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.host_capabilities import (
     CapabilityReceiptTarget,
     CapabilityRequestTarget,
@@ -65,13 +66,7 @@ def test_preflight_persists_private_target_bound_receipt(tmp_path: Path, returnc
     receipt = HdiutilQuotaBackend(
         host_probe=lambda: ("darwin", True), command_runner=_runner(returncode)
     ).preflight(target)
-    path = (
-        tmp_path
-        / "build"
-        / ".issue_implementer"
-        / "host-capability-receipts"
-        / f"{receipt.receipt_id}.json"
-    )
+    path = tmp_path / DEFAULT_STATE_DIR / "host-capability-receipts" / f"{receipt.receipt_id}.json"
     assert path.is_file()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     data = json.loads(path.read_text())
@@ -81,16 +76,16 @@ def test_preflight_persists_private_target_bound_receipt(tmp_path: Path, returnc
     assert data["target"]["root_device"] == tmp_path.stat().st_dev
 
 
-@pytest.mark.parametrize("component", [".issue_implementer", "host-capability-receipts"])
+@pytest.mark.parametrize("component", ["state", "host-capability-receipts"])
 def test_preflight_rejects_symlink_receipt_parent(tmp_path: Path, component: str) -> None:
     """An unsafe receipt parent cannot produce available capability evidence."""
     outside = tmp_path / "outside"
     outside.mkdir()
-    state = tmp_path / "build" / ".issue_implementer"
+    state = tmp_path / DEFAULT_STATE_DIR
     state.parent.mkdir(mode=0o755)
     if component == "host-capability-receipts":
         state.mkdir(mode=0o700)
-    link = state if component == ".issue_implementer" else state / component
+    link = state if component == "state" else state / component
     link.symlink_to(outside, target_is_directory=True)
     receipt = HdiutilQuotaBackend(
         host_probe=lambda: ("darwin", True), command_runner=_runner()
@@ -298,11 +293,7 @@ def test_preflight_timeout_preserves_redacted_output_and_cleanup(
         assert tail.endswith(ending)
         assert 0 < len(tail) <= 4000
         assert "secret" not in tail
-    path = (
-        tmp_path
-        / "build/.issue_implementer/host-capability-receipts"
-        / f"{receipt.receipt_id}.json"
-    )
+    path = tmp_path / DEFAULT_STATE_DIR / "host-capability-receipts" / f"{receipt.receipt_id}.json"
     stored = json.loads(path.read_text())["receipt"]
     assert stored["stdout_tail"] == receipt.stdout_tail
     assert stored["stderr_tail"] == receipt.stderr_tail
