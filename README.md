@@ -576,7 +576,8 @@ squash-merges that exact head; it does not create, disable, adopt, or poll an
 auto-merge request. Normal review may collect CI/CD evidence as context, but
 the loop does not change CI/CD. Required CI/CD checks are the merge contract.
 
-1. Create a feature branch named `<issue-number>-description`
+1. Create a feature branch. Prefer `<issue-number>-<description>`; this format
+   is a recommendation, not a requirement.
    (`git checkout -b 123-amazing-feature`).
 2. Commit your changes with both attestations (`git commit -s -S -m "feat(scope): add amazing feature"`),
    using [conventional commit](https://www.conventionalcommits.org/) messages.

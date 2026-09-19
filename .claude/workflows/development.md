@@ -11,7 +11,9 @@ of project principles only to satisfy this writing standard.
 ## Development Cycle
 
 1. **Issue Creation**: Create GitHub issue describing the utility or enhancement
-2. **Branch Creation**: Create feature branch named `{issue-number}-description`
+2. **Branch Creation**: Create a feature branch. The recommended format is
+   `<issue-number>-<description>`. Other valid Git branch names are permitted.
+   Do not block review or request a naming exception.
 3. **Implementation**: Write utility functions with comprehensive tests
 4. **Quality Checks**: Run linters, type checker, and tests
 5. **Documentation**: Update or create relevant documentation

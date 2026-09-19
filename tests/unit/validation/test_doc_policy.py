@@ -14,6 +14,7 @@ from hephaestus.validation.doc_policy import (
     _extract_code_blocks,
     format_json_report,
     format_text_report,
+    main,
     scan_file,
     scan_repository,
 )
@@ -28,6 +29,19 @@ def make_md(tmp_path: Path, name: str, content: str) -> Path:
     path = tmp_path / name
     path.write_text(textwrap.dedent(content))
     return path
+
+
+@pytest.mark.parametrize(
+    "branch", ["codex/3291-manual-policy", "feature/config", "repair-source", "3291-description"]
+)
+def test_branch_name_does_not_fail_documentation_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, branch: str
+) -> None:
+    """Accept branch examples without enforcing the optional naming format."""
+    path = make_md(tmp_path, "workflow.md", f"```bash\ngit checkout -b {branch}\n```\n")
+    assert scan_file(path, tmp_path) == []
+    monkeypatch.setattr("sys.argv", ["doc-policy", "--directory", str(tmp_path)])
+    assert main() == 0
 
 
 # ---------------------------------------------------------------------------

@@ -5,13 +5,17 @@ enforces socially, and (b) what CI enforces mechanically. This document is the
 single, discoverable place where both lists live. If you change the PR template
 or a CI gate, also update the corresponding row here.
 
-A piece of work is **done** when every item below is true.
+A piece of work is **done** when every requirement below is true.
+
+Branch naming is optional guidance, not a completion gate. Prefer
+`<issue-number>-<description>` for new branches. Other valid Git branch names
+do not require an exception, a rename, or a replacement PR. Reviewers must not
+block a PR because it uses another branch naming format.
 
 ## For every PR
 
 | # | Requirement | Enforced by |
 |---|-------------|-------------|
-| 1 | Branch named `<issue-number>-<description>` | Convention (PR reviewer) |
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
 | 3 | Every commit is cryptographically signed and DCO-signed (`git commit -S -s`) | `homeric-main-baseline` ruleset (`required_signatures`) + CI `pr-policy` DCO check |
 | 4 | `pr_review` writes loop-owned `state:implementation-go` only after the typed reviewer verdict is `GO`. Fresh GitHub facts must also confirm the exact open, unarmed reviewed head, complete thread state, and exclusive-label readback. A missing, malformed, `NOGO`, or `BLOCKED` verdict fails closed. A grade is audit metadata only. Immediately before each server merge request, `merge_wait` requires that label, the current-process reviewed-head proof, no unresolved review threads, and complete passing required status evidence for the exact head. Completed Check Runs can have a `success`, `neutral`, or `skipped` conclusion. Commit statuses can satisfy only unbound contexts and must have the `success` state. Optional Check Runs do not grant or revoke merge eligibility. A second GitHub user and a marked `APPROVED` review are not required. Required status evidence is a separate merge gate and does not authorize review or replace the reviewed-head proof. The merge budget (default: five) bounds actual requests and safe pre-dispatch retries, not readiness polling. The effective policy selects the server route. A required merge queue uses exact-head queue admission. Direct merge requires effective strict-update protection and an actor that cannot bypass it. No queue stage uses `gh pr merge` or mutates native auto-merge. | Queue gate and exact-head CI gate |

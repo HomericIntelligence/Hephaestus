@@ -18,7 +18,8 @@ links to the full section below.
    typecheck) and `just test`. Green here means your machine is ready. It is
    not evidence for a later branch change.
 3. **Pick an issue** ([Code Contributions](#code-contributions)) — pick or open a
-   GitHub issue, then branch as `<issue-number>-description`.
+   GitHub issue, then create a branch. The recommended name is
+   `<issue-number>-<description>`; other valid Git branch names are permitted.
 4. **Make the change test-first** ([Testing](#testing)) — write a failing test,
    make it pass, and run each new or changed test before you create the PR. Keep
    coverage at the configured floor in
@@ -89,7 +90,8 @@ are cut on demand by pushing a signed `vX.Y.Z` git tag (see
 ### Code Contributions
 
 1. Open (or pick up) a GitHub issue describing the change.
-2. Create a feature branch named `<issue-number>-description`.
+2. Create a feature branch. Prefer `<issue-number>-<description>`. This format
+   is optional; another valid Git branch name needs no exception or rename.
 3. Make your changes.
 4. Write/update tests.
 5. Run each new or changed test and make sure that it passes.
