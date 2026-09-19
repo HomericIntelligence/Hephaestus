@@ -23,6 +23,7 @@ from hephaestus.automation.fleet_snapshot_policy import (
     MAX_SCAN_ENTRIES,
     SnapshotError as SnapshotError,
     SnapshotPolicy as SnapshotPolicy,
+    admit_member_path,
     canonical,
     digest,
     integer,
@@ -237,7 +238,7 @@ def _present_paths(
 ) -> tuple[str, ...]:
     present: list[str] = []
     total = 0
-    folded: set[str] = set()
+    names: dict[str, tuple[str, bool]] = {}
     for name in sorted(selected):
         remaining(deadline)
         location = source
@@ -257,9 +258,7 @@ def _present_paths(
             or stat.S_IMODE(metadata.st_mode) & ~0o777
         ):
             raise SnapshotError("source contains an unsupported file type or mode")
-        if name.lower() in folded:
-            raise SnapshotError("snapshot paths collide")
-        folded.add(name.lower())
+        admit_member_path(name, names)
         total += metadata.st_size
         present.append(name)
         if total > policy.max_bytes or len(present) > policy.max_members:
@@ -495,7 +494,16 @@ def _decode(
 
 
 def _artifact_identity(artifact: Path, deadline: float) -> str:
-    if {path.name for path in artifact.iterdir()} != {"manifest.json", "source.tar"}:
+    pending = {"manifest.json", "source.tar"}
+    with directory(artifact, deadline) as descriptor:
+        remaining(deadline)
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                remaining(deadline)
+                if entry.name not in pending:
+                    raise SnapshotError("snapshot artifact has unexpected members")
+                pending.remove(entry.name)
+    if pending:
         raise SnapshotError("snapshot artifact has unexpected members")
     return path_content_identity(
         artifact,

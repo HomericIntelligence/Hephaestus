@@ -60,7 +60,9 @@ Read regular files without following links. Reject selected symbolic links,
 hard links, submodules, special files, and special permission bits. Preserve
 allowed regular-file permission bits, including executable bits. Member names
 must be canonical relative POSIX paths with portable ASCII components. Reject
-case-fold collisions and names that the archive cannot represent.
+case-fold collisions and names that the archive cannot represent. Check each
+implicit directory as well as each file. A name cannot identify both a file
+and a directory, and shared directories must use the same spelling.
 
 Directories are implicit, with mode `0700`. Empty directories, ownership,
 timestamps, and extended attributes are not source members. The snapshot file
@@ -101,6 +103,8 @@ remaining time before the next operation.
 ## Artifact and commitment
 
 The private artifact contains exactly `manifest.json` and `source.tar`.
+Membership checks read entries incrementally under the operation deadline.
+They stop at the first unexpected entry and read at most three entries.
 The manifest has exactly `schema`, `baseCommit`, `policyDigest`, and `files`.
 Its schema is `hi/hephaestus/source-snapshot/v1`. Each file entry has exactly
 `path`, `mode`, `size`, and `sha256`, sorted by encoded path.

@@ -1553,3 +1553,243 @@ def test_receivers_reject_case_collisions_with_consistent_artifact_bytes(
         receive_snapshot(operation, artifact, destination, commitment, policy)
         if operation == "restore":
             assert {path.name: path.read_bytes() for path in destination.iterdir()} == contents
+
+
+@pytest.mark.parametrize("collides", [False, True], ids=["shared-directory", "case-collision"])
+def test_export_rejects_implicit_directory_case_collisions(
+    source: Path, tmp_path: Path, collides: bool
+) -> None:
+    """Conflicting directory spellings cannot produce a completed artifact."""
+    second = "folder/two.txt" if collides else "Folder/two.txt"
+    contents = {"Folder/one.txt": b"first ordinary file\n", second: b"second ordinary file\n"}
+    with (source / ".gitignore").open("a") as stream:
+        # On case-folding hosts, ignore the discovered Folder/two.txt alias so
+        # a full-path collision cannot mask the index's directory-spelling gap.
+        stream.write("/Folder/two.txt\n")
+    for name, data in contents.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        blob = git(source, "hash-object", "-w", "--", name)
+        git(source, "update-index", "--add", "--cacheinfo", f"100644,{blob},{name}")
+    indexed = set(git(source, "ls-files", "-z").split("\0"))
+    assert set(contents) <= indexed
+    for name, data in contents.items():
+        assert (source / name).is_file()
+        assert (source / name).read_bytes() == data
+    source_before = tree_state(source)
+
+    if collides:
+        before = tree_state(tmp_path)
+        with pytest.raises(SnapshotError):
+            capture(source, tmp_path)
+        assert tree_state(tmp_path) == before
+        assert not (tmp_path / "artifact").exists()
+    else:
+        artifact, commitment, policy = capture(source, tmp_path)
+        verify_snapshot(artifact, commitment=commitment, policy=policy)
+        destination = tmp_path / "restored"
+        restore_snapshot(artifact, destination, commitment=commitment, policy=policy)
+        assert commitment["members"] == 6
+        assert sorted(path.name for path in (destination / "Folder").iterdir()) == [
+            "one.txt",
+            "two.txt",
+        ]
+        for name, data in contents.items():
+            assert (destination / name).read_bytes() == data
+        assert tree_state(source) == source_before
+
+
+@pytest.mark.parametrize("operation", ["verify", "restore"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "shared-directory",
+        "directory-case-collision",
+        "file-directory-collision",
+        "file-before-directory",
+    ],
+)
+def test_receivers_reject_implicit_directory_case_collisions(
+    source: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    case: str,
+) -> None:
+    """Consistent bytes cannot authorize conflicting file or directory spellings."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    manifest = json.loads((artifact / "manifest.json").read_bytes())
+    second = {
+        "shared-directory": "Folder/two.txt",
+        "directory-case-collision": "folder/two.txt",
+        "file-directory-collision": "folder",
+        "file-before-directory": "folder/two.txt",
+    }[case]
+    first = "Folder" if case == "file-before-directory" else "Folder/one.txt"
+    contents = {first: b"first ordinary file\n", second: b"second ordinary file\n"}
+    manifest["files"] = [
+        {"path": name, "mode": 0o644, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        for name, data in sorted(contents.items())
+    ]
+    with tarfile.open(artifact / "source.tar", "w", format=tarfile.USTAR_FORMAT) as writer:
+        for entry in manifest["files"]:
+            member = tarfile.TarInfo(entry["path"])
+            member.size = entry["size"]
+            member.mode = entry["mode"]
+            writer.addfile(member, io.BytesIO(contents[entry["path"]]))
+    encoded = (
+        json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    (artifact / "manifest.json").write_bytes(encoded)
+    commitment["manifestDigest"] = hashlib.sha256(encoded).hexdigest()
+    commitment["members"] = len(contents)
+    commitment["bytes"] = sum(map(len, contents.values()))
+    destination = tmp_path / "restored"
+    before = tree_state(tmp_path)
+
+    if case != "shared-directory":
+        real_mkdir = os.mkdir
+
+        def refuse_destination(path: Any, *args: Any, **kwargs: Any) -> None:
+            if Path(os.fsdecode(path)).name == destination.name:
+                pytest.fail(
+                    "Restore created its destination before rejecting colliding directories."
+                )
+            real_mkdir(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "mkdir", refuse_destination)
+            patch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {refuse_destination})
+            with pytest.raises(SnapshotError):
+                receive_snapshot(operation, artifact, destination, commitment, policy)
+        assert not destination.exists()
+        assert tree_state(tmp_path) == before
+    else:
+        receive_snapshot(operation, artifact, destination, commitment, policy)
+        if operation == "verify":
+            assert not destination.exists()
+            assert tree_state(tmp_path) == before
+        else:
+            assert {
+                path.relative_to(destination).as_posix(): path.read_bytes()
+                for path in destination.rglob("*")
+                if path.is_file()
+            } == contents
+            for name in contents:
+                assert stat.S_IMODE((destination / name).stat().st_mode) == 0o644
+
+
+class ObservedArtifactScan:
+    """Expose real directory entries through a bounded OS iterator fixture."""
+
+    def __init__(self, entries: list[os.DirEntry[str]], case: str) -> None:
+        self.entries = entries
+        self.case = case
+        self.offset = 0
+        self.closed = False
+        self.expired = False
+        self.names: list[str] = []
+
+    def __iter__(self) -> ObservedArtifactScan:
+        """Return the observed iterator."""
+        return self
+
+    def __next__(self) -> os.DirEntry[str]:
+        """Yield one real entry within the fixture's inspection bound."""
+        if self.offset == len(self.entries):
+            raise StopIteration
+        limit = 2 if self.case == "inherited-deadline" else 3
+        if self.offset >= limit:
+            pytest.fail("Artifact scan continued after its refusal or deadline boundary.")
+        entry = self.entries[self.offset]
+        self.offset += 1
+        self.names.append(entry.name)
+        if self.case == "inherited-deadline" and self.offset == 1:
+            self.expired = True
+        return entry
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> ObservedArtifactScan:
+        """Return this iterator as a scan context."""
+        return self
+
+    def __exit__(self, *details: object) -> None:
+        """Record closure when the scan context exits."""
+        self.close()
+
+
+@pytest.mark.parametrize("operation", ["verify", "restore"])
+@pytest.mark.parametrize("case", ["valid", "extra-entry", "inherited-deadline"])
+def test_artifact_membership_scan_stops_at_refusal_or_deadline(
+    source: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    case: str,
+) -> None:
+    """Artifact membership uses a bounded scan and the inherited time budget."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    if case != "valid":
+        (artifact / "extra-a").write_bytes(b"")
+        (artifact / "extra-b").write_bytes(b"")
+    before = tree_state(tmp_path)
+    metadata = artifact.stat()
+    artifact_identity = (metadata.st_dev, metadata.st_ino)
+    real_scandir = os.scandir
+    with real_scandir(artifact) as entries:
+        actual_entries = {entry.name: entry for entry in entries}
+    names = ["manifest.json", "source.tar"]
+    if case != "valid":
+        names.extend(["extra-a", "extra-b"])
+    assert set(actual_entries) == set(names)
+    ordered = [actual_entries[name] for name in names]
+    scans: list[ObservedArtifactScan] = []
+
+    def observe_scandir(path: Any = ".") -> Any:
+        inspected = os.fstat(path) if isinstance(path, int) else os.stat(path)
+        if (inspected.st_dev, inspected.st_ino) != artifact_identity:
+            return real_scandir(path)
+        scan = ObservedArtifactScan(ordered, case)
+        scans.append(scan)
+        return scan
+
+    destination = tmp_path / "restored"
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", observe_scandir)
+        if real_scandir in os.supports_fd:
+            patch.setattr(os, "supports_fd", os.supports_fd | {observe_scandir})
+        patch.setattr(
+            time, "monotonic", lambda: 20.0 if any(scan.expired for scan in scans) else 10.0
+        )
+        with operation_deadline(15.0):
+            if case == "valid":
+                receive_snapshot(operation, artifact, destination, commitment, policy, timeout=30)
+            else:
+                with pytest.raises(SnapshotError) as caught:
+                    receive_snapshot(
+                        operation, artifact, destination, commitment, policy, timeout=30
+                    )
+
+    assert scans, "the fixture did not reach artifact membership enumeration"
+    assert all(scan.closed for scan in scans)
+    if case == "valid":
+        assert all(scan.names == ["manifest.json", "source.tar"] for scan in scans)
+        if operation == "verify":
+            assert not destination.exists()
+            assert tree_state(tmp_path) == before
+        else:
+            assert (destination / "recipe.txt").read_bytes() == b"working\n"
+            assert (destination / "new.txt").read_bytes() == b"untracked\x00content\n"
+    else:
+        assert not destination.exists()
+        assert tree_state(tmp_path) == before
+        if case == "extra-entry":
+            assert any(scan.names == ["manifest.json", "source.tar", "extra-a"] for scan in scans)
+        else:
+            assert any(scan.expired for scan in scans)
+            assert all(1 <= len(scan.names) <= 2 for scan in scans)
+            diagnostic = "".join(traceback.format_exception(caught.value))
+            assert "operation deadline" in diagnostic
