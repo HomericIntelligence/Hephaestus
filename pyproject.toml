@@ -110,6 +110,7 @@ automation = [
 default-groups = ["dev", "automation"]
 
 [project.scripts]
+hephaestus-fleet-build-artifacts = "hephaestus.automation.fleet_build_artifact_server:main"
 hephaestus-fleet-worker = "hephaestus.automation.fleet_worker_cli:main"
 hephaestus-automation-loop = "hephaestus.automation.loop_runner:main"
 hephaestus-install-pi-plugins = "hephaestus.agents.pi_plugins:main"
@@ -117,6 +118,7 @@ hephaestus-plan-issues = "hephaestus.automation.planner:main"
 hephaestus-implement-issues = "hephaestus.automation.implementer:main"
 hephaestus-review-prs = "hephaestus.automation.pr_reviewer:main"
 hephaestus-ensure-state-labels = "hephaestus.automation.ensure_state_labels:main"
+hephaestus-reconcile-implementation-labels = "hephaestus.automation.reconcile_implementation_labels:main"
 hephaestus-gh = "hephaestus.github.gh_cli:main"
 hephaestus-fleet-sync = "hephaestus.github.fleet_sync:main"
 hephaestus-tidy = "hephaestus.github.tidy:main"

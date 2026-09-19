@@ -1,6 +1,6 @@
 # ADR-0053: Focused local checks and CI-owned full validation
 
-- Status: Accepted
+- Status: Partly superseded by ADR-0055 (manual rebase trigger only)
 - Date: 2026-09-16
 - Tracks: #3269
 

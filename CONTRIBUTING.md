@@ -231,46 +231,37 @@ tests.
 
 ### Change verification
 
-For a manual contribution, use this sequence:
+For a manual contribution, use this verification sequence:
 
-1. Run focused tests during implementation.
-2. Verify that `upstream` has the canonical project URL. Fetch the current
-   project `main` branch:
-
-   ```bash
-   test "$(git remote get-url upstream)" = "https://github.com/HomericIntelligence/Hephaestus.git"
-   git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
-   ```
-
-   If a command fails, stop.
-3. Use Bash strict mode to rebase and sign each new commit. Then verify each
-   commit signature:
-
-   ```bash
-   set -euo pipefail
-   git rebase -S upstream/main
-   git rev-list --reverse upstream/main..HEAD | while IFS= read -r commit; do
-       git verify-commit "$commit" || exit 1
-   done
-   ```
-
-   Strict mode stops the sequence if the rebase, revision enumeration, or a
-   signature check fails.
-
-4. If the rebase or conflict resolution changes a file, run each affected test
-   again.
+1. Run focused tests during implementation. Agents must use test-only
+   subagents for these checks.
+2. Verify the canonical target remote and fetch its current `main` branch.
+   Record the feature branch start commit as the local review base. A later
+   target-branch advance does not change that recorded base.
+3. Rebase only for an actual conflict, a necessary dependency, or an explicit
+   request. If a rebase is necessary, use `git rebase -S <verified-target>`.
+   Keep unrelated branches and worktrees unchanged.
+4. Commit with `git commit -s -S`. Verify every contribution commit with
+   `git verify-commit <commit>`. Require exactly one final `Signed-off-by`
+   trailer that matches the commit author. A rebase must preserve these checks.
 5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
    Record `git rev-parse HEAD`.
 6. Run focused checks on this head. Select tests for the affected behavior and
    each new or changed test. Use locked pytest commands with explicit paths or
    node IDs and `--override-ini="addopts="`. Confirm nonempty collection and
-   success. For documentation-only changes, use the applicable existing
-   documentation checks. A complete local suite is not required.
-
+   success. For documentation-only changes, use applicable existing
+   documentation checks. Do not require a complete local suite.
 7. Record `git rev-parse HEAD` again. Require the same value and an empty
-   `git status --porcelain=v1 --untracked-files=all` result.
-8. If the branch changes after this run, repeat the final-rebase sequence and
-   focused checks for the resulting change.
+   `git status --porcelain=v1 --untracked-files=all` result. Record each command,
+   source revision, result, and test summary.
+8. After a source change, repeat the affected checks and signature and DCO
+   verification for the resulting head. Do not require another rebase solely
+   because a check ran or the target branch advanced.
+
+Historical results retain their original executed revision. Do not report
+those results as a new run on the current head. Any use of historical evidence
+requires an explicit compatibility basis for the relevant inputs. Required CI
+must still pass for the merge candidate under the current merge policy.
 
 Record each command, branch head, result, and test summary. A hook result can
 supply focused evidence only when it collected and passed the selected tests
@@ -281,7 +272,8 @@ PR result is not full-suite evidence. The checks in
 do not verify a later branch change.
 
 This manual sequence uses
-[ADR-0053](docs/adr/0053-focused-local-ci-full-validation.md). The automation
+[ADR-0053](docs/adr/0053-focused-local-ci-full-validation.md) and
+[ADR-0055](docs/adr/0055-conditional-manual-rebases.md). The automation
 loop uses the rebase policy in
 [ADR-0048](docs/adr/0048-automation-rebase-triggers.md). It prepares the branch
 before implementation and does not do a routine final rebase. An operator can

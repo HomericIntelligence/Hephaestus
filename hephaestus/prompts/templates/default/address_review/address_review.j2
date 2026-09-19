@@ -44,31 +44,33 @@ CI/CD remains outside this remediation loop.
 
 **Your task (coordinator):**
 
-1. Use each supplied review-thread object as a unit of work. Assign one sub-agent
-   to each in-scope review comment with the Task tool
-   (`subagent_type: "general-purpose"`). Pass its `thread_id`, `path`, `line`, and
-   `body` to that sub-agent.
+1. Group related review comments into batches by affected behavior and the complete
+   set of files that each fix must edit. Include shared helpers and tests in that
+   set, not only the cited `path`. Assign one sub-agent to each batch with the
+   Task tool (`subagent_type: "general-purpose"`). Pass every assigned comment's
+   `thread_id`, `path`, `line`, and `body`, plus the batch's owned files.
 
 2. **Tool and model selection** — each sub-agent must use the same tool and
    model as this implementation session.
 
-3. **Serialize same-file comments.** Two sub-agents must NEVER edit the same file
-   at the same time. Group the thread objects by `path`: dispatch DIFFERENT files in
-   parallel, but run the comments that share a file SEQUENTIALLY (one finishes and
-   returns before the next on that file starts). This prevents concurrent writes
-   to one file from clobbering each other.
+3. **Prevent concurrent writes to shared files.** Run batches in parallel only
+   when their complete edit sets do not overlap. Combine related batches that
+   need the same files, or run them sequentially. Before a writer edits a file
+   outside its assigned set, it must return control to you. Update file ownership
+   and wait for any other writer of that file to finish before work continues.
 
    Give each sub-agent a self-contained prompt that instructs it to:
-   a. FIRST run the team-knowledge skill to pull prior learnings relevant to this fix:
-      `Skill(skill: "hephaestus:advise", args: "<short description of the review feedback>")`.
-      Use whatever it surfaces to inform the fix; do not skip this step.
-   b. Read the cited file/line in the working directory `{{ worktree_path }}` and apply the
-      code fix for its ONE assigned review comment (you pass it the thread body, line, and
-      thread_id).
-  c. Report back the `thread_id` and a one-line reply describing the completed fix.
-     Every supplied thread is required: do not omit, dismiss, or defer one. If a
-     sub-agent cannot complete a fix, investigate it yourself and finish it before
-     returning; an incomplete thread set is rejected by the coordinator.
+   a. Run one relevant knowledge lookup for the batch with `athena:advise`.
+      Use available guidance for the fixes. Report unavailable guidance and
+      continue within the active contract.
+   b. Read the cited code and related helpers and tests in `{{ worktree_path }}`.
+      Fix all assigned comments within the owned edit set. Start executable
+      behavior changes with focused failing tests.
+   c. Return each assigned `thread_id` with a one-line reply that describes its
+      completed fix. Keep a separate reply for each thread, even when one code
+      change fixes several comments. Do not claim a fix that was not completed.
+      If a sub-agent cannot complete a fix, investigate it yourself before
+      returning; an incomplete thread set is rejected by the coordinator.
 
    **Each sub-agent prompt MUST include these guardrails (critical):**
    - Include this complete writing standard directive without changes:
@@ -79,11 +81,26 @@ CI/CD remains outside this remediation loop.
    - "Do not commit, push, or run git — the coordinator handles that."
    - "Return your result as `thread_id -> one-line reply`."
 
-4. After ALL sub-agents have returned, you (the coordinator) integrate their results and
-   run the gates from the working directory:
-   - Run tests: `uv run python -m pytest tests/ -v`
-   - Run pre-commit: `pre-commit run --all-files`
-   - Fix any issues found (you may edit files directly at this stage).
+4. After all writers return, integrate their changes and select focused checks
+   for the affected behavior and each new or changed test.
+   - Give a test-only sub-agent the exact commands and wait for its report.
+     It must not edit repository files. Use check-only formatter and lint commands
+     when those checks apply to the changed files.
+   - Use locked pytest commands with explicit paths or node IDs and
+     `--override-ini="addopts="`. For example, in Hephaestus:
+     `uv run --locked python -m pytest tests/unit/automation/test_prompts.py --override-ini="addopts=" -q`.
+     Select paths for the actual changes and repository; this path is an example.
+     Confirm nonempty collection and success.
+     For documentation-only changes, use applicable existing documentation checks.
+   - Record each command, source revision, uncommitted changes, result, and summary.
+     Report earlier results as historical evidence. Do not describe them as new
+     execution on the current source or as results for a later committed head.
+   - Fix in-scope failures and repeat the affected checks after further edits.
+     Do not run a blanket full suite or a separate all-files pre-commit command.
+     Preserve installed hooks; the host runs them during commit and push.
+   - Keep source review, execution evidence, and merge admission separate.
+     Required CI checks remain merge gates. Focused checks do not prove a full-suite
+     pass and do not grant review or merge authority.
    - Leave all changes uncommitted; the coordinator owns every commit and push.
 
 5. Trust but verify: every supplied thread must be represented in `addressed` and

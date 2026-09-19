@@ -1325,9 +1325,10 @@ failed receipt. It cannot become a passing skip. Other platforms remain
 fail-closed until a separately reviewed isolation backend exists. There is no
 unsandboxed fallback.
 
-The Hephaestus profile uses the host-verification boundary above. The completed
-PR #3006 bootstrap is retired. There is no target-specific grant, comment
-selector, or skip-to-pass path. Generic host receipts remain in
+Capability-dependent Hephaestus execution uses the boundary above. Ordinary
+source review does not execute these checks or require their image and quota
+filesystem. The completed PR #3006 bootstrap is retired. There is no
+target-specific grant, comment selector, or skip-to-pass path. Generic host receipts remain in
 [`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
 
 For `LLM360/comet`, the coordinator first binds the detached source workspace.
@@ -1393,12 +1394,20 @@ summary that preserves the evidence kind. Clean evaluation, audit persistence,
 and implementation GO each require complete current coverage. Production
 operations and repository merge gates retain their separate requirements.
 
-Every host-verification failure also upserts an automation-owned diagnostic on
-the pull request after the exact-head NOGO label is read back. The comment is
-keyed by reviewed head and fixed verification ID, so an identical retry updates
-instead of spamming the PR. It records the command, affected path, failure
-classification, and bounded output tails; it is informational and never grants
-implementation authorization.
+An unavailable capability produces a diagnostic and a recoverable block. It
+does not change source verdicts, consume remediation budget, or start a writer.
+For an execution result, a runner failure with the same source head and no
+source-head mismatch also preserves verdicts and blocks after checkout cleanup.
+
+Other source-validation or execution-evidence failures retain the existing
+NO-GO path. The host publishes their diagnostic only after exact-head NO-GO
+readback. A confirmed test or validation failure can return to implementation.
+Invalid execution evidence retains the failure and checkout cleanup path.
+
+The diagnostic comment uses the reviewed head and fixed verification ID, so
+an identical retry updates the same comment. It records the command, affected
+path, failure classification, and bounded output tails. The comment is
+informational and never grants implementation authorization.
 
 #### Boundary diagram
 
@@ -1406,7 +1415,7 @@ implementation authorization.
 flowchart LR
     PR["PR diff and requirements"] --> ThreadGate{"Open thread state"}
     PR --> Explicit["Explicit operator broad review"] --> Snapshot
-    ThreadGate -->|"no thread"| Snapshot["Immutable host verification"] --> Review
+    ThreadGate -->|"no thread"| Snapshot["Immutable source checkout"] --> Review
     ThreadGate -->|"unreplied thread"| Address["Implementation fixes and replies"]
     ThreadGate -->|"all threads replied"| Validate["Reviewer validates reply + diff"]
     Review --> GitHub["GitHub review and inline threads"]
@@ -1420,6 +1429,9 @@ flowchart LR
 ```
 
 #### State machine
+
+Capability and host-execution states apply only to requested execution. They
+are not prerequisites for the ordinary source-review checkout path.
 
 ```mermaid
 stateDiagram-v2
@@ -1441,11 +1453,13 @@ stateDiagram-v2
     RepositoryValidation --> Review: complete coverage; broad audit
     RepositoryValidation --> Validate: complete coverage; comment validation
     RepositoryValidation --> Failed: invalid evidence or unavailable required capability
-    Checkout --> HostVerification: Hephaestus fixed check is required
+    HostCapability --> HostVerification: available capability; current request and receipt
+    HostCapability --> Blocked: unavailable capability; diagnostic; unchanged verdicts and budget
     HostVerification --> Review: immutable snapshot verification passed
+    HostVerification --> Blocked: runner fault at unchanged head; diagnostic and checkout cleanup
     HostVerification --> Implementation: confirmed test failure, after durable no-go, diagnostic, and checkout cleanup
-    HostVerification --> Failed: boundary/setup failure, after durable no-go diagnostic and checkout cleanup
-    Checkout --> Review: clean checkout matches snapshot head, no fixed check required
+    HostVerification --> Failed: invalid execution evidence; durable no-go diagnostic and checkout cleanup
+    Checkout --> Review: clean source checkout matches snapshot head
     Checkout --> Failed: checkout or head drift; cleanup then a later loop gets a new snapshot
     Review --> Validate: review produced
     Validate --> CorrectAnchor: one or more anchors are invalid
@@ -2017,6 +2031,9 @@ body values in each job. The Git worker calls this neutral commit interface;
 it does not fetch issue data through an old commit adapter.
 
 ### Host capability ownership
+
+[ADR-0056](adr/0056-explicit-host-capabilities-and-operation-recovery.md)
+records the capability and operation recovery contracts.
 
 The coordinator supplies quota and signing providers through
 `WorkerCapabilities`. The pure contracts in `pipeline/host_capabilities.py`
@@ -2965,13 +2982,67 @@ cgroup, and retained process identities show absence. A stopped stream or an
 empty provider terminal list is insufficient. Uncertain observations retain the
 lease and workspace exclusion.
 
-The supervisor is not yet connected to provider environment attachment.
+The private [`AttachmentEndpoint`](../hephaestus/automation/fleet_attachment.py)
+connects provider program transport to one retained supervisor lease. Its client
+sends only the immutable binding, then forwards bounded process streams. The
+endpoint completes supervisor engine and kernel checks before exposing the
+stream. An operation lock serializes supervisor journal access across attachment
+threads. Detachment retains the lease and its workspace reservation.
 [`EnvironmentRegistry`](../hephaestus/automation/fleet_environments.py) supplies
-immutable remote-only selection metadata; metadata cannot prove containment.
+immutable remote-only selection and the private attachment command. It rejects
+missing supervisor bindings and checks worker, session, execution, and generation
+ownership on every selection. It verifies those declared fields against the
+canonical lease document and the endpoint's immutable digest before writing
+configuration. The worker retains host paths in its journal and
+uses `/workspace` for contained cwd, roots, filesystem grants, and tool storage.
+The registry checks private socket directories against all configured workspaces;
+the supervisor persists declared private roots and checks future mounts and
+unresolved leases against them. Metadata alone cannot prove containment.
+
+For a worker with a fixed environment registry, cancellation also requires the
+matching `ContainedExecSupervisor`. The worker checks the immutable lease before
+disposal, verifies the supervisor's causal disposal receipt, and retains a private
+receipt reference before releasing its session reservation. An uncertain removal
+is reconciled through observation; it is not submitted again. Provider terminal
+cleanup alone cannot publish the `backgroundCleanup: confirmed_empty` marker.
+The journal, inventory, and activity events use that marker only when complete
+contained cleanup is confirmed. Provider-only cleanup and outcomes stay private.
+An interrupted contained session retains its lease and reservation and reports
+`unknown` until reconciliation. The controller keeps that interruption pending;
+this change does not establish an interrupt/resume recovery path. A normal
+completed turn also retains its container and does not complete the issue.
+
 Native macOS and shared Linux session admission remain disabled by
 [`fleet_isolation`](../hephaestus/automation/fleet_isolation.py).
-The next integration must replace raw engine attachment with the supervisor,
-map permission and tool paths into the remote workspace, and prove restricted
-thread startup, normal tool routing, and cold-resume ownership. It must preserve
-the disabled local fallback. The [Fleet worker design and runbook](fleet-worker.md)
+The next execution gates must prove restricted thread startup, normal tool
+routing, and cold-resume ownership through this attachment. The default CLI does
+not provision a supervisor or admit a contained session. Preserve the disabled
+local fallback. The [Fleet worker design and runbook](fleet-worker.md)
 records the supported contracts, bounded probes, and remaining gates.
+
+### Private retained build logs
+
+The separate
+[`BuildArtifactServer`](../hephaestus/automation/fleet_build_artifact_server.py)
+serves terminal build output over authenticated loopback HTTPS. Agamemnon
+retains work admission and durable decisions. Odysseus reads logs through
+Agamemnon. This service does not change the worker socket, metrics interface,
+or execution gates.
+
+[`ArtifactCatalog`](../hephaestus/automation/fleet_build_artifacts.py) loads
+explicit private registrations before the listener starts. Each registration
+pins the receipt, complete identity, admitted build attempt, worker allocation
+and generation, snapshot, and terminal log commitment. The loader checks fixed
+member bytes and retains an immutable historical view in memory. HTTP requests
+cannot select a file path, add a registration, or change that view.
+
+Pages use the existing `hi/fleet/build-logs/v1` schema and UTF-8 byte cursors.
+The service always reports `truncated=true` because the current producer
+receipt does not prove complete original capture. `complete` means retained
+EOF. A log read does not verify current source, prove cleanup, or set
+`collectionVerified`.
+
+The [private build-log runbook](fleet-build-artifacts.md) specifies file
+ownership, explicit TLS trust, bearer delivery, bounded operation, and restart.
+Producer registration and actual Agamemnon-to-service deployment remain
+separate gates. Keep controller log reads disabled until those gates pass.

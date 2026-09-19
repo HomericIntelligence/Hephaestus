@@ -279,10 +279,11 @@ def test_no_problem_header_at_all() -> None:
     assert result == []
 
 
-def test_run_gh_tidy_rebases_and_auto_deletes_merged_branches(
+def test_run_gh_tidy_cleans_without_rebase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gh-tidy boundary uses the complete unattended cleanup argv."""
+    """Cleanup does not rebase branches, including with an inherited setting."""
+    monkeypatch.setenv("GH_TIDY_REBASE_ALL", "true")
     process = MagicMock()
     process.stdout = iter(())
     process.returncode = 0
@@ -296,7 +297,6 @@ def test_run_gh_tidy_rebases_and_auto_deletes_merged_branches(
         [
             "gh",
             "tidy",
-            "--rebase-all",
             "--auto-delete-merged",
             "--trunk",
             "main",
@@ -309,6 +309,7 @@ def test_run_gh_tidy_rebases_and_auto_deletes_merged_branches(
         bufsize=1,
         env=ANY,
     )
+    assert popen.call_args.kwargs["env"]["GH_TIDY_REBASE_ALL"] == "false"
     process.wait.assert_called_once_with()
 
 
@@ -1836,7 +1837,9 @@ class TestTidyHandlers:
         tmp_path: Path,
     ) -> None:
         """Dry-run problem branches emit the existing ok JSON envelope."""
-        args = argparse.Namespace(no_swarm=False, dry_run=True, json=True, max_concurrent=5)
+        args = argparse.Namespace(
+            rebase_all=True, no_swarm=False, dry_run=True, json=True, max_concurrent=5
+        )
 
         assert (
             tidy_module._handle_problem_branches(
@@ -2081,7 +2084,7 @@ class TestMain:
             tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
         )
         monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
-        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry, **kwargs: (0, ""))
         monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: [])
         monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--agent", "claude"])
         assert tidy_module.main() == 0
@@ -2102,7 +2105,7 @@ class TestMain:
             tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
         )
         monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
-        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry, **kwargs: (0, ""))
         monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: ["feature/a"])
         monkeypatch.setattr(
             "sys.argv", ["hephaestus-tidy", "--json", "--no-swarm", "--agent", "claude"]
@@ -2153,10 +2156,11 @@ class TestMain:
             tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
         )
         monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
-        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry, **kwargs: (0, ""))
         monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: ["feature/a"])
         monkeypatch.setattr(
-            "sys.argv", ["hephaestus-tidy", "--json", "--dry-run", "--agent", "claude"]
+            "sys.argv",
+            ["hephaestus-tidy", "--rebase-all", "--json", "--dry-run", "--agent", "claude"],
         )
         assert tidy_module.main() == 0
         payload = json.loads(capsys.readouterr().out)
@@ -2176,14 +2180,16 @@ class TestMain:
             tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
         )
         monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
-        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry, **kwargs: (0, ""))
         monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: ["feature/a"])
 
         async def fake_dispatch(*args, **kwargs):
             return {"feature/a": "rebased"}
 
         monkeypatch.setattr(tidy_module, "_dispatch_swarm", fake_dispatch)
-        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--agent", "claude"])
+        monkeypatch.setattr(
+            "sys.argv", ["hephaestus-tidy", "--rebase-all", "--json", "--agent", "claude"]
+        )
         assert tidy_module.main() == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "ok"
@@ -2344,3 +2350,40 @@ def test_tidy_configure_logging_forwards_explicit_format() -> None:
         tidy_module._configure_logging(True, "json")
 
     configure.assert_called_once_with(verbose=True, log_format="json")
+
+
+def test_cleanup_does_not_dispatch_unexpected_problem_branches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unexpected conflict output cannot start a cleanup agent."""
+    monkeypatch.setattr(tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path))
+    monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _branch: "main")
+    monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ONE_PROBLEM))
+    dispatch = MagicMock(return_value=0)
+    monkeypatch.setattr(tidy_module, "_dispatch_tidy_swarm", dispatch)
+    monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--agent", "claude"])
+
+    assert tidy_module.main() == 1
+    dispatch.assert_not_called()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["swarm"] == "skipped"
+
+
+def test_explicit_rebase_runs_extension_rebase(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only an explicit request enables the extension rebase operation."""
+    monkeypatch.setenv("GH_TIDY_REBASE_ALL", "false")
+    monkeypatch.setattr(tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path))
+    monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _branch: "main")
+    process = MagicMock()
+    process.stdout = iter(())
+    process.returncode = 0
+    popen = MagicMock()
+    popen.return_value.__enter__.return_value = process
+    monkeypatch.setattr(tidy_module.subprocess, "Popen", popen)
+    monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--rebase-all", "--agent", "claude"])
+
+    assert tidy_module.main() == 0
+    assert "--rebase-all" in popen.call_args.args[0]
+    assert popen.call_args.kwargs["env"]["GH_TIDY_REBASE_ALL"] == "true"

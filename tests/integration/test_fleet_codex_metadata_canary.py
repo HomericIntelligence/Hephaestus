@@ -35,7 +35,8 @@ def test_installed_codex_parses_remote_only_registry_without_starting_environmen
     native_probe_root,
 ):
     """Ask the actual provider to inspect configured, unstarted environments."""
-    from hephaestus.automation.fleet_environments import EnvironmentLease, EnvironmentRegistry
+    from hephaestus.automation.fleet_environments import EnvironmentRegistry
+    from tests.fixtures.fleet_environment import environment_lease
 
     binary = os.environ.get("FLEET_CODEX_NATIVE_BIN") or shutil.which("codex")
     assert binary is not None
@@ -46,7 +47,7 @@ def test_installed_codex_parses_remote_only_registry_without_starting_environmen
         workspace = native_probe_root / f"workspace-{number}"
         workspace.mkdir(mode=0o700)
         leases.append(
-            EnvironmentLease(
+            environment_lease(
                 worker_id="parser-worker",
                 session_id=f"parser-session-{number}",
                 generation=1,
@@ -54,7 +55,10 @@ def test_installed_codex_parses_remote_only_registry_without_starting_environmen
                 container_id=str(number) * 64,
                 image_digest="sha256:" + "a" * 64,
                 workspace=workspace,
-                engine_program=Path("/fleet-metadata-probe-no-engine"),
+                attachment_program=Path("/fleet-metadata-probe-no-engine"),
+                execution_id=f"parser-execution-{number}",
+                socket_path=native_probe_root / "unstarted-supervisor" / f"s{number}.sock",
+                lease_id=str(number) * 32,
             )
         )
     registry = EnvironmentRegistry(home, leases)
