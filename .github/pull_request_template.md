@@ -50,10 +50,12 @@ Closes #
 - [ ] New or revised English technical prose follows the [ASD-STE100 writing standard](https://github.com/HomericIntelligence/Hephaestus/blob/main/docs/asd-ste100.md)
 - [ ] No new warnings introduced
 - [ ] PR title and authored commit subjects use Conventional Commit format
-- [ ] Branch named following convention: `<issue-number>-<description>`
 - [ ] Change meets the [Definition of Done](https://github.com/HomericIntelligence/Hephaestus/blob/main/docs/DEFINITION_OF_DONE.md)
 
 ## Additional Notes
+
+Recommended branch format: `<issue-number>-<description>`. This format is
+optional. Other valid Git branch names do not require an exception or a rename.
 
 <!-- Any additional context, screenshots, or information -->
 

@@ -441,6 +441,13 @@ Hephaestus uses trunk-based development: create one short-lived feature
 branch per issue, open a pull request, squash-merge it back to `main`, and cut
 releases from signed `vX.Y.Z` tags; there are no release branches.
 
+Branch naming is a recommendation, not a requirement. Prefer
+`<issue-number>-<description>` for new branches. Other valid Git branch names
+are permitted. Do not block review, CI/CD, or merge because a branch does not
+use this format. Do not request a naming exception or require a branch rename.
+Keep the exact branch-identity checks that protect automation ownership and
+recovery.
+
 #### PR policy
 
 The required CI gate `pr-policy` and the PR reviewer enforce:
