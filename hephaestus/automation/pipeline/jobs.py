@@ -328,8 +328,6 @@ def validate_build_test_repository_validation(job: BuildTestJob) -> None:
     """Reject job fields that conflict with repository validation metadata."""
     execution = job.repository_validation
     preparation = job.repository_validation_preparation
-    if execution is None and preparation is None:
-        return
     if preparation is not None:
         if execution is not None or type(preparation) is not RepositoryValidationRuntimeRequest:
             raise ValueError("Runtime preparation and execution must be separate jobs.")
@@ -340,11 +338,11 @@ def validate_build_test_repository_validation(job: BuildTestJob) -> None:
         )
         if type(job.timeout_s) is not int or not 0 < job.timeout_s <= 120:
             raise ValueError("The runtime preparation timeout is invalid.")
-    else:
-        if execution is None:
-            raise ValueError("Repository validation execution is missing.")
+    elif execution is not None:
         check = validate_repository_validation_execution(execution)
         plan = execution.plan
+    else:
+        return
     if (
         type(job.repo) is not str
         or job.repo.casefold() not in {plan.repository.casefold(), "comet"}
