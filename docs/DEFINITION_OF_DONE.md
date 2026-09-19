@@ -35,45 +35,41 @@ A piece of work is **done** when every item below is true.
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 | 23 | New or revised English technical prose follows the [ASD-STE100 writing standard](asd-ste100.md); principle declarations and specialized principle statements do not change only to satisfy the standard | Author and PR reviewer |
 | 24 | Each `required-checks-gate` dependency succeeds on pull-request and merge-group events; only `pr-policy` can skip on a push event | CI gate `required-checks-gate` + structural unit guard |
-| 25 | For a manual contribution, verify the canonical `upstream`, fetch `upstream/main`, use a signed rebase, verify the new commit signatures, and record clean exact-head evidence from focused checks. Cover affected behavior and each new or changed test; use applicable documentation checks for documentation-only changes. ADR-0053 defines this manual sequence. No complete local suite is required. The automation loop retains ADR-0048. Pre-commit and required PR checks run the shared fast selection. Nightly CI owns full validation. | Author and source reviewer; focused local checks, fast tests in `lint`, full suites in nightly CI |
+| 25 | For a manual contribution, verify the canonical `upstream`, fetch `upstream/main`, rebase only for a conflict, necessary dependency, or explicit request, verify commit signatures and one matching final DCO trailer, and record clean exact-head evidence from focused checks. Cover affected behavior and each new or changed test; use applicable documentation checks for documentation-only changes. ADR-0053 and ADR-0055 define this manual sequence. No complete local suite is required. The automation loop retains ADR-0048. Pre-commit and required PR checks run the shared fast selection. Nightly CI owns full validation. | Author and source reviewer; focused local checks, fast tests in `lint`, full suites in nightly CI |
 
-### Final-rebase test evidence
+### Focused test evidence
 
-Focused local evidence is valid only for the final rebased head. First,
-verify that `upstream` has the canonical
-`https://github.com/HomericIntelligence/Hephaestus.git` URL. Fetch
-`upstream/main` with these commands:
+For a manual contribution, use this verification sequence:
 
-```bash
-test "$(git remote get-url upstream)" = "https://github.com/HomericIntelligence/Hephaestus.git"
-git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
-```
+1. Run focused tests during implementation. Agents must use test-only
+   subagents for these checks.
+2. Verify the canonical target remote and fetch its current `main` branch.
+   Record the feature branch start commit as the local review base. A later
+   target-branch advance does not change that recorded base.
+3. Rebase only for an actual conflict, a necessary dependency, or an explicit
+   request. If a rebase is necessary, use `git rebase -S <verified-target>`.
+   Keep unrelated branches and worktrees unchanged.
+4. Commit with `git commit -s -S`. Verify every contribution commit with
+   `git verify-commit <commit>`. Require exactly one final `Signed-off-by`
+   trailer that matches the commit author. A rebase must preserve these checks.
+5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
+   Record `git rev-parse HEAD`.
+6. Run focused checks on this head. Select tests for the affected behavior and
+   each new or changed test. Use locked pytest commands with explicit paths or
+   node IDs and `--override-ini="addopts="`. Confirm nonempty collection and
+   success. For documentation-only changes, use applicable existing
+   documentation checks. Do not require a complete local suite.
+7. Record `git rev-parse HEAD` again. Require the same value and an empty
+   `git status --porcelain=v1 --untracked-files=all` result. Record each command,
+   source revision, result, and test summary.
+8. After a source change, repeat the affected checks and signature and DCO
+   verification for the resulting head. Do not require another rebase solely
+   because a check ran or the target branch advanced.
 
-If a command fails, stop. Use Bash strict mode to run the signed rebase. Then
-verify each new commit signature:
-
-```bash
-set -euo pipefail
-git rebase -S upstream/main
-git rev-list --reverse upstream/main..HEAD | while IFS= read -r commit; do
-    git verify-commit "$commit" || exit 1
-done
-```
-
-Strict mode stops the sequence if the rebase, revision enumeration, or a
-signature check fails.
-
-Require `git status --porcelain=v1 --untracked-files=all` to have no output.
-Record `git rev-parse HEAD`. Run focused checks for the affected behavior and
-each new or changed test. Use locked pytest commands with explicit paths or
-node IDs and `--override-ini="addopts="`. Require nonempty collection and
-success. For documentation-only changes, use applicable documentation checks.
-
-Record `git rev-parse HEAD` again. Require the same value and an empty
-`git status --porcelain=v1 --untracked-files=all` result. Conflict-resolution
-edits, later commits, and other branch changes invalidate the prior evidence.
-After such a change, repeat the final-rebase sequence and focused checks for
-the resulting change. Record each command, branch head, result, and summary.
+Historical results retain their original executed revision. Do not report
+those results as a new run on the current head. Any use of historical evidence
+requires an explicit compatibility basis for the relevant inputs. Required CI
+must still pass for the merge candidate under the current merge policy.
 
 A hook result counts as focused evidence only when it collected and passed the
 selected tests on the applicable head and recorded the command and result.

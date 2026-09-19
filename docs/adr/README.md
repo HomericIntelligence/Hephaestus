@@ -65,5 +65,6 @@ numbered, and listed here.
 | [0050](0050-queue-owned-automation-cutover.md) | Queue-owned automation cutover | Accepted |
 | [0051](0051-manual-final-rebase-verification.md) | Manual final-rebase verification | Superseded by 0053 |
 | [0052](0052-verified-default-branch-merge-admission.md) | Verified default branch for merge admission | Accepted |
-| [0053](0053-focused-local-ci-full-validation.md) | Focused local checks and CI-owned full validation | Accepted |
+| [0053](0053-focused-local-ci-full-validation.md) | Focused local checks and CI-owned full validation | Manual rebase trigger superseded by 0055 |
 | [0054](0054-comet-review-validation.md) | Comet review validation | Accepted |
+| [0055](0055-conditional-manual-rebases.md) | Conditional manual rebases | Accepted |
