@@ -358,7 +358,7 @@ def _check_skill_version_errors(
         if not scan_dir.is_dir():
             continue
         for md_file in sorted(scan_dir.rglob("*.md")):
-            if any(part in skip_dirs for part in md_file.parts):
+            if any(part in skip_dirs for part in md_file.relative_to(scan_dir).parent.parts):
                 continue
             rel = md_file.relative_to(repo_root)
             errors.extend(_find_aspirational_versions(md_file, canonical_tuple, str(rel)))

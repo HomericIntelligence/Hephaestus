@@ -9,6 +9,7 @@ git tags, not a file. Tests inject a canonical version by monkeypatching
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -226,6 +227,104 @@ def test_check_package_consistency_scan_skills_ignores_code_blocks(tmp_path, set
     skills.mkdir(parents=True)
     (skills / "demo.md").write_text("# Demo\n\n```\npip install foo==9.9.9\n```\n")
     assert check_package_version_consistency(tmp_path, scan_skills=True) == 0
+
+
+@pytest.mark.parametrize("scan_root", [".claude-plugin/skills", ".claude"])
+@pytest.mark.parametrize("repo_path", ["worktrees/repository", "worktrees"])
+def test_scan_skills_preserves_repositories_named_worktrees(
+    tmp_path: Path,
+    set_canonical: Callable[[str], None],
+    capsys: pytest.CaptureFixture[str],
+    scan_root: str,
+    repo_path: str,
+) -> None:
+    """Repository and ancestor names must not exclude normal skill files."""
+    set_canonical("1.0.0")
+    repo = tmp_path / repo_path
+    skill = repo / scan_root / "demo.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("Requires v2.5.0.\n")
+
+    assert check_package_version_consistency(repo, scan_skills=True) == 1
+    assert str(skill.relative_to(repo)) in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("scan_root", [".claude-plugin/skills", ".claude"])
+@pytest.mark.parametrize("nested_path", ["worktrees", "nested/worktrees"])
+def test_scan_skills_excludes_descendant_worktrees(
+    tmp_path: Path,
+    set_canonical: Callable[[str], None],
+    capsys: pytest.CaptureFixture[str],
+    scan_root: str,
+    nested_path: str,
+) -> None:
+    """Exclude worktree content at each depth below either scan root."""
+    set_canonical("1.0.0")
+    skill = tmp_path / scan_root / nested_path / "excluded.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("Requires v9.9.9.\n")
+
+    assert check_package_version_consistency(tmp_path, scan_skills=True) == 0
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("scan_root", [".claude-plugin/skills", ".claude"])
+def test_scan_skills_exclusion_is_selective(
+    tmp_path: Path,
+    set_canonical: Callable[[str], None],
+    capsys: pytest.CaptureFixture[str],
+    scan_root: str,
+) -> None:
+    """Scan normal and similarly named directories, but not worktrees."""
+    set_canonical("1.0.0")
+    repo = tmp_path / "worktrees" / "repository"
+    for relative in ("normal.md", "worktrees-copy/demo.md", "worktrees/excluded.md"):
+        skill = repo / scan_root / relative
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        skill.write_text("Requires v2.5.0.\n")
+
+    assert check_package_version_consistency(repo, scan_skills=True) == 1
+    errors = capsys.readouterr().err
+    assert str(Path(scan_root) / "normal.md") in errors
+    assert str(Path(scan_root) / "worktrees-copy/demo.md") in errors
+    assert "excluded.md" not in errors
+
+
+@pytest.mark.parametrize("scan_root", [".claude-plugin/skills", ".claude"])
+@pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+def test_scan_skills_cli_under_worktrees_ancestor(
+    tmp_path: Path,
+    set_canonical: Callable[[str], None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scan_root: str,
+    json_output: bool,
+) -> None:
+    """Both CLI modes report only scanned violations below a named ancestor."""
+    set_canonical("1.0.0")
+    repo = tmp_path / "worktrees" / "repository"
+    for relative in ("normal.md", "nested/worktrees/excluded.md"):
+        skill = repo / scan_root / relative
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        skill.write_text("Requires v2.5.0.\n")
+    args = ["hephaestus-check-package-versions", "--repo-root", str(repo), "--scan-skills"]
+    if json_output:
+        args.append("--json")
+    monkeypatch.setattr("sys.argv", args)
+
+    assert consistency.check_package_versions_main() == 1
+    captured = capsys.readouterr()
+    if json_output:
+        payload = json.loads(captured.out)
+        assert payload["ok"] is False
+        assert payload["error_count"] == 1
+        assert len(payload["errors"]) == 1
+        errors = payload["errors"][0]
+        assert captured.err == ""
+    else:
+        errors = captured.err
+    assert str(Path(scan_root) / "normal.md") in errors
+    assert "excluded.md" not in errors
 
 
 # ---------------------------------------------------------------------------
