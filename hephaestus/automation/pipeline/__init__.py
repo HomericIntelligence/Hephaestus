@@ -19,7 +19,14 @@ if TYPE_CHECKING:
     from .coordinator import run_pipeline
     from .coordinator_types import PipelineConfig
     from .jobs import (
-        GIT_OPS, AgentJob, BuildTestJob, CompactJob, GitJob, HostCapabilityJob, JobHandle, JobResult,
+        GIT_OPS,
+        AgentJob,
+        BuildTestJob,
+        CompactJob,
+        GitJob,
+        HostCapabilityJob,
+        JobHandle,
+        JobResult,
     )
     from .queues import CompletionQueue, StageQueue
     from .routing import (
@@ -46,8 +53,8 @@ __all__ = [
     "CompletionQueue",
     "Disposition",
     "GitJob",
-    "HostCapabilityJob",
     "HistoryEvent",
+    "HostCapabilityJob",
     "ItemKind",
     "ItemResult",
     "JobHandle",
