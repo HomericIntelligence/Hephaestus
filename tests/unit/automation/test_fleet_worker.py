@@ -100,7 +100,7 @@ def worker(tmp_path):
     )
     # This deterministic provider performs no real model/tool execution.
     instance.storage_guard = lambda: None
-    instance.execution_guard = lambda: None
+    instance.execution_guard = lambda _session, _active: None
     instance.start()
     yield instance
     instance.close()

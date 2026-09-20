@@ -49,7 +49,7 @@ def test_exported_controller_commands_complete_worker_stop_resume_cycle(tmp_path
     )
     # The subprocess is a protocol fixture, not a native execution boundary.
     worker.storage_guard = lambda: None
-    worker.execution_guard = lambda: None
+    worker.execution_guard = lambda _session, _active: None
     try:
         worker.start()
         provider_thread = None

@@ -115,7 +115,7 @@ class FleetWorker:
         self.storage_guard: Callable[[], None] = lambda: validate_worker_storage(
             self.codex_home, self.journal.directory, self.workspace_root
         )
-        self.execution_guard: Callable[[], None] = lambda: require_execution_platform(sys.platform)
+        self.execution_guard: Callable[[dict[str, Any], bool], None] = self._require_execution
         self._activity_emitted: dict[str, float] = {}
         self._closed = False
         self._provider_attempted = False
@@ -216,7 +216,7 @@ class FleetWorker:
         raise ValueError("unsupported_operation")
 
     def _resume(self, command: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
-        self.execution_guard()
+        self.execution_guard(session, True)
         if self.environment_registry is not None:
             self.environment_registry.parameters(session, "thread/resume")
         if session.get("backgroundCleanup") == "unconfirmed":
@@ -291,8 +291,34 @@ class FleetWorker:
             return {}
         return self.environment_registry.parameters(session, operation)
 
+    def _require_execution(self, session: dict[str, Any], active: bool) -> None:
+        """Require the selected assignment's current supervisor-owned boundary."""
+        try:
+            if sys.platform != "linux" or self.environment_registry is None:
+                require_execution_platform(sys.platform)
+            if self.capacity != 1:
+                raise ValueError("contained_execution_requires_capacity_one")
+            registry = self.environment_registry
+            owner = self.containment_supervisor
+            if registry is None or owner is None:
+                raise ValueError("containment_supervisor_required")
+            lease = registry.lease_for(session)
+            if lease.lease_id is None:
+                raise ValueError("containment_supervisor_required")
+            with owner.operation_lock:
+                if binding_digest(owner.inspect(lease.lease_id)) != lease.binding_digest:
+                    raise ValueError("environment_binding_mismatch")
+                owner.observe_execution(lease.lease_id, active=active)
+        except (KeyError, TypeError, OSError, RuntimeError) as error:
+            if session.get("sessionId") in self.journal.sessions:
+                self._activity(session, "unknown", "container_observation_unavailable")
+            raise ValueError("container_observation_unavailable") from error
+        except ValueError as error:
+            if session.get("sessionId") in self.journal.sessions:
+                self._activity(session, "unknown", str(error))
+            raise
+
     def _start_session(self, command: dict[str, Any]) -> dict[str, Any]:
-        self.execution_guard()
         if self.journal.draining:
             raise ValueError("worker_draining")
         if command["targetId"] in self.journal.sessions:
@@ -334,12 +360,15 @@ class FleetWorker:
             "admissionReserved": True,
             "outcome": None,
         }
+        self.execution_guard(session, False)
         # A workspace reservation must survive a lost thread/start response.
         self.journal.append("session", session)
         result = self.provider.request(
             "thread/start", {**self._thread_parameters(session), "ephemeral": False}
         )
         session["providerThreadId"] = _text(result["thread"]["id"])
+        self.journal.append("session", session)
+        self.execution_guard(session, True)
         self._activity(session, "idle")
         return result_for(
             command,
@@ -349,7 +378,6 @@ class FleetWorker:
         )
 
     def _input(self, command: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
-        self.execution_guard()
         if self.journal.draining:
             raise ValueError("worker_draining")
         if not _reserved(session):
@@ -363,6 +391,7 @@ class FleetWorker:
             "threadId": session["providerThreadId"],
             "input": [{"type": "text", "text": text}],
         }
+        self.execution_guard(session, True)
         selection = self._environment_parameters(session, "turn/start")
         method = "turn/start"
         if session["activity"] != "idle":
@@ -384,7 +413,6 @@ class FleetWorker:
         return result_for(command, "completed", providerTurnId=session["providerTurnId"])
 
     def _respond(self, command: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
-        self.execution_guard()
         request_id = command["payload"].get("requestId")
         if not isinstance(request_id, (str, int)):
             raise ValueError("invalid_request_id")
@@ -405,6 +433,7 @@ class FleetWorker:
                 raise ValueError("unsupported_approval_decision")
         elif not isinstance(response.get("answers"), dict):
             raise ValueError("invalid_answers")
+        self.execution_guard(session, True)
         self.provider.respond(request_id, response)
         self._drop_pending(request_id)
         self._activity(session, "model_working")
