@@ -2497,6 +2497,12 @@ and raw tool output keep their original content.
 It includes local private-denylist policy. It uses native check flags or detects
 changes to the private copy, and restores the input before each subsequent
 hook. Missing prepared tools and unknown execution contracts fail verification.
+Policy hooks accept only three reviewed root selector pairs: the default with
+no exclusions, the external Comet fixture exclusion for `current/`, `fe5a67d/`,
+and `historical/controls/`, and that same exclusion with `7c2772e/` added.
+Each fixture directory is under `tests/fixtures/comet-review-validation/`.
+The adapter keeps pre-commit's file selection and preserves external fixture
+bytes. Other root selector changes fail preparation before hooks run.
 It does not install hook dependencies or request the queue's native fallback.
 The CI builder prepares hooks with the same pinned Node/npm prefix copied into
 the runtime. This keeps the Markdown hook's system Node environment consistent

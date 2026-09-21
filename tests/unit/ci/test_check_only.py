@@ -486,6 +486,153 @@ def test_pygrep_accepts_the_bound_contract(workspace: Workspace, hook_id: str) -
 
 
 @pytest.mark.parametrize(
+    ("hook_id", "path", "violation"),
+    [
+        ("forbid-or-true", "scripts/checked.sh", "command || true\n"),
+        (
+            "forbid-continue-on-error",
+            ".github/workflows/checked.yml",
+            "continue-on-error: true\n",
+        ),
+        (
+            "forbid-advisory-warnings",
+            ".github/workflows/checked.yml",
+            "::warning::policy violation\n",
+        ),
+        (
+            "forbid-unwhitelisted-add-to-bashrc",
+            "scripts/shell/install.sh",
+            'add_to_bashrc "unapproved command"\n',
+        ),
+    ],
+)
+def test_pygrep_enforces_policy_with_canonical_root_selection(
+    workspace: Workspace, hook_id: str, path: str, violation: str
+) -> None:
+    """Use the repository root selectors and enforce each policy hook."""
+    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text())
+    workspace.write(path, "# Acceptable input\n")
+    workspace.config(
+        [{"repo": "local", "hooks": [_configured_local_hook(hook_id)]}],
+        files=config.get("files", ""),
+        exclude=config.get("exclude", "^$"),
+    )
+    workspace.stage()
+
+    accepted = workspace.run()
+
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    workspace.write(path, violation)
+    before = _source_state(workspace.root)
+
+    rejected = workspace.run()
+
+    assert rejected.returncode == 1, rejected.stdout + rejected.stderr
+    assert path in rejected.stdout + rejected.stderr
+    assert _source_state(workspace.root) == before
+
+
+@pytest.mark.parametrize(
+    ("exclude", "fixture_directories"),
+    [
+        (
+            "^tests/fixtures/comet-review-validation/(current/|fe5a67d/|historical/controls/)",
+            ("current", "fe5a67d", "historical/controls"),
+        ),
+        (
+            "^tests/fixtures/comet-review-validation/"
+            "(current/|fe5a67d/|7c2772e/|historical/controls/)",
+            ("current", "fe5a67d", "7c2772e", "historical/controls"),
+        ),
+    ],
+    ids=["prior-fixture-policy", "current-fixture-policy"],
+)
+def test_pygrep_fixture_exclusions_preserve_external_bytes_and_check_source(
+    workspace: Workspace, exclude: str, fixture_directories: tuple[str, ...]
+) -> None:
+    """Keep approved fixtures unchanged without excluding source violations."""
+    for directory in fixture_directories:
+        workspace.write(
+            f"tests/fixtures/comet-review-validation/{directory}/checked.sh",
+            "command || true  \n",
+        ).chmod(0o755)
+    normalizer = _cache_remote(workspace, "trailing-whitespace", "trailing-whitespace-fixer")
+    workspace.config(
+        [
+            {"repo": "local", "hooks": [_configured_local_hook("forbid-or-true")]},
+            normalizer,
+        ],
+        exclude=exclude,
+    )
+    workspace.stage()
+    before = _source_state(workspace.root)
+
+    accepted = workspace.run()
+
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert _source_state(workspace.root) == before
+    workspace.write("scripts/checked.sh", "command || true\n")
+    before_violation = _source_state(workspace.root)
+
+    rejected = workspace.run()
+
+    assert rejected.returncode == 1, rejected.stdout + rejected.stderr
+    assert "scripts/checked.sh" in rejected.stdout + rejected.stderr
+    assert _source_state(workspace.root) == before_violation
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/fixtures/comet-review-validation/current-extra/checked.sh",
+        "tests/fixtures/comet-review-validation/fe5a67d-extra/checked.sh",
+        "tests/fixtures/comet-review-validation/7c2772e-extra/checked.sh",
+        "tests/fixtures/comet-review-validation/historical/controls-extra/checked.sh",
+        "tests/fixtures/comet-review-validation/unknown/checked.sh",
+        "nested/tests/fixtures/comet-review-validation/current/checked.sh",
+    ],
+)
+def test_pygrep_canonical_fixture_exclusion_keeps_adjacent_paths_in_scope(
+    workspace: Workspace, path: str
+) -> None:
+    """Reject a violation outside the exact fixture directory boundaries."""
+    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text())
+    workspace.write(path, "command || true\n")
+    workspace.config(
+        [{"repo": "local", "hooks": [_configured_local_hook("forbid-or-true")]}],
+        exclude=config["exclude"],
+    )
+    workspace.stage()
+
+    result = workspace.run()
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert path in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "suffix", ["|^scripts/", "|^tests/fixtures/"], ids=["source", "all-fixtures"]
+)
+def test_pygrep_rejects_wider_canonical_fixture_exclusion(
+    workspace: Workspace, suffix: str
+) -> None:
+    """Reject an unreviewed extension of the approved fixture exclusion."""
+    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text())
+    workspace.write("scripts/checked.sh", "command || true\n")
+    workspace.config(
+        [{"repo": "local", "hooks": [_configured_local_hook("forbid-or-true")]}],
+        exclude=config["exclude"] + suffix,
+    )
+    workspace.stage()
+
+    result = workspace.run()
+
+    assert result.returncode == 2
+    assert "root file selection" in result.stderr.lower()
+    assert workspace.events() == []
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [("files", "^absent$"), ("exclude", ".*")],
     ids=["files", "exclude"],
