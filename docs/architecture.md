@@ -3003,6 +3003,19 @@ cgroup, and retained process identities show absence. A stopped stream or an
 empty provider terminal list is insufficient. Uncertain observations retain the
 lease and workspace exclusion.
 
+On enforcing SELinux hosts, the Podman adapter uses the maintained
+`container_userns_t` domain for the nested Codex filesystem sandbox. The existing
+engine identity binds that selection. Engine inspection and kernel observation
+must agree on the process domain and the private MCS relationship between each
+observed process and the exclusive workspace. Missing or mismatched evidence
+blocks attachment; unsupported domain selection has no fallback. Non-SELinux
+hosts retain their existing path. The adapter does not install policy.
+This domain permits additional namespace mount and PTY operations at the SELinux
+layer. All existing capability, namespace, mount, network, and resource controls
+remain required. Domain selection is not a containment-equivalence claim or
+runtime qualification. The [worker contract](fleet-worker.md#contained-exec-server-supervisor)
+defines the checks and remaining bounded startup gate.
+
 The private [`AttachmentEndpoint`](../hephaestus/automation/fleet_attachment.py)
 connects provider program transport to one retained supervisor lease. Its client
 sends only the immutable binding, then forwards bounded process streams. The
