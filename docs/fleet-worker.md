@@ -293,6 +293,103 @@ the current execution checks.
 Prompt text, model output, shell command text, and credential values are excluded
 from activity facts and command receipts.
 
+### Retained command output
+
+The worker stores valid `item/completed` command notifications on private
+storage under `state-dir/session-output/`. Capture requires the current worker,
+generation, allocation, session, task, execution, agent, provider thread, and
+turn. A missing identity makes capture unavailable. A completed item does not
+prove that the task passed tests or received independent approval.
+
+The stored output is the exact `aggregatedOutput` supplied by Codex 0.153.4,
+or its bounded UTF-8 prefix. It combines stdout and stderr. This provider field
+does not establish output completeness or provider truncation. A null aggregate
+means output is unavailable or empty in the provider record. It does not mean
+exit zero. An actual empty string remains distinct from null.
+
+Each immutable item has a digest bound to its retained owner. The capture
+manifest records unique valid observed item identities, retained and omitted
+items, and limits. Exact repeats do not change the counts. Conflicting content
+for the same turn and item blocks export. An incomplete storage update or a
+capture failure also blocks export; activity facts can still report progress.
+The safe `outputCaptureUnavailable` flag is durable in the worker journal.
+Raw commands and output do not enter that journal or shared events.
+
+The limits per retained session and generation are:
+
+- 64 retained items and 1 MiB of encoded item records;
+- 64 KiB of UTF-8 output per item, cut only at a scalar boundary;
+- 16 KiB of command text, 4 KiB of working-directory text, and 1024 bytes per
+  identity string;
+- 4096 unique observed item identities; exceeding this count blocks export;
+- 2 MiB for the encoded export bundle.
+
+Oversized command or working-directory metadata is omitted, not shortened.
+The manifest preserves the omission count. A missing or malformed provider
+notification is outside these counts. Capture always reports `complete: false`.
+It is a partial set of completed command records, not a complete terminal log.
+
+To export already retained output:
+
+1. Wait for worker facts to be acknowledged and for contained execution disposal.
+   Stop the worker with the normal shutdown procedure. Export requires the
+   existing journal writer lock to be free and holds that lock until export ends.
+   A live worker causes an immediate refusal without a capture-state change.
+2. Select the exact worker state directory, session ID, and generation from
+   retained execution records. Keep the state directory outside agent-writeable
+   workspaces. Do not delete it when the worker is disposed.
+3. Select a new absolute file path in an existing owner-only directory. Keep
+   this export outside all agent-writeable workspaces. Do not reuse an old file.
+4. Run the existing registered CLI. This operation does not start a provider or
+   connect to a worker socket:
+
+   ```bash
+   just --command uv run --locked hephaestus-fleet-worker export-output \
+     --state-dir /private/fleet/state --session-id session-1 \
+     --generation 1 --output /private/fleet/exports/session-1.json
+   ```
+
+5. Retain the emitted receipt and exported file. The receipt contains the exact
+   file SHA-256 as `receiptDigest`, its byte count, and the complete owner.
+   The file uses `hi/fleet/session-output/v1`. A storage or validation failure
+   returns a nonzero status and `session_output_unavailable`.
+6. Use an already admitted transport to collect the private file and receipt.
+   Register those exact bytes and expected owner with Odysseus. Collection is
+   a separate operation; this CLI does not establish a transport or authority.
+
+Export remains available after worker disposal. Capture and export files have
+mode `0600` and their directories have mode `0700`. Reads reject symbolic links, multiple file
+links, nonprivate ownership, oversized files, and changed bytes or metadata.
+The complete file digest also binds the capture counts and limits. Each export
+is an immutable snapshot. A later snapshot requires a new file and explicit
+dashboard registration. The dashboard's live metadata stream remains separate.
+
+The versioned bundle has exactly five top-level fields: `schema`, `identity`,
+`provider`, `capture`, and `items`. The identity contains `workerId`, positive
+integer `generation`, `allocationId`, `sessionId`, `executionId`, `taskId`,
+`agentId`, and `providerThreadId`. The provider is exactly
+`{"name":"codex","version":"0.153.4"}`. The capture object contains
+`profile: "completed_command_items"`, `complete: false`,
+`observedCompletedItems`, `retainedItems`, `omittedItems`, and `retentionLimited`.
+Observed items equal retained plus omitted items. The limit flag is true if
+an item was omitted or retained text was shortened by the collector.
+
+Each item contains `turnId`, `itemId`, `completedAtMs`, `command`, `cwd`,
+`status`, `exitCode`, `durationMs`, `output`, and `recordDigest`. The terminal
+status is `completed`, `failed`, or `declined`. Completion time and duration
+are provider-reported milliseconds. Exit code and duration can be null. The
+output object contains `kind: "provider_aggregate"`, `text`, `byteCount`,
+`sha256`, `providerTruncated: null`, and Boolean `captureTruncated`.
+Null output has null text, byte count, and digest. Otherwise the byte count and
+digest apply to the retained UTF-8 bytes.
+
+The item digest is SHA-256 of `{"identity": identity, "item": item}` with the
+`recordDigest` field removed from the item. Use sorted keys, compact JSON,
+UTF-8 without ASCII substitution, no nonfinite numbers, and no final newline.
+Consumers must reject extra fields, duplicate JSON keys, duplicate item
+identities, invalid scalar types, digest mismatches, and exceeded resource limits.
+The detached `receiptDigest` applies to the complete exported file bytes.
+
 Recognized text, reasoning, tool-output, and usage notifications refresh active
 observations at most once per five seconds per session. The thread and turn IDs
 must match. Waiting or idle sessions cannot become active from an old delta.

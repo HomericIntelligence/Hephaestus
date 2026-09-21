@@ -14,6 +14,7 @@ from typing import Any
 
 from hephaestus.automation.fleet_request_evidence import read_request_evidence
 from hephaestus.automation.fleet_runtime import ContainedRuntime
+from hephaestus.automation.fleet_session_output import export_session_output
 from hephaestus.automation.fleet_worker import FleetWorker
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg
@@ -110,6 +111,18 @@ def serve(worker: FleetWorker) -> None:
         socket_path.unlink(missing_ok=True)
 
 
+def _export_output(args: argparse.Namespace) -> int:
+    try:
+        result = export_session_output(
+            args.state_dir, args.session_id, args.generation, args.output
+        )
+    except (ValueError, OSError):
+        print(json.dumps({"error": "session_output_unavailable"}))
+        return 1
+    print(json.dumps(result))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run a private worker or attach through an existing authenticated transport."""
     parser = argparse.ArgumentParser(description=text(__doc__ or ""))
@@ -126,6 +139,11 @@ def main(argv: list[str] | None = None) -> int:
     serving.add_argument("--allocation-id")
     serving.add_argument("--codex-bin", default="codex")
     serving.add_argument("--contained-config", type=Path)
+    exporting = subcommands.add_parser("export-output")
+    exporting.add_argument("--state-dir", required=True, type=Path)
+    exporting.add_argument("--session-id", required=True)
+    exporting.add_argument("--generation", required=True, type=int)
+    exporting.add_argument("--output", required=True, type=Path)
     for operation in ("attach", "inventory", "events"):
         command = subcommands.add_parser(operation)
         command.add_argument("--state-dir", required=True, type=Path)
@@ -153,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
                 worker.close()
             else:
                 runtime.close()
+    elif args.operation == "export-output":
+        return _export_output(args)
     elif args.operation == "attach":
         for line in sys.stdin:
             message = json.loads(line)
