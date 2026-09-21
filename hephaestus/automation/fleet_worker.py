@@ -26,6 +26,7 @@ from hephaestus.automation.fleet_provider import (
     CodexAppServer,
     ProviderError,
 )
+from hephaestus.automation.fleet_session_output import retain_command
 
 _REQUESTS = {
     "item/commandExecution/requestApproval": "waiting_approval",
@@ -603,6 +604,7 @@ class FleetWorker:
                 "providerBackgroundCleanup",
                 "providerOutcome",
                 "containmentDisposal",
+                "outputCaptureUnavailable",
             }
         }
         fact.update(details)
@@ -671,6 +673,14 @@ class FleetWorker:
         if not _current_turn(session, params.get("turnId")):
             return
         item = params.get("item", {})
+        if method == "item/completed" and not session.get("outputCaptureUnavailable", False):
+            try:
+                if any(session.get(key) != value for key, value in self.identity.items()):
+                    raise ValueError("output_owner_mismatch")
+                retain_command(self.journal.directory, session, params)
+            except (OSError, ValueError):
+                # A retained failure flag prevents export of stale capture counts.
+                session["outputCaptureUnavailable"] = True
         activity = (
             "tool_running"
             if item.get("type") in _TOOLS and method == "item/started"

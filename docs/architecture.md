@@ -2965,6 +2965,24 @@ These private receipts cannot authorize a replacement task. Public facts contain
 bounded activity metadata. Prompts, tool requests, answers, and credentials stay
 on private worker storage and attachments.
 
+[`fleet_session_output`](../hephaestus/automation/fleet_session_output.py)
+retains completed Codex command items under the private worker state directory.
+The worker checks the session owner and current thread and turn before capture.
+Immutable item files and an atomic capture manifest survive worker disposal.
+They contain combined provider output, command metadata, and identity digests.
+They do not enter the activity journal or Keystone events. The journal carries
+only a Boolean failure flag if capture becomes unavailable.
+
+The existing worker CLI has an `export-output` operation. It reads retained
+records and writes one new private bundle with a byte digest. It requires a
+stopped worker and holds the existing journal writer lock during export. It
+does not use a socket or start a provider. The bundle states that capture is
+incomplete: the Codex aggregate cannot prove separate stdout/stderr or complete
+process output.
+Odysseus can display an explicitly registered bundle after it verifies the
+bytes and canonical owner. This operation does not grant task admission or
+establish a review result. See [retained command output](fleet-worker.md#retained-command-output).
+
 The [private socket CLI](../hephaestus/automation/fleet_worker_cli.py) supplies
 inventory, pending requests, and
 [current file-change evidence](../hephaestus/automation/fleet_request_evidence.py).
