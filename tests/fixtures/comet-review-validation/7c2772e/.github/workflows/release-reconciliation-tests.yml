@@ -1,0 +1,84 @@
+name: release-reconciliation-tests
+
+on:
+  push:
+    branches: [codex/1108-coordinator]
+
+permissions:
+  contents: read
+
+jobs:
+  affected-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        selection: [coordinator, release, workflow]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the selected source
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          printf '%s\n' "${SOURCE_SHA}" > tested-source.txt
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - name: Run the affected tests
+        env:
+          SELECTION: ${{ matrix.selection }}
+        run: |
+          set -euo pipefail
+          case "${SELECTION}" in
+            coordinator)
+              selected=(tests/test_release_resource_reconciliation_coordinator.py)
+              ;;
+            release)
+              selected=(
+                tests/test_release_resource_coordinator.py::test_release_records_stop_and_removal_before_completion
+                tests/test_release_resource_coordinator.py::test_release_recovers_each_durable_and_external_boundary
+                tests/test_release_resource_coordinator.py::test_release_requires_current_authority_after_intent
+                tests/test_release_resource_coordinator.py::test_release_rechecks_keeper_before_removal
+                tests/test_release_resource_coordinator.py::test_release_waits_for_uncertain_keeper_before_new_stop
+                tests/test_release_resource_coordinator.py::test_release_propagates_cancellation_and_recovers_observation
+                tests/test_release_resource_coordinator.py::test_release_rejects_bad_external_observation_without_fabricated_evidence
+                tests/test_release_resource_coordinator.py::test_release_keeps_terminal_legacy_keeper_evidence_without_effects
+              )
+              ;;
+            workflow)
+              selected=(
+                tests/test_ci_workflows.py::test_all_workflows_have_the_approved_trigger_contract
+                tests/test_ci_workflows.py::test_remote_actions_and_uv_are_immutable
+                tests/test_release_contracts.py::test_release_all_exports_the_approved_public_surface
+              )
+              ;;
+            *) exit 2 ;;
+          esac
+          env -u COMET_ROOT uv run --locked --extra dev pytest -q "${selected[@]}" --junitxml=affected-tests.xml
+      - name: Require executed tests
+        if: ${{ always() && !cancelled() }}
+        run: |
+          python3 -I - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = ElementTree.parse(Path("affected-tests.xml"))
+          cases = list(report.iter("testcase"))
+          if not cases or not any(case.find("skipped") is None for case in cases):
+              raise SystemExit("The affected selection did not execute a test.")
+          PY
+      - name: Keep affected-test evidence
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reconciliation-${{ matrix.selection }}-${{ github.sha }}
+          path: |
+            tested-source.txt
+            affected-tests.xml
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,1132 @@
+name: postgres-tests
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: false
+        default: ${{ github.sha }}
+      profile_id:
+        type: string
+        required: false
+        default: full
+      promotion_exception:
+        type: string
+        required: false
+        default: ''
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full lowercase commit SHA to test
+        type: string
+        required: true
+      test_keyword:
+        description: One literal pytest keyword fragment
+        type: string
+        required: false
+        default: ""
+      profile_id:
+        description: Fixed PostgreSQL test profile
+        type: choice
+        required: false
+        default: full
+        options:
+          - full
+          - quick
+          - bootstrap-store
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-exception:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      bypass: ${{ steps.exception.outputs.bypass || 'false' }}
+    steps:
+      - name: Keep normal PostgreSQL coverage
+        if: inputs.promotion_exception == ''
+        run: echo 'Normal PostgreSQL coverage is required.'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.promotion_exception != ''
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        if: inputs.promotion_exception != ''
+      - name: Validate the release-specific PostgreSQL exception
+        id: exception
+        if: inputs.promotion_exception != ''
+        env:
+          PROMOTION_EXCEPTION: ${{ inputs.promotion_exception }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          TEST_KEYWORD: ${{ inputs.test_keyword }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: >-
+          uv run --locked --extra dev python scripts/ci/postgres_promotion_exception.py
+          --output postgres-exception.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.exception.outputs.bypass == 'true'
+        with:
+          name: postgres-v0.1.100-exception
+          path: postgres-exception.json
+          if-no-files-found: error
+          overwrite: true
+
+  postgres-integration:
+    if: inputs.profile_id != 'full' || inputs.test_keyword != ''
+    name: ${{ inputs.profile_id == 'bootstrap-store' && 'postgres-bootstrap-store' || inputs.test_keyword && 'postgres-focused' || 'postgres-integration' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.profile_id == 'quick' && 10 || 120 }}
+    services:
+      postgres:
+        image: postgres@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: comet-postgres-test
+        ports: [5432]
+        options: >-
+          --health-cmd "pg_isready --username postgres --dbname postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      COMET_POSTGRES_IMAGE: postgres:17.11-alpine3.24@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
+      COMET_POSTGRES_USER: postgres
+      COMET_POSTGRES_DB: postgres
+      COMET_POSTGRES_PASSWORD: comet-postgres-test
+      COMET_TEST_POSTGRES_HOST: localhost
+      COMET_TEST_KEEP_DATABASES: "0"
+    steps:
+      - name: Validate the source commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          TEST_KEYWORD: ${{ inputs.test_keyword }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${EVENT_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Manual PostgreSQL validation must use the main workflow." >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The source commit must be a full lowercase hexadecimal SHA." >&2
+            exit 1
+          fi
+          profile="${PROFILE_ID:-full}"
+          if [[ "${profile}" != "full" && "${profile}" != "quick" && "${profile}" != "bootstrap-store" ]]; then
+            echo "::error::The PostgreSQL test profile is not valid." >&2
+            exit 1
+          fi
+          if [[ "${profile}" == "bootstrap-store" && ( "${EVENT_NAME}" != "workflow_dispatch" || "${EVENT_REF}" != "refs/heads/main" ) ]]; then
+            echo "::error::Bootstrap store validation must use the main workflow." >&2
+            exit 1
+          fi
+          keyword="${TEST_KEYWORD:-}"
+          if [[ "${profile}" == "quick" && -n "${keyword}" ]]; then
+            echo "::error::The quick profile does not accept a test selector." >&2
+            exit 1
+          fi
+          if [[ "${profile}" == "bootstrap-store" && -n "${keyword}" ]]; then
+            echo "::error::The bootstrap store profile does not accept a test selector." >&2
+            exit 1
+          fi
+          if [[ -n "${keyword}" ]]; then
+            export LC_ALL=C
+            if [[ "${EVENT_NAME}" != "workflow_dispatch" || "${#keyword}" -gt 128 || ! "${keyword}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ || "${keyword,,}" =~ ^(and|or|not)$ ]]; then
+              echo "::error::The test selector is not valid." >&2
+              exit 1
+            fi
+          fi
+      - name: Install the YAML reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes python3-yaml
+          /usr/bin/python3 --version
+          dpkg-query --show --showformat='${Version}\n' python3-yaml
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          TEST_KEYWORD: ${{ inputs.test_keyword }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "${actual_sha}" != "${SOURCE_SHA}" ]]; then
+            echo "::error::The checked-out commit does not match the selected source." >&2
+            exit 1
+          fi
+          printf 'workflow_sha=%s\ntested_sha=%s\n' "${WORKFLOW_SHA}" "${actual_sha}" > postgres-source.txt
+          python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          profile = os.environ.get("PROFILE_ID") or "full"
+          keyword = os.environ.get("TEST_KEYWORD", "")
+          if profile == "bootstrap-store":
+              postgres = ["uv", "run", "--locked", "--extra", "dev", "pytest", "-m",
+                          "postgres", "-q", "--junitxml=postgres-junit.xml",
+                          "tests/postgres/test_migrations.py",
+                          "tests/postgres/test_release_state.py"]
+              grafana = []
+              scope_name = "bootstrap-store"
+          else:
+              postgres = ["uv", "run", "--locked", "--extra", "dev", "pytest", "-m",
+                          "postgres_quick" if profile == "quick" else "postgres",
+                          "--junitxml=postgres-junit.xml"]
+              if keyword:
+                  postgres.extend(["-k", keyword])
+              grafana = ["uv", "run", "--locked", "--extra", "dev", "pytest",
+                         "tests/test_grafana_provisioning.py::test_expanded_grafana_queries_execute_on_postgresql_17_tls",
+                         "--junitxml=grafana-postgres-junit.xml"]
+              scope_name = "quick" if profile == "quick" else "focused" if keyword else "full"
+          scope = {"schema_version": 1, "scope": scope_name, "selector": keyword,
+                   "postgres_argv": postgres, "grafana_argv": grafana,
+                   "workflow_sha": os.environ["WORKFLOW_SHA"],
+                   "tested_sha": os.environ["SOURCE_SHA"]}
+          if profile == "bootstrap-store":
+              scope["profile_id"] = profile
+          Path("postgres-scope.json").write_text(json.dumps(scope, sort_keys=True) + "\n")
+          PY
+      - name: Read the selected PostgreSQL retention value
+        id: read-postgres-retention
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          value="$(/usr/bin/timeout 30s /usr/bin/python3 -I - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          import yaml
+          from yaml.events import MappingEndEvent, MappingStartEvent, SequenceEndEvent, SequenceStartEvent
+          from yaml.nodes import MappingNode, ScalarNode, SequenceNode
+
+          SOURCE_PATH = ".github/workflows/postgres-tests.yml"
+          STRING_TAG = "tag:yaml.org,2002:str"
+
+          def fail():
+              raise ValueError
+
+          def git_output(arguments, limit, environment):
+              command = [
+                  "/usr/bin/timeout",
+                  "30s",
+                  "/usr/bin/git",
+                  *arguments,
+              ]
+              process = subprocess.Popen(
+                  command,
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+                  env=environment,
+              )
+              assert process.stdout is not None
+              data = process.stdout.read(limit + 1)
+              if len(data) > limit:
+                  process.kill()
+              process.stdout.close()
+              if process.wait() != 0 or len(data) > limit:
+                  fail()
+              return data
+
+          def inspect(node, depth):
+              if depth > 64:
+                  fail()
+              if isinstance(node, MappingNode):
+                  keys = set()
+                  for key, value in node.value:
+                      if not isinstance(key, ScalarNode) or key.tag != STRING_TAG:
+                          fail()
+                      if key.value == "<<" or key.value in keys:
+                          fail()
+                      keys.add(key.value)
+                      inspect(key, depth + 1)
+                      inspect(value, depth + 1)
+              elif isinstance(node, SequenceNode):
+                  for value in node.value:
+                      inspect(value, depth + 1)
+
+          def member(mapping, name):
+              if not isinstance(mapping, MappingNode):
+                  fail()
+              values = [value for key, value in mapping.value if key.value == name]
+              if len(values) != 1:
+                  fail()
+              return values[0]
+
+          try:
+              source_sha = os.environ["SOURCE_SHA"]
+              if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+                  fail()
+              object_store = Path(".git/objects")
+              if not object_store.is_dir():
+                  fail()
+              with tempfile.TemporaryDirectory(prefix="comet-postgres-git-") as directory:
+                  private_git = Path(directory)
+                  (private_git / "refs").mkdir()
+                  (private_git / "objects/info").mkdir(parents=True)
+                  (private_git / "HEAD").write_text("ref: refs/heads/none\n", encoding="ascii")
+                  (private_git / "config").write_text(
+                      "[core]\n\trepositoryformatversion = 0\n\tbare = true\n", encoding="ascii"
+                  )
+                  (private_git / "objects/info/alternates").write_text(
+                      str(object_store.resolve()) + "\n", encoding="ascii"
+                  )
+                  environment = {
+                      "GIT_CONFIG_GLOBAL": "/dev/null",
+                      "GIT_CONFIG_COUNT": "1",
+                      "GIT_CONFIG_KEY_0": "core.useReplaceRefs",
+                      "GIT_CONFIG_VALUE_0": "false",
+                      "GIT_CONFIG_NOSYSTEM": "1",
+                      "GIT_DIR": str(private_git),
+                      "GIT_NO_REPLACE_OBJECTS": "1",
+                      "GIT_OPTIONAL_LOCKS": "0",
+                      "GIT_PAGER": "cat",
+                      "GIT_TERMINAL_PROMPT": "0",
+                      "LC_ALL": "C",
+                      "PATH": "/usr/bin:/bin",
+                  }
+                  entry = git_output(
+                      ["ls-tree", "-z", "--full-tree", source_sha, "--", SOURCE_PATH], 4096, environment
+                  )
+                  match = re.fullmatch(
+                      rb"100644 blob ([0-9a-f]{40})\t\.github/workflows/postgres-tests\.yml\0", entry
+                  )
+                  if match is None:
+                      fail()
+                  blob = match.group(1).decode("ascii")
+                  declared_size = git_output(["cat-file", "-s", blob], 4096, environment)
+                  if re.fullmatch(rb"[1-9][0-9]*\n", declared_size) is None:
+                      fail()
+                  size = int(declared_size)
+                  if size > 256 * 1024:
+                      fail()
+                  data = git_output(["cat-file", "blob", blob], size, environment)
+              if len(data) != size:
+                  fail()
+              text = data.decode("utf-8")
+              events = 0
+              depth = 0
+              for event in yaml.parse(text, Loader=yaml.BaseLoader):
+                  events += 1
+                  if events > 16_384 or getattr(event, "anchor", None) is not None:
+                      fail()
+                  if getattr(event, "tag", None) is not None:
+                      fail()
+                  if getattr(event, "version", None) is not None or getattr(event, "tags", None):
+                      fail()
+                  if isinstance(event, (MappingStartEvent, SequenceStartEvent)):
+                      depth += 1
+                      if depth > 64:
+                          fail()
+                  elif isinstance(event, (MappingEndEvent, SequenceEndEvent)):
+                      depth -= 1
+                      if depth < 0:
+                          fail()
+              documents = list(yaml.compose_all(text, Loader=yaml.BaseLoader))
+              if len(documents) != 1 or not isinstance(documents[0], MappingNode):
+                  fail()
+              root = documents[0]
+              inspect(root, 1)
+              terminal = member(member(member(member(root, "jobs"), "postgres-integration"), "env"), "COMET_TEST_KEEP_DATABASES")
+              if not isinstance(terminal, ScalarNode) or terminal.tag != STRING_TAG:
+                  fail()
+              if terminal.style not in {"'", '"'} or terminal.value not in {"0", "1"}:
+                  fail()
+              spelling = text[terminal.start_mark.index:terminal.end_mark.index]
+              if spelling not in {"'0'", '"0"', "'1'", '"1"'}:
+                  fail()
+          except (KeyError, OSError, RecursionError, UnicodeError, ValueError, yaml.YAMLError):
+              raise SystemExit("The selected PostgreSQL retention value is not correct.") from None
+          sys.stdout.write(terminal.value)
+          PY
+          )"
+          if [[ "${value}" != "0" && "${value}" != "1" ]]; then
+            echo "::error::The selected PostgreSQL retention value is not correct." >&2
+            exit 1
+          fi
+          printf 'keep_databases=%s\n' "${value}" >> "${GITHUB_OUTPUT}"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - name: Configure encrypted TLS
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          POSTGRES_CA_FILE: ${{ runner.temp }}/comet-postgres-ca.pem
+        run: |
+          echo "COMET_TEST_POSTGRES_CONTAINER=${POSTGRES_CONTAINER}" >> "${GITHUB_ENV}"
+          echo "COMET_DB_CA_FILE=${POSTGRES_CA_FILE}" >> "${GITHUB_ENV}"
+          scripts/configure-test-postgres-tls.sh "${POSTGRES_CONTAINER}" "${POSTGRES_CA_FILE}"
+          postgres_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "${POSTGRES_CONTAINER}")
+          echo "COMET_TEST_POSTGRES_PORT=${postgres_port}" >> "${GITHUB_ENV}"
+      - id: bootstrap-evidence
+        name: Prepare bootstrap store evidence
+        if: inputs.profile_id == 'bootstrap-store'
+        shell: bash
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          umask 077
+          success="$(mktemp -d "${RUNNER_TEMP}/comet-bootstrap-store-success.XXXXXX")"
+          diagnostic="$(mktemp -d "${RUNNER_TEMP}/comet-bootstrap-store-diagnostic.XXXXXX")"
+          test ! -L "${success}"
+          test ! -L "${diagnostic}"
+          test "$(stat -c %u -- "${success}")" = "$(id -u)"
+          test "$(stat -c %u -- "${diagnostic}")" = "$(id -u)"
+          test "$(stat -c %a -- "${success}")" = 700
+          test "$(stat -c %a -- "${diagnostic}")" = 700
+          printf 'success=%s\n' "${success}" >> "${GITHUB_OUTPUT}"
+          printf 'success_device=%s\n' "$(stat -c %d -- "${success}")" >> "${GITHUB_OUTPUT}"
+          printf 'success_inode=%s\n' "$(stat -c %i -- "${success}")" >> "${GITHUB_OUTPUT}"
+          printf 'diagnostic=%s\n' "${diagnostic}" >> "${GITHUB_OUTPUT}"
+          printf 'diagnostic_device=%s\n' "$(stat -c %d -- "${diagnostic}")" >> "${GITHUB_OUTPUT}"
+          printf 'diagnostic_inode=%s\n' "$(stat -c %i -- "${diagnostic}")" >> "${GITHUB_OUTPUT}"
+      - id: postgres-test
+        name: Run PostgreSQL test profile
+        env:
+          DIAGNOSTIC_DIRECTORY: ${{ steps.bootstrap-evidence.outputs.diagnostic }}
+          DIAGNOSTIC_DEVICE: ${{ steps.bootstrap-evidence.outputs.diagnostic_device }}
+          DIAGNOSTIC_INODE: ${{ steps.bootstrap-evidence.outputs.diagnostic_inode }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          SUCCESS_DIRECTORY: ${{ steps.bootstrap-evidence.outputs.success }}
+          SUCCESS_DEVICE: ${{ steps.bootstrap-evidence.outputs.success_device }}
+          SUCCESS_INODE: ${{ steps.bootstrap-evidence.outputs.success_inode }}
+          TEST_KEYWORD: ${{ inputs.test_keyword }}
+          COMET_TEST_KEEP_DATABASES: ${{ steps.read-postgres-retention.outputs.keep_databases }}
+        run: |
+          set -euo pipefail
+          if [[ "${PROFILE_ID:-full}" != "bootstrap-store" ]]; then
+            marker=postgres
+            if [[ "${PROFILE_ID:-full}" == "quick" ]]; then
+              marker=postgres_quick
+            fi
+            command=(uv run --locked --extra dev pytest -m "${marker}" --junitxml=postgres-junit.xml)
+            if [[ -n "${TEST_KEYWORD:-}" ]]; then
+              command+=(-k "${TEST_KEYWORD}")
+            fi
+            "${command[@]}"
+            exit 0
+          fi
+          exec /usr/bin/python3 -I - <<'PY'
+          import json
+          import os
+          import selectors
+          import signal
+          import stat
+          import subprocess
+          import time
+          from pathlib import Path
+
+          command = [
+              "uv", "run", "--locked", "--extra", "dev", "pytest", "-m", "postgres",
+              "-q", "--junitxml=postgres-junit.xml", "tests/postgres/test_migrations.py",
+              "tests/postgres/test_release_state.py",
+          ]
+          github_output = Path(os.environ["GITHUB_OUTPUT"])
+          child_environment = {
+              name: value
+              for name, value in os.environ.items()
+              if not name.startswith(("ACTIONS_", "GITHUB_", "RUNNER_"))
+              and name
+              not in {
+                  "DIAGNOSTIC_DEVICE",
+                  "DIAGNOSTIC_DIRECTORY",
+                  "DIAGNOSTIC_INODE",
+                  "PROFILE_ID",
+                  "SUCCESS_DEVICE",
+                  "SUCCESS_DIRECTORY",
+                  "SUCCESS_INODE",
+                  "TEST_KEYWORD",
+              }
+          }
+          process = subprocess.Popen(
+              command,
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              start_new_session=True,
+              env=child_environment,
+          )
+          execution_deadline = time.monotonic() + 6000
+          assert process.stdout is not None
+          output_size = 0
+          tail = bytearray()
+          overflow = False
+          timeout = False
+          pipe_closed = False
+          process_group_leaked = False
+          supervision_failed = False
+          try:
+              anchored_group = os.getpgid(process.pid) == process.pid
+          except OSError:
+              anchored_group = False
+
+          def leader_exited():
+              return os.waitid(
+                  os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+              ) is not None
+
+          def other_group_members():
+              scan_deadline = time.monotonic() + 1
+              for entry in Path("/proc").iterdir():
+                  if time.monotonic() >= scan_deadline:
+                      return True
+                  if not entry.name.isdecimal() or int(entry.name) == process.pid:
+                      continue
+                  try:
+                      fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+                  except FileNotFoundError:
+                      continue
+                  except (OSError, IndexError):
+                      return True
+                  if len(fields) < 3 or not fields[2].isdecimal():
+                      return True
+                  if int(fields[2]) == process.pid:
+                      return True
+              return False
+
+          def signal_group(selected_signal):
+              if not anchored_group:
+                  return False
+              try:
+                  if os.getpgid(process.pid) != process.pid:
+                      return False
+                  os.killpg(process.pid, selected_signal)
+              except ProcessLookupError:
+                  return True
+              except OSError:
+                  return False
+              return True
+
+          selector = selectors.DefaultSelector()
+
+          def read_output(wait):
+              global output_size, overflow, pipe_closed
+              for _key, _events in selector.select(wait):
+                  try:
+                      chunk = os.read(process.stdout.fileno(), 65536)
+                  except BlockingIOError:
+                      continue
+                  if not chunk:
+                      selector.unregister(process.stdout)
+                      pipe_closed = True
+                      continue
+                  output_size += len(chunk)
+                  tail.extend(chunk)
+                  if len(tail) > 65536:
+                      del tail[:-65536]
+                  overflow = overflow or output_size > 16 * 1024 * 1024
+
+          def wait_for_group(deadline):
+              while time.monotonic() < deadline:
+                  read_output(min(0.05, max(0, deadline - time.monotonic())))
+                  if leader_exited() and not other_group_members():
+                      return True
+              return False
+
+          try:
+              os.set_blocking(process.stdout.fileno(), False)
+              selector.register(process.stdout, selectors.EVENT_READ)
+              if not anchored_group:
+                  supervision_failed = True
+              while not supervision_failed:
+                  remaining = execution_deadline - time.monotonic()
+                  if remaining <= 0:
+                      timeout = True
+                      break
+                  read_output(min(remaining, 0.1))
+                  if time.monotonic() >= execution_deadline:
+                      timeout = True
+                      break
+                  if overflow:
+                      break
+                  if pipe_closed and leader_exited():
+                      process_group_leaked = other_group_members()
+                      break
+              if timeout or overflow or process_group_leaked or supervision_failed:
+                  supervision_failed |= not signal_group(signal.SIGTERM)
+                  if not wait_for_group(time.monotonic() + 1):
+                      supervision_failed |= not signal_group(signal.SIGKILL)
+                      if not wait_for_group(time.monotonic() + 1):
+                          supervision_failed = True
+              drain_deadline = time.monotonic() + 1
+              while not pipe_closed and time.monotonic() < drain_deadline:
+                  read_output(min(0.05, max(0, drain_deadline - time.monotonic())))
+          except (OSError, ValueError):
+              supervision_failed = True
+              signal_group(signal.SIGKILL)
+          finally:
+              selector.close()
+              process.stdout.close()
+          return_code = None
+          try:
+              return_code = process.wait(timeout=1)
+          except subprocess.TimeoutExpired:
+              supervision_failed = True
+          group_absent = False
+          absence_deadline = time.monotonic() + 1
+          while time.monotonic() < absence_deadline:
+              try:
+                  os.killpg(process.pid, 0)
+              except ProcessLookupError:
+                  group_absent = True
+                  break
+              except OSError:
+                  break
+              time.sleep(0.01)
+          process_group_leaked |= supervision_failed or not pipe_closed or not group_absent
+          fixed_status = (
+              return_code
+              if not timeout and not overflow and not process_group_leaked
+              and type(return_code) is int and 0 <= return_code <= 125
+              else 1
+          )
+          status = json.dumps(
+              {
+                  "exit_code": return_code,
+                  "output_bytes": output_size,
+                  "output_overflow": overflow,
+                  "profile_id": "bootstrap-store",
+                  "process_group_leaked": process_group_leaked,
+                  "timeout": timeout,
+              },
+              separators=(",", ":"),
+              sort_keys=True,
+          ) + "\n"
+          if len(status.encode("utf-8")) > 1024:
+              raise SystemExit("The bootstrap store status is too large.")
+          source = Path("postgres-source.txt").read_bytes()
+          scope = Path("postgres-scope.json").read_bytes()
+          if len(source) > 1024 or len(scope) > 8192:
+              raise SystemExit("The bootstrap store identity evidence is too large.")
+          for directory, device_name, inode_name in (
+              (Path(os.environ["SUCCESS_DIRECTORY"]), "SUCCESS_DEVICE", "SUCCESS_INODE"),
+              (
+                  Path(os.environ["DIAGNOSTIC_DIRECTORY"]),
+                  "DIAGNOSTIC_DEVICE",
+                  "DIAGNOSTIC_INODE",
+              ),
+          ):
+              value = directory.lstat()
+              if (
+                  not stat.S_ISDIR(value.st_mode)
+                  or stat.S_IMODE(value.st_mode) != 0o700
+                  or value.st_uid != os.geteuid()
+                  or value.st_dev != int(os.environ[device_name])
+                  or value.st_ino != int(os.environ[inode_name])
+              ):
+                  raise SystemExit("The bootstrap store evidence directory changed.")
+              (directory / "status.json").write_text(status, encoding="utf-8")
+              (directory / "postgres-source.txt").write_bytes(source)
+              (directory / "postgres-scope.json").write_bytes(scope)
+          Path(os.environ["DIAGNOSTIC_DIRECTORY"], "diagnostic-tail.txt").write_bytes(tail)
+          limits = {
+              "diagnostic-tail.txt": 65536,
+              "postgres-scope.json": 8192,
+              "postgres-source.txt": 1024,
+              "status.json": 1024,
+          }
+          diagnostic = Path(os.environ["DIAGNOSTIC_DIRECTORY"])
+          if {path.name for path in diagnostic.iterdir()} != set(limits):
+              raise SystemExit("The bootstrap store diagnostic inventory is not valid.")
+          for name, limit in limits.items():
+              value = (diagnostic / name).lstat()
+              if (
+                  not stat.S_ISREG(value.st_mode)
+                  or value.st_uid != os.geteuid()
+                  or value.st_size > limit
+              ):
+                  raise SystemExit("The bootstrap store diagnostic file is not valid.")
+          for directory, device_name, inode_name in (
+              (Path(os.environ["SUCCESS_DIRECTORY"]), "SUCCESS_DEVICE", "SUCCESS_INODE"),
+              (
+                  Path(os.environ["DIAGNOSTIC_DIRECTORY"]),
+                  "DIAGNOSTIC_DEVICE",
+                  "DIAGNOSTIC_INODE",
+              ),
+          ):
+              value = directory.lstat()
+              if (
+                  not stat.S_ISDIR(value.st_mode)
+                  or stat.S_IMODE(value.st_mode) != 0o700
+                  or value.st_uid != os.geteuid()
+                  or value.st_dev != int(os.environ[device_name])
+                  or value.st_ino != int(os.environ[inode_name])
+              ):
+                  raise SystemExit("The bootstrap store evidence directory changed.")
+          with github_output.open("a", encoding="utf-8") as stream:
+              stream.write("diagnostic_ready=true\n")
+          raise SystemExit(fixed_status)
+          PY
+      - name: Run Grafana PostgreSQL validation
+        if: inputs.profile_id != 'bootstrap-store'
+        env:
+          COMET_TEST_KEEP_DATABASES: ${{ steps.read-postgres-retention.outputs.keep_databases }}
+        run: |
+          export COMET_TEST_POSTGRES_DSN="postgresql://${COMET_POSTGRES_USER}:${COMET_POSTGRES_PASSWORD}@${COMET_TEST_POSTGRES_HOST}:${COMET_TEST_POSTGRES_PORT}/${COMET_POSTGRES_DB}"
+          uv run --locked --extra dev pytest tests/test_grafana_provisioning.py::test_expanded_grafana_queries_execute_on_postgresql_17_tls --junitxml=grafana-postgres-junit.xml
+      - name: Validate PostgreSQL test evidence
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          DIAGNOSTIC_DEVICE: ${{ steps.bootstrap-evidence.outputs.diagnostic_device }}
+          DIAGNOSTIC_DIRECTORY: ${{ steps.bootstrap-evidence.outputs.diagnostic }}
+          DIAGNOSTIC_INODE: ${{ steps.bootstrap-evidence.outputs.diagnostic_inode }}
+          SUCCESS_DEVICE: ${{ steps.bootstrap-evidence.outputs.success_device }}
+          SUCCESS_DIRECTORY: ${{ steps.bootstrap-evidence.outputs.success }}
+          SUCCESS_INODE: ${{ steps.bootstrap-evidence.outputs.success_inode }}
+          TEST_KEYWORD: ${{ inputs.test_keyword }}
+        run: |
+          python3 -I - <<'PY'
+          import json
+          import os
+          import re
+          import stat
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          def read(name, limit):
+              path = Path(name)
+              value = path.lstat()
+              if (
+                  not stat.S_ISREG(value.st_mode)
+                  or value.st_uid != os.geteuid()
+                  or value.st_size > limit
+              ):
+                  raise ValueError
+              with path.open("rb") as stream:
+                  data = stream.read(limit + 1)
+              if len(data) > limit:
+                  raise ValueError
+              return data
+
+          def counts(node):
+              result = {}
+              for name in ("tests", "failures", "errors", "skipped"):
+                  value = node.get(name, "")
+                  if re.fullmatch(r"[0-9]+", value) is None:
+                      raise ValueError
+                  result[name] = int(value)
+              return result
+
+          def validate_report(name, *, allow_skips):
+              data = read(name, 64 * 1024 * 1024).decode("utf-8-sig")
+              if "<!DOCTYPE" in data or "<!ENTITY" in data:
+                  raise ValueError
+              root = ET.fromstring(data)
+              if root.tag == "testsuite":
+                  suites = [root]
+              elif root.tag == "testsuites" and all(child.tag == "testsuite" for child in root):
+                  suites = list(root)
+              else:
+                  raise ValueError
+              if len(list(root.iter("testsuite"))) != len(suites):
+                  raise ValueError
+              for outcome in ("failure", "error", "skipped"):
+                  direct = sum(len(case.findall(outcome)) for case in root.iter("testcase"))
+                  if len(list(root.iter(outcome))) != direct:
+                      raise ValueError
+              totals = dict.fromkeys(("tests", "failures", "errors", "skipped"), 0)
+              for suite in suites:
+                  declared = counts(suite)
+                  cases = suite.findall("testcase")
+                  if any(child.tag not in {"testcase", "properties", "system-out", "system-err"} for child in suite):
+                      raise ValueError
+                  if len(cases) != declared["tests"] or len(list(suite.iter("testcase"))) != len(cases):
+                      raise ValueError
+                  skipped = 0
+                  for case in cases:
+                      if not case.get("name") or list(case.iter("failure")) or list(case.iter("error")) or len(list(case.iter("skipped"))) > 1:
+                          raise ValueError
+                      if any(child.tag not in {"skipped", "properties", "system-out", "system-err"} for child in case):
+                          raise ValueError
+                      skipped += len(case.findall("skipped"))
+                  if declared["failures"] or declared["errors"] or skipped != declared["skipped"]:
+                      raise ValueError
+                  for key in totals:
+                      totals[key] += declared[key]
+              if totals["tests"] <= totals["skipped"] or (
+                  totals["skipped"] and not allow_skips
+              ):
+                  raise ValueError
+              if root.tag == "testsuites":
+                  for key, value in totals.items():
+                      if key in root.attrib and root.get(key) != str(value):
+                          raise ValueError
+              return totals
+
+          stage = "source"
+          try:
+              source, workflow = os.environ["SOURCE_SHA"], os.environ["WORKFLOW_SHA"]
+              if any(re.fullmatch(r"[0-9a-f]{40}", value) is None for value in (source, workflow)):
+                  raise ValueError
+              source_record = f"workflow_sha={workflow}\ntested_sha={source}\n".encode()
+              if read("postgres-source.txt", 1024) != source_record:
+                  raise ValueError
+              profile = os.environ.get("PROFILE_ID") or "full"
+              keyword = os.environ.get("TEST_KEYWORD", "")
+              if profile == "bootstrap-store":
+                  postgres = ["uv", "run", "--locked", "--extra", "dev", "pytest", "-m",
+                              "postgres", "-q", "--junitxml=postgres-junit.xml",
+                              "tests/postgres/test_migrations.py",
+                              "tests/postgres/test_release_state.py"]
+                  grafana = []
+                  scope_name = "bootstrap-store"
+              elif profile in {"full", "quick"}:
+                  if profile == "quick" and keyword:
+                      raise ValueError
+                  postgres = ["uv", "run", "--locked", "--extra", "dev", "pytest", "-m",
+                              "postgres_quick" if profile == "quick" else "postgres",
+                              "--junitxml=postgres-junit.xml"] + (
+                                  ["-k", keyword] if keyword else []
+                              )
+                  grafana = ["uv", "run", "--locked", "--extra", "dev", "pytest",
+                             "tests/test_grafana_provisioning.py::test_expanded_grafana_queries_execute_on_postgresql_17_tls",
+                             "--junitxml=grafana-postgres-junit.xml"]
+                  scope_name = "quick" if profile == "quick" else "focused" if keyword else "full"
+              else:
+                  raise ValueError
+              expected = {"schema_version": 1, "scope": scope_name, "selector": keyword,
+                          "postgres_argv": postgres, "grafana_argv": grafana,
+                          "workflow_sha": workflow, "tested_sha": source}
+              if profile == "bootstrap-store":
+                  expected["profile_id"] = profile
+              stage = "scope"
+              scope = json.loads(read("postgres-scope.json", 8192))
+              if scope != expected or type(scope["schema_version"]) is not int:
+                  raise ValueError
+              scope_record = json.dumps(expected, sort_keys=True).encode() + b"\n"
+              stage = "postgres-junit"
+              postgres_totals = validate_report(
+                  "postgres-junit.xml",
+                  allow_skips=bool(keyword) or profile == "bootstrap-store",
+              )
+              if profile == "bootstrap-store":
+                  stage = "directories"
+                  success = Path(os.environ["SUCCESS_DIRECTORY"])
+                  diagnostic = Path(os.environ["DIAGNOSTIC_DIRECTORY"])
+                  for path, device_name, inode_name in (
+                      (success, "SUCCESS_DEVICE", "SUCCESS_INODE"),
+                      (diagnostic, "DIAGNOSTIC_DEVICE", "DIAGNOSTIC_INODE"),
+                  ):
+                      value = path.lstat()
+                      if (
+                          not stat.S_ISDIR(value.st_mode)
+                          or stat.S_IMODE(value.st_mode) != 0o700
+                          or value.st_uid != os.geteuid()
+                          or value.st_dev != int(os.environ[device_name])
+                          or value.st_ino != int(os.environ[inode_name])
+                      ):
+                          raise ValueError
+                  stage = "status"
+                  status = json.loads(read(str(success / "status.json"), 1024))
+                  if (
+                      type(status) is not dict
+                      or set(status) != {"exit_code", "output_bytes", "output_overflow", "profile_id", "process_group_leaked", "timeout"}
+                      or status.get("exit_code") != 0
+                      or status.get("output_overflow") is not False
+                      or status.get("profile_id") != "bootstrap-store"
+                      or status.get("process_group_leaked") is not False
+                      or status.get("timeout") is not False
+                      or type(status.get("output_bytes")) is not int
+                      or not 0 <= status["output_bytes"] <= 16 * 1024 * 1024
+                  ):
+                      raise ValueError
+                  status_record = json.dumps(status, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+                  if read(str(success / "status.json"), 1024) != status_record:
+                      raise ValueError
+                  stage = "inventory"
+                  files = {
+                      "postgres-source.txt": source_record,
+                      "postgres-scope.json": scope_record,
+                      "status.json": status_record,
+                      "postgres-junit.xml": read("postgres-junit.xml", 64 * 1024 * 1024),
+                  }
+                  summary = json.dumps(
+                      {
+                          **postgres_totals,
+                          "profile_id": profile,
+                          "tested_sha": source,
+                          "workflow_sha": workflow,
+                      },
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  ).encode() + b"\n"
+                  if len(summary) > 8192:
+                      raise ValueError
+                  files["summary.json"] = summary
+                  for name, data in files.items():
+                      target = success / name
+                      if target.exists():
+                          limit = {"postgres-source.txt": 1024, "postgres-scope.json": 8192, "status.json": 1024}.get(name)
+                          if limit is None or read(str(target), limit) != data:
+                              raise ValueError
+                          continue
+                      descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                      try:
+                          view = memoryview(data)
+                          while view:
+                              written = os.write(descriptor, view)
+                              if written == 0:
+                                  raise OSError
+                              view = view[written:]
+                      finally:
+                          os.close(descriptor)
+                  if {path.name for path in success.iterdir()} != set(files):
+                      raise ValueError
+                  limits = {
+                      "postgres-junit.xml": 64 * 1024 * 1024,
+                      "postgres-scope.json": 8192,
+                      "postgres-source.txt": 1024,
+                      "status.json": 1024,
+                      "summary.json": 8192,
+                  }
+                  for name, limit in limits.items():
+                      read(str(success / name), limit)
+              else:
+                  stage = "grafana-junit"
+                  validate_report("grafana-postgres-junit.xml", allow_skips=False)
+          except (OSError, ValueError, KeyError, TypeError, ET.ParseError):
+              raise SystemExit(f"PostgreSQL test evidence is not valid: {stage}.") from None
+          PY
+      - name: Summarize PostgreSQL test durations
+        if: ${{ always() && inputs.profile_id != 'bootstrap-store' }}
+        run: |
+          if [[ -f postgres-junit.xml ]]; then
+            python scripts/ci/summarize-test-durations.py \
+              postgres-junit.xml --output postgres-duration-summary.json
+          fi
+          if [[ -f grafana-postgres-junit.xml ]]; then
+            python scripts/ci/summarize-test-durations.py \
+              grafana-postgres-junit.xml --output grafana-postgres-duration-summary.json
+          fi
+      - name: Upload PostgreSQL test evidence
+        if: ${{ always() && inputs.profile_id != 'bootstrap-store' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.profile_id == 'quick' && 'postgres-quick-test-evidence' || inputs.test_keyword && 'postgres-focused-test-evidence' || 'postgres-test-evidence' }}
+          path: |
+            postgres-source.txt
+            postgres-scope.json
+            postgres-junit.xml
+            postgres-duration-summary.json
+            grafana-postgres-junit.xml
+            grafana-postgres-duration-summary.json
+          if-no-files-found: warn
+      - name: Upload bootstrap store qualification evidence
+        if: ${{ success() && inputs.profile_id == 'bootstrap-store' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-bootstrap-store-evidence
+          path: ${{ steps.bootstrap-evidence.outputs.success }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload bootstrap store diagnostic evidence
+        if: ${{ failure() && inputs.profile_id == 'bootstrap-store' && steps.postgres-test.outputs.diagnostic_ready == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-bootstrap-store-diagnostics
+          path: ${{ steps.bootstrap-evidence.outputs.diagnostic }}
+          if-no-files-found: error
+          retention-days: 1
+      - name: Emit sanitized PostgreSQL failure diagnostics
+        if: failure()
+        run: scripts/diagnose-test-postgres.sh "${COMET_TEST_POSTGRES_CONTAINER}"
+
+  postgres-plan:
+    needs: postgres-exception
+    if: inputs.profile_id == 'full' && inputs.test_keyword == '' && needs.postgres-exception.result == 'success' && needs.postgres-exception.outputs.bypass != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Collect the complete PostgreSQL inventory
+        id: plan
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          fi
+          uv run --locked --extra dev python scripts/ci/postgres_shards.py collect \
+            --source "${SOURCE_SHA}" --workflow "${WORKFLOW_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" --output postgres-plan.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-full-plan
+          path: postgres-plan.json
+          if-no-files-found: error
+          overwrite: true
+
+  postgres-shard:
+    if: inputs.profile_id == 'full' && inputs.test_keyword == '' && needs.postgres-plan.result == 'success'
+    needs: postgres-plan
+    name: postgres-full-shard-${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.postgres-plan.outputs.matrix) }}
+    services:
+      postgres:
+        image: postgres@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: comet-postgres-test
+        ports: [5432]
+        options: >-
+          --health-cmd "pg_isready --username postgres --dbname postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      COMET_POSTGRES_IMAGE: postgres:17.11-alpine3.24@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
+      COMET_POSTGRES_USER: postgres
+      COMET_POSTGRES_DB: postgres
+      COMET_POSTGRES_PASSWORD: comet-postgres-test
+      COMET_TEST_POSTGRES_HOST: localhost
+      COMET_TEST_KEEP_DATABASES: "0"
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        timeout-minutes: 2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        timeout-minutes: 2
+        with:
+          name: postgres-full-plan
+          path: shard-plan
+      - name: Configure encrypted TLS for this shard
+        timeout-minutes: 4
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          POSTGRES_CA_FILE: ${{ runner.temp }}/comet-postgres-ca.pem
+        run: |
+          set -euo pipefail
+          echo "COMET_TEST_POSTGRES_CONTAINER=${POSTGRES_CONTAINER}" >> "${GITHUB_ENV}"
+          echo "COMET_DB_CA_FILE=${POSTGRES_CA_FILE}" >> "${GITHUB_ENV}"
+          scripts/configure-test-postgres-tls.sh "${POSTGRES_CONTAINER}" "${POSTGRES_CA_FILE}"
+          port=$(docker --host unix:///var/run/docker.sock inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "${POSTGRES_CONTAINER}")
+          echo "COMET_TEST_POSTGRES_PORT=${port}" >> "${GITHUB_ENV}"
+          echo "COMET_TEST_POSTGRES_DSN=postgresql://${COMET_POSTGRES_USER}:${COMET_POSTGRES_PASSWORD}@localhost:${port}/${COMET_POSTGRES_DB}" >> "${GITHUB_ENV}"
+      - name: Run the assigned PostgreSQL tests
+        timeout-minutes: 100
+        run: |
+          mkdir shard-result
+          uv run --locked --extra dev python scripts/ci/postgres_shards.py run \
+            --plan shard-plan/postgres-plan.json --source "${SOURCE_SHA}" \
+            --workflow "${WORKFLOW_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --attempt "${GITHUB_RUN_ATTEMPT}" --shard "${SHARD}" \
+            --output shard-result/result.json
+      - name: Remove the shard service
+        if: always()
+        timeout-minutes: 5
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          python scripts/ci/postgres_shards.py cleanup \
+            --container "${POSTGRES_CONTAINER}" --output shard-result/result.json
+      - name: Upload shard outcomes and phase diagnostics
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-full-shard-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: shard-result/
+          if-no-files-found: error
+
+  postgres-aggregate:
+    if: always() && inputs.profile_id == 'full' && inputs.test_keyword == ''
+    needs: [postgres-exception, postgres-plan, postgres-shard]
+    name: postgres-integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require the exception admission result
+        env:
+          ADMISSION_RESULT: ${{ needs.postgres-exception.result }}
+        run: test "${ADMISSION_RESULT}" = success
+      - name: Record the authorized PostgreSQL exception
+        if: needs.postgres-exception.outputs.bypass == 'true'
+        run: |
+          echo 'PostgreSQL validation: BYPASSED for v0.1.100; no PostgreSQL test pass is claimed. See issue #1925.' >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.postgres-exception.outputs.bypass != 'true'
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.postgres-exception.outputs.bypass != 'true'
+        with:
+          name: postgres-full-plan
+          path: shard-plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.postgres-exception.outputs.bypass != 'true'
+        with:
+          pattern: postgres-full-shard-*
+          path: shard-results
+      - name: Verify the complete PostgreSQL result
+        if: needs.postgres-exception.outputs.bypass != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          python scripts/ci/postgres_shards.py aggregate \
+            --plan shard-plan/postgres-plan.json --results shard-results \
+            --source "${SOURCE_SHA}" --workflow "${WORKFLOW_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" --attempt "${GITHUB_RUN_ATTEMPT}" \
+            --output postgres-evidence
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: needs.postgres-exception.outputs.bypass != 'true'
+        with:
+          name: postgres-test-evidence
+          path: postgres-evidence/
+          if-no-files-found: error
+          overwrite: true

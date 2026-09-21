@@ -1,0 +1,242 @@
+name: docs
+run-name: ${{ inputs.intent_sha256 && format('initial-bootstrap-docs-{0}-{1}', inputs.target, inputs.intent_sha256) || github.event.head_commit.message || 'Documentation build' }}
+
+# Build the MkDocs site in strict mode for pull requests, manual runs, and all
+# pushes. Admit production through completed bootstrap or an exact bootstrap request.
+on:
+  push: {}
+  workflow_dispatch:
+    inputs:
+      target:
+        type: string
+        default: ''
+      intent_base64:
+        type: string
+        default: ''
+      intent_sha256:
+        type: string
+        default: ''
+  pull_request:
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - scripts/ci/verify-current-prod.sh
+      - wrangler.jsonc
+      - .github/workflows/docs.yml
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  DOCS_TARGET: ${{ inputs.target }}
+  INTENT_BASE64: ${{ inputs.intent_base64 }}
+  INTENT_SHA256: ${{ inputs.intent_sha256 }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      authorized: ${{ steps.authorize-production.outputs.authorized }}
+      bootstrap: ${{ steps.authorize-production.outputs.bootstrap }}
+      target: ${{ steps.authorize-production.outputs.target }}
+      request-digest: ${{ steps.authorize-production.outputs.request-digest }}
+      pages-artifact-id: ${{ steps.bootstrap-pages.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Authorize production source
+        id: authorize-production
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run --locked --extra dev python scripts/prepare-bootstrap-docs.py admit
+      - name: Reuse candidate documentation payload
+        if: steps.authorize-production.outputs.bootstrap == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --locked --extra dev python scripts/prepare-bootstrap-docs.py stage
+      - name: Build site in strict mode
+        if: steps.authorize-production.outputs.bootstrap != 'true'
+        run: uv run --locked --extra dev mkdocs build --strict
+      - name: Validate Cloudflare configuration
+        if: steps.authorize-production.outputs.bootstrap != 'true'
+        run: npx --yes wrangler@4.82.2 deploy --dry-run --config wrangler.jsonc
+      - name: Upload Cloudflare site artifact
+        if: steps.authorize-production.outputs.target != 'pages'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloudflare-site
+          path: site
+          if-no-files-found: error
+      - name: Upload GitHub Pages artifact
+        if: steps.authorize-production.outputs.bootstrap != 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          name: github-pages
+          path: site
+      - name: Upload retained Pages tar
+        id: bootstrap-pages
+        if: steps.authorize-production.outputs.target == 'pages'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/bootstrap-pages/artifact.tar
+          archive: true
+          overwrite: false
+          if-no-files-found: error
+      - name: Record observed documentation build inputs
+        if: steps.authorize-production.outputs.bootstrap != 'true'
+        env:
+          DOCS_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: uv run --locked --extra dev python scripts/emit-bootstrap-docs-build.py
+      - name: Upload documentation build inputs
+        if: steps.authorize-production.outputs.bootstrap != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: initial-bootstrap-docs-build-v1-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/bootstrap-docs-build.json
+          if-no-files-found: error
+
+  deploy-cloudflare:
+    if: needs.build.outputs.authorized == 'true' && needs.build.outputs.target != 'pages'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: docs-cloudflare-production
+      cancel-in-progress: false
+    environment:
+      name: cloudflare-production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Recheck documentation admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUIRE_DEPLOYMENT: 'true'
+        run: uv run --locked --extra dev python scripts/prepare-bootstrap-docs.py admit
+      - name: Download Cloudflare site artifact
+        if: needs.build.outputs.bootstrap != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cloudflare-site
+          path: site
+      - name: Reuse exact candidate Cloudflare payload
+        if: needs.build.outputs.bootstrap == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --locked --extra dev python scripts/prepare-bootstrap-docs.py stage
+      - name: Record deployed source
+        env:
+          DEPLOY_REF: ${{ github.ref }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          printf 'deploy_ref=%s\n' "${DEPLOY_REF}"
+          printf 'deploy_sha=%s\n' "${DEPLOY_SHA}"
+      - name: Verify current production source
+        id: verify-current-prod
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/verify-current-prod.sh
+      - name: Deploy to docs.llm360.ai/comet (Cloudflare Workers)
+        id: cloudflare
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.82.2"
+          command: ${{ needs.build.outputs.bootstrap == 'true' && format('deploy --config wrangler.jsonc --message {0}', needs.build.outputs.request-digest) || 'deploy --config wrangler.jsonc' }}
+      - name: Read exact Cloudflare deployment
+        if: needs.build.outputs.bootstrap == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT: ${{ steps.cloudflare.outputs.command-output }}
+        run: uv run --locked --extra dev python scripts/prepare-bootstrap-docs.py cloudflare-readback
+      - name: Upload Cloudflare deployment evidence
+        if: needs.build.outputs.bootstrap == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: initial-bootstrap-docs-evidence-cloudflare-${{ inputs.intent_sha256 }}
+          path: ${{ runner.temp }}/comet-bootstrap-docs/evidence.json
+          if-no-files-found: error
+
+  deploy-pages:
+    if: needs.build.outputs.authorized == 'true' && needs.build.outputs.target != 'cloudflare'
+    needs: build
+    runs-on: ubuntu-latest
+    concurrency:
+      group: docs-github-pages-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Recheck documentation admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUIRE_DEPLOYMENT: 'true'
+        run: uv run --locked --extra dev python scripts/prepare-bootstrap-docs.py admit
+      - name: Record deployed source
+        env:
+          DEPLOY_REF: ${{ github.ref }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          printf 'deploy_ref=%s\n' "${DEPLOY_REF}"
+          printf 'deploy_sha=%s\n' "${DEPLOY_SHA}"
+      - name: Verify retained Pages tar before deployment
+        if: needs.build.outputs.bootstrap == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_ARTIFACT_ID: ${{ needs.build.outputs.pages-artifact-id }}
+        run: uv run --locked --extra dev python scripts/prepare-bootstrap-docs.py verify-pages
+      - name: Verify current production source
+        id: verify-current-prod
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/verify-current-prod.sh
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          artifact_name: github-pages
+      - name: Record exact Pages invocation
+        if: needs.build.outputs.bootstrap == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_ARTIFACT_ID: ${{ needs.build.outputs.pages-artifact-id }}
+        run: uv run --locked --extra dev python scripts/prepare-bootstrap-docs.py pages-evidence
+      - name: Upload Pages deployment evidence
+        if: needs.build.outputs.bootstrap == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: initial-bootstrap-docs-evidence-pages-${{ inputs.intent_sha256 }}
+          path: ${{ runner.temp }}/comet-bootstrap-docs/evidence.json
+          if-no-files-found: error

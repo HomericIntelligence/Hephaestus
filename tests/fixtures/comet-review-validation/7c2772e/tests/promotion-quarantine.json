@@ -1,0 +1,279 @@
+[
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1952",
+    "nodes": [
+      "tests/test_batch_cli.py::test_cancel_queued",
+      "tests/test_batch_cli.py::test_results_streams_output",
+      "tests/test_batch_cli.py::test_retry_failed_creates_queued_follow_up_batch",
+      "tests/test_batch_cli.py::test_status_and_list",
+      "tests/test_batch_cli.py::test_submit_bad_priority_and_metadata",
+      "tests/test_batch_cli.py::test_submit_creates_queued_job",
+      "tests/test_batch_cli.py::test_submit_duplicate_custom_id_rejected",
+      "tests/test_batch_cli.py::test_submit_identity_from_api_key",
+      "tests/test_batch_cli.py::test_submit_rejected_without_key",
+      "tests/test_batch_cli.py::test_submit_sets_workload_type",
+      "tests/test_deployment_context_coexistence.py::test_cli_context_selector_is_command_scoped_and_reaches_the_runtime",
+      "tests/test_deployment_context_coexistence.py::test_cli_context_selector_mismatch_fails_before_command_effects"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1962",
+    "nodes": [
+      "tests/test_cli.py::test_fair_share_apply_atomically_updates_one_model_and_audits"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1961",
+    "nodes": [
+      "tests/test_deployment_context_coexistence.py::test_cli_context_selector_prevents_a_foreign_endpoint_request",
+      "tests/test_deployment_context_coexistence.py::test_container_mounts_do_not_expose_sibling_context_roots",
+      "tests/test_deployment_context_coexistence.py::test_container_mounts_expand_only_the_administrative_root[m2-development.yaml]",
+      "tests/test_deployment_context_coexistence.py::test_container_mounts_expand_only_the_administrative_root[m2-main.yaml]",
+      "tests/test_deployment_context_coexistence.py::test_container_mounts_expand_only_the_administrative_root[m2-production.yaml]",
+      "tests/test_deployment_context_coexistence.py::test_external_mutations_reject_a_foreign_gateway_before_effects",
+      "tests/test_deployment_context_coexistence.py::test_front_active_count_rejects_foreign_evidence_before_read[selector0]",
+      "tests/test_deployment_context_coexistence.py::test_front_active_count_rejects_foreign_evidence_before_read[selector1]",
+      "tests/test_deployment_context_coexistence.py::test_front_does_not_route_a_foreign_target",
+      "tests/test_deployment_context_coexistence.py::test_front_entry_rejects_context_mismatch_before_server[port]",
+      "tests/test_deployment_context_coexistence.py::test_front_entry_rejects_context_mismatch_before_server[target]",
+      "tests/test_deployment_context_coexistence.py::test_front_entry_rejects_context_mismatch_before_server[telemetry]",
+      "tests/test_deployment_context_coexistence.py::test_front_supervisor_rejects_a_foreign_control_environment",
+      "tests/test_deployment_context_coexistence.py::test_front_switch_rejects_a_foreign_existing_target",
+      "tests/test_deployment_context_coexistence.py::test_front_switch_revalidates_the_gateway_allocation",
+      "tests/test_deployment_context_coexistence.py::test_gateway_controller_rejects_a_foreign_service_origin",
+      "tests/test_deployment_context_coexistence.py::test_gateway_discovery_rejects_a_foreign_exact_name_result",
+      "tests/test_deployment_context_coexistence.py::test_gateway_records_require_version_2_and_the_complete_context",
+      "tests/test_deployment_context_coexistence.py::test_gateway_schema_failure_omits_stored_endpoint_data",
+      "tests/test_deployment_context_coexistence.py::test_gateway_up_does_not_submit_when_exact_job_context_drifts",
+      "tests/test_deployment_context_coexistence.py::test_multinode_renders_prepare_only_the_context_temporary_directory",
+      "tests/test_deployment_context_coexistence.py::test_one_physical_profile_renders_two_complete_contexts",
+      "tests/test_deployment_context_coexistence.py::test_pool_render_rejects_an_altered_cookbook_artifact_or_revision",
+      "tests/test_deployment_context_coexistence.py::test_process_entry_rejects_stale_rendered_context_evidence",
+      "tests/test_deployment_context_coexistence.py::test_process_entry_resolves_one_context_and_then_its_physical_profile",
+      "tests/test_deployment_context_coexistence.py::test_proxy_worker_rejects_context_bootstrap_drift_before_publication",
+      "tests/test_deployment_context_coexistence.py::test_registrar_rejects_a_foreign_gateway_before_registration",
+      "tests/test_deployment_context_coexistence.py::test_render_rejects_a_cluster_or_model_authority_mismatch",
+      "tests/test_deployment_context_coexistence.py::test_render_rejects_a_context_slot_cost_mismatch",
+      "tests/test_deployment_context_coexistence.py::test_rendered_child_resolves_after_the_packaged_registry_moves",
+      "tests/test_deployment_context_coexistence.py::test_runtime_records_reject_version_1_and_incomplete_context[ClusterStackStamp]",
+      "tests/test_deployment_context_coexistence.py::test_runtime_records_reject_version_1_and_incomplete_context[GatewayStackObservation]",
+      "tests/test_deployment_context_coexistence.py::test_smg_artifact_must_match_an_approved_context_artifact_root",
+      "tests/test_deployment_context_coexistence.py::test_two_releases_select_distinct_smg_artifacts_on_one_cluster"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1955",
+    "nodes": [
+      "tests/test_release_executor.py::test_scale_out_retry_activation_service_has_only_the_closed_public_inputs",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_after_restart_rereads_durable_declaration",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_blocks_a_changed_retained_root_before_store_use",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_preserves_store_error_identity",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_rejects_a_different_committed_event[different-operation]",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_rejects_a_different_committed_event[different-owner]",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_rejects_a_different_committed_event[earlier-fence]",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_rejects_a_different_committed_event[earlier-sequence]",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_rejects_a_different_committed_event[later-fence]",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_rejects_a_different_committed_event[later-sequence]",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_replay_preserves_store_error_identity",
+      "tests/test_release_executor.py::test_scale_out_retry_rollback_uses_a_renewed_current_claim_fence"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1954",
+    "nodes": [
+      "tests/test_release_executor.py::test_registered_control_target_is_mapping_order_stable_and_array_order_sensitive"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1912",
+    "nodes": [
+      "tests/test_release_executor.py::test_registered_control_target_has_the_m2_qualification_golden_vector"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1745",
+    "nodes": [
+      "tests/test_release_executor.py::test_installed_service_rejects_a_control_artifact_for_a_different_stack_release",
+      "tests/test_release_executor.py::test_registered_control_target_ignores_release_bound_context_facts",
+      "tests/test_release_executor.py::test_scale_out_retry_activation_blocks_a_compatible_artifact_for_a_different_manifest_release",
+      "tests/test_release_executor.py::test_scale_out_retry_activation_blocks_tampered_evidence_without_a_store_write",
+      "tests/test_release_executor.py::test_scale_out_retry_activation_propagates_exact_retry_conflicts",
+      "tests/test_release_executor.py::test_scale_out_retry_activation_rederives_both_registered_descriptors_before_hashing",
+      "tests/test_release_executor.py::test_scale_out_retry_resolver_rejects_ambient_selectors_and_forged_proofs",
+      "tests/test_release_executor.py::test_scale_out_retry_resolver_survives_restart_and_blocks_old_writer_after_rollback",
+      "tests/test_release_executor.py::test_scale_out_retry_resolver_uses_one_fixed_denial_for_missing_and_mismatched_facts",
+      "tests/test_release_executor.py::test_scale_out_retry_writer_activation_builds_one_bound_idempotent_store_request"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1956",
+    "nodes": [
+      "tests/test_gateway_front_live.py::test_live_blue_green_handoff_has_no_failed_requests_or_broken_stream"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1957",
+    "nodes": [
+      "tests/test_k2_config_staging.py::test_source_paths_select_only_the_artifact_noop_job"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1964",
+    "nodes": [
+      "tests/test_postgres_support.py::test_postgres_environment_has_exact_exports"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1959",
+    "nodes": [
+      "tests/test_release_state_contracts.py::test_bootstrap_attempt_and_effect_terminal_freeze[attempt]",
+      "tests/test_release_state_contracts.py::test_bootstrap_attempt_and_effect_terminal_freeze[effect]",
+      "tests/test_release_state_contracts.py::test_bootstrap_effect_fixtures_cover_all_effect_and_event_kinds[bootstrap-tag]",
+      "tests/test_release_state_contracts.py::test_bootstrap_effect_fixtures_cover_all_effect_and_event_kinds[stable-release]",
+      "tests/test_release_state_contracts.py::test_bootstrap_effect_fixtures_cover_all_effect_and_event_kinds[version-tag]",
+      "tests/test_release_state_contracts.py::test_bootstrap_reducer_accepts_exact_completed_provider_history[bootstrap-tag]",
+      "tests/test_release_state_contracts.py::test_bootstrap_reducer_accepts_exact_completed_provider_history[stable-release]",
+      "tests/test_release_state_contracts.py::test_bootstrap_reducer_accepts_exact_completed_provider_history[version-tag]",
+      "tests/test_release_state_contracts.py::test_bootstrap_reducer_rejects_a_different_version_tag_object",
+      "tests/test_release_state_contracts.py::test_direct_conflict_history_is_terminal_and_preserves_typed_result[bootstrap-tag]",
+      "tests/test_release_state_contracts.py::test_direct_conflict_history_is_terminal_and_preserves_typed_result[stable-release]",
+      "tests/test_release_state_contracts.py::test_direct_conflict_history_is_terminal_and_preserves_typed_result[version-tag]",
+      "tests/test_release_state_contracts.py::test_effect_history_append_matrix_preserves_order_and_outcome_rules[conflict-True-None]",
+      "tests/test_release_state_contracts.py::test_effect_history_append_matrix_preserves_order_and_outcome_rules[matches-True-None]",
+      "tests/test_release_state_contracts.py::test_effect_history_append_matrix_preserves_order_and_outcome_rules[missing-True-mutation-request]",
+      "tests/test_release_state_contracts.py::test_effect_history_append_matrix_preserves_order_and_outcome_rules[uncertain-False-reconciliation-request]",
+      "tests/test_release_state_contracts.py::test_effect_history_rejects_invalid_event_transitions[changed]",
+      "tests/test_release_state_contracts.py::test_effect_history_rejects_invalid_event_transitions[duplicate]",
+      "tests/test_release_state_contracts.py::test_effect_history_rejects_invalid_event_transitions[ordinal]",
+      "tests/test_release_state_contracts.py::test_effect_history_rejects_invalid_event_transitions[reversed]",
+      "tests/test_release_state_contracts.py::test_effect_history_rejects_invalid_event_transitions[skipped]",
+      "tests/test_release_state_contracts.py::test_effect_history_rejects_invalid_event_transitions[source-digest]",
+      "tests/test_release_state_contracts.py::test_effect_history_restart_replay_concurrency_and_failed_write_are_atomic",
+      "tests/test_release_state_contracts.py::test_initial_bootstrap_bindings_require_parent_identity_equality"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1965",
+    "nodes": [
+      "tests/test_render.py::test_m2_production_replica_launch_contract[deepseek-v4-flash-0731-cfd9de183af31d596447d5197e71d408267ecd19678560a6e00ff94b393bffec]",
+      "tests/test_render.py::test_m2_production_replica_launch_contract[glm-5.2-512k-2n-8b1dd09f4b33606774947283ad4722fc12c1041ea5645fe629beb831510faabb]",
+      "tests/test_render.py::test_m2_production_replica_launch_contract[gpt-oss-120b-997fe8bd9c31a1c3af797eb3301aa841d44bd60ee22ad407729c814659e3f223]",
+      "tests/test_render.py::test_m2_production_replica_launch_contract[kimi-k3-ce30acd60f4d8a117a3aa7414dd7ab750c5a37d8a76eb45a88c36f1fb89dbde3]"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1963",
+    "nodes": [
+      "tests/test_render.py::test_render_matches_golden[gateway-m2.sbatch]",
+      "tests/test_render.py::test_render_matches_golden[gateway-runtime-m2.sh]",
+      "tests/test_render.py::test_render_matches_golden[replica-multinode-vllm-m2.sbatch]",
+      "tests/test_render.py::test_render_matches_golden[replica-qwen3-8b-m2.sbatch]"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1967",
+    "nodes": [
+      "tests/test_render.py::test_gateway_direct_service_kill_reap_proves_strict_wrapper_cleanup[monitor-comet-gateway-monitor]",
+      "tests/test_render.py::test_gateway_direct_service_kill_reap_proves_strict_wrapper_cleanup[runner-comet-runner]"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1958",
+    "nodes": [
+      "tests/test_reservations.py::test_concurrent_membership_updates_are_not_lost",
+      "tests/test_reservations.py::test_reservation_lock_times_out_with_actionable_error"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1966",
+    "nodes": [
+      "tests/test_sdk_credential_store.py::test_concurrent_readers_and_cluster_writers[reader-replacement]",
+      "tests/test_sdk_credential_store.py::test_concurrent_readers_and_cluster_writers[two-cluster-writers]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[acl-unknown]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[ancestor-acl]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[ancestor-link]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[ancestor-owner]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[ancestor-writable]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[cap-cloexec]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[cap-directory]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[cap-dirfd-open]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[cap-dirfd-stat]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[cap-fsync]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[cap-nofollow]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[cap-nonblock]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[cap-xattr]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[descendant-acl]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[descendant-file]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[descendant-link]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[descendant-owner]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[new-config-and-root]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[new-private-root]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[outside-selected-root]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[private-0700]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[private-0755]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[private-descendant-0700]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[private-descendant-0755]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[private-setgid]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[private-writable]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[root-acl]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[root-file]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[root-link]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[root-owner]",
+      "tests/test_sdk_credential_store.py::test_local_root_and_system_ancestor_policy[system-0755]",
+      "tests/test_sdk_credential_store.py::test_private_mode_before_first_secret_write[umask-000]",
+      "tests/test_sdk_credential_store.py::test_private_mode_before_first_secret_write[umask-022]",
+      "tests/test_sdk_credential_store.py::test_private_mode_before_first_secret_write[umask-077]",
+      "tests/test_sdk_credential_store.py::test_replacement_uses_one_retained_parent[ancestor-swap]",
+      "tests/test_sdk_credential_store.py::test_replacement_uses_one_retained_parent[device-swap]",
+      "tests/test_sdk_credential_store.py::test_replacement_uses_one_retained_parent[lock-swap]",
+      "tests/test_sdk_credential_store.py::test_replacement_uses_one_retained_parent[parent-swap]",
+      "tests/test_sdk_credential_store.py::test_replacement_uses_one_retained_parent[root-swap]",
+      "tests/test_sdk_credential_store.py::test_replacement_uses_one_retained_parent[stable-parent]",
+      "tests/test_sdk_credential_store.py::test_symlink_destination_preserves_victim[dangling]",
+      "tests/test_sdk_credential_store.py::test_symlink_destination_preserves_victim[read]",
+      "tests/test_sdk_credential_store.py::test_symlink_destination_preserves_victim[save]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[acl-access]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[acl-unknown]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[candidate-acl]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[candidate-mode]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[candidate-name-swap]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[directory]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[fifo-swap]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[fifo]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[foreign-uid]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[hardlink]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[lock-acl]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[lock-fifo]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[lock-hardlink]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[lock-mode]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[lock-symlink]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[mode-0400]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[mode-0644]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[regular-swap]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[setuid]",
+      "tests/test_sdk_credential_store.py::test_unsafe_destination_rejected_without_blocking[socket]"
+    ]
+  },
+  {
+    "issue": "https://github.com/LLM360/comet/issues/1953",
+    "nodes": [
+      "tests/test_service_paths.py::test_external_boundaries_keep_registered_read_only_roots_below_deployment_root",
+      "tests/test_service_paths.py::test_external_boundaries_skip_an_artifact_root_that_contains_deployment_root",
+      "tests/test_service_paths.py::test_external_boundary_equal_to_deployment_root_fails_closed[artifact_root0-read_only_roots0]",
+      "tests/test_service_paths.py::test_external_boundary_equal_to_deployment_root_fails_closed[artifact_root1-read_only_roots1]",
+      "tests/test_service_paths.py::test_external_boundary_read_only_root_containing_deployment_fails_closed",
+      "tests/test_service_paths.py::test_keycache_policy_is_registered_for_a_non_default_nested_path",
+      "tests/test_service_paths.py::test_keycache_rejects_a_registered_external_boundary[artifact/keycache.json]",
+      "tests/test_service_paths.py::test_keycache_rejects_a_registered_external_boundary[readonly/keycache.json]",
+      "tests/test_service_paths.py::test_keycache_rejects_a_registered_receipt_ancestor",
+      "tests/test_service_paths.py::test_keycache_rejects_a_root_excluded_ancestor[keys/requests/keycache.json]",
+      "tests/test_service_paths.py::test_keycache_rejects_a_root_excluded_ancestor[models/keycache.json]",
+      "tests/test_service_paths.py::test_keycache_rejects_an_incompatible_static_ancestor",
+      "tests/test_service_paths.py::test_nested_keycache_registers_one_exact_recovery_sibling_policy",
+      "tests/test_service_paths.py::test_recovery_policy_rejects_a_registered_sibling_collision",
+      "tests/test_service_paths.py::test_recovery_policy_rejects_an_excluded_ancestor[keys/requests/keycache.json]",
+      "tests/test_service_paths.py::test_recovery_policy_rejects_an_excluded_ancestor[models/keycache.json]",
+      "tests/test_service_paths.py::test_recovery_policy_rejects_an_external_boundary"
+    ]
+  }
+]

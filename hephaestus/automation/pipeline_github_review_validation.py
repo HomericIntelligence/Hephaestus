@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NoReturn, cast
 
+import hephaestus.automation.comet_profile_7c2772e as comet_profile_7c2772e
 from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.config.child_environments import build_gh_child_env
 from hephaestus.utils.helpers import SubprocessOutputLimitExceeded, run_subprocess
@@ -781,6 +782,11 @@ _FE5A67D_SELECTION = {
 }
 # Profile digests cover canonical JSON controls and selection.
 _PROFILES = {
+    comet_profile_7c2772e.PROFILE_ID: (
+        comet_profile_7c2772e.PROFILE_DIGEST,
+        comet_profile_7c2772e.CONTROLS,
+        comet_profile_7c2772e.SELECTION,
+    ),
     "comet-fe5a67d-v1": (
         "e225e80e95bcdb376e599b6cd3d735ecebfef6f65b1de2fdfcecc8e09878aed2",
         _FE5A67D_CONTROLS,
@@ -793,11 +799,19 @@ _PROFILES = {
         _HISTORICAL_SELECTION,
     ),
 }
+_BASE_CONTROL_PATHS = frozenset(row[0] for row in _CONTROLS)
+_CONTROL_PATHS = frozenset(row[0] for _, controls, _ in _PROFILES.values() for row in controls)
+_CONTROL_MODES = {
+    path: frozenset(
+        row[1] for _, controls, _ in _PROFILES.values() for row in controls if row[0] == path
+    )
+    for path in _CONTROL_PATHS
+}
 _CONTROL_SIZES = {
     path: frozenset(
         row[2] for _, controls, _ in _PROFILES.values() for row in controls if row[0] == path
     )
-    for path, _, _, _ in _CONTROLS
+    for path in _CONTROL_PATHS
 }
 
 
@@ -808,7 +822,6 @@ def comet_profile_digest(profile: str) -> str:
     return _PROFILES[profile][0]
 
 
-_CONTROL_PATHS = frozenset(row[0] for row in _CONTROLS)
 _CONFIG_NAMES = frozenset(
     {
         "pyproject.toml",
@@ -1042,6 +1055,7 @@ _TOOL_IMPORTS = frozenset(
         "jsonschema",
         "jsonschema_specifications",
         "keyword",
+        "k2_ci_policy",
         "lib2to3",
         "linecache",
         "locale",
@@ -1231,6 +1245,13 @@ _PYTHON_COMMANDS = (
 )
 
 
+def _python_commands(profile: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if profile == comet_profile_7c2772e.PROFILE_ID:
+        first, *remaining = _PYTHON_COMMANDS
+        return ((first[0], (*first[1], "--diff")), *remaining)
+    return _PYTHON_COMMANDS
+
+
 def _valid_path(value: object) -> bool:
     return (
         type(value) is str
@@ -1287,11 +1308,11 @@ def admit_comet_controls(
         inventory_bytes += len(path.encode("utf-8")) + 1
         if inventory_bytes > 64 * 1024 * 1024 or _new_control(path):
             raise ValueError("The control path inventory is unsupported.")
-    if set(controls) != _CONTROL_PATHS or not seen >= _CONTROL_PATHS:
+    if set(controls) != seen & _CONTROL_PATHS or not seen >= _BASE_CONTROL_PATHS:
         raise ValueError("The control inventory does not match the profile.")
     total = 0
     actual = []
-    for path in sorted(_CONTROL_PATHS):
+    for path in sorted(controls):
         record = controls[path]
         if type(record) is not tuple or len(record) != 2:
             raise ValueError("The control record is invalid.")
@@ -1372,7 +1393,7 @@ def comet_validation_checks(
         seen.add(path)
     commands: list[tuple[str, tuple[str, ...]]] = []
     if any(path.endswith(".py") or path in {"pyproject.toml", "uv.lock"} for path in seen):
-        commands.extend(_PYTHON_COMMANDS)
+        commands.extend(_python_commands(profile))
     if any(
         path.startswith("docs/") or path.endswith(".md") or path == "mkdocs.yml" for path in seen
     ):
@@ -1397,13 +1418,17 @@ def comet_validation_checks(
     return tuple(RepositoryValidationCheck(name, argv, sources) for name, argv in commands)
 
 
-def comet_ci_check_ids(checks: tuple[RepositoryValidationCheck, ...]) -> tuple[str, ...]:
+def comet_ci_check_ids(
+    checks: tuple[RepositoryValidationCheck, ...], *, profile: str = COMET_PROFILE_ID
+) -> tuple[str, ...]:
     """Return applicable checks that the ordinary PR workflow can cover."""
+    comet_profile_digest(profile)
+    selection = _PROFILES[profile][2]
     return tuple(
         check.check_id
         for check in checks
         if not check.check_id.startswith("comet.contract.")
-        or _SELECTION["contracts"].get(check.check_id.removeprefix("comet.contract.")) == "pr"
+        or selection["contracts"].get(check.check_id.removeprefix("comet.contract.")) == "pr"
     )
 
 
@@ -1473,10 +1498,10 @@ class _CometGitSource:
             members[path] = (mode, fields[2])
             if len(inventory) > 500_000:
                 raise ValueError("The Git source inventory exceeds its limit.")
-        if not members.keys() >= _CONTROL_PATHS:
+        if not members.keys() >= _BASE_CONTROL_PATHS:
             raise ValueError("The Git control inventory is incomplete.")
         controls: dict[str, tuple[int, bytes]] = {}
-        for path, _, _size, _ in _CONTROLS:
+        for path in sorted(members.keys() & _CONTROL_PATHS):
             mode, object_id = members[path]
             object_size = self.read("cat-file", "-s", object_id, limit=32).strip()
             if object_size not in {str(value) for value in _CONTROL_SIZES[path]}:
@@ -2004,12 +2029,16 @@ class CometCIControls:
             for parent in PurePosixPath(path).parents
         ):
             raise ValueError("The source tree has a missing parent directory.")
-        if not members.keys() >= _CONTROL_PATHS or len(_CONTROL_PATHS) > 256:
+        if not members.keys() >= _BASE_CONTROL_PATHS or len(_CONTROL_PATHS) > 256:
             raise ValueError("The source control inventory is incomplete.")
         controls: dict[str, tuple[int, bytes]] = {}
-        for path, expected_mode, _expected_size, _ in _CONTROLS:
+        for path in sorted(members.keys() & _CONTROL_PATHS):
             mode, blob_sha, size = members[path]
-            if mode != expected_mode or size not in _CONTROL_SIZES[path] or size > 16 * 1024 * 1024:
+            if (
+                mode not in _CONTROL_MODES[path]
+                or size not in _CONTROL_SIZES[path]
+                or size > 16 * 1024 * 1024
+            ):
                 raise ValueError("The source control metadata changed.")
             controls[path] = (mode, self._blob(blob_sha, size))
         return admit_comet_controls(controls, tuple(members))
@@ -2211,13 +2240,15 @@ _CI_UV_STEP = "Run astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4"
 _CI_FAILED_CONCLUSIONS = _CI_CONCLUSIONS - {"success", "neutral", "skipped"}
 
 
-def _ci_check_steps(check: RepositoryValidationCheck) -> tuple[str, tuple[tuple[str, str], ...]]:
+def _ci_check_steps(
+    check: RepositoryValidationCheck, profile: str = COMET_PROFILE_ID
+) -> tuple[str, tuple[tuple[str, str], ...]]:
     prefix = [("Set up job", "success"), (_CI_CHECKOUT_STEP, "success"), (_CI_UV_STEP, "success")]
     match check.check_id:
         case "comet.python.ruff-format":
             name, target = "lint", "Run " + " ".join(check.argv)
         case "comet.python.ruff-check":
-            prefix.append(("Run " + " ".join(_PYTHON_COMMANDS[0][1]), "success"))
+            prefix.append(("Run " + " ".join(_python_commands(profile)[0][1]), "success"))
             name, target = "lint", "Run " + " ".join(check.argv)
         case "comet.python.ty-check":
             name, target = "typecheck", "Run " + " ".join(check.argv)
@@ -2228,7 +2259,10 @@ def _ci_check_steps(check: RepositoryValidationCheck) -> tuple[str, tuple[tuple[
             name, target = "docs / docs-strict", "Build site in strict mode"
         case _:
             validator = check.check_id.removeprefix("comet.contract.")
-            if check.check_id == validator or _SELECTION["contracts"].get(validator) != "pr":
+            if (
+                check.check_id == validator
+                or _PROFILES[profile][2]["contracts"].get(validator) != "pr"
+            ):
                 raise CometCIReadError("ci_check_unsupported")
             prefix.insert(2, ("Verify the checked-out commit", "success"))
             prefix.extend(
@@ -2244,10 +2278,9 @@ def _ci_check_steps(check: RepositoryValidationCheck) -> tuple[str, tuple[tuple[
     return name, (*prefix, (target, "success"))
 
 
-def _ci_check_receipt(
-    plan: RepositoryValidationPlan, check: RepositoryValidationCheck, jobs: tuple[_CometCIJob, ...]
-) -> RepositoryValidationReceipt | None:
-    name, expected = _ci_check_steps(check)
+def _ci_job_status(
+    jobs: tuple[_CometCIJob, ...], name: str, expected: tuple[tuple[str, str], ...]
+) -> Literal["success", "failed"] | None:
     matching = [job for job in jobs if job.name == name]
     if len(matching) > 1:
         raise CometCIReadError("ci_job_ambiguous")
@@ -2255,20 +2288,78 @@ def _ci_check_receipt(
         return None
     job = matching[0]
     names = {name for name, _ in expected}
-    status: Literal["success", "failed"]
     if job.conclusion in _CI_FAILED_CONCLUSIONS or any(
         step.name in names and step.conclusion in _CI_FAILED_CONCLUSIONS for step in job.steps
     ):
-        status = "failed"
-    elif (
+        return "failed"
+    if (
         job.status == "completed"
         and job.conclusion == "success"
         and tuple((step.name, step.conclusion) for step in job.steps[: len(expected)]) == expected
         and all(step.status == "completed" for step in job.steps[: len(expected)])
         and all(sum(step.name == name for step in job.steps) == 1 for name in names)
     ):
-        status = "success"
+        return "success"
+    return None
+
+
+def _ci_legacy_scope_proved(plan: RepositoryValidationPlan, jobs: tuple[_CometCIJob, ...]) -> bool:
+    # The admitted main-target PR workflow excludes promotion. Its pinned
+    # classifier selects legacy before content rules for these complete paths.
+    if any(
+        path == ".github/ci/k2-affected-scope.json"
+        or any(
+            re.search(r"(?:^|[-_.])k2(?:$|[-_.])", part, re.IGNORECASE) for part in path.split("/")
+        )
+        for _status, path in plan.changes
+    ):
+        return False
+    expected = (
+        ("Set up job", "success"),
+        (_CI_CHECKOUT_STEP, "success"),
+        (_CI_UV_STEP, "success"),
+        ("Initialize safe downstream selections", "success"),
+        ("Collect immutable changed-path records", "success"),
+        ("Validate inventory and classify inputs", "success"),
+    )
+    return _ci_job_status(jobs, "deployment-policy", expected) == "success"
+
+
+def _ci_complete_pr_shards(jobs: tuple[_CometCIJob, ...]) -> Literal["success", "failed"] | None:
+    names = {f"test (3.12, shard {index})" for index in range(32)}
+    if any(job.name.startswith("test (3.12, shard ") and job.name not in names for job in jobs):
+        raise CometCIReadError("ci_job_ambiguous")
+    expected = (
+        ("Set up job", "success"),
+        (_CI_CHECKOUT_STEP, "success"),
+        (_CI_UV_STEP, "success"),
+        ("Require the test scope", "skipped"),
+        ("Verify test source", "success"),
+        ("Install Bubblewrap", "success"),
+        ("Run the ordinary pull-request profile", "success"),
+        ("Run the promotion profile", "skipped"),
+    )
+    statuses = [_ci_job_status(jobs, name, expected) for name in sorted(names)]
+    if "failed" in statuses:
+        return "failed"
+    return "success" if all(status == "success" for status in statuses) else None
+
+
+def _ci_check_receipt(
+    plan: RepositoryValidationPlan, check: RepositoryValidationCheck, jobs: tuple[_CometCIJob, ...]
+) -> RepositoryValidationReceipt | None:
+    current = plan.profile_id == comet_profile_7c2772e.PROFILE_ID
+    full_tests = check.check_id == "comet.python.pr-tests" or check.check_id.startswith(
+        "comet.contract."
+    )
+    if current and full_tests and not _ci_legacy_scope_proved(plan, jobs):
+        return None
+    if current and check.check_id == "comet.python.pr-tests":
+        status = _ci_complete_pr_shards(jobs)
     else:
+        name, expected = _ci_check_steps(check, plan.profile_id)
+        status = _ci_job_status(jobs, name, expected)
+    if status is None:
         return None
     return RepositoryValidationReceipt(
         repository=plan.repository,
@@ -2300,7 +2391,8 @@ def collect_comet_ci(
             or not plan.execution_allowed
             or plan.profile_digest != comet_profile_digest(plan.profile_id)
             or plan.checks != comet_validation_checks(plan.profile_id, plan.changes)
-            or not set(invocation.check_ids) <= set(comet_ci_check_ids(plan.checks))
+            or not set(invocation.check_ids)
+            <= set(comet_ci_check_ids(plan.checks, profile=plan.profile_id))
         ):
             raise ValueError("The CI selection does not match the admitted profile.")
     except (ValueError, TypeError, AttributeError):

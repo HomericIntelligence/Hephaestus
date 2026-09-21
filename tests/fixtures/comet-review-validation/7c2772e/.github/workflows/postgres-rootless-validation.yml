@@ -1,0 +1,81 @@
+name: postgres-rootless-validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full lowercase commit SHA to test
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  rootless-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 140
+    steps:
+      - name: Validate the source commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" != "workflow_dispatch" || "${EVENT_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Manual PostgreSQL validation must use the main workflow." >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The source commit must be a full lowercase hexadecimal SHA." >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        id: evidence
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "${actual_sha}" != "${SOURCE_SHA}" ]]; then
+            echo "::error::The checked-out commit does not match the selected source." >&2
+            exit 1
+          fi
+          umask 077
+          evidence_parent="$(mktemp -d "${RUNNER_TEMP}/comet-rootless-evidence.XXXXXX")"
+          printf 'workflow_sha=%s\ntested_sha=%s\n' "${WORKFLOW_SHA}" "${actual_sha}" > "${evidence_parent}/source.txt"
+          printf 'parent=%s\ndirectory=%s\n' "${evidence_parent}" "${evidence_parent}/evidence" >> "${GITHUB_OUTPUT}"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - name: Run rootless PostgreSQL validation
+        shell: bash
+        env:
+          COMET_TEST_CONTAINER_RUNTIME: podman
+          EVIDENCE_DIRECTORY: ${{ steps.evidence.outputs.directory }}
+        run: |
+          set -euo pipefail
+          uv run --locked --extra dev python scripts/ci/run-postgres-tests.py --evidence-dir "${EVIDENCE_DIRECTORY}"
+          if [[ ! -s "${EVIDENCE_DIRECTORY}/result.json" || ! -f "${EVIDENCE_DIRECTORY}/result.json" || -L "${EVIDENCE_DIRECTORY}/result.json" || ! -f "${EVIDENCE_DIRECTORY}/diagnostics.txt" || -L "${EVIDENCE_DIRECTORY}/diagnostics.txt" ]]; then
+            echo "::error::Required PostgreSQL validation evidence is missing." >&2
+            exit 1
+          fi
+      - name: Upload rootless PostgreSQL evidence
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-rootless-evidence
+          path: |
+            ${{ steps.evidence.outputs.parent }}/source.txt
+            ${{ steps.evidence.outputs.directory }}/result.json
+            ${{ steps.evidence.outputs.directory }}/diagnostics.txt
+          if-no-files-found: error
+          retention-days: 7

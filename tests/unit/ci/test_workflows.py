@@ -928,6 +928,8 @@ class TestCLIEntryPoints:
         ("tests/fixtures/comet-review-validation/current/scripts/tool.sh", True),
         ("tests/fixtures/comet-review-validation/fe5a67d/scripts/tool.sh", True),
         ("tests/fixtures/comet-review-validation/fe5a67d-extra/tool.sh", False),
+        ("tests/fixtures/comet-review-validation/7c2772e/scripts/tool.sh", True),
+        ("tests/fixtures/comet-review-validation/7c2772e-extra/tool.sh", False),
         ("tests/fixtures/comet-review-validation/historical/controls/scripts/tool.sh", True),
         ("scripts/tool.sh", False),
         ("tests/fixtures/comet-review-validation/current-extra/tool.sh", False),

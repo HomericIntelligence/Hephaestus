@@ -1,0 +1,535 @@
+name: release-focused-validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full lowercase commit SHA to test
+        type: string
+        required: true
+      profile_id:
+        description: Fixed release test profile
+        type: choice
+        required: true
+        default: bootstrap-core
+        options:
+          - bootstrap-core
+          - bootstrap-policy
+          - bootstrap-store
+          - bootstrap-cli
+          - bootstrap-preparation
+
+permissions:
+  contents: read
+
+jobs:
+  root:
+    if: inputs.profile_id != 'bootstrap-store'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Validate the focused test selection
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" != "workflow_dispatch" || "${EVENT_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Focused release validation must use the main workflow." >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The source commit must be a full lowercase hexadecimal SHA." >&2
+            exit 1
+          fi
+          case "${PROFILE_ID}" in
+            bootstrap-core|bootstrap-policy|bootstrap-cli|bootstrap-preparation) ;;
+            *) echo "::error::The focused release profile is not valid." >&2; exit 1 ;;
+          esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - id: evidence
+        name: Prepare focused evidence directories
+        shell: bash
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          umask 077
+          success="$(mktemp -d "${RUNNER_TEMP}/comet-release-focused-success.XXXXXX")"
+          diagnostic="$(mktemp -d "${RUNNER_TEMP}/comet-release-focused-diagnostic.XXXXXX")"
+          test ! -L "${success}"
+          test ! -L "${diagnostic}"
+          test "$(stat -c %u -- "${success}")" = "$(id -u)"
+          test "$(stat -c %u -- "${diagnostic}")" = "$(id -u)"
+          test "$(stat -c %a -- "${success}")" = 700
+          test "$(stat -c %a -- "${diagnostic}")" = 700
+          printf 'success=%s\n' "${success}" >> "${GITHUB_OUTPUT}"
+          printf 'success_device=%s\n' "$(stat -c %d -- "${success}")" >> "${GITHUB_OUTPUT}"
+          printf 'success_inode=%s\n' "$(stat -c %i -- "${success}")" >> "${GITHUB_OUTPUT}"
+          printf 'diagnostic=%s\n' "${diagnostic}" >> "${GITHUB_OUTPUT}"
+          printf 'diagnostic_device=%s\n' "$(stat -c %d -- "${diagnostic}")" >> "${GITHUB_OUTPUT}"
+          printf 'diagnostic_inode=%s\n' "$(stat -c %i -- "${diagnostic}")" >> "${GITHUB_OUTPUT}"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - name: Install Bubblewrap for policy tests
+        if: inputs.profile_id == 'bootstrap-policy'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap
+      - id: focused-test
+        name: Run the focused release profile
+        shell: bash
+        env:
+          DIAGNOSTIC_DEVICE: ${{ steps.evidence.outputs.diagnostic_device }}
+          DIAGNOSTIC_DIRECTORY: ${{ steps.evidence.outputs.diagnostic }}
+          DIAGNOSTIC_INODE: ${{ steps.evidence.outputs.diagnostic_inode }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SUCCESS_DEVICE: ${{ steps.evidence.outputs.success_device }}
+          SUCCESS_DIRECTORY: ${{ steps.evidence.outputs.success }}
+          SUCCESS_INODE: ${{ steps.evidence.outputs.success_inode }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          exec /usr/bin/python3 -I - <<'PY'
+          import json
+          import os
+          import re
+          import selectors
+          import signal
+          import stat
+          import subprocess
+          import sys
+          import time
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          OUTPUT_LIMIT = 16 * 1024 * 1024
+          TAIL_LIMIT = 64 * 1024
+          FILE_LIMITS = {
+              "source.txt": 1024,
+              "scope.json": 8192,
+              "status.json": 1024,
+              "release-focused-junit.xml": 64 * 1024 * 1024,
+              "summary.json": 8192,
+          }
+          profiles = {
+              "bootstrap-core": [
+                  "uv", "run", "--locked", "--extra", "dev", "pytest", "-q",
+                  "--junitxml=release-focused-junit.xml",
+                  "tests/test_release_bootstrap.py",
+                  "tests/test_release_contracts.py",
+                  "tests/test_release_forge.py",
+                  "tests/test_release_ports.py",
+                  "tests/test_release_postgres_contract.py",
+                  "tests/test_release_state_contracts.py",
+                  "tests/test_schema_export.py",
+              ],
+              "bootstrap-policy": [
+                  "uv", "run", "--locked", "--extra", "dev", "pytest", "-q",
+                  "--junitxml=release-focused-junit.xml",
+                  "tests/test_branch_policy.py",
+                  "tests/test_ci_workflows.py",
+                  "tests/test_workflow_policy.py",
+              ],
+              "bootstrap-cli": [
+                  "uv", "run", "--locked", "--extra", "dev", "pytest", "-q",
+                  "--junitxml=release-focused-junit.xml",
+                  "tests/test_release_bootstrap.py::"
+                  "test_initial_bootstrap_cli_rejects_wrong_process_identity_before_effects",
+              ],
+              "bootstrap-preparation": [
+                  "uv", "run", "--locked", "--extra", "dev", "pytest", "-q",
+                  "--junitxml=release-focused-junit.xml",
+                  "tests/test_release_bootstrap.py", "-k", "preparation",
+              ],
+          }
+
+          def bound_directory(path_name, device_name, inode_name):
+              path = Path(os.environ[path_name])
+              value = path.lstat()
+              if (
+                  not stat.S_ISDIR(value.st_mode)
+                  or stat.S_IMODE(value.st_mode) != 0o700
+                  or value.st_uid != os.geteuid()
+                  or value.st_dev != int(os.environ[device_name])
+                  or value.st_ino != int(os.environ[inode_name])
+              ):
+                  raise ValueError("The focused evidence directory changed.")
+              return path
+
+          def write_new(directory, name, data, limit):
+              if len(data) > limit:
+                  raise ValueError("The focused evidence record is too large.")
+              path = directory / name
+              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              try:
+                  view = memoryview(data)
+                  while view:
+                      written = os.write(descriptor, view)
+                      if written == 0:
+                          raise OSError("The focused evidence write did not progress.")
+                      view = view[written:]
+              finally:
+                  os.close(descriptor)
+
+          def read_regular(path, limit):
+              value = path.lstat()
+              if (
+                  not stat.S_ISREG(value.st_mode)
+                  or value.st_uid != os.geteuid()
+                  or value.st_size > limit
+              ):
+                  raise ValueError("The focused evidence file is not valid.")
+              data = path.read_bytes()
+              if len(data) > limit:
+                  raise ValueError("The focused evidence file is too large.")
+              return data
+
+          def junit_counts(data):
+              text = data.decode("utf-8-sig")
+              if "<!DOCTYPE" in text or "<!ENTITY" in text:
+                  raise ValueError("The focused JUnit file is not valid.")
+              root = ET.fromstring(text)
+              if root.tag == "testsuite":
+                  suites = [root]
+              elif root.tag == "testsuites" and all(
+                  child.tag == "testsuite" for child in root
+              ):
+                  suites = list(root)
+              else:
+                  raise ValueError("The focused JUnit structure is not valid.")
+              if len(list(root.iter("testsuite"))) != len(suites):
+                  raise ValueError("The focused JUnit structure is nested.")
+              for outcome in ("failure", "error", "skipped"):
+                  direct = sum(len(case.findall(outcome)) for case in root.iter("testcase"))
+                  if len(list(root.iter(outcome))) != direct:
+                      raise ValueError("The focused JUnit outcome is not direct.")
+              totals = dict.fromkeys(("tests", "failures", "errors", "skipped"), 0)
+              for suite in suites:
+                  declared = {}
+                  for key in totals:
+                      raw = suite.get(key, "")
+                      if re.fullmatch(r"[0-9]+", raw) is None:
+                          raise ValueError("The focused JUnit count is not valid.")
+                      declared[key] = int(raw)
+                  cases = suite.findall("testcase")
+                  if any(
+                      child.tag not in {"testcase", "properties", "system-out", "system-err"}
+                      for child in suite
+                  ):
+                      raise ValueError("The focused JUnit suite has an unexpected item.")
+                  if len(cases) != declared["tests"] or len(
+                      list(suite.iter("testcase"))
+                  ) != len(cases):
+                      raise ValueError("The focused JUnit test count is not valid.")
+                  observed = dict.fromkeys(("failures", "errors", "skipped"), 0)
+                  for case in cases:
+                      if not case.get("name"):
+                          raise ValueError("The focused JUnit test name is missing.")
+                      if any(
+                          child.tag
+                          not in {"failure", "error", "skipped", "properties", "system-out", "system-err"}
+                          for child in case
+                      ):
+                          raise ValueError("The focused JUnit test has an unexpected item.")
+                      for outcome in observed:
+                          count = len(case.findall(outcome))
+                          if count > 1:
+                              raise ValueError("The focused JUnit test has duplicate outcomes.")
+                          observed[outcome] += count
+                  if any(observed[key] != declared[key] for key in observed):
+                      raise ValueError("The focused JUnit outcomes do not match their counts.")
+                  for key in totals:
+                      totals[key] += declared[key]
+              if root.tag == "testsuites":
+                  for key, value in totals.items():
+                      if key in root.attrib and root.get(key) != str(value):
+                          raise ValueError("The focused JUnit total is not valid.")
+              if (
+                  totals["tests"] <= totals["skipped"]
+                  or totals["failures"]
+                  or totals["errors"]
+              ):
+                  raise ValueError("The focused test result is not successful.")
+              return totals
+
+          success = bound_directory("SUCCESS_DIRECTORY", "SUCCESS_DEVICE", "SUCCESS_INODE")
+          diagnostic = bound_directory(
+              "DIAGNOSTIC_DIRECTORY", "DIAGNOSTIC_DEVICE", "DIAGNOSTIC_INODE"
+          )
+          source_sha = os.environ["SOURCE_SHA"]
+          workflow_sha = os.environ["WORKFLOW_SHA"]
+          profile_id = os.environ["PROFILE_ID"]
+          if (
+              re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+              or re.fullmatch(r"[0-9a-f]{40}", workflow_sha) is None
+              or profile_id not in profiles
+          ):
+              raise SystemExit("The focused test identity is not valid.")
+          command = profiles[profile_id]
+          source = (
+              f"workflow_sha={workflow_sha}\ntested_sha={source_sha}\nprofile_id={profile_id}\n"
+          ).encode("ascii")
+          scope = (json.dumps({
+              "command": command,
+              "profile_id": profile_id,
+              "schema_version": 1,
+              "tested_sha": source_sha,
+              "workflow_sha": workflow_sha,
+          }, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+          github_output = Path(os.environ["GITHUB_OUTPUT"])
+          child_environment = {
+              name: value
+              for name, value in os.environ.items()
+              if not name.startswith(("ACTIONS_", "GITHUB_", "RUNNER_"))
+              and name
+              not in {
+                  "DIAGNOSTIC_DEVICE",
+                  "DIAGNOSTIC_DIRECTORY",
+                  "DIAGNOSTIC_INODE",
+                  "PROFILE_ID",
+                  "SOURCE_SHA",
+                  "SUCCESS_DEVICE",
+                  "SUCCESS_DIRECTORY",
+                  "SUCCESS_INODE",
+                  "WORKFLOW_SHA",
+              }
+          }
+          process = subprocess.Popen(
+              command,
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              start_new_session=True,
+              env=child_environment,
+          )
+          execution_deadline = time.monotonic() + 1200
+          assert process.stdout is not None
+          tail = bytearray()
+          output_size = 0
+          overflow = False
+          timeout = False
+          pipe_closed = False
+          leaked_process_group = False
+          supervision_failed = False
+          try:
+              anchored_group = os.getpgid(process.pid) == process.pid
+          except OSError:
+              anchored_group = False
+
+          def leader_exited():
+              return os.waitid(
+                  os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+              ) is not None
+
+          def other_group_members():
+              scan_deadline = time.monotonic() + 1
+              for entry in Path("/proc").iterdir():
+                  if time.monotonic() >= scan_deadline:
+                      return True
+                  if not entry.name.isdecimal() or int(entry.name) == process.pid:
+                      continue
+                  try:
+                      fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+                  except FileNotFoundError:
+                      continue
+                  except (OSError, IndexError):
+                      return True
+                  if len(fields) < 3 or not fields[2].isdecimal():
+                      return True
+                  if int(fields[2]) == process.pid:
+                      return True
+              return False
+
+          def signal_group(selected_signal):
+              if not anchored_group:
+                  return False
+              try:
+                  if os.getpgid(process.pid) != process.pid:
+                      return False
+                  os.killpg(process.pid, selected_signal)
+              except ProcessLookupError:
+                  return True
+              except OSError:
+                  return False
+              return True
+
+          selector = selectors.DefaultSelector()
+
+          def read_output(wait):
+              global output_size, overflow, pipe_closed
+              for _key, _events in selector.select(wait):
+                  try:
+                      chunk = os.read(process.stdout.fileno(), 65536)
+                  except BlockingIOError:
+                      continue
+                  if not chunk:
+                      selector.unregister(process.stdout)
+                      pipe_closed = True
+                      continue
+                  output_size += len(chunk)
+                  tail.extend(chunk)
+                  if len(tail) > TAIL_LIMIT:
+                      del tail[:-TAIL_LIMIT]
+                  overflow = overflow or output_size > OUTPUT_LIMIT
+
+          def wait_for_group(deadline):
+              while time.monotonic() < deadline:
+                  read_output(min(0.05, max(0, deadline - time.monotonic())))
+                  if leader_exited() and not other_group_members():
+                      return True
+              return False
+
+          try:
+              os.set_blocking(process.stdout.fileno(), False)
+              selector.register(process.stdout, selectors.EVENT_READ)
+              if not anchored_group:
+                  supervision_failed = True
+              while not supervision_failed:
+                  remaining = execution_deadline - time.monotonic()
+                  if remaining <= 0:
+                      timeout = True
+                      break
+                  read_output(min(remaining, 0.1))
+                  if time.monotonic() >= execution_deadline:
+                      timeout = True
+                      break
+                  if overflow:
+                      break
+                  if pipe_closed and leader_exited():
+                      leaked_process_group = other_group_members()
+                      break
+              if timeout or overflow or leaked_process_group or supervision_failed:
+                  supervision_failed |= not signal_group(signal.SIGTERM)
+                  if not wait_for_group(time.monotonic() + 1):
+                      supervision_failed |= not signal_group(signal.SIGKILL)
+                      if not wait_for_group(time.monotonic() + 1):
+                          supervision_failed = True
+              drain_deadline = time.monotonic() + 1
+              while not pipe_closed and time.monotonic() < drain_deadline:
+                  read_output(min(0.05, max(0, drain_deadline - time.monotonic())))
+          except (OSError, ValueError):
+              supervision_failed = True
+              signal_group(signal.SIGKILL)
+          finally:
+              selector.close()
+              process.stdout.close()
+          return_code = None
+          try:
+              return_code = process.wait(timeout=1)
+          except subprocess.TimeoutExpired:
+              supervision_failed = True
+          group_absent = False
+          absence_deadline = time.monotonic() + 1
+          while time.monotonic() < absence_deadline:
+              try:
+                  os.killpg(process.pid, 0)
+              except ProcessLookupError:
+                  group_absent = True
+                  break
+              except OSError:
+                  break
+              time.sleep(0.01)
+          leaked_process_group |= supervision_failed or not pipe_closed or not group_absent
+          tail_bytes = bytes(tail)
+          status = (json.dumps({
+              "exit_code": return_code,
+              "output_bytes": output_size,
+              "output_overflow": overflow,
+              "profile_id": profile_id,
+              "process_group_leaked": leaked_process_group,
+              "timeout": timeout,
+          }, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+          success = bound_directory("SUCCESS_DIRECTORY", "SUCCESS_DEVICE", "SUCCESS_INODE")
+          diagnostic = bound_directory(
+              "DIAGNOSTIC_DIRECTORY", "DIAGNOSTIC_DEVICE", "DIAGNOSTIC_INODE"
+          )
+          for directory in (success, diagnostic):
+              write_new(directory, "source.txt", source, FILE_LIMITS["source.txt"])
+              write_new(directory, "scope.json", scope, FILE_LIMITS["scope.json"])
+              write_new(directory, "status.json", status, FILE_LIMITS["status.json"])
+          write_new(diagnostic, "diagnostic-tail.txt", tail_bytes, TAIL_LIMIT)
+          diagnostic_limits = {
+              "diagnostic-tail.txt": TAIL_LIMIT,
+              "scope.json": FILE_LIMITS["scope.json"],
+              "source.txt": FILE_LIMITS["source.txt"],
+              "status.json": FILE_LIMITS["status.json"],
+          }
+          if {path.name for path in diagnostic.iterdir()} != set(diagnostic_limits):
+              raise SystemExit("The focused diagnostic evidence inventory is not valid.")
+          for name, limit in diagnostic_limits.items():
+              read_regular(diagnostic / name, limit)
+          with github_output.open("a", encoding="utf-8") as stream:
+              stream.write("diagnostic_ready=true\n")
+          if timeout or overflow or leaked_process_group or return_code != 0:
+              raise SystemExit(
+                  return_code if type(return_code) is int and 0 < return_code <= 125 else 1
+              )
+          junit_path = Path("release-focused-junit.xml")
+          junit = read_regular(junit_path, FILE_LIMITS["release-focused-junit.xml"])
+          totals = junit_counts(junit)
+          write_new(
+              success,
+              "release-focused-junit.xml",
+              junit,
+              FILE_LIMITS["release-focused-junit.xml"],
+          )
+          summary = (json.dumps({
+              **totals,
+              "profile_id": profile_id,
+              "tested_sha": source_sha,
+              "workflow_sha": workflow_sha,
+          }, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+          write_new(success, "summary.json", summary, FILE_LIMITS["summary.json"])
+          if set(path.name for path in success.iterdir()) != set(FILE_LIMITS):
+              raise SystemExit("The focused success evidence inventory is not valid.")
+          for name, limit in FILE_LIMITS.items():
+              read_regular(success / name, limit)
+          success = bound_directory("SUCCESS_DIRECTORY", "SUCCESS_DEVICE", "SUCCESS_INODE")
+          diagnostic = bound_directory(
+              "DIAGNOSTIC_DIRECTORY", "DIAGNOSTIC_DEVICE", "DIAGNOSTIC_INODE"
+          )
+          with github_output.open("a", encoding="utf-8") as stream:
+              stream.write("qualification_ready=true\n")
+          PY
+      - name: Upload focused qualification evidence
+        if: ${{ success() && steps.focused-test.outputs.qualification_ready == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-focused-${{ inputs.profile_id }}-evidence
+          path: ${{ steps.evidence.outputs.success }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload focused diagnostic evidence
+        if: ${{ failure() && steps.focused-test.outputs.diagnostic_ready == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-focused-${{ inputs.profile_id }}-diagnostics
+          path: ${{ steps.evidence.outputs.diagnostic }}
+          if-no-files-found: error
+          retention-days: 1
+
+  postgres:
+    if: inputs.profile_id == 'bootstrap-store'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/postgres-tests.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      profile_id: bootstrap-store

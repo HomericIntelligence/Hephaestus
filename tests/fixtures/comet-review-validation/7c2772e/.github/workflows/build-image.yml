@@ -1,0 +1,55 @@
+name: artifacts
+
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        description: JSON matrix of selected artifact validators
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: inputs.matrix != ''
+    name: ${{ matrix.check_name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Successful no-op
+        if: matrix.id == 'noop'
+        run: echo "No artifact validator applies to this change."
+      - name: Confirm Docker
+        if: matrix.engine == 'docker'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v docker
+          test "$(id -u)" -ne 0
+          docker info >/dev/null
+      - name: Confirm rootless Podman
+        if: matrix.engine == 'podman'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v podman
+          test "$(id -u)" -ne 0
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = "true"
+      - name: Validate selected artifact
+        if: matrix.id != 'noop'
+        env:
+          CONTAINER_ENGINE: ${{ matrix.engine }}
+          VALIDATOR: ${{ matrix.id }}
+        run: >-
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py validate
+          --validator "${VALIDATOR}"
+          --container-engine "${CONTAINER_ENGINE}"
