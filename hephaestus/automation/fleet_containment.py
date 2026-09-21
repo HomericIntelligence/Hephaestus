@@ -19,6 +19,7 @@ from hephaestus.automation.fleet_journal import WorkerJournal
 
 # These paths belong to the container mount namespace, not host temporary storage.
 _CONTAINER_SCRATCH = str(PurePosixPath("/") / "tmp")
+SELINUX_TOOL_TYPE = "container_userns_t"
 TOOL_ENVIRONMENT = {
     "HOME": "/workspace/.fleet-runtime/home",
     "XDG_CONFIG_HOME": "/workspace/.fleet-runtime/xdg/config",
@@ -32,6 +33,32 @@ TOOL_ENVIRONMENT = {
     "LANG": "C.UTF-8",
     "HOSTNAME": "fleet-tool",
 }
+
+
+def _private_selinux_label(value: Any, prefix: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("container_policy_mismatch")
+    match = re.fullmatch(re.escape(prefix) + r":s0:c([0-9]{1,4})([,.])c([0-9]{1,4})", value)
+    if match is None:
+        raise ValueError("container_policy_mismatch")
+    first, second = int(match[1]), int(match[3])
+    if first == second or max(first, second) >= 1024 or (match[2] == "." and second != first + 1):
+        raise ValueError("container_policy_mismatch")
+    return f"{prefix}:s0:c{min(first, second)},c{max(first, second)}"
+
+
+def container_selinux_labels(snapshot: dict[str, Any], required: bool) -> tuple[str, str] | None:
+    """Require the supported process domain and matching private Podman MCS pair."""
+    process, mount = snapshot.get("ProcessLabel"), snapshot.get("MountLabel")
+    if not required:
+        if process not in (None, "") or mount not in (None, ""):
+            raise ValueError("container_policy_mismatch")
+        return None
+    process = _private_selinux_label(process, f"system_u:system_r:{SELINUX_TOOL_TYPE}")
+    mount = _private_selinux_label(mount, "system_u:object_r:container_file_t")
+    if process.split(":", 3)[3] != mount.split(":", 3)[3]:
+        raise ValueError("container_policy_mismatch")
+    return process, mount
 
 
 def _expected_environment(entries: Any) -> bool:
@@ -180,6 +207,14 @@ def validate_container(snapshot: dict[str, Any], lease: dict[str, Any]) -> None:
     spec = lease["spec"]
     config = snapshot.get("Config", {})
     host = snapshot.get("HostConfig", {})
+    selinux_type = lease["engine"].get("selinuxType")
+    if selinux_type not in (None, SELINUX_TOOL_TYPE):
+        raise ValueError("container_policy_mismatch")
+    container_selinux_labels(snapshot, selinux_type is not None)
+    security_options = host.get("SecurityOpt", [])
+    expected_security_options = {"no-new-privileges"}
+    if selinux_type is not None:
+        expected_security_options.add("label=type:" + SELINUX_TOOL_TYPE)
     expected = {
         "ReadonlyRootfs": True,
         "Privileged": False,
@@ -203,7 +238,10 @@ def validate_container(snapshot: dict[str, Any], lease: dict[str, Any]) -> None:
         config.get("Entrypoint") in (["/opt/codex-bin/codex"], "/opt/codex-bin/codex"),
         config.get("Cmd") == ["exec-server", "--listen", "stdio"],
         config.get("Labels", {}).get("hi.fleet.lease") == lease["leaseId"],
-        "no-new-privileges" in host.get("SecurityOpt", []),
+        isinstance(security_options, list)
+        and len(security_options) == len(expected_security_options)
+        and all(isinstance(value, str) for value in security_options)
+        and set(security_options) == expected_security_options,
         not host.get("CapAdd"),
         _expected_capabilities(snapshot, host),
         not host.get("Devices"),

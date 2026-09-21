@@ -588,6 +588,34 @@ can add the variable when a container starts. The exclusive workspace bind uses
 private SELinux relabeling; SELinux enforcement remains enabled. The supervisor
 does not relabel its authority directories or another session's workspace.
 
+On an enforcing SELinux host, the engine selects the maintained
+`container_userns_t` process domain for Codex's nested filesystem sandbox. It
+records that choice in the existing engine identity. Hosts without the SELinux
+enforcement interface retain the existing non-SELinux path. A present interface
+must report enforcement; permissive, unreadable, or malformed state fails closed.
+An unavailable process domain fails container creation without a fallback.
+
+Container inspection must show exactly the selected security options and a
+`system_u:system_r:container_userns_t` process label. Its private two-category MCS
+level must match the `system_u:object_r:container_file_t` mount label. Shared
+`s0`, fixed-level overrides, malformed labels, extra security options, and another
+domain are rejected. The kernel observer checks every observed process context
+and the workspace's actual `security.selinux` attribute against those labels.
+It rechecks global enforcement before returning its private observation. Labels
+alone do not authorize admission or replace the other containment checks. An old
+SELinux lease without the selected-domain identity requires reconciliation.
+
+The maintained domain permits more SELinux operations than `container_t`,
+including namespace filesystem mounts and generic PTY access. Its capability
+rules permit checks; they do not assign Linux capabilities. Child user namespaces
+can acquire namespace-local capabilities. The existing capability drop,
+no-new-privileges, private namespaces, read-only root, network denial, resource
+limits, and private workspace remain required. The domain retains MCS constraints;
+private workspace categories do not establish isolation of generic PTY objects.
+See the [pinned domain policy](https://github.com/containers/container-selinux/blob/9715eb09108e9fabb0fbaeee9044636b349370eb/container.te#L1286)
+and [label initialization](https://github.com/podman-container-tools/podman/blob/8303f2e25b675ea7f82099d615c60969aec15870/vendor/github.com/opencontainers/selinux/go-selinux/label/label_linux.go#L22).
+No custom host policy or policy installation belongs to the worker.
+
 `LinuxKernel` must run on the engine's Linux host. It checks cgroup budgets,
 process identities, namespace separation, capabilities, and `NoNewPrivs`.
 Disposal retains the original and current process identities. A receipt requires
@@ -631,6 +659,10 @@ available. The next no-model startup probe must use a fresh empty authority home
 permit only initialization, environment status, and restricted thread startup,
 and observe the exact active lease and causal disposal. It must reject account,
 turn, and direct tool RPCs and retain a failed or uncertain result.
+The SELinux domain selection needs this fresh qualification on the actual host;
+unit fixtures do not prove startup compatibility. Keep a finite outer deadline,
+retain actual output and cleanup receipts, and verify that the VM stops afterward.
+New denials do not authorize additional permissions or sandbox changes.
 
 Restricted startup, normal model-tool routing, and complete deployment private-root
 configuration still need evidence from the actual deployment. The default CLI

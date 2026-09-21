@@ -22,6 +22,7 @@ def engine_process(monkeypatch, tmp_path: Path):
     """Replace only Podman with an executable that records exact arguments and environment."""
     from hephaestus.automation import fleet_podman
 
+    monkeypatch.setattr(fleet_podman, "_SELINUX_ENFORCE", tmp_path / "enforce", raising=False)
     with tempfile.TemporaryDirectory(prefix="hephaestus-podman-", dir=tmp_path) as directory:
         private = Path(directory).resolve() / "engine"
         private.mkdir(mode=0o700)
@@ -247,6 +248,7 @@ def kernel_files(tmp_path, monkeypatch):
     cgroup.mkdir()
     monkeypatch.setattr(fleet_podman, "_PROC", proc)
     monkeypatch.setattr(fleet_podman, "_CGROUP", cgroup)
+    monkeypatch.setattr(fleet_podman, "_SELINUX_ENFORCE", tmp_path / "enforce", raising=False)
     monkeypatch.setattr(fleet_podman.sys, "platform", "linux")
     boot = proc / "sys/kernel/random/boot_id"
     boot.parent.mkdir(parents=True)
