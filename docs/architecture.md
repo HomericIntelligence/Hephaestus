@@ -2970,6 +2970,24 @@ These private receipts cannot authorize a replacement task. Public facts contain
 bounded activity metadata. Prompts, tool requests, answers, and credentials stay
 on private worker storage and attachments.
 
+[`FleetJobResults`](../hephaestus/automation/fleet_job_results.py) adds an explicit
+private association for one admitted session and its next input. It records the
+existing assignment, stage, workspace, generation, provider thread, and contained
+lease. Its upstream digest is a correlation reference, not admission authority.
+The private `associate-job` and `job-result` operations use `hi/fleet/job/v1`;
+they add no public dispatch fields or queue. A matching final answer, durable
+input receipt, provider terminal outcome, and causal disposal can produce a
+private `hi/fleet/job-result/v1` result. Failed provider outcomes retain their
+native error details. Conflicting evidence withholds the original immutable
+result. Unfinished replay and uncertain writes require reconciliation.
+
+This path retains local workspace and capacity reservations after normal
+completion. It does not release Agamemnon's claim, change labels, or complete the
+issue. The connection to `AgentJob`, `JobResult`, and the existing coordinator's
+test, review, and publication stages remains separate work. Synthetic unit tests
+do not establish live runtime acceptance. See the
+[private result contract](fleet-worker.md#private-terminal-job-results).
+
 [`fleet_session_output`](../hephaestus/automation/fleet_session_output.py)
 retains completed Codex command items under the private worker state directory.
 The worker checks the session owner and current thread and turn before capture.
@@ -3081,8 +3099,10 @@ The journal, inventory, and activity events use that marker only when complete
 contained cleanup is confirmed. Provider-only cleanup and outcomes stay private.
 An interrupted contained session retains its lease and reservation and reports
 `unknown` until reconciliation. The controller keeps that interruption pending;
-this change does not establish an interrupt/resume recovery path. A normal
-completed turn also retains its container and does not complete the issue.
+this change does not establish an interrupt/resume recovery path. An interactive
+completed turn retains its container. An explicitly associated terminal job
+instead confirms disposal before producing its private result. Both paths keep
+the canonical issue claim; neither completes the issue.
 
 Native macOS and Linux without a verified owned boundary remain disabled by
 [`fleet_isolation`](../hephaestus/automation/fleet_isolation.py).

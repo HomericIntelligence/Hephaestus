@@ -43,6 +43,10 @@ def exchange(state_dir: Path, message: dict[str, Any]) -> dict[str, Any]:
 
 def _dispatch(worker: FleetWorker, message: dict[str, Any]) -> dict[str, Any]:
     operation = message.get("operation")
+    if operation == "associate-job":
+        return worker.associate_job(message)
+    if operation == "job-result":
+        return worker.jobs.read(message)
     if operation == "inventory":
         return worker.inventory()
     if operation == "events":
