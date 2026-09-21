@@ -1,0 +1,43 @@
+name: Bootstrap correlation
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_base64:
+        description: Canonical correlation bundle in base64
+        required: true
+        type: string
+      bundle_sha256:
+        description: SHA-256 of the canonical correlation bundle
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap-correlation:
+    name: bootstrap-correlation
+    if: github.repository == 'LLM360/comet' && (github.ref == 'refs/heads/main' || github.ref == format('refs/heads/promotion/{0}', github.sha))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Validate correlation evidence
+        env:
+          BUNDLE_BASE64: ${{ inputs.bundle_base64 }}
+          BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+        run: uv run --locked --extra dev python scripts/emit-bootstrap-correlation.py
+      - name: Keep correlation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: initial-bootstrap-correlation-v1-${{ github.sha }}
+          path: ${{ runner.temp }}/comet-bootstrap-correlation/receipt.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90

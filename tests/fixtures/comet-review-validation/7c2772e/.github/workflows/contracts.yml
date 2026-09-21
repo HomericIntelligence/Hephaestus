@@ -1,0 +1,68 @@
+name: contracts
+
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        description: JSON matrix of selected repository contracts
+        required: true
+        type: string
+      ref:
+        description: Immutable commit to validate
+        required: true
+        type: string
+      ordinary_test_scope:
+        description: Test scope from the same workflow run
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: ${{ matrix.check_name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.ref }}"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Install Bubblewrap
+        if: matrix.id == 'workflow-contracts'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap
+      - name: Successful no-op
+        if: matrix.id == 'noop'
+        run: echo "No contract validator applies to this change."
+      - name: Validate selected contract
+        if: matrix.id != 'noop'
+        shell: bash
+        env:
+          VALIDATOR: ${{ matrix.id }}
+          AFFECTED_SCOPE: ${{ inputs.ordinary_test_scope }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          scope_arguments=()
+          if [[ -n "${AFFECTED_SCOPE}" ]]; then
+            scope_arguments=(
+              --affected-scope-json "${AFFECTED_SCOPE}"
+              --event-name "${EVENT_NAME}" --run-id "${RUN_ID}" --run-attempt "${RUN_ATTEMPT}"
+              --base-sha "${BASE_SHA}" --head-sha "${HEAD_SHA}"
+            )
+          fi
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py validate \
+            --validator "${VALIDATOR}" --container-engine none "${scope_arguments[@]}"

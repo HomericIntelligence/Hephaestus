@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "rule": "k2-ci-amendment-v1",
+  "files": [
+    {
+      "path": "scripts/k2_ci_policy.py",
+      "base_blob": "b749db0c5d489c4c04fa51eaeabd6dc3af18c979",
+      "head_blob": "e8463acba6062a4ff95b09c8f7f5f564c94154c1",
+      "base_mode": "100644",
+      "head_mode": "100644"
+    },
+    {
+      "path": "tests/test_deployed_inputs.py",
+      "base_blob": "d444ce8d54333885b685144a883b578b573571ad",
+      "head_blob": "bcf6baa23cd1358ce130a814e74934d0ad3f612c",
+      "base_mode": "100644",
+      "head_mode": "100644"
+    }
+  ]
+}

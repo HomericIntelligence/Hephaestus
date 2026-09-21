@@ -63,6 +63,33 @@ identity and repository objects from that run. It is not an original REST
 pull-response capture. The fixture keeps the empty `pull_requests` list and
 proves identity through the reusable-workflow merge witness.
 
+### Current profile and shard coverage
+
+Issue #3319 adds the finite `comet-7c2772e-v1` profile. It binds 47 control
+files, including the test-scope selector, quarantine manifest, and shard data.
+Source readers collect all registered controls present in the complete Git
+inventory. Admission requires one complete profile. Historical profiles keep
+their original control sets. A mixture of profiles remains invalid.
+
+For this profile, the ordinary main-target PR identity excludes promotion.
+The complete immutable change list must contain no K2 path component or
+`.github/ci/k2-affected-scope.json` change to prove the legacy route. The same
+CI run and attempt must contain the successful scope-classifier job and its
+required ordered steps. This proof uses the pinned selector's path rule.
+It does not execute repository code or infer a route from job success alone.
+
+A full PR-test receipt requires all 32 distinct shards and their required
+source, setup, and execution steps. The pinned partition algorithm covers
+the complete admitted PR profile across these shards. This proves coverage
+of the planned command; it does not claim one unsharded execution. The
+quarantine manifest remains an explicit part of that profile. Skipped tests
+are not evidence of successful test execution.
+
+Repository-contract receipts require the legacy route and the full validator
+steps. An affected route can run a subset or no tests. Its success cannot
+supply a receipt for a full command. Uncovered checks remain required under
+the existing local-execution and evidence-gap rules.
+
 ### Local evidence
 
 Complete CI coverage proceeds without a local runtime lookup. Otherwise, use

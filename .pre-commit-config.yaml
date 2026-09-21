@@ -11,7 +11,7 @@
 # below actually fires without `--hook-type commit-msg`. See issue #1209.
 default_install_hook_types: [pre-commit, commit-msg]
 # Preserve the exact bytes of external source-admission fixtures.
-exclude: ^tests/fixtures/comet-review-validation/(current/|fe5a67d/|historical/controls/)
+exclude: ^tests/fixtures/comet-review-validation/(current/|fe5a67d/|7c2772e/|historical/controls/)
 
 repos:
 

@@ -202,23 +202,42 @@ def test_deletion_of_a_forbidden_path_is_not_an_admission_error() -> None:
     assert api.comet_validation_checks(profile, (("D", ".gitmodules"),)) == ()
 
 
-@pytest.mark.parametrize("version", ["current", "historical", "fe5a67d"])
-def test_contract_selection_matches_the_frozen_repository_selector(version: str) -> None:
+def _frozen_selector(root: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Load the frozen selector with its own policy dependency."""
+    import importlib.util
+    import sys
+
+    policy_path = root / "scripts/k2_ci_policy.py"
+    if policy_path.is_file():
+        spec = importlib.util.spec_from_file_location("k2_ci_policy", policy_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, "k2_ci_policy", module)
+        spec.loader.exec_module(module)
+    return runpy.run_path(str(root / "scripts/check_deployed_inputs.py"))
+
+
+@pytest.mark.parametrize("version", ["current", "historical", "fe5a67d", "7c2772e"])
+def test_contract_selection_matches_the_frozen_repository_selector(
+    version: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Compare tracked paths and policy edges with each frozen source selector."""
     api = _api()
     controls = {
         "current": _controls,
         "historical": lambda: _historical_controls()[0],
         "fe5a67d": _fe5a67d_controls,
+        "7c2772e": _7c2772e_controls,
     }[version]()
-    profile = api.admit_comet_controls(controls, CONTROL_PATHS)
+    profile = api.admit_comet_controls(controls, tuple(controls))
     root = FIXTURES / ("historical/controls" if version == "historical" else version)
-    source = runpy.run_path(str(root / "scripts/check_deployed_inputs.py"))
+    source = _frozen_selector(root, monkeypatch)
     inventory = yaml.safe_load((root / "deployment/deployed-inputs.yaml").read_text())
     contracts = {
         entry["id"] for entry in inventory["validators"] if entry["kind"] == "repository-contract"
     }
-    paths = set(json.loads((FIXTURES / "current-paths.json").read_text()))
+    inventory_version = "current" if version == "historical" else version
+    paths = set(json.loads((FIXTURES / f"{inventory_version}-paths.json").read_text()))
     for policy in [*inventory["policies"], *source["CI_POLICIES"]]:
         for pattern in [*policy["include"], *policy.get("exclude", [])]:
             paths.add(
@@ -748,7 +767,9 @@ def test_ci_identity_retains_failure_and_incomplete_run_facts() -> None:
     assert pending.conclusion is None
 
 
-def _ci_control_graph() -> dict[str, dict[str, Any]]:
+def _ci_control_graph(
+    controls: dict[str, tuple[int, bytes]] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Make an immutable API graph from the exact current control fixture."""
     import base64
     import hashlib
@@ -756,7 +777,7 @@ def _ci_control_graph() -> dict[str, dict[str, Any]]:
     graph: dict[str, dict[str, Any]] = {}
     entries: list[dict[str, Any]] = []
     directories: set[str] = set()
-    for path, (mode, content) in _controls().items():
+    for path, (mode, content) in (_controls() if controls is None else controls).items():
         sha = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
         entries.append(
             {"path": path, "mode": f"{mode:o}", "type": "blob", "sha": sha, "size": len(content)}
@@ -1489,14 +1510,17 @@ def test_fe5a67d_tier_additions(tier: str, modules: set[str]) -> None:
     assert not set(previous[tier]) - set(current[tier])
 
 
-def test_fe5a67d_profile_identity_matches_source_policy() -> None:
+@pytest.mark.parametrize("version", ["fe5a67d", "7c2772e"])
+def test_profile_identity_matches_source_policy(
+    version: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Bind all control bytes and source selection to the profile digest."""
     import hashlib
 
-    controls = _fe5a67d_controls()
-    manifest = json.loads((FIXTURES / "fe5a67d-manifest.json").read_text())
-    root = FIXTURES / "fe5a67d"
-    source = runpy.run_path(str(root / "scripts/check_deployed_inputs.py"))
+    controls = {"fe5a67d": _fe5a67d_controls, "7c2772e": _7c2772e_controls}[version]()
+    manifest = json.loads((FIXTURES / f"{version}-manifest.json").read_text())
+    root = FIXTURES / version
+    source = _frozen_selector(root, monkeypatch)
     inventory = yaml.safe_load(controls["deployment/deployed-inputs.yaml"][1])
     selection = {
         "candidates": inventory["production_candidates"],
@@ -1521,5 +1545,385 @@ def test_fe5a67d_profile_identity_matches_source_policy() -> None:
         {"controls": records, "selection": selection}, sort_keys=True, separators=(",", ":")
     )
     api = _api()
-    profile = api.admit_comet_controls(controls, CONTROL_PATHS)
+    profile = api.admit_comet_controls(controls, tuple(controls))
     assert api.comet_profile_digest(profile) == hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def test_admit_7c2772e_complete_source_controls() -> None:
+    """Admit the pinned source and retain the full ordinary test command."""
+    manifest = json.loads((FIXTURES / "7c2772e-manifest.json").read_text())
+    controls = {
+        row["path"]: (int(row["mode"], 8), (FIXTURES / "7c2772e" / row["path"]).read_bytes())
+        for row in manifest["entries"]
+    }
+    paths = tuple(json.loads((FIXTURES / "7c2772e-paths.json").read_text()))
+    api = _api()
+    profile = api.admit_comet_controls(controls, paths)
+    assert profile == "comet-7c2772e-v1"
+    checks = api.comet_validation_checks(profile, (("M", "tests/test_key_expiration.py"),))
+    commands = {check.check_id: check.argv for check in checks}
+    assert commands["comet.python.pr-tests"] == (
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "dev",
+        "python",
+        "scripts/ci/run-test-tier.py",
+        "pr",
+    )
+
+
+def test_7c2772e_format_command_matches_its_workflow() -> None:
+    """Keep the command identity from the pinned workflow."""
+    checks = _api().comet_validation_checks(
+        "comet-7c2772e-v1", (("M", "tests/test_key_expiration.py"),)
+    )
+    commands = {check.check_id: check.argv for check in checks}
+    assert commands["comet.python.ruff-format"] == (
+        "uv",
+        "run",
+        "--locked",
+        "--extra",
+        "dev",
+        "ruff",
+        "format",
+        "--check",
+        ".",
+        "--diff",
+    )
+
+
+@pytest.mark.parametrize("check_id", ["comet.python.pr-tests", "comet.contract.workflow-contracts"])
+def test_7c2772e_ci_does_not_claim_unproved_full_test_coverage(
+    tmp_path: Path, check_id: str
+) -> None:
+    """Reject a green job without proof of its full validation scope."""
+    from dataclasses import replace
+
+    api = _api()
+    invocation, _reader = _ci_collection_fixture(tmp_path)
+    checks = api.comet_validation_checks(
+        "comet-7c2772e-v1", (("M", "scripts/check_deployed_inputs.py"),)
+    )
+    plan = replace(
+        invocation.plan,
+        profile_id="comet-7c2772e-v1",
+        profile_digest=api.comet_profile_digest("comet-7c2772e-v1"),
+        changes=(("M", "scripts/check_deployed_inputs.py"),),
+        checks=checks,
+    )
+    check = next(check for check in checks if check.check_id == check_id)
+    steps = [
+        ("Set up job", "success"),
+        ("Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "success"),
+        ("Run astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4", "success"),
+    ]
+    if check_id == "comet.python.pr-tests":
+        name = "test (3.12)"
+        steps.extend(
+            [
+                ("Install Bubblewrap", "success"),
+                ("Run the ordinary pull-request profile", "success"),
+            ]
+        )
+    else:
+        name = "contracts / workflow-contracts"
+        steps.insert(2, ("Verify the checked-out commit", "success"))
+        steps.extend(
+            [
+                ("Install Bubblewrap", "success"),
+                ("Successful no-op", "skipped"),
+                ("Validate selected contract", "success"),
+            ]
+        )
+    job = api._CometCIJob(
+        1,
+        name,
+        "completed",
+        "success",
+        tuple(
+            api._CometCIStep(i + 1, step, "completed", result)
+            for i, (step, result) in enumerate(steps)
+        ),
+    )
+    assert api._ci_check_receipt(plan, check, (job,)) is None
+
+
+def _7c2772e_receipt_fixture(tmp_path: Path, check_id: str) -> tuple[Any, Any, tuple[Any, ...]]:
+    from dataclasses import replace
+
+    api = _api()
+    invocation, _reader = _ci_collection_fixture(tmp_path)
+    changes = (("M", "scripts/check_deployed_inputs.py"),)
+    checks = api.comet_validation_checks("comet-7c2772e-v1", changes)
+    plan = replace(
+        invocation.plan,
+        profile_id="comet-7c2772e-v1",
+        profile_digest=api.comet_profile_digest("comet-7c2772e-v1"),
+        changes=changes,
+        checks=checks,
+    )
+    check = next(check for check in checks if check.check_id == check_id)
+    prefix = [
+        ("Set up job", "success"),
+        ("Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "success"),
+        ("Run astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4", "success"),
+    ]
+    definitions = [
+        (
+            "deployment-policy",
+            [
+                *prefix,
+                ("Initialize safe downstream selections", "success"),
+                ("Collect immutable changed-path records", "success"),
+                ("Validate inventory and classify inputs", "success"),
+            ],
+        )
+    ]
+    if check_id == "comet.python.pr-tests":
+        definitions.extend(
+            (
+                f"test (3.12, shard {index})",
+                [
+                    *prefix,
+                    ("Require the test scope", "skipped"),
+                    ("Verify test source", "success"),
+                    ("Install Bubblewrap", "success"),
+                    ("Run the ordinary pull-request profile", "success"),
+                    ("Run the promotion profile", "skipped"),
+                ],
+            )
+            for index in range(32)
+        )
+    else:
+        steps = list(prefix)
+        steps.insert(2, ("Verify the checked-out commit", "success"))
+        steps.extend(
+            [
+                (
+                    "Install Bubblewrap",
+                    "success" if check_id.endswith("workflow-contracts") else "skipped",
+                ),
+                ("Successful no-op", "skipped"),
+                ("Validate selected contract", "success"),
+            ]
+        )
+        definitions.append(("contracts / " + check_id.removeprefix("comet.contract."), steps))
+    jobs = tuple(
+        api._CometCIJob(
+            job_index + 1,
+            name,
+            "completed",
+            "success",
+            tuple(
+                api._CometCIStep(i + 1, step, "completed", result)
+                for i, (step, result) in enumerate(steps)
+            ),
+        )
+        for job_index, (name, steps) in enumerate(definitions)
+    )
+    return plan, check, jobs
+
+
+@pytest.mark.parametrize(
+    "check_id",
+    [
+        "comet.python.pr-tests",
+        "comet.contract.workflow-contracts",
+        "comet.contract.github-production-rules-contracts",
+    ],
+)
+def test_7c2772e_ci_proves_full_legacy_coverage(tmp_path: Path, check_id: str) -> None:
+    """Require the scope producer and complete consumer coverage."""
+    api = _api()
+    plan, check, jobs = _7c2772e_receipt_fixture(tmp_path, check_id)
+    assert check_id in api.comet_ci_check_ids(plan.checks, profile=plan.profile_id)
+    receipt = api._ci_check_receipt(plan, check, jobs)
+    assert receipt is not None
+    assert receipt.status == "success"
+    assert receipt.argv == check.argv
+    assert receipt.source_digests == check.source_digests
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/K2-notes.md",
+        "scripts/k2_ci_policy.py",
+        "cookbooks/k2.yaml",
+        ".github/ci/k2-affected-scope.json",
+    ],
+)
+@pytest.mark.parametrize("status", ["A", "M", "D"])
+def test_7c2772e_ci_rejects_affected_coverage(tmp_path: Path, path: str, status: str) -> None:
+    """A green affected job does not prove the full ordinary test command."""
+    from dataclasses import replace
+
+    api = _api()
+    plan, check, jobs = _7c2772e_receipt_fixture(tmp_path, "comet.python.pr-tests")
+    plan = replace(plan, changes=(*plan.changes, (status, path)))
+    assert api._ci_check_receipt(plan, check, jobs) is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-classifier",
+        "missing-shard",
+        "skipped-source",
+        "skipped-test",
+        "duplicate-shard",
+        "extra-shard",
+        "failed-shard",
+    ],
+)
+def test_7c2772e_ci_rejects_incomplete_shard_proof(tmp_path: Path, mutation: str) -> None:
+    """Reject incomplete, ambiguous, or unsuccessful shard evidence."""
+    from dataclasses import replace
+
+    api = _api()
+    plan, check, jobs = _7c2772e_receipt_fixture(tmp_path, "comet.python.pr-tests")
+    if mutation == "missing-classifier":
+        jobs = jobs[1:]
+    elif mutation == "missing-shard":
+        jobs = jobs[:-1]
+    elif mutation in {"skipped-source", "skipped-test"}:
+        target = (
+            "Verify test source"
+            if mutation == "skipped-source"
+            else "Run the ordinary pull-request profile"
+        )
+        changed = replace(
+            jobs[-1],
+            steps=tuple(
+                replace(step, conclusion="skipped") if step.name == target else step
+                for step in jobs[-1].steps
+            ),
+        )
+        jobs = (*jobs[:-1], changed)
+    elif mutation == "duplicate-shard":
+        jobs = (*jobs, replace(jobs[-1], identifier=100))
+    elif mutation == "extra-shard":
+        jobs = (*jobs, replace(jobs[-1], identifier=100, name="test (3.12, shard 32)"))
+    else:
+        jobs = (*jobs[:-1], replace(jobs[-1], conclusion="failure"))
+    if mutation in {"duplicate-shard", "extra-shard"}:
+        with pytest.raises(api.CometCIReadError, match="ci_job_ambiguous"):
+            api._ci_check_receipt(plan, check, jobs)
+    else:
+        receipt = api._ci_check_receipt(plan, check, jobs)
+        assert receipt is None or receipt.status == "failed"
+
+
+def _7c2772e_controls() -> dict[str, tuple[int, bytes]]:
+    manifest = json.loads((FIXTURES / "7c2772e-manifest.json").read_text())
+    return {
+        row["path"]: (int(row["mode"], 8), (FIXTURES / "7c2772e" / row["path"]).read_bytes())
+        for row in manifest["entries"]
+    }
+
+
+def test_7c2772e_source_plan_reads_all_registered_controls(tmp_path: Path) -> None:
+    """Bind the larger profile to immutable source commits."""
+    from dataclasses import replace
+
+    from tests.unit.automation.pipeline.stages.test_pr_review_comet_validation import _git
+
+    workspace, _old_base, _old_head = _source_fixture(tmp_path)
+    for path, (mode, data) in _7c2772e_controls().items():
+        target = workspace.cwd / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        target.chmod(mode & 0o777)
+    _git(workspace.cwd, "add", ".")
+    _git(workspace.cwd, "commit", "-m", "Use the pinned validation controls.")
+    base = _git(workspace.cwd, "rev-parse", "HEAD")
+    (workspace.cwd / "src/comet/example.py").write_text("VALUE = 3319\n")
+    _git(workspace.cwd, "add", ".")
+    _git(workspace.cwd, "commit", "-m", "Change the selected source.")
+    head = _git(workspace.cwd, "rev-parse", "HEAD")
+    plan = _source_plan_api()(
+        replace(workspace, revision=head),
+        issue_number=1200,
+        pr_number=1200,
+        reviewed_base=base,
+        timeout_s=30,
+    )
+    assert plan.profile_id == "comet-7c2772e-v1"
+    assert plan.changes == (("M", "src/comet/example.py"),)
+    assert all(len(check.source_digests) == 47 for check in plan.checks)
+
+
+def test_7c2772e_ci_collection_binds_all_shards_and_source_controls(tmp_path: Path) -> None:
+    """Read stable same-run evidence through the complete CI collector."""
+    from dataclasses import replace
+
+    api = _api()
+    invocation, reader = _ci_collection_fixture(tmp_path)
+    plan, check, jobs = _7c2772e_receipt_fixture(tmp_path, "comet.python.pr-tests")
+    invocation = replace(invocation, plan=plan, check_ids=(check.check_id,))
+    reader.graph.update(_ci_control_graph(_7c2772e_controls()))
+    reader.graph["repos/LLM360/comet/git/commits/" + "c" * 40] = _ci_identity_fixture()[2]
+    reader.graph["repos/LLM360/comet/actions/runs/123/attempts/2/jobs?per_page=100&page=1"] = {
+        "total_count": len(jobs),
+        "jobs": [
+            {
+                "id": job.identifier,
+                "run_id": 123,
+                "run_attempt": 2,
+                "head_sha": "a" * 40,
+                "name": job.name,
+                "status": job.status,
+                "conclusion": job.conclusion,
+                "steps": [
+                    {
+                        "number": step.number,
+                        "name": step.name,
+                        "status": step.status,
+                        "conclusion": step.conclusion,
+                    }
+                    for step in job.steps
+                ],
+            }
+            for job in jobs
+        ],
+    }
+    result = _collect_ci(api, invocation, reader)
+    assert not result.gaps
+    assert len(result.receipts) == 1
+    assert result.receipts[0].status == "success"
+    assert result.receipts[0].source_digests == check.source_digests
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        row["path"]
+        for row in json.loads((FIXTURES / "7c2772e-manifest.json").read_text())["entries"]
+    ],
+)
+@pytest.mark.parametrize("mutation", ["bytes", "mode", "missing"])
+def test_7c2772e_rejects_changed_controls(path: str, mutation: str) -> None:
+    """Reject changed bytes, modes, and missing controls from the current profile."""
+    controls = _7c2772e_controls()
+    mode, data = controls[path]
+    if mutation == "bytes":
+        controls[path] = (mode, data + b"\n")
+    elif mutation == "mode":
+        controls[path] = (mode ^ 0o111, data)
+    else:
+        del controls[path]
+    paths = tuple(json.loads((FIXTURES / "7c2772e-paths.json").read_text()))
+    with pytest.raises(ValueError, match="control"):
+        _api().admit_comet_controls(controls, paths)
+
+
+@pytest.mark.parametrize(
+    "path", ["k2_ci_policy.py", "src/k2_ci_policy.py", "scripts/ci/k2_ci_policy.py", "ruff.toml"]
+)
+def test_7c2772e_rejects_new_validation_controls(path: str) -> None:
+    """Reject unregistered configuration and modules that can replace the policy."""
+    paths = tuple(json.loads((FIXTURES / "7c2772e-paths.json").read_text()))
+    with pytest.raises(ValueError, match="control"):
+        _api().admit_comet_controls(_7c2772e_controls(), (*paths, path))

@@ -1347,11 +1347,19 @@ keeps applicable checks separate from the checks eligible for ordinary PR CI
 or offline local execution. Unknown or mixed control versions fail admission.
 See [ADR-0054](adr/0054-comet-review-validation.md) for profile and receipt rules.
 
-The admitted profiles are `comet-5232ef5-v1`, `comet-d19d3dd-v1`, and
-`comet-fe5a67d-v1`. The last profile binds the public-root test controls and
-adds `scripts/build_public_access_application.py` to the control-deployment
-policy. Its deployment contract remains a nightly check. Profile admission
-does not prove that a validation command passed.
+The admitted profiles are `comet-5232ef5-v1`, `comet-d19d3dd-v1`,
+`comet-fe5a67d-v1`, and `comet-7c2772e-v1`. Each profile keeps its complete
+control inventory and selection policy. The `comet-fe5a67d-v1` profile binds
+the public-root test controls and adds `scripts/build_public_access_application.py`
+to the control-deployment policy. Its deployment contract remains a nightly
+check. Profile admission does not prove that a validation command passed.
+
+The `comet-7c2772e-v1` profile includes the affected-test selector, shard data,
+and quarantine manifest. Full test evidence requires a proved legacy route.
+The scope-classifier job must succeed. All 32 PR test shards must supply the
+required source and execution steps. A subset or successful no-op cannot
+supply full-test evidence. The pinned quarantine exceptions remain part of
+the profile; skipped tests are not reported as passed tests.
 
 The submitted GitHub job collects two agreeing CI observations. The retained
 PR identity, reviewed head, target base, immutable merge parents, control bytes,

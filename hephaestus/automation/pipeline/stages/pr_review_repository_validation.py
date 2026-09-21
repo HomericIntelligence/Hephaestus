@@ -452,7 +452,7 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
         item.payload["reviewed_pr_base_sha"] = plan.reviewed_base
         if not plan.execution_allowed:
             return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_profile_gap")
-        checks = comet_ci_check_ids(plan.checks)
+        checks = comet_ci_check_ids(plan.checks, profile=plan.profile_id)
         if not checks:
             return self._repository_validation_ci_wait(item, ctx)
         try:
