@@ -12,6 +12,7 @@ from .repository_validation import (
     RepositoryValidationExecution,
     RepositoryValidationInvocation,
     RepositoryValidationPlan,
+    repository_workspace_name_matches,
     validate_repository_validation_execution,
     validate_repository_validation_invocation,
 )
@@ -77,8 +78,7 @@ class RepositoryValidationSourceRequest:
             and type(binding.schema_version) is int
             and binding.schema_version == 1
             and binding.dirty_claim is None
-            and type(binding.repository) is str
-            and binding.repository.casefold() == self.repository.casefold()
+            and repository_workspace_name_matches(self.repository, binding.repository)
             and binding.revision == self.reviewed_head
             and type(binding.item_number) is int
             and binding.item_number == (self.issue_number or self.pr_number)

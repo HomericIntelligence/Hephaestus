@@ -36,8 +36,9 @@ def _supply_registered_worktree_listing(root: Path, monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize("case", ["valid", "stale", "changed_manifest", "expired"])
+@pytest.mark.parametrize("workspace_repository", ["comet", "LLM360/comet"])
 def test_repository_validation_source_preparation_holds_review_lease(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, workspace_repository: str
 ) -> None:
     """Inspect source under current review ownership without writer authority."""
     import time
@@ -49,7 +50,7 @@ def test_repository_validation_source_preparation_holds_review_lease(
     from tests.unit.automation.pipeline.test_repository_validation import _api, _plan
 
     root, _, revision = _repository(tmp_path, origin_repository="LLM360/comet")
-    manager = SourceWorkspaceManager(root, repository="LLM360/comet")
+    manager = SourceWorkspaceManager(root, repository=workspace_repository)
     binding = manager.prepare(1623, SourceLane.REVIEW, revision)
     _supply_registered_worktree_listing(root, monkeypatch)
     expected = replace(binding, generation=binding.generation + 1) if case == "stale" else binding

@@ -701,3 +701,44 @@ def test_runtime_preparation_rejects_incomplete_invocation(tmp_path: Path, fault
         RepositoryValidationRuntimeRequest(
             invocation, float("nan") if fault == "deadline" else 123.0
         )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("repository", "foreign/comet"),
+        ("repository", "LLM360/other"),
+        ("repository", "other"),
+        ("revision", "f" * 40),
+        ("lane", SourceLane.IMPLEMENTATION),
+        ("ownership_key", ""),
+        ("item_number", 999),
+        ("detached", False),
+    ],
+)
+def test_validation_consumers_reject_changed_workspace_identity(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    """Reject foreign source and incomplete review ownership in both consumers."""
+    from hephaestus.automation.pipeline.repository_validation_preparation import (
+        RepositoryValidationSourceRequest,
+    )
+
+    plan = _plan(_api(), tmp_path)
+    workspace = replace(plan.source_workspace, **{field: value})
+    with pytest.raises(ValueError):
+        replace(plan, source_workspace=workspace)
+    with pytest.raises(ValueError):
+        RepositoryValidationSourceRequest(
+            plan.repository,
+            plan.issue_number,
+            plan.pr_number,
+            workspace,
+            plan.reviewed_head,
+            plan.reviewed_base,
+            plan.diff_base_sha,
+            plan.changes,
+            1,
+            "f" * 32,
+            123.0,
+        )

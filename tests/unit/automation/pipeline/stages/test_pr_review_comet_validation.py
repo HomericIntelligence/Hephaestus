@@ -1217,3 +1217,43 @@ def test_reviewer_job_carries_current_repository_validation(
     assert not item.payload.get("host_verification_bootstrap_json")
     rendered = result.job.prompt_builder(**result.job.prompt_kwargs)
     assert encoded in rendered
+
+
+@pytest.mark.parametrize("fault", ["workspace", "manifest", "target_base", "missing_field"])
+def test_source_preparation_reports_bounded_failure_reason(
+    tmp_path: Path, make_work_item: Any, make_ctx: Any, caplog: Any, fault: str
+) -> None:
+    """Report the failed source check without source paths or payload values."""
+    from dataclasses import replace
+
+    from hephaestus.automation.pipeline.stages.base import Disposition, StageOutcome
+
+    item, request, _ = _pending_ci_item(tmp_path, make_work_item)
+    plan = request.plan
+    item.payload.pop("repository_validation_attempt")
+    item.payload.pop("repository_validation_ci_request")
+    item.payload.update(
+        review_change_records=plan.changes,
+        review_changed_paths=[path for _, path in plan.changes],
+        review_target_base_sha=plan.reviewed_base,
+        review_diff_base_sha=plan.diff_base_sha,
+    )
+    workspace = plan.source_workspace
+    if fault == "workspace":
+        workspace = replace(workspace, repository="private-owner/comet")
+        reason = "The source binding does not match the detached review."
+    elif fault == "manifest":
+        item.payload["review_change_records"] = [("M", "private-file")]
+        reason = "The checkout manifest is invalid."
+    elif fault == "target_base":
+        item.payload["review_target_base_sha"] = "private-value"
+        reason = "The target base changed."
+    else:
+        item.payload.pop("reviewed_pr_proof_generation")
+        reason = "KeyError"
+    result = PrReviewStage()._start_repository_validation(item, make_ctx(org="LLM360"), workspace)
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "repository_validation_source_gap")
+    assert reason in caplog.text
+    assert "private-" not in caplog.text
+    assert str(tmp_path) not in caplog.text
+    assert "repository_validation_source_request" not in item.payload

@@ -404,7 +404,28 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
                 repository_validation_preparation=request,
                 descr="review_repository_validation_source",
             )
-        except (AttributeError, KeyError, TypeError, ValueError):
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            reason = str(exc)
+            if reason not in {
+                "The checkout manifest is invalid.",
+                "The target base changed.",
+                "The preparation deadline is invalid.",
+                "The source repository is unsupported.",
+                "The PR number is invalid.",
+                "The issue number is invalid.",
+                "The source attempt identity is invalid.",
+                "The source binding type is invalid.",
+                "The source binding does not match the detached review.",
+                "The change inventory is invalid.",
+                "The change record is invalid.",
+                "The change path is invalid or repeated.",
+            }:
+                reason = type(exc).__name__
+            logger.warning(
+                "Repository validation source preparation failed for PR #%s: %s",
+                item.pr,
+                reason,
+            )
             item.payload["repository_validation_failure"] = "validation_source_plan_invalid"
             return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_source_gap")
         item.payload["repository_validation_source_request"] = request

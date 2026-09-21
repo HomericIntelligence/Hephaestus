@@ -144,6 +144,14 @@ class RepositoryValidationPlan:
         object.__setattr__(self, "plan_id", _digest(self, "plan_id"))
 
 
+def repository_workspace_name_matches(repository: str, workspace_repository: object) -> bool:
+    """Accept the full repository name or its local workspace name."""
+    return type(workspace_repository) is str and workspace_repository.casefold() in {
+        repository.casefold(),
+        "comet" if repository == "LLM360/comet" else repository.casefold(),
+    }
+
+
 def _validate_workspace(plan: RepositoryValidationPlan) -> None:
     workspace = plan.source_workspace
     _require(type(workspace) is WorkspaceBinding, "The source binding type is invalid.")
@@ -157,8 +165,7 @@ def _validate_workspace(plan: RepositoryValidationPlan) -> None:
         "An immutable review source binding is necessary.",
     )
     _require(
-        type(workspace.repository) is str
-        and workspace.repository.casefold() == plan.repository.casefold()
+        repository_workspace_name_matches(plan.repository, workspace.repository)
         and workspace.revision == plan.reviewed_head
         and type(workspace.item_number) is int
         and workspace.item_number == (plan.issue_number or plan.pr_number),
