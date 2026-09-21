@@ -923,10 +923,17 @@ class RepoIntakeManager:
         if not primary.name.endswith(".lock"):
             raise RepoIntakeError("repository-intake operational state paths are invalid")
         legacy_roots = self._legacy_worktree_roots(records)
-        try:
-            canonical_roots = tuple(root.resolve(strict=True) for root in legacy_roots)
-        except (OSError, RuntimeError, UnicodeError) as exc:
-            raise RepoIntakeError("repository-intake worktree registration is unavailable") from exc
+        canonical_roots: list[Path] = []
+        for root in legacy_roots:
+            try:
+                canonical_roots.append(root.resolve(strict=True))
+            except FileNotFoundError:
+                # A stale registration cannot supply a compatibility lock.
+                continue
+            except (OSError, RuntimeError, UnicodeError) as exc:
+                raise RepoIntakeError(
+                    "repository-intake worktree registration is unavailable"
+                ) from exc
         for root in canonical_roots:
             if primary.parent == root / DEFAULT_STATE_DIR / "locks":
                 allowed: set[Path] = set()

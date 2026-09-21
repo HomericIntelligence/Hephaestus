@@ -7,6 +7,7 @@ import errno
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -655,9 +656,16 @@ def test_legacy_caller_state_blocks_before_intake_and_is_preserved(
     assert _caller_state(caller) == before
 
 
-def test_compatibility_lock_does_not_poison_intake_validation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stale_registration", [False, True])
+def test_compatibility_lock_does_not_poison_intake_validation(
+    tmp_path: Path, stale_registration: bool
+) -> None:
     """The caller-local compatibility lock is not durable caller state."""
     caller, remote = _make_repository(tmp_path)
+    stale = tmp_path / "removed-worktree"
+    if stale_registration:
+        _run_git(caller, "worktree", "add", "--detach", str(stale), "HEAD")
+        shutil.rmtree(stale)
     manager = _manager(caller, remote)
     lock_path = caller / DEFAULT_STATE_DIR / "locks" / "git-repo.lock"
     compatibility_paths = (
@@ -678,6 +686,40 @@ def test_compatibility_lock_does_not_poison_intake_validation(tmp_path: Path) ->
     assert lock_path.is_file()
     assert Path(f"{lock_path}.owner.lock").is_file()
     manager.validate(operational_state_paths=compatibility_paths)
+    if stale_registration:
+        assert not stale.exists()
+        assert str(stale) in _run_git(caller, "worktree", "list", "--porcelain").stdout
+
+
+@pytest.mark.parametrize("failure", [PermissionError, RuntimeError])
+def test_unreadable_registration_still_blocks_compatibility_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type[Exception]
+) -> None:
+    """An inaccessible registration must not be treated as an absent worktree."""
+    caller, remote = _make_repository(tmp_path)
+    sibling = tmp_path / "sibling"
+    _run_git(caller, "worktree", "add", "--detach", str(sibling), "HEAD")
+    manager = _manager(caller, remote)
+    lock_path = caller / DEFAULT_STATE_DIR / "locks" / "git-repo.lock"
+    compatibility_paths = (
+        lock_path,
+        Path(f"{lock_path}.owner.lock"),
+        Path(f"{lock_path}.owner.json"),
+    )
+    original_resolve = Path.resolve
+
+    def resolve(path: Path, strict: bool = False) -> Path:
+        if path == sibling and strict:
+            raise failure("registration unavailable")
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    with pytest.raises(RepoIntakeError, match="worktree registration is unavailable") as caught:
+        manager.validate(operational_state_paths=compatibility_paths)
+
+    assert isinstance(caught.value.__cause__, failure)
+    assert not manager.worktree_path.exists()
+    assert sibling.is_dir()
 
 
 @pytest.mark.parametrize("unsafe_kind", ["extra", "symlink", "mode"])
