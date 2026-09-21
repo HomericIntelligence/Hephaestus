@@ -790,6 +790,11 @@ Thus, a second process cannot remove or rebind the fixed intake path
 while the first coordinator uses it. The second process fails immediately with
 `repository_intake_in_use` and tells the operator to wait for the active run.
 
+Compatibility-lock discovery skips registered worktrees whose directories no
+longer exist. It does not prune their Git registrations. Missing directories
+cannot supply an allowed lock path. Other path-resolution errors still stop
+intake, and the existing state and symlink checks remain in force.
+
 The intake worktree is created or rebound only under the separate shared Git
 metadata lock. Before a Git command uses an existing intake, a filesystem-only
 check verifies that its regular no-follow `.git` pointer identifies one direct
