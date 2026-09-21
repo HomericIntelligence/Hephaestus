@@ -21,11 +21,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NoReturn, cast
 
+import hephaestus.automation.comet_profile_7c2772e as comet_profile_7c2772e
 from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.config.child_environments import build_gh_child_env
 from hephaestus.utils.helpers import SubprocessOutputLimitExceeded, run_subprocess
 
-from . import comet_profile_7c2772e
 from .pipeline.repository_validation import (
     RepositoryValidationCheck,
     RepositoryValidationGap,
