@@ -13,6 +13,7 @@ from subprocess import SubprocessError
 from typing import TYPE_CHECKING, Protocol
 
 from hephaestus.automation.comment_identity import CommentAliasConflictError
+from hephaestus.automation.current_plan import read_current_plan
 from hephaestus.automation.dependency_parser import (
     MAX_DEPENDENCY_FACTS,
     DependencyFact,
@@ -154,11 +155,12 @@ def _fetch_planned_files(
     """
     try:
         with github.operation_deadline(deadline_s, shutdown=shutdown):
-            discovered = github.discover_plan(issue)
+            current = read_current_plan(issue, github)
     except CommentAliasConflictError:
         raise
     except (CancelledError, SubprocessError, OSError, RuntimeError) as error:
         raise CommentJournalReadError(str(error)) from error
+    discovered = current.plan
     if discovered.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
         raise CommentAliasConflictError(f"plan marker identity conflict: {discovered.error}")
     if discovered.status is PlanDiscoveryStatus.READ_ERROR:
@@ -167,6 +169,11 @@ def _fetch_planned_files(
         return None
     if discovered.plan_text is None:
         raise CommentJournalReadError("plan admission returned no plan text")
+    if current.finalized_body:
+        paths = parse_publication_scope_files(discovered.plan_text)
+        if not paths:
+            raise CommentJournalReadError("finalized plan scope is empty or invalid")
+        return paths
     return _parse_planned_files(discovered.plan_text)
 
 

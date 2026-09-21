@@ -979,6 +979,14 @@ Architectural contract:
   one next state: ordinarily `state:plan-no-go` to request amendment,
   `state:plan-go` to approve, or `state:needs-plan` only when no canonical plan
   should be reused.
+- File-overlap admission and publication scope use the shared current-plan
+  reader. A finalized issue body must have a valid seal, an authenticated
+  editor, and current plan-GO metadata. A second issue read must confirm the
+  same open issue, body, and digest after the editor check. A failed check
+  cannot use an older comment plan. Both consumers require complete, valid,
+  nonempty file scope for finalized bodies, including top-level files. Ordinary
+  issues keep the existing actor-owned comment lookup and path rules. The
+  reader writes no labels and grants no execution admission.
 
 ### 5.3 Plan review
 

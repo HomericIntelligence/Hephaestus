@@ -11,6 +11,7 @@ from threading import Event
 from typing import Any, Literal, assert_never
 
 from hephaestus.automation.comment_identity import CommentAliasConflictError
+from hephaestus.automation.current_plan import read_current_plan
 from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.pipeline.admission import parse_publication_scope_files
 from hephaestus.automation.pipeline.github_jobs import (
@@ -329,7 +330,7 @@ class PipelineGitHubJobRunner:
         request: ReadCurrentPlanScopeRequest, github: PipelineGitHub
     ) -> CurrentPlanScopeRead:
         """Return scope only after a complete current-plan read."""
-        plan = github.discover_plan(request.issue_number)
+        plan = read_current_plan(request.issue_number, github).plan
         if plan.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
             raise CommentAliasConflictError(plan.error or "plan identity conflict")
         if plan.status is PlanDiscoveryStatus.READ_ERROR:
