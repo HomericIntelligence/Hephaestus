@@ -4,10 +4,11 @@ The Fleet worker owns one Codex 0.153.4 app-server process. It accepts admitted
 commands through a private Unix socket. Agamemnon owns task admission. Keystone
 supplies the authenticated transport. The worker does not discover issues, assign
 tasks, change state labels, or run another task queue.
-The CLI supports contained runtime startup and inspection. Session admission is
-disabled on macOS and Linux until an enforced execution boundary is available.
-The deployment steps below describe that later enabled mode; they do not bypass
-the current gate.
+The CLI supports contained runtime startup and inspection. One fresh Linux
+session can execute through its matching supervisor-owned boundary at worker
+capacity one. Native macOS, Linux without that boundary, higher capacity, and
+cold resume remain unsupported. The deployment must separately validate the
+pinned provider's restricted startup and ordinary model/tool route.
 
 ## Start and attachment
 
@@ -26,17 +27,18 @@ the current gate.
 
    ```sh
    hephaestus-fleet-worker serve \
-     --state-dir /private/fleet/state \
-     --workspace-root /private/fleet/workspaces \
-     --codex-home /private/fleet/codex \
+     --state-dir /srv/fleet/state \
+     --workspace-root /srv/fleet/workspaces \
+     --codex-home /srv/fleet/codex \
      --worker-id laptop-1 --pool-id laptop --host-id laptop \
-     --generation 1 --capacity 12
+     --generation 1 --capacity 1 \
+     --contained-config /srv/fleet/control/runtime.json
    ```
 
 5. Attach the authenticated allocation transport to this command:
 
    ```sh
-   hephaestus-fleet-worker attach --state-dir /private/fleet/state
+   hephaestus-fleet-worker attach --state-dir /srv/fleet/state
    ```
 
 `attach` exchanges one JSON request and one JSON response per line. Each request
@@ -102,7 +104,8 @@ keeps its installed packages. It validates the executable target separately.
 }
 ```
 
-Use 1–24 entries, within the declared worker capacity. Each entry needs separate
+The configuration accepts 1–24 entries within the declared worker capacity.
+Execution currently requires capacity one and its single entry. Each entry needs separate
 session, execution, environment, and workspace identities. The worker and
 generation must match the CLI arguments. Workspaces must be below the worker
 workspace root. No workspace can contain or overlap another workspace or a
@@ -123,6 +126,31 @@ a deployment for execution.
 A complete inventory of unchanged, unstarted leases can be reused with the same
 registry. Partial, active, uncertain, or changed inventories require explicit
 reconciliation. Startup never repeats an uncertain create, start, or remove.
+
+For a fresh `start` command, the worker checks assignment ownership and the
+registry's exact retained bytes. It compares the immutable binding to the
+supervisor's lease and observes the valid stopped container in phase `created`.
+The attachment then activates that lease during `thread/start`; the worker
+does not hold the supervisor lock across this RPC. The reply's thread identity
+is journaled before the worker observes the active container and kernel boundary.
+Only a confirmed active boundary permits idle readiness. No model turn starts
+until a separate admitted `input` command arrives.
+
+Input, steering, and approval responses each recheck the active boundary before
+the provider effect. Checks include the engine, image and container policy,
+protected roots, and retained boot, container, and cgroup identities. Missing,
+stopped, changed, disposed, or uncertain boundaries fail the command. Receipts
+retain the specific cause, such as `environment_binding_mismatch`,
+`container_phase_not_ready`, or `container_observation_unavailable`.
+An existing session becomes `unknown`; its known thread and reservation remain
+durable. Repeating the same command returns its retained receipt. Observation
+does not retry thread creation, attachment, or disposal.
+
+These checks retain the restricted filesystem profile, disabled tool network,
+native worker authentication, and disabled local fallback. They do not replace
+the deployment measurement of ordinary model/tool routing. Cold resume returns
+`environment_resume_requires_reconciliation`; higher worker capacity returns
+`contained_execution_requires_capacity_one`.
 Cold session resume and dynamic registry updates remain unsupported.
 
 Shutdown stops the provider, closes attachment connections, and joins serving
@@ -259,7 +287,8 @@ event and block replay at its cursor. The controller therefore keeps this stop
 pending and blocks new controls. Resume and explicit recovery remain deployment
 gates. Closing an attachment or worker does not substitute for cancellation or
 prove contained disposal. The optional contained configuration constructs the
-supervisor and fixed registry; the platform admission gates remain closed.
+supervisor and fixed registry. Only the capacity-one fresh Linux path can pass
+the current execution checks.
 
 Prompt text, model output, shell command text, and credential values are excluded
 from activity facts and command receipts.
@@ -311,7 +340,9 @@ The pinned macOS process sandbox adds shared temporary-directory access when
 The worker therefore rejects native macOS session admission with
 `native_macos_requires_isolated_linux_worker`. A laptop Linux VM or container
 boundary must separately demonstrate its filesystem and resource isolation.
-Linux also rejects admission with `linux_execution_requires_verified_boundary`.
+Linux without an owned contained registry also rejects admission with
+`linux_execution_requires_verified_boundary`. The capacity-one contained path
+checks the actual boundary before startup and again before each execution effect.
 The platform name and a test report cannot enable execution. A shared container
 around 24 conversations does not establish separate tool boundaries.
 The worker does not expose a CLI bypass. See the pinned
@@ -473,7 +504,7 @@ The separate installed-binary metadata canary verifies the effective profile,
 workspace roots, and approval policy with a new empty private `CODEX_HOME`.
 It permits only `initialize` and `thread/start`; it cannot submit a model turn.
 Codex 0.153.4 accepted an equivalent generated profile in that host canary.
-This example uses the paths from the launch command above:
+This separate native metadata-canary example uses `/private/fleet` paths.
 
 ```toml
 [permissions.fleet.filesystem]
@@ -601,8 +632,9 @@ permit only initialization, environment status, and restricted thread startup,
 and observe the exact active lease and causal disposal. It must reject account,
 turn, and direct tool RPCs and retain a failed or uncertain result.
 
-Restricted startup, normal model-tool routing, complete deployment private-root
-configuration, and cold-resume ownership remain execution gates. The default CLI
-does not provision contained environments. Keep native and shared Linux
-admission closed until those gates pass; retain the Codex 0.153.4 pin, disabled
+Restricted startup, normal model-tool routing, and complete deployment private-root
+configuration still need evidence from the actual deployment. The default CLI
+does not provision contained environments; use the fixed contained configuration
+for the capacity-one fresh Linux path. Cold resume and higher capacity remain
+unsupported. Retain the Codex 0.153.4 pin, existing sandbox policy, disabled
 nested subagents, and disabled local fallback.

@@ -329,6 +329,31 @@ class ContainedExecSupervisor:
         return cast(dict[str, Any], value)
 
     @_serialized
+    def observe_execution(self, lease_id: str, *, active: bool) -> dict[str, Any]:
+        """Check the current boundary without starting or disposing of its container."""
+        try:
+            lease = self.inspect(lease_id)
+            if lease["phase"] != ("active" if active else "created"):
+                raise ValueError("container_phase_not_ready")
+            self._check_context(lease)
+            self._check_workspace(ContainerSpec.from_document(lease["spec"]).workspace)
+            snapshot = self.engine.inspect(lease["containerId"])
+            validate_container(snapshot, lease)
+            if snapshot["State"].get("Running") is not active:
+                raise ValueError("container_running_state_changed")
+            if active:
+                current = self._capture(lease, snapshot)
+                previous = lease.get("runtime", {})
+                if any(
+                    previous.get(key) != current[key]
+                    for key in ("bootId", "containerId", "cgroupPath")
+                ):
+                    raise ValueError("kernel_observation_changed")
+            return lease
+        except (KeyError, TypeError, OSError, RuntimeError) as error:
+            raise ValueError("container_observation_unavailable") from error
+
+    @_serialized
     def create(self, spec: ContainerSpec) -> dict[str, Any]:
         """Persist creation intent before requesting an immutable contained endpoint."""
         self._check_workspace(spec.workspace)

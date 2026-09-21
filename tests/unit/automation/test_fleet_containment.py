@@ -164,6 +164,76 @@ def supervisor(tmp_path, engine=None, kernel=None):
     return ContainedExecSupervisor(tmp_path / "state", engine, kernel or Kernel(engine))
 
 
+def test_execution_observation_preserves_lifecycle_and_journal(tmp_path):
+    """Observe stopped and active boundaries without another lifecycle effect."""
+    owner = supervisor(tmp_path)
+    try:
+        created = owner.create(specification(tmp_path))
+        before = list(owner.journal.records)
+        assert owner.observe_execution(created["leaseId"], active=False) == created
+        assert owner.journal.records == before
+        assert "attach" not in owner.engine.calls
+        owner.start(created["leaseId"])
+        active = owner.inspect(created["leaseId"])
+        before = list(owner.journal.records)
+        assert owner.observe_execution(created["leaseId"], active=True) == active
+        assert owner.journal.records == before
+        assert owner.engine.calls.count("create") == owner.engine.calls.count("attach") == 1
+        assert "remove" not in owner.engine.calls
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        ("unknown-lease", "container_observation_unavailable"),
+        ("engine", "engine_context_changed"),
+        ("policy", "container_policy_mismatch"),
+        ("kernel", "container_observation_unavailable"),
+        ("boot", "kernel_observation_changed"),
+        ("missing-runtime", "kernel_observation_changed"),
+        ("stopped", "container_running_state_changed"),
+        ("uncertain", "container_phase_not_ready"),
+        ("disposed", "container_phase_not_ready"),
+        ("protected-workspace", "supervisor_storage_overlap"),
+    ],
+)
+def test_execution_observation_rejects_changed_boundary(tmp_path, monkeypatch, failure, expected):
+    """Reject unavailable or changed evidence without a lifecycle retry."""
+    owner = supervisor(tmp_path)
+    try:
+        lease = owner.create(specification(tmp_path))
+        lease_id = lease["leaseId"]
+        owner.start(lease_id)
+        if failure == "unknown-lease":
+            lease_id = "absent"
+        elif failure == "engine":
+            monkeypatch.setattr(owner.engine, "identity", lambda: {"socket": "other"})
+        elif failure == "policy":
+            owner.engine.snapshot["HostConfig"]["NetworkMode"] = "host"
+        elif failure == "kernel":
+            owner.kernel.fail_capture = True
+        elif failure == "boot":
+            owner.kernel.boot = "boot-2"
+        elif failure == "missing-runtime":
+            owner.leases[lease_id].pop("runtime")
+        elif failure == "stopped":
+            owner.engine.snapshot["State"]["Running"] = False
+        elif failure in {"uncertain", "disposed"}:
+            owner.leases[lease_id]["phase"] = failure
+        elif failure == "protected-workspace":
+            owner.protected_roots = (specification(tmp_path).workspace,)
+        before = list(owner.journal.records)
+        with pytest.raises(ValueError, match=expected):
+            owner.observe_execution(lease_id, active=True)
+        assert owner.journal.records == before
+        assert owner.engine.calls.count("create") == owner.engine.calls.count("attach") == 1
+        assert "remove" not in owner.engine.calls
+    finally:
+        owner.close()
+
+
 def test_disposal_requires_causal_kernel_absence_and_retains_a_durable_receipt(tmp_path):
     """Never treat an engine remove acknowledgment or process-stream exit as disposal."""
     owner = supervisor(tmp_path)

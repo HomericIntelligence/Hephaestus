@@ -16,7 +16,9 @@ import threading
 import time
 import tomllib
 import venv
+from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -26,6 +28,7 @@ from hephaestus.automation.fleet_journal import WorkerJournal
 from hephaestus.automation.fleet_provider import CodexAppServer
 from tests.unit.automation.test_fleet_attachment import PipeEngine
 from tests.unit.automation.test_fleet_containment import Kernel
+from tests.unit.automation.test_fleet_worker import command
 
 pytestmark = pytest.mark.precommit
 FIXTURE = Path(__file__).parents[2] / "fixtures" / "fleet_provider.py"
@@ -71,9 +74,16 @@ class RuntimeEngine:
 
 
 @pytest.fixture
-def runtime_setup(monkeypatch: pytest.MonkeyPatch):
+def runtime_setup(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     """Replace external engines and the provider, with the admission guard unchanged."""
-    with tempfile.TemporaryDirectory(prefix="hf-", dir="/tmp") as directory:
+    private_storage = getattr(request, "param", False)
+    parent = Path.home() / ".cache" / "hf" if private_storage else Path("/tmp")
+    if private_storage:
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        assert parent.is_dir() and not parent.is_symlink()
+        assert parent.stat().st_uid == os.getuid() and parent.stat().st_mode & 0o077 == 0
+    capacity = 1 if private_storage else 2
+    with tempfile.TemporaryDirectory(prefix="hf-", dir=parent) as directory:
         root = Path(directory).resolve()
         for name in (
             "auth",
@@ -87,7 +97,7 @@ def runtime_setup(monkeypatch: pytest.MonkeyPatch):
         ):
             (root / name).mkdir(mode=0o700)
         environments = []
-        for index in (1, 2):
+        for index in range(1, capacity + 1):
             workspace = root / "work" / str(index)
             workspace.mkdir()
             environments.append(
@@ -138,7 +148,8 @@ def runtime_setup(monkeypatch: pytest.MonkeyPatch):
             return engine
 
         monkeypatch.setattr(fleet_worker, "CodexAppServer", provider)
-        monkeypatch.setattr(fleet_worker, "validate_worker_storage", lambda *_: None)
+        if not private_storage:
+            monkeypatch.setattr(fleet_worker, "validate_worker_storage", lambda *_: None)
         monkeypatch.setattr(fleet_podman, "PodmanEngine", acquire_engine)
         monkeypatch.setattr(fleet_podman, "LinuxKernel", lambda: Kernel(PipeEngine()))
         arguments = ["serve", "--contained-config", str(config_path)]
@@ -149,7 +160,7 @@ def runtime_setup(monkeypatch: pytest.MonkeyPatch):
             "worker-id": "worker-a",
             "pool-id": "pool-a",
             "host-id": "host-a",
-            "capacity": 2,
+            "capacity": capacity,
             "generation": 1,
         }.items():
             arguments.extend(["--" + name, str(value)])
@@ -157,6 +168,264 @@ def runtime_setup(monkeypatch: pytest.MonkeyPatch):
         engine.close()
         for value in providers:
             value.close()
+
+
+@pytest.fixture
+def contained_session(runtime_setup, monkeypatch: pytest.MonkeyPatch):
+    """Prepare the real worker with a provider that uses its owned attachment."""
+    from hephaestus.automation.fleet_runtime import ContainedRuntime
+
+    root, _config, path, _arguments, _engine, _providers = runtime_setup
+    # Control the host observation, not the production admission decision.
+    monkeypatch.setattr(fleet_worker, "sys", SimpleNamespace(platform="linux"))
+    original_request = CodexAppServer.request
+    requests = []
+    expected_selection = [
+        {"environmentId": "env-1", "cwd": "/workspace", "runtimeWorkspaceRoots": ["/workspace"]}
+    ]
+    with ExitStack() as attachments:
+
+        def request(provider, method, params, *, timeout=None):
+            if method in {"thread/start", "turn/start"}:
+                requests.append((method, copy.deepcopy(params)))
+                assert params["environments"] == expected_selection
+            if method == "thread/start":
+                registry = tomllib.loads((provider.codex_home / "environments.toml").read_text())
+                assert registry["include_local"] is False and registry["default"] == "none"
+                assert len(registry["environments"]) == 1
+                environment = registry["environments"][0]
+                assert environment["id"] == "env-1"
+                args = environment["args"]
+                values = dict(zip(args[2::2], args[3::2], strict=True))
+                client = attachments.enter_context(
+                    socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                )
+                client.settimeout(2)
+                client.connect(values["--socket"])
+                client.sendall(
+                    json.dumps(
+                        {
+                            "schema": "hi/fleet/attachment/v1",
+                            "leaseId": values["--lease-id"],
+                            "bindingDigest": values["--binding-digest"],
+                        }
+                    ).encode()
+                    + b"\n"
+                )
+                stream = attachments.enter_context(client.makefile("rb"))
+                assert json.loads(stream.readline(1024)) == {"status": "attached"}
+                client.sendall(b"owned attachment marker\n")
+                assert stream.readline(1024) == b"owned attachment marker\n"
+            return original_request(provider, method, params, timeout=timeout)
+
+        monkeypatch.setattr(CodexAppServer, "request", request)
+        worker = fleet_worker.FleetWorker(
+            state_dir=root / "worker",
+            workspace_root=root / "work",
+            codex_home=root / "auth",
+            worker_id="worker-a",
+            pool_id="pool-a",
+            host_id="host-a",
+            generation=1,
+            capacity=1,
+        )
+        runtime = ContainedRuntime(worker, path)
+        try:
+            runtime.start()
+            start = command(
+                "start",
+                payload={
+                    "workspace": "1",
+                    "agentId": "agent-1",
+                    "taskId": "task-1",
+                    "executionId": "execution-1",
+                    "stage": "implementation",
+                    "issueRefs": ["HomericIntelligence/Hephaestus#3308"],
+                },
+            )
+            yield worker, runtime, requests, start, original_request
+        finally:
+            attachments.close()
+            runtime.close()
+
+
+@pytest.mark.parametrize("runtime_setup", [True], indirect=True, ids=["private-storage"])
+def test_contained_runtime_admits_one_fresh_session(contained_session) -> None:
+    """Admit work only through the real runtime and its owned attachment."""
+    worker, runtime, requests, start, _original_request = contained_session
+    result = worker.handle(start)
+    assert result["status"] == "completed", (
+        f"start error: {result.get('error') or result.get('receipt', {}).get('error')}"
+    )
+    assert worker.handle(start) == result
+    assert [method for method, _ in requests] == ["thread/start"]
+    session = worker.inventory()["sessions"][0]
+    assert session["activity"] == "idle" and session["providerTurnId"] is None
+    assert session["providerThreadId"] == result["receipt"]["providerThreadId"]
+    assert worker.journal.commands[start["idempotencyKey"]]["result"] == result
+    assert runtime.supervisor is not None
+    lease = runtime.supervisor.inventory()[0]
+    assert lease["phase"] == "active" and lease["spec"]["sessionId"] == session["sessionId"]
+    assert lease["runtime"]["containerId"] == lease["containerId"]
+    assert requests[0][1]["config"]["permissions"]["fleet"] == {
+        "filesystem": {":minimal": "read", "/workspace": "write"},
+        "network": {"enabled": False},
+    }
+    result = worker.handle(command("input", number=2, payload={"text": "approval"}))
+    assert result["status"] == "completed", result
+    # This response follows the fixture's approval frame on the same stream.
+    worker.provider.request("fixture/last-request", {"method": "turn/start"})
+    worker.poll()
+    assert worker.inventory()["sessions"][0]["activity"] == "waiting_approval"
+    response = command(
+        "respond",
+        number=3,
+        payload={"requestId": "approve-1", "response": {"decision": "decline"}},
+    )
+    result = worker.handle(response)
+    assert result["status"] == "completed", result
+    assert worker.handle(response) == result
+    worker.provider.request("fixture/last-request", {"method": "turn/start"})
+    session = worker.inventory()["sessions"][0]
+    assert session["activity"] == "idle" and session["outcome"] == "completed"
+    assert [method for method, _ in requests] == ["thread/start", "turn/start"]
+    assert worker.inventory()["activeReservations"] == 1
+    resumed = worker.handle(command("resume", number=4))
+    assert resumed["receipt"]["error"] == "environment_resume_requires_reconciliation"
+    assert worker.provider.request("fixture/last-request", {"method": "thread/resume"}) == {}
+
+
+@pytest.mark.parametrize("runtime_setup", [True], indirect=True, ids=["private-storage"])
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        ("macos", "native_macos_requires_isolated_linux_worker"),
+        ("bare-linux", "linux_execution_requires_verified_boundary"),
+        ("capacity", "contained_execution_requires_capacity_one"),
+        ("supervisor", "containment_supervisor_required"),
+        ("assignment", "environment_not_owned"),
+        ("owner", "environment_binding_mismatch"),
+        ("registry", "environment_configuration_changed"),
+        ("engine", "engine_context_changed"),
+    ],
+)
+def test_contained_start_rejects_unverified_assignment(
+    contained_session, monkeypatch: pytest.MonkeyPatch, failure, expected
+) -> None:
+    """Reject an invalid boundary before a thread or reservation is created."""
+    worker, runtime, requests, start, _original_request = contained_session
+    owner = runtime.supervisor
+    lease = owner.inventory()[0]
+    if failure == "macos":
+        monkeypatch.setattr(fleet_worker, "sys", SimpleNamespace(platform="darwin"))
+    elif failure == "bare-linux":
+        worker.environment_registry = None
+    elif failure == "capacity":
+        worker.capacity = 2
+    elif failure == "supervisor":
+        worker.containment_supervisor = None
+    elif failure == "assignment":
+        start["payload"]["executionId"] = "other-execution"
+    elif failure == "owner":
+        owner.leases[lease["leaseId"]]["spec"]["generation"] = 2
+    elif failure == "registry":
+        (worker.codex_home / "environments.toml").write_text("include_local = true\n")
+    elif failure == "engine":
+        monkeypatch.setattr(owner.engine, "identity", lambda: {"socket": "other"})
+    result = worker.handle(start)
+    assert result["status"] == "failed" and result["receipt"]["error"] == expected
+    assert worker.handle(start) == result
+    assert requests == [] and worker.inventory()["sessions"] == []
+    assert worker.inventory()["activeReservations"] == 0
+
+
+@pytest.mark.parametrize("runtime_setup", [True], indirect=True, ids=["private-storage"])
+@pytest.mark.parametrize("failure", ["no-attachment", "changed-owner"])
+def test_contained_start_keeps_known_thread_when_readiness_is_unconfirmed(
+    contained_session, monkeypatch: pytest.MonkeyPatch, failure
+) -> None:
+    """Keep the known thread and reservation without retrying an uncertain start."""
+    worker, runtime, requests, start, original_request = contained_session
+    owner = runtime.supervisor
+    lease_id = owner.inventory()[0]["leaseId"]
+    request_with_attachment = CodexAppServer.request
+
+    def request(provider, method, params, *, timeout=None):
+        invoke = original_request if failure == "no-attachment" else request_with_attachment
+        result = invoke(provider, method, params, timeout=timeout)
+        if method == "thread/start" and failure == "changed-owner":
+            owner.leases[lease_id]["spec"]["generation"] = 2
+        return result
+
+    monkeypatch.setattr(CodexAppServer, "request", request)
+    result = worker.handle(start)
+    expected = (
+        "container_phase_not_ready"
+        if failure == "no-attachment"
+        else "environment_binding_mismatch"
+    )
+    assert result["status"] == "failed" and result["receipt"]["error"] == expected
+    assert worker.handle(start) == result
+    session = worker.inventory()["sessions"][0]
+    assert session["providerThreadId"] == "thread-1" and session["activity"] == "unknown"
+    assert session["waitingReason"] == expected and session["admissionReserved"] is True
+    assert worker.inventory()["activeReservations"] == 1 and session["released"] is False
+    assert len(requests) == (0 if failure == "no-attachment" else 1)
+    assert worker.handle(command("input", number=2, payload={"text": "tool"}))["status"] == "failed"
+    assert worker.provider.request("fixture/last-request", {"method": "turn/start"}) == {}
+
+
+@pytest.mark.parametrize("runtime_setup", [True], indirect=True, ids=["private-storage"])
+@pytest.mark.parametrize("operation", ["input", "steer", "respond"])
+@pytest.mark.parametrize("failure", ["registry", "stopped", "kernel", "uncertain", "disposed"])
+def test_contained_effect_rechecks_current_boundary(
+    contained_session, monkeypatch: pytest.MonkeyPatch, operation, failure
+) -> None:
+    """A lost boundary rejects new input and replies while keeping the task reserved."""
+    worker, runtime, requests, start, _original_request = contained_session
+    assert worker.handle(start)["status"] == "completed"
+    if operation != "input":
+        text = "approval" if operation == "respond" else "tool"
+        assert worker.handle(command("input", number=2, payload={"text": text}))["status"] == (
+            "completed"
+        )
+        worker.provider.request("fixture/last-request", {"method": "turn/start"})
+        worker.poll()
+    owner = runtime.supervisor
+    lease = owner.inventory()[0]
+    if failure == "registry":
+        (worker.codex_home / "environments.toml").write_text("include_local = true\n")
+        expected = "environment_configuration_changed"
+    elif failure == "stopped":
+        owner.engine.children[lease["containerId"]].snapshot["State"]["Running"] = False
+        expected = "container_running_state_changed"
+    elif failure == "kernel":
+        owner.kernel.fail_capture = True
+        expected = "container_observation_unavailable"
+    else:
+        owner.leases[lease["leaseId"]]["phase"] = failure
+        expected = "container_phase_not_ready"
+    responses = []
+    monkeypatch.setattr(worker.provider, "respond", lambda *args: responses.append(args))
+    methods_before = [method for method, _ in requests]
+    action = (
+        command(
+            "respond",
+            number=3,
+            payload={"requestId": "approve-1", "response": {"decision": "decline"}},
+        )
+        if operation == "respond"
+        else command("input", number=3, payload={"text": "tool"})
+    )
+    result = worker.handle(action)
+    assert result["status"] == "failed" and result["receipt"]["error"] == expected
+    assert worker.handle(action) == result
+    assert [method for method, _ in requests] == methods_before and responses == []
+    assert worker.provider.request("fixture/last-request", {"method": "turn/steer"}) == {}
+    session = worker.inventory()["sessions"][0]
+    assert session["activity"] == "unknown" and session["waitingReason"] == expected
+    assert session["providerThreadId"] == "thread-1" and session["admissionReserved"] is True
+    assert worker.inventory()["activeReservations"] == 1
 
 
 def test_cli_serves_two_fixed_attachments_with_one_provider(
@@ -202,7 +471,7 @@ def test_cli_serves_two_fixed_attachments_with_one_provider(
         assert len(worker.containment_supervisor.inventory()) == 2
         assert worker.provider.request("fixture/last-request", {"method": "thread/start"}) == {}
         with pytest.raises(ValueError):
-            worker.execution_guard()
+            worker.execution_guard({}, False)
 
     monkeypatch.setattr(CodexAppServer, "start", observe_start)
     monkeypatch.setattr(fleet_worker_cli, "serve", serve)

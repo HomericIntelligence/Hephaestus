@@ -3011,6 +3011,23 @@ unchanged inventory of unstarted leases retains its identities across restart.
 Active, uncertain, partial, or changed inventories require reconciliation.
 The configuration has no task or command authority.
 
+One fresh Linux session can pass the local execution check when worker capacity
+is one. Before `thread/start`, the worker checks the assignment against the
+fixed registry and the supervisor's immutable lease. The supervisor observes
+the engine, container policy, protected roots, and stopped `created` boundary.
+The attachment owns activation. The startup RPC runs without the supervisor
+lock so that activation can acquire it. After the reply, the worker journals
+the provider thread identity and checks the active boundary before reporting
+readiness. Startup does not start a model turn.
+
+Before input, steering, or an approval response, the worker checks the current
+registry and owned active boundary again. The supervisor observes the running
+container and current kernel state against the retained boot, container, and
+cgroup identities. Observation does not create, attach, or remove a container.
+A failed check returns its specific cause and keeps a previously reserved
+session non-ready. Known provider identities and reservations remain in the
+journal. Command replay returns the retained receipt without another effect.
+
 The runtime closes the provider and attachment streams with finite waits. It
 attempts all acquired local cleanup after a partial failure. A live endpoint
 thread or failed engine attachment cleanup keeps the supervisor journal writer
@@ -3031,12 +3048,13 @@ An interrupted contained session retains its lease and reservation and reports
 this change does not establish an interrupt/resume recovery path. A normal
 completed turn also retains its container and does not complete the issue.
 
-Native macOS and shared Linux session admission remain disabled by
+Native macOS and Linux without a verified owned boundary remain disabled by
 [`fleet_isolation`](../hephaestus/automation/fleet_isolation.py).
-The next execution gates must prove restricted thread startup, normal tool
-routing, and cold-resume ownership through this attachment. The optional CLI
-configuration provisions the supervisor but does not enable admission. Preserve the disabled
-local fallback. The [Fleet worker design and runbook](fleet-worker.md)
+Capacity above one and cold resume remain unsupported. Deployment must still
+demonstrate restricted startup and ordinary model/tool routing with the pinned
+provider, native authentication, and its actual engine and kernel. Deterministic
+protocol tests do not supply that evidence. Keep the existing sandbox policy
+and disabled local fallback. The [Fleet worker design and runbook](fleet-worker.md)
 records the supported contracts, bounded probes, and remaining gates.
 
 ### Transferable build source
