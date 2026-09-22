@@ -1702,6 +1702,14 @@ class ImplementationStage(Stage):
     def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """WORKTREE_WAIT submits the create-worktree git job."""
         issue = _issue_number(item)
+        if item.payload.get("_fleet_attempt_digest"):
+            try:
+                _existing_impl_receipt(item)
+                if not item.payload.get(_PUBLICATION_DISCOVERY_CHECKED):
+                    raise ValueError("Fleet source discovery is not confirmed.")
+            except (KeyError, TypeError, ValueError):
+                return StageOutcome(Disposition.BLOCKED, "fleet_source_unconfirmed")
+            return Continue(next_state=ADVISE_WAIT)
         if (
             item.pr is None
             and not item.payload.get("existing_pr")
@@ -2533,6 +2541,11 @@ class ImplementationStage(Stage):
                 repo=item.repo,
                 expected_repository=f"{ctx.org}/{item.repo}",
                 op="discover_first_publication",
+                workspace=(
+                    _existing_impl_workspace(item)
+                    if item.payload.get("_fleet_attempt_digest")
+                    else None
+                ),
                 timeout_s=GIT_JOB_TIMEOUT_S,
                 kwargs={
                     "repo_root": str(ctx.paths.repo_root),

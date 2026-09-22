@@ -2968,7 +2968,7 @@ recovered journal continues its existing epoch. The standalone planner's
 
 ## 14. Fleet execution boundary
 
-Fleet adds an opt-in execution adapter beside the existing queue pipeline.
+Fleet adds an opt-in execution adapter to the existing queue pipeline.
 Agamemnon retains task admission, assignments, and orchestration decisions.
 Keystone transports admitted commands and worker facts. Odysseus owns the web
 interface. The Fleet adapter does not discover issues, create another task
@@ -2997,18 +2997,45 @@ private association for one admitted session and its next input. It records the
 existing assignment, stage, workspace, generation, provider thread, and contained
 lease. Its upstream digest is a correlation reference, not admission authority.
 The private `associate-job` and `job-result` operations use `hi/fleet/job/v1`;
-they add no public dispatch fields or queue. A matching final answer, durable
-input receipt, provider terminal outcome, and causal disposal can produce a
+they add no public dispatch fields or queue. The association reply exposes only
+its retained lease ID and binding digest for caller comparison. A matching final
+answer, durable input receipt, provider terminal outcome, and causal disposal can produce a
 private `hi/fleet/job-result/v1` result. Failed provider outcomes retain their
 native error details. Conflicting evidence withholds the original immutable
 result. Unfinished replay and uncertain writes require reconciliation.
 
 This path retains local workspace and capacity reservations after normal
 completion. It does not release Agamemnon's claim, change labels, or complete the
-issue. The connection to `AgentJob`, `JobResult`, and the existing coordinator's
-test, review, and publication stages remains separate work. Synthetic unit tests
-do not establish live runtime acceptance. See the
+issue. Synthetic unit tests do not establish live runtime acceptance. See the
 [private result contract](fleet-worker.md#private-terminal-job-results).
+
+[`run_fleet_pipeline`](../hephaestus/automation/pipeline/fleet_execution.py)
+connects one already-admitted implementation to the normal Coordinator,
+WorkerPool, `AgentJob`, and stage callbacks. Its caller owns the controller client
+and private worker attachment. The entry validates one direct issue, one worker,
+one pass, Codex, configured pre-PR tests, and disabled discovery, advice, learning,
+and model overrides. Normal Planning authenticates the sealed plan. Fleet
+PlanReview reuses the authenticated plan reader and scope validation. The exact
+body and intake revision must match the admitted attempt.
+
+The existing source receipt and lane lock bind the physical writer. Read-only
+discovery rejects dirty, changed, or retained publication/rebase state. It does
+not prepare a new workspace, reserve a branch, or rebase. A durable source
+obligation fences the single input attempt before its controller command. Only
+the matching terminal result and confirmed disposal can clear that obligation;
+uncertainty retains it. The controller continues to validate the canonical task
+claim. The source obligation cannot replace that claim or authorize recovery.
+
+Confirmed implementation output enters the normal configured test and controlled
+publication callbacks. The existing deterministic commit-message fallback avoids
+another provider turn. A created PR or required repair ends the local slice with
+`new_admission_required`. Uncertain execution, publication, and cancellation end
+with `reconciliation_required`. These non-passing local results preserve source
+and external admission while releasing local queue capacity. They do not enter
+ordinary retry or finished cleanup. Review and other model operations require a
+new admission. Generic events omit the private final answer; retained output
+continues through the authenticated reader. See the
+[single-attempt runbook](fleet-worker.md#run-one-admitted-implementation-through-the-pipeline).
 
 [`fleet_session_output`](../hephaestus/automation/fleet_session_output.py)
 retains completed Codex command items under the private worker state directory.

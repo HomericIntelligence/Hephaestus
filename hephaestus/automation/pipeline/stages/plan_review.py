@@ -49,6 +49,7 @@ re-pointed at the pipeline (#1820):
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -80,6 +81,7 @@ from hephaestus.automation.comment_identity import (
     CommentAliasConflictError,
     validate_planning_body_for_write,
 )
+from hephaestus.automation.current_plan import read_current_plan
 from hephaestus.automation.plan_review_session import PlanReviewSessionLostError
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
@@ -92,6 +94,7 @@ from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
     JournalSnapshot,
+    PlanDiscoveryStatus,
     current_plan_context,
     is_pending_review,
     journal_snapshot,
@@ -189,6 +192,25 @@ def _plan_scope_admission_failure(plan_text: str, ctx: StageContext) -> str | No
     if parse_publication_scope_files(plan_text):
         return None
     return _PLAN_SCOPE_INVALID
+
+
+def _fleet_finalized_plan_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome:
+    """Check the admitted sealed plan through its existing authenticated reader."""
+    if item.issue is None:
+        return StageOutcome(Disposition.BLOCKED, "fleet_finalized_plan_changed")
+    current = read_current_plan(item.issue, ctx.github)
+    body = current.plan.plan_text
+    if (
+        not current.finalized_body
+        or current.plan.status is not PlanDiscoveryStatus.FOUND
+        or not isinstance(body, str)
+        or body != item.payload.get("issue_body")
+        or hashlib.sha256(body.encode()).hexdigest() != item.payload.get("_fleet_plan_sha256")
+    ):
+        return StageOutcome(Disposition.BLOCKED, "fleet_finalized_plan_changed")
+    if failure := _plan_scope_admission_failure(body, ctx):
+        return StageOutcome(Disposition.BLOCKED, failure)
+    return StageOutcome(Disposition.ADVANCE, "Admitted finalized plan remains approved")
 
 
 def _plan_scope_blocked_verdict() -> ReviewVerdict:
@@ -709,6 +731,8 @@ class PlanReviewStage(Stage):
             to step().
 
         """
+        if item.payload.get("_fleet_attempt_digest"):
+            return _fleet_finalized_plan_outcome(item, ctx)
         if item.issue is not None:
             labels = _require_issue_labels(item, ctx)
             if STATE_PLAN_BLOCKED in labels:

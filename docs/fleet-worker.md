@@ -243,6 +243,9 @@ digest is a correlation reference. It does not prove admission or source approva
 The worker retains its existing assignment identity, stage, workspace, provider
 thread, and immutable containment lease. An identical association can be read
 again. Changed ownership or a replacement lease cannot reuse it.
+The association reply also returns `lease: {leaseId, bindingDigest}` from that
+retained lease. The pipeline compares both values with its admitted references
+before it submits input. This private reply does not grant containment authority.
 
 The ordinary admitted `input` command must match all three input fields. The
 worker checks the lease again before dispatch. Each association permits one turn;
@@ -285,13 +288,94 @@ Normal job completion keeps the local reservation and workspace ownership.
 It emits no stop command ID and does not release Agamemnon's canonical claim.
 Explicit interruption and cancellation retain their existing semantics. A
 terminal result proves a provider outcome and cleanup, not completion of a
-GitHub issue. The adapter from admitted Fleet work to the existing `AgentJob`,
-`JobResult`, test, review, and publication stages remains separate implementation
-work. No live provider or cluster execution is established by the synthetic unit
-tests for this interface.
+GitHub issue. The optional pipeline connection below consumes this evidence.
+Synthetic unit tests for this interface do not establish live provider or
+cluster execution.
 
 [fleet-job-thread-item]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts
 [fleet-job-turn-error]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/app-server-protocol/schema/typescript/v2/TurnError.ts
+
+### Run one admitted implementation through the pipeline
+
+[`run_fleet_pipeline`](../hephaestus/automation/pipeline/fleet_execution.py)
+is an async entry to the existing Coordinator and WorkerPool. A trusted caller
+supplies an existing `AgamemnonClient`, a typed `FleetAttempt`, and the private
+worker attachment. Hephaestus does not install or construct the controller
+client, provision the worker, create admission, or discover another issue.
+
+1. Obtain the current controller assignment, session, execution generation,
+   provider thread, containment lease, and exact finalized-plan digest from the
+   existing admission path. Read the existing implementation source receipt.
+   Construct `FleetAttempt` from those records. Preserve its physical workspace,
+   branch, receipt generation, and repository identity. The full `owner/repo`
+   transport name remains separate from an existing short source-manager name.
+2. Supply `PipelineConfig` for one repository, one direct issue, one worker,
+   and one pass. Select Codex with empty model, fallback, and adapter overrides.
+   Disable advice, learning, discovery sources, and the rate guard. Enable the
+   configured pre-PR tests. Rebase, forced planning, plan updates, PR intake,
+   stage scopes, and dry runs are rejected. Key the repository path maps by the
+   same short name used in `config.repos`. The intake revision must equal the
+   admitted source revision.
+3. Keep the authenticated client open on the calling event loop. Bind the
+   existing private attachment and call the entry below with the supplied
+   configuration and admitted attempt:
+
+   ```python
+   from functools import partial
+
+   from hephaestus.automation.fleet_worker_cli import exchange
+   from hephaestus.automation.pipeline.fleet_execution import run_fleet_pipeline
+
+   result = await run_fleet_pipeline(
+       pipeline_config,
+       client=client,
+       attempt=admitted_attempt,
+       private_spool=private_spool,
+       worker_exchange=partial(exchange, worker_state_dir),
+   )
+   ```
+
+   These objects must come from the caller's current deployment and admission.
+   The call does not start a service. The private spool must be owned by the
+   worker user, have mode `0700`, and be outside source and shared temporary
+   trees. Input files use mode `0600`. Keep the client and attachment available
+   until the call returns. Each attachment request has at most 40 seconds within
+   the remaining job deadline; a longer model budget does not extend that call.
+4. Inspect the local result and retained evidence. Normal Planning authenticates
+   the sealed body. The Fleet PlanReview path rechecks the same body, editor,
+   digest, and file scope without requiring deleted intermediate comments.
+   Discovery checks the exact source receipt under its existing lane lock.
+   Dirty, changed, or retained publication/rebase work requires reconciliation.
+   The pipeline reuses the admitted writer; it creates no replacement workspace,
+   branch reservation, or initial-rebase record.
+5. After a confirmed implementation result, let the normal stage callbacks run
+   the configured tests and controlled Git/PR publication. The commit message
+   uses the existing deterministic fallback. No hidden model call is permitted.
+   A created PR ends this slice with `new_admission_required` for review. Failed
+   tests also require new admission before a repair turn. Compaction, advice,
+   planning, review, and any additional model turn cannot run on this admission.
+
+The executor writes immutable input before dispatch. Under the source lane lock,
+it confirms a `fleet-attempt:<digest>` obligation before association and the one
+controller `input` command. The controller owns canonical claim validation.
+The private worker result must match the job, input, owner, provider turn, and
+confirmed disposal. An input acknowledgment cannot complete the stage. Only a
+validated terminal result permits removal of this exact source obligation.
+Uncertain input, provider, storage, publication, or cancellation outcomes keep
+work for reconciliation and cannot authorize a retry.
+
+A local hold has a non-passing `ItemResult` and retains the workspace and external
+admission. It bypasses the normal retry and finished cleanup routes. The hold can
+release local queue capacity; it does not release Agamemnon's canonical claim or
+declare the GitHub issue complete. Cancellation signals the owned coordinator
+and worker shutdown events and waits for the coordinator thread to exit. It does
+not submit a new canonical cancellation command.
+
+The stage receives the private final answer. Generic pipeline events omit that
+answer. The existing authenticated output reader remains the log interface.
+Synthetic tests cover the normal callbacks and finite holds. They do not prove
+live authentication, provider/tool routing, cluster capacity, or deployment
+acceptance. Those checks remain separate prerequisites for a live run.
 
 ### Other private attachment operations
 
@@ -721,9 +805,10 @@ The opt-in cross-component test consumes an artifact generated by Agamemnon's
 controller serialization and a deterministic provider process. It maps only the
 physical workspace root and resolves the fixture's private input reference.
 
-The current adapter slice does not connect the existing Hephaestus issue-stage
-callbacks, heavy-build MCP recipes, or private terminal history. Add those through
-their owning interfaces before claiming the full Fleet workflows are complete.
+The optional pipeline entry connects one admitted implementation to the existing
+issue-stage callbacks. Heavy-build MCP recipes and cross-component history
+delivery remain separate integrations. Validate their owning interfaces before
+claiming the full Fleet workflows are complete.
 Keep existing `exec` integrations and label/publication rules in effect.
 
 ## Private approval evidence

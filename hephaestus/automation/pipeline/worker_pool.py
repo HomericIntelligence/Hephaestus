@@ -115,6 +115,10 @@ from hephaestus.automation.pipeline.diagnostics import (
     bounded_pipeline_diagnostic,
     redact_diagnostic_text,
 )
+from hephaestus.automation.pipeline.fleet_execution import (
+    FleetJobExecutor,
+    is_initial_implementation,
+)
 from hephaestus.automation.pipeline.git_jobs import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
@@ -265,6 +269,7 @@ from hephaestus.automation.review_journal import (
     plan_fingerprint,
 )
 from hephaestus.automation.source_worktree import (
+    FleetAttemptFence,
     SourceWorkspaceCreationFailure,
     SourceWorkspaceError,
     SourceWorkspaceManager,
@@ -975,7 +980,11 @@ def _dirty_plan_from_read(receipt: DirtyDirectPrStateRead) -> DirtyDirectPlanInp
 
 @contextmanager
 def _agent_workspace_lease(
-    job: AgentJob, *, deadline_s: float, shutdown: threading.Event
+    job: AgentJob,
+    *,
+    deadline_s: float,
+    shutdown: threading.Event,
+    fleet_fence: FleetAttemptFence | None = None,
 ) -> Iterator[Path]:
     """Validate a job and hold its source-lane lock for the provider call."""
     binding = job.workspace
@@ -1013,6 +1022,7 @@ def _agent_workspace_lease(
         else None,
         deadline=deadline,
         source_operation=operation,
+        **({"fleet_fence": fleet_fence} if fleet_fence is not None else {}),
     ) as leased:
         yield leased
 
@@ -4772,6 +4782,7 @@ class WorkerPool:
         podman_machine: str | None = None,
         run_identity: str = "unknown",
         git_lock_timeout: int = 7200,
+        fleet_executor: FleetJobExecutor | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -4803,6 +4814,7 @@ class WorkerPool:
             podman_machine: Selected connection for the verified local CI runner.
             run_identity: Bounded identity for holder diagnostics from this run.
             git_lock_timeout: Maximum passive wait for an ordinary Git job.
+            fleet_executor: Explicit route for one admitted Fleet implementation turn.
 
         """
         if podman_machine is not None:
@@ -4813,6 +4825,7 @@ class WorkerPool:
             raise ValueError("git_lock_timeout must be a positive integer")
         self._run_identity = run_identity
         self._git_lock_timeout = git_lock_timeout
+        self._fleet_executor = fleet_executor
         self._podman_machine = podman_machine
         self._executor = ThreadPoolExecutor(
             max_workers=size,
@@ -6036,12 +6049,26 @@ class WorkerPool:
         try:
             remaining_timeout()
             _validate_source_operation_job(job)
-            with _agent_workspace_lease(job, deadline_s=deadline_s, shutdown=self._shutdown) as cwd:
+            fleet_fence = (
+                FleetAttemptFence(job.fleet_attempt.binding_digest)
+                if self._fleet_executor is not None and job.fleet_attempt is not None
+                else None
+            )
+            with _agent_workspace_lease(
+                job,
+                deadline_s=deadline_s,
+                shutdown=self._shutdown,
+                **({"fleet_fence": fleet_fence} if fleet_fence is not None else {}),
+            ) as cwd:
                 if reserve_pretest is not None:
                     reserve_pretest()
                 remaining_timeout()
                 return self._invoke_agent(
-                    job, cwd, deadline_s=deadline_s, remaining_timeout=remaining_timeout
+                    job,
+                    cwd,
+                    deadline_s=deadline_s,
+                    remaining_timeout=remaining_timeout,
+                    **({"source_fence": fleet_fence} if fleet_fence is not None else {}),
                 )
 
         except CodexIsolationError as exc:
@@ -6103,8 +6130,23 @@ class WorkerPool:
         *,
         deadline_s: float,
         remaining_timeout: Callable[[], int],
+        source_fence: FleetAttemptFence | None = None,
     ) -> JobResult:
         """Execute one provider turn while the caller holds its source lease."""
+        if self._fleet_executor is not None:
+            if not is_initial_implementation(job):
+                return JobResult(
+                    ok=False,
+                    error="fleet_new_admission_required",
+                    fleet_hold="new_admission_required",
+                )
+            return self._fleet_executor.execute(
+                job,
+                cwd,
+                deadline_s=deadline_s,
+                shutdown=self._shutdown,
+                **({"source_fence": source_fence} if source_fence is not None else {}),
+            )
         if _uses_codex_implementation_adapter(job):
             validate_agent_execution_support("codex", job.execution_request)
             agent_result = self._run_codex_implementation(job, cwd, deadline=deadline_s)
@@ -7473,6 +7515,8 @@ class WorkerPool:
             "repository": job.transport_repository,
             "issue_number": job.kwargs.get("issue_number"),
         }
+        if self._fleet_executor is not None:
+            return self._discover_fleet_first_publication(job, identity)
         try:
             issue = job.kwargs.get("issue_number")
             root = job.kwargs.get("repo_root")
@@ -7533,6 +7577,71 @@ class WorkerPool:
                 value={**identity, "failure_kind": "validation_runner"},
                 error=redact_diagnostic_text(str(error))[:_ERR_MAX],
                 interrupted=isinstance(error, InterruptedError),
+            )
+
+    def _discover_fleet_first_publication(self, job: GitJob, identity: dict[str, Any]) -> JobResult:
+        """Read the admitted source without creating a writer or recovery claim."""
+        try:
+            executor = self._fleet_executor
+            if executor is None:
+                raise ValueError("The Fleet executor is missing.")
+            attempt = executor.attempt
+            request_id = identity["publication_discovery_request_id"]
+            if (
+                job.workspace != attempt.workspace
+                or job.transport_repository != attempt.repository
+                or job.kwargs.get("issue_number") != attempt.issue
+                or job.kwargs.get("branch") != attempt.source_receipt.branch
+                or job.deadline_s is None
+                or type(request_id) is not str
+                or re.fullmatch(r"[0-9a-f]{32}", request_id) is None
+            ):
+                raise ValueError("The Fleet discovery source does not match its admission.")
+            manager, binding = self._source_git_manager(
+                replace(
+                    job,
+                    kwargs={"cwd": str(attempt.workspace.cwd), **job.kwargs},
+                )
+            )
+            deadline = _PreparationDeadline(job.deadline_s, time.monotonic, self._shutdown)
+            with manager.acquire(binding, deadline=deadline):
+                receipt = manager._require_receipt(attempt.issue, SourceLane.IMPLEMENTATION)
+                if receipt != attempt.source_receipt or receipt.obligations:
+                    raise ValueError("The admitted Fleet source receipt changed or retains work.")
+                store = FirstPublicationStore(manager.common_dir, deadline=deadline)
+                if store.candidate(attempt.issue) is not None:
+                    raise ValueError("The admitted Fleet source retains publication work.")
+                if (
+                    PendingRebaseStore(manager.common_dir, deadline=deadline).candidate(
+                        attempt.issue
+                    )
+                    is not None
+                ):
+                    raise ValueError("The admitted Fleet source retains rebase work.")
+                start = manager.state_dir / f"{attempt.issue}-implementation-start.json"
+                if any(
+                    path.exists() or path.is_symlink()
+                    for path in (start, start.with_suffix(".pending.json"))
+                ):
+                    raise ValueError("The admitted Fleet source retains implementation work.")
+                if manager._require_receipt(attempt.issue, SourceLane.IMPLEMENTATION) != receipt:
+                    raise ValueError("The Fleet source changed during discovery.")
+                return JobResult(
+                    ok=True,
+                    value={
+                        **identity,
+                        "first_publication_candidate": None,
+                        "source_workspace": binding.to_dict(),
+                        "source_receipt": receipt.to_dict(),
+                    },
+                )
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            return JobResult(
+                ok=False,
+                value={**identity, "failure_kind": "validation_runner"},
+                error=redact_diagnostic_text(str(error))[:_ERR_MAX],
+                interrupted=isinstance(error, InterruptedError),
+                fleet_hold="reconciliation_required",
             )
 
     def _first_publication_rebase_handoff(
@@ -15344,7 +15453,9 @@ class WorkerPool:
             "git_env": git_env or _isolated_checkout_git_env(),
             "issue_title": job.kwargs.get("issue_title"),
             "issue_body": job.kwargs.get("issue_body"),
-            "claude_message_agent": _invoke_claude_commit_message,
+            "claude_message_agent": (
+                None if self._fleet_executor is not None else _invoke_claude_commit_message
+            ),
         }
         if expected_tree_sha is not None:
             commit_kwargs["expected_tree_sha"] = expected_tree_sha

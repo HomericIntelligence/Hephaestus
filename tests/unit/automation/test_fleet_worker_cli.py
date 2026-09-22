@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 import json
+import socket
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -92,3 +97,58 @@ def test_private_request_evidence_refuses_inactive_bindings(mode):
         )
     assert worker.calls == []
     assert worker.control_messages == []
+
+
+def test_private_exchange_uses_the_callers_finite_deadline():
+    """A connected but silent private worker cannot outlive the caller budget."""
+    from hephaestus.automation.fleet_worker_cli import exchange
+
+    assert "timeout" in inspect.signature(exchange).parameters, (
+        "the existing private attachment must accept the caller's remaining timeout"
+    )
+    connected = threading.Event()
+    finish = threading.Event()
+    failures = []
+    with tempfile.TemporaryDirectory(
+        prefix="fleet-socket-", dir=Path("/tmp").resolve()
+    ) as temporary:
+        directory = Path(temporary)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(directory / "worker.sock"))
+            listener.listen(1)
+            listener.settimeout(2)
+
+            def serve():
+                try:
+                    connection, _ = listener.accept()
+                    with connection:
+                        connected.set()
+                        finish.wait(2)
+                except Exception as error:
+                    failures.append(error)
+
+            server = threading.Thread(target=serve)
+            server.start()
+            started = time.monotonic()
+            try:
+                with pytest.raises(TimeoutError):
+                    exchange(directory, {"operation": "inventory"}, timeout=0.05)
+                assert connected.is_set()
+                assert time.monotonic() - started < 1
+            finally:
+                finish.set()
+                server.join(timeout=3)
+            assert not server.is_alive()
+            assert failures == []
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_private_exchange_rejects_unbounded_timeout_before_connect(tmp_path, timeout):
+    """Invalid deadlines cannot become an unbounded attachment operation."""
+    from hephaestus.automation.fleet_worker_cli import exchange
+
+    assert "timeout" in inspect.signature(exchange).parameters, (
+        "the existing private attachment must accept the caller's remaining timeout"
+    )
+    with pytest.raises(ValueError, match="timeout"):
+        exchange(tmp_path, {"operation": "inventory"}, timeout=timeout)

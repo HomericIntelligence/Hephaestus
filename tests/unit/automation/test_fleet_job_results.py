@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hephaestus.automation.fleet_attachment import binding_digest
 from hephaestus.automation.fleet_worker_cli import _dispatch
 from tests.unit.automation.test_fleet_worker import command, start, worker as worker
 from tests.unit.automation.test_fleet_worker_containment import contained_worker as contained_worker
@@ -73,6 +74,24 @@ def test_input_ack_does_not_supply_a_terminal_job_result(contained_worker):
     assert "remove" not in owner.engine.calls
     assert owner.inspect(lease["leaseId"])["phase"] != "disposed"
     assert worker.inventory()["activeReservations"] == 1
+
+
+def test_association_returns_only_its_snapshotted_containment_reference(contained_worker):
+    """The consumer can compare its expected lease before it submits input."""
+    worker, owner, lease = contained_worker
+    assert start(worker)["status"] == "completed"
+    response = _dispatch(worker, association())
+    assert response == {
+        "schema": "hi/fleet/job/v1",
+        "jobId": "job-1",
+        "status": "associated",
+        "lease": {"leaseId": lease["leaseId"], "bindingDigest": binding_digest(lease)},
+    }
+    response["lease"]["leaseId"] = "caller-mutated-copy"
+    replay = _dispatch(worker, association())
+    assert replay["lease"]["leaseId"] == lease["leaseId"]
+    assert "remove" not in owner.engine.calls
+    assert read_result(worker)["result"] is None
 
 
 def test_completed_job_returns_private_answer_after_causal_disposal(contained_worker):

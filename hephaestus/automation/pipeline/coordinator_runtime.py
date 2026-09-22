@@ -690,6 +690,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         seeding reconstruction resumes exactly here with no shutdown
         bookkeeping.
         """
+        if self._fleet_executor is not None and item.issue == self._fleet_executor.attempt.issue:
+            self._hold_fleet_item(item, "reconciliation_required", reason="fleet_run_interrupted")
+            return
         self._record_resumable_recovery_worktrees(item)
         self._release_source_lease(item)
         item.result = ct.ItemResult(
@@ -938,6 +941,21 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         """Apply the Disposition-to-action table (plan #1817)."""
         if item.stage is ct.StageName.REPO and item.payload.get(_DIRECT_SCOPE_BOOTSTRAP_KEY, False):
             self._route_direct_scope_bootstrap(item, outcome)
+            return
+        if (
+            self._fleet_executor is not None
+            and item.issue == self._fleet_executor.attempt.issue
+            and (
+                outcome.disposition is not Disposition.ADVANCE
+                or item.stage not in {ct.StageName.PLANNING, ct.StageName.PLAN_REVIEW}
+            )
+        ):
+            hold = (
+                "new_admission_required"
+                if outcome.disposition is Disposition.ADVANCE
+                else "reconciliation_required"
+            )
+            self._hold_fleet_item(item, hold, reason=outcome.note)
             return
         route = self._routes.get(item.stage)
         if route is None:
@@ -1281,6 +1299,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _finish(self, item: ct.WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
+        if self._fleet_executor is not None and item.issue == self._fleet_executor.attempt.issue:
+            self._hold_fleet_item(item, "reconciliation_required", reason=reason)
+            return
         writer_key = (item.repo, item.branch)
         if self._pipeline_writer_worktrees.get(writer_key) is item:
             self._pipeline_writer_worktrees.pop(writer_key, None)

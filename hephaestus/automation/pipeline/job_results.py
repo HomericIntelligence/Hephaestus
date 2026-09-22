@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from .routing import StageName
 
@@ -33,6 +33,7 @@ class JobResult:
     session_lost: bool = False
     observed_skill_invocations: tuple[str, ...] = ()
     process_failure: ProcessFailureMetadata | None = None
+    fleet_hold: Literal["new_admission_required", "reconciliation_required"] | None = None
 
 
 @dataclass(frozen=True, eq=False)

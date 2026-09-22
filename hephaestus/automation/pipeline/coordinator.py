@@ -22,6 +22,7 @@ from hephaestus.automation.pipeline.jobs import JobHandle
 from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, ROUTES, StageName
 from hephaestus.automation.pipeline.stages import Stage, StageContext, StageGitHub
+from hephaestus.automation.pipeline.stages.implementation import _store_impl_source_metadata
 from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
     DIRECT_SCOPE_WORKTREE_NONCE_KEY,
@@ -43,9 +44,24 @@ from .coordinator_issue_classification import IssueClassificationCoordinator
 from .coordinator_learning import LearningRecoveryCoordinator
 from .coordinator_runtime import CoordinatorRuntime
 from .coordinator_sources import SourceCoordinator
+from .fleet_execution import FleetExecutor, validate_fleet_config
 from .worker_protocol import AuxiliaryWorker, MainWorker, WorkerFactory
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_runtime_options(
+    worker_factory: Callable[..., MainWorker],
+    run_identity: str,
+    fleet_executor: FleetExecutor | None,
+) -> dict[str, ct.Any]:
+    """Pass optional runtime arguments without changing ordinary worker adapters."""
+    options: dict[str, ct.Any] = {}
+    if "run_identity" in inspect.signature(worker_factory).parameters:
+        options["run_identity"] = run_identity
+    if fleet_executor is not None:
+        options["fleet_executor"] = fleet_executor
+    return options
 
 
 class Coordinator(
@@ -74,6 +90,7 @@ class Coordinator(
         force_shutdown_event: threading.Event | None = None,
         idle_poll_s: float = ct._IDLE_POLL_S,
         stall_ticks_before_retry: int = ct._STALL_TICKS_BEFORE_RETRY,
+        fleet_executor: FleetExecutor | None = None,
     ) -> None:
         """Initialize coordinator state.
 
@@ -87,9 +104,12 @@ class Coordinator(
                 this so each repo context targets GitHub with an explicit repo.
             install_signals: Install SIGINT/SIGTERM/SIGHUP handlers in
                 ``run()`` (disabled in unit tests).
+            fleet_executor: Opt-in executor for the caller's admitted Fleet attempt.
 
         """
+        validate_fleet_config(config, fleet_executor)
         self.config = config
+        self._fleet_executor = fleet_executor
         self.github = github
         self._github_factory = github_factory
         if config.event_log_capacity < 1:
@@ -146,9 +166,6 @@ class Coordinator(
                 if pipeline_requires_athena_executor(config)
                 else None
             )
-            run_identity_options: dict[str, ct.Any] = {}
-            if "run_identity" in inspect.signature(WorkerPool).parameters:
-                run_identity_options["run_identity"] = config.run_identity
             pool = WorkerPool(
                 size=work_window,
                 shutdown=self._worker_shutdown,
@@ -184,7 +201,7 @@ class Coordinator(
                 ),
                 podman_machine=config.podman_machine,
                 git_lock_timeout=config.git_lock_timeout,
-                **run_identity_options,
+                **_worker_runtime_options(WorkerPool, config.run_identity, fleet_executor),
             )
             from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 
@@ -357,6 +374,8 @@ class Coordinator(
     ) -> WorkItem:
         """Materialize a direct entry and apply its scope-specific metadata."""
         item = self._entry_to_item(entry, repo)
+        if self._fleet_executor is not None:
+            return self._prepare_fleet_item(item, base_sha)
         if (
             self.config.explicit_pr_review
             and item.stage is StageName.PR_REVIEW
@@ -404,6 +423,40 @@ class Coordinator(
             )
         return item
 
+    def _prepare_fleet_item(self, item: WorkItem, base_sha: str) -> WorkItem:
+        """Bind one direct item to its existing admitted source and plan."""
+        executor = self._fleet_executor
+        if executor is None:
+            raise ValueError("The Fleet executor is missing.")
+        attempt = executor.attempt
+        item.branch = attempt.source_receipt.branch or ""
+        item.worktree = str(attempt.workspace.cwd)
+        try:
+            if (
+                item.repo != attempt.repository.rsplit("/", 1)[-1]
+                or item.issue != attempt.issue
+                or item.kind is not ItemKind.ISSUE
+                or item.pr is not None
+                or item.stage is not StageName.PLANNING
+                or base_sha != attempt.workspace.revision
+            ):
+                raise ValueError("fleet_intake_mismatch")
+            executor.validate_plan(item.payload.get("issue_body"))
+            _store_impl_source_metadata(
+                item,
+                {
+                    "source_workspace": attempt.workspace.to_dict(),
+                    "source_receipt": attempt.source_receipt.to_dict(),
+                },
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            self._hold_fleet_item(item, "reconciliation_required", reason="fleet_intake_mismatch")
+            return item
+        item.payload["_fleet_attempt_digest"] = attempt.binding_digest
+        item.payload["_fleet_plan_sha256"] = attempt.plan_sha256
+        self._pass_work_count += 1
+        return item
+
     def _seed_direct_issue_entry(
         self, repo: str, issue: int, *, github: StageGitHub
     ) -> _seeding.SeedEntry:
@@ -432,6 +485,16 @@ def run_pipeline(config: ct.PipelineConfig) -> int:
         Exit code: 130 interrupt, 1 any fail/skip/blocked, 0 clean.
 
     """
+    return _build_pipeline_coordinator(config).run()
+
+
+def _build_pipeline_coordinator(
+    config: ct.PipelineConfig,
+    *,
+    fleet_executor: FleetExecutor | None = None,
+    install_signals: bool = True,
+) -> Coordinator:
+    """Share the canonical accessor and worker construction between entry points."""
     ct._preflight_prompt_catalog()
 
     # Imported here: pipeline_github maps the accessor onto the real gh
@@ -456,5 +519,9 @@ def run_pipeline(config: ct.PipelineConfig) -> int:
         if repo
         else PipelineGitHub(config.org, dry_run=config.dry_run, gh_timeout=config.gh_timeout)
     )
-    coordinator = Coordinator(config, github=github, github_factory=_github_for)
-    return coordinator.run()
+    options: dict[str, ct.Any] = {}
+    if fleet_executor is not None:
+        options["fleet_executor"] = fleet_executor
+    if not install_signals:
+        options["install_signals"] = False
+    return Coordinator(config, github=github, github_factory=_github_for, **options)

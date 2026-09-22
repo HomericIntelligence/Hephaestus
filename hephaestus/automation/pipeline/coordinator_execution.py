@@ -12,10 +12,12 @@ import hephaestus.automation.pipeline.coordinator_types as ct
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 
+from .athena_skill_jobs import AthenaSkillJob
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import session_selection_error, store_agent_session_result
+from .fleet_execution import is_initial_implementation
 from .github_jobs import GitHubJob, RateBudgetRead, ReadRateBudgetRequest
-from .jobs import CompactJob
+from .jobs import BuildTestJob, CompactJob
 from .routing import AUXILIARY_PIPELINE_ORDER
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
@@ -190,7 +192,9 @@ class ExecutionCoordinator(_CoordinatorHost):
     def _submit_ready_job(self, item: ct.WorkItem, request: ct.JobRequest) -> None:
         """Submit one job whose admission work is complete."""
         assert not self.config.dry_run, "dry-run must never submit jobs"  # noqa: S101
-        job: ct.Any = request.job
+        job = self._bind_fleet_job(item, request.job)
+        if job is None:
+            return
         if isinstance(job, AgentJob):
             if self.config.phase_timeout_s and self.config.phase_timeout_s > 0:
                 timeout = min(job.timeout_s, self.config.phase_timeout_s)
@@ -243,6 +247,21 @@ class ExecutionCoordinator(_CoordinatorHost):
             request.on_done_state,
             {"lane": "auxiliary" if auxiliary else "main"},
         )
+
+    def _bind_fleet_job(self, item: ct.WorkItem, job: ct.Any) -> ct.Any:
+        """Permit only the first admitted implementation model request."""
+        executor = self._fleet_executor
+        if executor is None or not isinstance(job, (AgentJob, CompactJob, AthenaSkillJob)):
+            return job
+        if (
+            not isinstance(job, AgentJob)
+            or not is_initial_implementation(job)
+            or item.payload.get("_fleet_model_dispatched")
+        ):
+            self._hold_fleet_item(item, "new_admission_required", reason="fleet_model_not_admitted")
+            return None
+        item.payload["_fleet_model_dispatched"] = True
+        return replace(job, fleet_attempt=executor.attempt)
 
     def _complete_rate_budget(self, item: ct.WorkItem, result: JobResult) -> None:
         """Apply returned quota facts without another coordinator-side read."""
@@ -335,6 +354,26 @@ class ExecutionCoordinator(_CoordinatorHost):
                 self._auxiliary_job_failure_count += 1
         self._record_completion_metrics(item, handle, result, auxiliary=auxiliary)
 
+        if self._fleet_executor is not None and result.fleet_hold is not None:
+            self._hold_fleet_item(item, result.fleet_hold, reason=result.error or "")
+            return
+        if (
+            self._fleet_executor is not None
+            and item.issue == self._fleet_executor.attempt.issue
+            and (
+                result.interrupted
+                or self.shutdown.is_set()
+                or self._pool_shut_down
+                or (not result.ok and not isinstance(handle.job, BuildTestJob))
+            )
+        ):
+            self._hold_fleet_item(
+                item,
+                "reconciliation_required",
+                reason=result.error or "fleet_completion_unconfirmed",
+            )
+            return
+
         if isinstance(handle.job, GitHubJob) and isinstance(
             handle.job.request, ReadRateBudgetRequest
         ):
@@ -386,6 +425,25 @@ class ExecutionCoordinator(_CoordinatorHost):
             self._park_resumable(item)
             return
         self._run_item(item)
+
+    def _hold_fleet_item(self, item: ct.WorkItem, hold: str, *, reason: str = "") -> None:
+        """End this local run while retaining external admission and source ownership."""
+        item.result = ct.ItemResult(
+            passed=False,
+            reason=f"{hold}: {reason}" if reason else hold,
+            final_stage=item.stage,
+        )
+        if not item.payload.get("_recorded", False):
+            self.ledger.append(item.result)
+            item.payload["_recorded"] = True
+        if item.worktree:
+            preserved = (item.repo, item.issue or item.pr or 0, item.worktree)
+            if preserved not in self.preserved:
+                self.preserved.append(preserved)
+        self._record_terminal_result(item)
+        self._release_source_lease(item)
+        self._release_work_permit(item)
+        self._record_event("fleet_hold", self._item_key(item), hold)
 
     def _adopt_repo_intake(self, item: ct.WorkItem, result: JobResult) -> str | None:
         """Adopt a worker-verified intake root before repository reads."""

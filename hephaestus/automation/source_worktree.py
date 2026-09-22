@@ -100,6 +100,59 @@ class SourceWorkspaceError(RuntimeError):
         self.recovery = recovery
 
 
+class FleetAttemptFence:
+    """Change one durable attempt obligation only within its source lease."""
+
+    def __init__(self, digest: str) -> None:
+        """Bind correlation to one bounded digest without granting admission."""
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise SourceWorkspaceError("Fleet attempt digest is invalid")
+        self._name = f"fleet-attempt:{digest}"
+        self._change: Callable[[bool], None] | None = None
+        self._attempted = False
+        self._armed = False
+
+    @property
+    def name(self) -> str:
+        """Return the immutable obligation name for this attempt."""
+        return self._name
+
+    def _attach(self, change: Callable[[bool], None]) -> None:
+        if self._change is not None or self._attempted:
+            raise SourceWorkspaceError("Fleet attempt fence already has a lease")
+        self._change = change
+
+    def _detach(self) -> None:
+        self._change = None
+
+    def arm(self) -> None:
+        """Persist exclusion before the caller can dispatch its input."""
+        if self._change is None:
+            raise SourceWorkspaceError("Fleet source lease is not active")
+        if self._attempted:
+            raise SourceWorkspaceError("Fleet attempt fence was already used")
+        self._attempted = True
+        self._change(True)
+        self._armed = True
+
+    def complete(self) -> None:
+        """Clear this obligation after the caller confirms terminal disposal."""
+        if self._change is None:
+            raise SourceWorkspaceError("Fleet source lease is not active")
+        if not self._armed:
+            raise SourceWorkspaceError("Fleet attempt fence is not armed")
+        self._change(False)
+        self._armed = False
+
+
+def _reject_fleet_fence(receipt: SourceWorkspaceReceipt | None) -> None:
+    """Refuse a new writer while an earlier attempt has an uncertain result."""
+    if receipt is not None and any(
+        name.startswith("fleet-attempt:") for name in receipt.obligations
+    ):
+        raise SourceWorkspaceError("Fleet attempt requires reconciliation")
+
+
 @dataclass(frozen=True, slots=True)
 class SourceWorkspaceTerminalReference:
     """Identify a failure snapshot without granting writer authority."""
@@ -831,6 +884,7 @@ class SourceWorkspaceManager:
         """Prepare one lane while its source lock is held."""
         old = self._read_receipt(item_number, lane)
         self._reject_foreign_owner(old, item_number, lane)
+        _reject_fleet_fence(old)
         if path.exists() and self._is_dirty(path, deadline=deadline):
             raise SourceWorkspaceError(f"source workspace is dirty and preserved: {path}")
         desired_detached = lane is SourceLane.REVIEW or branch is None
@@ -948,6 +1002,7 @@ class SourceWorkspaceManager:
             )
         old = self._read_receipt(item_number, lane)
         self._reject_foreign_owner(old, item_number, lane)
+        _reject_fleet_fence(old)
         if old is not None and old.path != expected_path:
             raise SourceWorkspaceError("incompatible source workspace receipt")
         transition = self._read_writer_transition(item_number)
@@ -1703,6 +1758,7 @@ class SourceWorkspaceManager:
         dirty_plan_identity: DirtyPlanIdentity | None = None,
         deadline: _PreparationDeadline | None = None,
         source_operation: DirtySourceOperation | None = None,
+        fleet_fence: FleetAttemptFence | None = None,
     ) -> Iterator[Path]:
         """Hold the lane lease and consume a dirty claim before provider execution."""
         if binding.item_number is None or binding.lane is None:
@@ -1717,6 +1773,10 @@ class SourceWorkspaceManager:
             if receipt is None or self._binding(receipt) != binding:
                 raise SourceWorkspaceError("source workspace receipt no longer matches binding")
             self._reject_foreign_owner(receipt, binding.item_number, binding.lane)
+            _reject_fleet_fence(receipt)
+            if fleet_fence is not None:
+                fence_name = fleet_fence.name
+                fleet_fence._attach(lambda arm: self._change_fleet_fence(binding, fence_name, arm))
             try:
                 if binding.schema_version == 1 and not self._path_is_registered_to_repository(
                     receipt.path, deadline=deadline
@@ -1775,6 +1835,30 @@ class SourceWorkspaceManager:
                     yield cwd
             except WorkspaceBindingError as exc:
                 raise SourceWorkspaceError(str(exc)) from exc
+            finally:
+                if fleet_fence is not None:
+                    fleet_fence._detach()
+
+    def _change_fleet_fence(self, binding: WorkspaceBinding, name: str, arm: bool) -> None:
+        """Update only the matching obligation while acquire holds the lane."""
+        if binding.item_number is None or binding.lane is None:
+            raise SourceWorkspaceError("source workspace binding is incomplete")
+        receipt = self._require_receipt(binding.item_number, binding.lane)
+        self._reject_foreign_owner(receipt, binding.item_number, binding.lane)
+        if self._binding(receipt) != binding:
+            raise SourceWorkspaceError("Fleet attempt source binding changed")
+        active = tuple(value for value in receipt.obligations if value.startswith("fleet-attempt:"))
+        if arm:
+            _reject_fleet_fence(receipt)
+            obligations = (*receipt.obligations, name)
+        else:
+            if active != (name,):
+                raise SourceWorkspaceError("Fleet attempt fence changed")
+            obligations = tuple(value for value in receipt.obligations if value != name)
+        updated = replace(receipt, obligations=obligations)
+        self._write_receipt(updated)
+        if self._read_receipt(binding.item_number, binding.lane) != updated:
+            raise SourceWorkspaceError("Fleet attempt fence write is unconfirmed")
 
     def _validate_dirty_operation(
         self,

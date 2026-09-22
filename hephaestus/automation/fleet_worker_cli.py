@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import socket
 import socketserver
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,23 +24,53 @@ from hephaestus.cli.utils import add_json_arg, add_version_arg
 _MAX_MESSAGE = 1024 * 1024
 
 
-def exchange(state_dir: Path, message: dict[str, Any]) -> dict[str, Any]:
+def exchange(state_dir: Path, message: dict[str, Any], *, timeout: float = 40) -> dict[str, Any]:
     """Send one bounded request through the private local worker socket."""
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ValueError("invalid_timeout")
+    deadline = time.monotonic() + timeout
     data = (json.dumps(message) + "\n").encode()
     if len(data) > _MAX_MESSAGE:
         raise ValueError("message_limit")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(40)
+        connection.settimeout(_remaining_timeout(deadline))
         connection.connect(str(state_dir / "worker.sock"))
+        connection.settimeout(_remaining_timeout(deadline))
         connection.sendall(data)
-        with connection.makefile("rb") as stream:
-            response = stream.readline(_MAX_MESSAGE + 1)
+        response = _receive_response(connection, deadline)
         if not response.endswith(b"\n") or len(response) > _MAX_MESSAGE:
             raise ValueError("invalid_response")
         result = json.loads(response)
         if not isinstance(result, dict):
             raise ValueError("invalid_response")
         return result
+
+
+def _remaining_timeout(deadline: float) -> float:
+    """Retain the caller's total budget across attachment operations."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("worker_exchange_timeout")
+    return remaining
+
+
+def _receive_response(connection: socket.socket, deadline: float) -> bytes:
+    """Read one frame without resetting the deadline as bytes arrive."""
+    response = bytearray()
+    while len(response) <= _MAX_MESSAGE:
+        connection.settimeout(_remaining_timeout(deadline))
+        chunk = connection.recv(min(65536, _MAX_MESSAGE + 1 - len(response)))
+        if not chunk:
+            break
+        response.extend(chunk)
+        if b"\n" in chunk:
+            return bytes(response[: response.index(b"\n") + 1])
+    return bytes(response)
 
 
 def _dispatch(worker: FleetWorker, message: dict[str, Any]) -> dict[str, Any]:
