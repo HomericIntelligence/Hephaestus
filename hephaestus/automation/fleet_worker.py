@@ -20,6 +20,12 @@ from hephaestus.automation.fleet_isolation import (
     shell_environment_policy,
     validate_worker_storage,
 )
+from hephaestus.automation.fleet_job_results import (
+    FleetJobResults,
+    digest,
+    owner_identity,
+    validate_request,
+)
 from hephaestus.automation.fleet_journal import WorkerJournal as WorkerJournal, result_for
 from hephaestus.automation.fleet_provider import (
     LIVE_ACTIVITY_METHODS,
@@ -121,6 +127,89 @@ class FleetWorker:
         self._closed = False
         self._provider_attempted = False
         self.journal = WorkerJournal(state_dir)
+        self.jobs = FleetJobResults(self.journal)
+
+    def _job_lease(self, session: dict[str, Any]) -> dict[str, Any]:
+        """Require a current contained lease for private pipeline association."""
+        registry, owner = self.environment_registry, self.containment_supervisor
+        if registry is None or owner is None:
+            raise ValueError("pipeline_containment_required")
+        lease = registry.lease_for(session)
+        if lease.lease_id is None:
+            raise ValueError("pipeline_containment_required")
+        with owner.operation_lock:
+            retained = owner.inspect(lease.lease_id)
+            if binding_digest(retained) != lease.binding_digest:
+                raise ValueError("environment_binding_mismatch")
+        return {"leaseId": lease.lease_id, "bindingDigest": lease.binding_digest}
+
+    def associate_job(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Associate one already admitted session without dispatching work."""
+        validate_request(message, "associate-job")
+        session = self.journal.sessions.get(message["targetId"])
+        if session is None or self.journal.draining:
+            raise ValueError("job_session_not_ready")
+        return self.jobs.associate(message, session, self._job_lease(session))
+
+    def _complete_job(self, session: dict[str, Any], turn: dict[str, Any]) -> bool:
+        """Return a private terminal result after the owned container is disposed."""
+        job = self.jobs.for_session(session["sessionId"])
+        if job is None:
+            return False
+        if job["phase"] == "associated" and job["providerTurnId"] is None:
+            return True
+        if job["result"] is not None:
+            if job["terminalSha256"] != digest(turn):
+                self.jobs.unknown(job, "job_terminal_conflict")
+                session["outcome"] = None
+                self._activity(session, "unknown", "job_terminal_conflict")
+            return True
+        if turn.get("status") == "interrupted":
+            self.jobs.unknown(job, "job_interrupted")
+            return False
+        reason = "job_terminal_unconfirmed"
+        try:
+            if (
+                job["owner"] != owner_identity(session)
+                or job["providerTurnId"] != turn.get("id")
+                or job["lease"] != self._job_lease(session)
+            ):
+                raise ValueError("job_owner_mismatch")
+            if turn.get("status") not in {"completed", "failed"}:
+                raise ValueError("job_terminal_unconfirmed")
+            self._confirm_job_disposal(session)
+            self.jobs.complete(job, session["containmentDisposal"], turn)
+            current = self.journal.jobs[job["jobId"]]
+            if current["result"] is not None:
+                session["outcome"] = turn["status"]
+                self._activity(session, "idle", "pipeline_result_ready", outcome=turn["status"])
+                return True
+            reason = current.get("error", reason)
+        except ValueError as error:
+            reason = str(error)
+        except ProviderError:
+            reason = "provider_terminal_unconfirmed"
+        except (KeyError, TypeError):
+            reason = "job_owner_mismatch"
+        self.jobs.unknown(self.journal.jobs[job["jobId"]], reason)
+        session["outcome"] = None
+        self._activity(session, "unknown", reason)
+        return True
+
+    def _confirm_job_disposal(self, session: dict[str, Any]) -> None:
+        """Confirm provider idle state before cleanup and contained disposal."""
+        observed = self.provider.request(
+            "thread/read", {"threadId": session["providerThreadId"], "includeTurns": False}
+        ).get("thread", {})
+        if (
+            observed.get("id") != session["providerThreadId"]
+            or observed.get("status", {}).get("type") != "idle"
+        ):
+            raise ValueError("provider_not_confirmed_idle")
+        if not self._clean_background_terminals(session):
+            raise ValueError("background_cleanup_unconfirmed")
+        if not self._confirm_contained_disposal(session):
+            raise ValueError("container_disposal_unconfirmed")
 
     def preflight(self) -> None:
         """Check retained ownership before creating runtime resources."""
@@ -394,6 +483,10 @@ class FleetWorker:
         }
         self.execution_guard(session, True)
         selection = self._environment_parameters(session, "turn/start")
+        job = self.jobs.for_session(session["sessionId"])
+        if job is not None and job["lease"] != self._job_lease(session):
+            raise ValueError("job_lease_mismatch")
+        self.jobs.before_input(command, session)
         method = "turn/start"
         if session["activity"] != "idle":
             method = "turn/steer"
@@ -410,6 +503,7 @@ class FleetWorker:
             session.pop("stopOperation", None)
             session["outcome"] = None
             session["providerTurnId"] = _text(result["turn"]["id"])
+            self.jobs.started(session)
         self._activity(session, "model_working")
         return result_for(command, "completed", providerTurnId=session["providerTurnId"])
 
@@ -479,6 +573,9 @@ class FleetWorker:
             raise ValueError("background_cleanup_unconfirmed")
         if not self._confirm_contained_disposal(session):
             raise ValueError("container_disposal_unconfirmed")
+        job = self.jobs.for_session(session["sessionId"])
+        if job is not None and job["result"] is None:
+            self.jobs.unknown(job, "job_cancelled")
         session["released"] = True
         session["admissionReserved"] = False
         session["outcome"] = "cancelled"
@@ -631,6 +728,9 @@ class FleetWorker:
             self._notification(message)
         if self.provider.failed:
             for session in list(self.journal.sessions.values()):
+                job = self.jobs.for_session(session["sessionId"])
+                if job is not None and job["phase"] in {"associated", "dispatching", "running"}:
+                    self.jobs.unknown(job, "provider_disconnected")
                 if session["activity"] != "unknown" and not session.get("released", False):
                     self._activity(session, "unknown", "provider_disconnected")
 
@@ -670,6 +770,11 @@ class FleetWorker:
             self._refresh_activity(session, params)
 
     def _item_activity(self, session: dict[str, Any], method: str, params: dict[str, Any]) -> None:
+        conflict = self.jobs.capture(session, params) if method == "item/completed" else None
+        if conflict is not None:
+            session["outcome"] = None
+            self._activity(session, "unknown", conflict)
+            return
         if not _current_turn(session, params.get("turnId")):
             return
         item = params.get("item", {})
@@ -749,11 +854,13 @@ class FleetWorker:
         turn = params["turn"]
         if turn.get("id") != session.get("providerTurnId"):
             return
-        status = turn.get("status")
-        outcome = status if status in {"completed", "failed", "interrupted"} else "unknown"
         for request_id, pending in list(self.pending.items()):
             if pending["sessionId"] == session["sessionId"]:
                 self._drop_pending(request_id)
+        if self._complete_job(session, turn):
+            return
+        status = turn.get("status")
+        outcome = status if status in {"completed", "failed", "interrupted"} else "unknown"
         if (
             status == "interrupted"
             and session.get("stopCommandId")

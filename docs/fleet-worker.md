@@ -164,7 +164,7 @@ not mean cancellation, disposal, released capacity, or completed issue work.
 
 ## Command contract
 
-Every mutating command has these fields:
+Every admitted control command has these fields:
 
 ```json
 {
@@ -211,6 +211,89 @@ the applicable cleanup is confirmed.
 
 Assignment fields can also appear in `payload` for an attached client. Duplicate
 fields must agree with the controller envelope. Conflicts fail before dispatch.
+
+### Private terminal job results
+
+The private attachment accepts `associate-job` and `job-result` with schema
+`hi/fleet/job/v1`. This interface associates one existing admitted session with
+one future input. It does not start a session, submit input, or grant a claim.
+The association requires the session's current registry lease and containment
+supervisor. Interactive sessions without this association keep their existing
+completion behavior.
+
+An association request has these fields:
+
+```json
+{
+  "operation": "associate-job",
+  "schema": "hi/fleet/job/v1",
+  "jobId": "job-1",
+  "targetId": "session-1",
+  "generation": 1,
+  "bindingDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "inputCommandId": "command-2",
+  "inputIdempotencyKey": "input-2",
+  "inputSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
+```
+
+The digest values above are examples. The trusted caller supplies its upstream
+binding digest and the SHA-256 digest of the exact UTF-8 input text. The upstream
+digest is a correlation reference. It does not prove admission or source approval.
+The worker retains its existing assignment identity, stage, workspace, provider
+thread, and immutable containment lease. An identical association can be read
+again. Changed ownership or a replacement lease cannot reuse it.
+
+The ordinary admitted `input` command must match all three input fields. The
+worker checks the lease again before dispatch. Each association permits one turn;
+it cannot steer a running turn or authorize another turn after completion.
+These private fields are not additions to the public Keystone control envelope.
+
+A `job-result` request supplies the same schema, job ID, target ID, generation,
+and binding digest. It omits the three input fields. The reply has `status` and
+`result`. An input acknowledgment leaves the job `pending`, with no result.
+Only the matching final provider item can supply the answer. Codex 0.153.4
+defines an `agentMessage` with `phase: final_answer` and null `delivery` for this
+path. Deltas, commentary, and asynchronous messages cannot supply this answer.
+See the pinned [ThreadItem source][fleet-job-thread-item] and
+[TurnError source][fleet-job-turn-error].
+
+After a matching completed or failed turn, the worker confirms provider idle
+state, clears owned pending requests, cleans background terminals, and disposes
+the bound container through the existing supervisor. A successful result needs
+the final answer and the confirmed input receipt. A failed result can have a
+null answer, but must retain the actual provider error. Missing or invalid output
+still permits cleanup after confirmed provider termination. It leaves the job
+`unknown`, with no readable result and no permission to retry.
+
+A ready result uses schema `hi/fleet/job-result/v1`. It contains the job and
+binding references, existing owner identity, input receipt references, provider
+turn ID, actual outcome, private answer or error, disposal reference, and a
+SHA-256 digest of the other result fields. The answer limit is 64 KiB of UTF-8.
+Error details have a 64 KiB encoded JSON limit. A complete job journal record has
+a 768 KiB limit, below the existing 1 MiB journal and private socket frame limits.
+Prompts, answers, and native error details do not enter public activity events.
+
+The worker retains the original result through replay. Identical terminal or
+final-item replay has no effect. Conflicting evidence withholds the result and
+reports `unknown`; it cannot replace the retained result. Provider disconnect
+and unfinished journal replay also report `unknown`. A failed journal write can
+stop the worker. Restart retains unfinished work for reconciliation. A rejected
+change to an immutable result fails before writing its bytes.
+
+Normal job completion keeps the local reservation and workspace ownership.
+It emits no stop command ID and does not release Agamemnon's canonical claim.
+Explicit interruption and cancellation retain their existing semantics. A
+terminal result proves a provider outcome and cleanup, not completion of a
+GitHub issue. The adapter from admitted Fleet work to the existing `AgentJob`,
+`JobResult`, test, review, and publication stages remains separate implementation
+work. No live provider or cluster execution is established by the synthetic unit
+tests for this interface.
+
+[fleet-job-thread-item]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts
+[fleet-job-turn-error]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/app-server-protocol/schema/typescript/v2/TurnError.ts
+
+### Other private attachment operations
 
 The private attachment also accepts `inventory`, `events` with `after`, and
 `requests` with `targetId`. Request details can contain private command or question
@@ -268,6 +351,8 @@ marker unconfirmed until disposal succeeds. This rule applies to natural turn
 completion as well as cancellation. Before each new turn, the worker invalidates
 both observations. Provider-only cleanup and interruption outcomes do not appear
 in activity events.
+An explicitly associated terminal job uses the disposal path described above.
+Other natural turns retain their interactive container.
 
 Contained cancellation requires an injected `ContainedExecSupervisor` that owns
 the registry's exact lease. The worker rechecks configuration, assignment, and

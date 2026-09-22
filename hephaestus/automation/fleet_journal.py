@@ -30,6 +30,7 @@ class WorkerJournal:
         self.commands: dict[str, dict[str, Any]] = {}
         self.command_ids: dict[str, str] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.jobs: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.runtime_pid: int | None = None
         self.runtime_uncertain = False
@@ -52,10 +53,24 @@ class WorkerJournal:
                 self._file.close()
             raise
 
+    def _validate_job(self, value: dict[str, Any]) -> None:
+        prior = self.jobs.get(value["jobId"])
+        if (
+            prior is not None
+            and prior["result"] is not None
+            and any(
+                prior.get(key) != value.get(key)
+                for key in ("association", "owner", "lease", "result", "terminalSha256")
+            )
+        ):
+            raise RuntimeError("terminal job result changed")
+
     def _apply(self, record: dict[str, Any]) -> None:
-        self.records.append(record)
         kind = record["kind"]
         value = record["value"]
+        if kind == "job":
+            self._validate_job(value)
+        self.records.append(record)
         if kind == "intent":
             self.commands[value["key"]] = value
             self.command_ids[value["commandId"]] = value["key"]
@@ -63,6 +78,8 @@ class WorkerJournal:
             self.commands[value["key"]]["result"] = value["result"]
         elif kind == "session":
             self.sessions[value["sessionId"]] = value
+        elif kind == "job":
+            self.jobs[value["jobId"]] = value
         elif kind == "event":
             self.events.append(value)
         elif kind == "runtime":
@@ -75,6 +92,8 @@ class WorkerJournal:
 
     def append(self, kind: str, value: dict[str, Any]) -> None:
         """Flush a receipt before it can affect command acknowledgment."""
+        if kind == "job":
+            self._validate_job(value)
         record = {"kind": kind, "value": value}
         data = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
         self._file.seek(0, os.SEEK_END)
