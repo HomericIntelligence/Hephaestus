@@ -105,7 +105,21 @@ _PYGREP_CONTRACTS = {
         ("file",),
     ),
 }
-_PYGREP_ROOT_SELECTORS = ("", "^$")
+# Keep the reviewed root policies explicit. A wider exclusion requires review.
+_PYGREP_ROOT_SELECTORS = frozenset(
+    {
+        ("", "^$"),
+        (
+            "",
+            "^tests/fixtures/comet-review-validation/(current/|fe5a67d/|historical/controls/)",
+        ),
+        (
+            "",
+            "^tests/fixtures/comet-review-validation/"
+            "(current/|fe5a67d/|7c2772e/|historical/controls/)",
+        ),
+    }
+)
 _REMOTE_ENTRIES = {
     "https://github.com/pre-commit/pre-commit-hooks": {
         "trailing-whitespace": "trailing-whitespace-fixer",
@@ -347,7 +361,7 @@ def _selected(
     has_policy_hook = any(
         hook.src == "local" and hook.id in _PYGREP_CONTRACTS for hook in configured_hooks
     )
-    if has_policy_hook and (config["files"], config["exclude"]) != _PYGREP_ROOT_SELECTORS:
+    if has_policy_hook and (config["files"], config["exclude"]) not in _PYGREP_ROOT_SELECTORS:
         raise PreparationError("Unsupported root file selection contract for policy hooks")
     classifier = Classifier.from_config(names, config["files"], config["exclude"])
     selected = []
