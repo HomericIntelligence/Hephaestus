@@ -165,6 +165,10 @@ class TestFetchPlannedFiles:
         def run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             if argv == ["api", "user", "--jq", ".login"]:
                 body = "bot"
+            elif argv[:3] == ["issue", "view", str(issue)]:
+                body = json.dumps(
+                    {"number": issue, "state": "OPEN", "body": "Requirements", "labels": []}
+                )
             else:
                 assert f"/repos/{repo[0]}/{repo[1]}/issues/{issue}/comments" in argv[1]
                 page = int(argv[1].rsplit("page=", 1)[1])

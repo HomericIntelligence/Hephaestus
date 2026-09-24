@@ -202,7 +202,7 @@ def _recovery_provenance_candidate_lines(body: str) -> list[str]:
     return candidates
 
 
-def _has_finalized_plan_candidate(body: str) -> bool:
+def has_finalized_plan_candidate(body: str) -> bool:
     """Return whether a top-level line claims shared finalization."""
     return bool(_finalized_plan_candidate_lines(body))
 
@@ -245,7 +245,7 @@ def has_contaminated_issue_body(body: str) -> bool:
     return bool(
         first_line in {*PLAN_CANONICAL_MARKERS, *PLAN_REVIEW_CANONICAL_MARKERS}
         or HISTORY_RE.fullmatch(first_line)
-        or (_has_finalized_plan_candidate(body) and verified_finalized_plan(body) is None)
+        or (has_finalized_plan_candidate(body) and verified_finalized_plan(body) is None)
     )
 
 
