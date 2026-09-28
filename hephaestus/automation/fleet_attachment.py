@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.automation.fleet_containment import ContainedExecSupervisor, ContainerSpec
-from hephaestus.cli.localization import text
 
 _SCHEMA = "hi/fleet/attachment/v1"
 _BUFFER = 65536
@@ -118,10 +117,6 @@ def _relay(
                     # Stop restoring this number before releasing its ownership.
                     os.set_blocking(writer, original.pop(writer))
                     close_writer()
-                else:
-                    # The client drains the remote output, then exits even while
-                    # its provider keeps stdin open. The caller owns stdout EOF.
-                    return
                 writer_open = False
             if not reader_open and not outbound and not output_closed:
                 channel.shutdown(socket.SHUT_WR)
@@ -165,10 +160,8 @@ class AttachmentEndpoint:
         self.binding_digest = binding_digest(lease)
         self.path = supervisor.journal.directory.resolve() / f"a-{lease_id[:12]}.sock"
         self._stopped = threading.Event()
-        self.ready = threading.Event()
         self._connection_lock = threading.Lock()
         self._connection: socket.socket | None = None
-        self._identity: os.stat_result | None = None
         self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             self._listener.bind(str(self.path))
@@ -177,12 +170,11 @@ class AttachmentEndpoint:
             self._listener.listen(1)
             self._listener.settimeout(0.25)
         except BaseException:
-            self.close()
+            self._listener.close()
             raise
 
     def serve_once(self) -> None:
         """Serve one attachment; a failed or detached stream never disposes a lease."""
-        self.ready.set()
         while not self._stopped.is_set():
             try:
                 channel, _ = self._listener.accept()
@@ -251,16 +243,13 @@ class AttachmentEndpoint:
         self._listener.close()
         with contextlib.suppress(FileNotFoundError):
             current = self.path.lstat()
-            if self._identity is not None and (current.st_dev, current.st_ino) == (
-                self._identity.st_dev,
-                self._identity.st_ino,
-            ):
+            if (current.st_dev, current.st_ino) == (self._identity.st_dev, self._identity.st_ino):
                 self.path.unlink()
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the provider's private program transport without an engine executable."""
-    parser = argparse.ArgumentParser(description=text(__doc__ or ""))
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", type=Path, required=True)
     parser.add_argument("--lease-id", required=True)
     parser.add_argument("--binding-digest", required=True)
@@ -295,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             _relay(channel, sys.stdin.fileno(), sys.stdout.fileno(), None)
         return 0
     except (OSError, ValueError):
-        print(text("Fleet attachment unavailable; reconciliation is required."), file=sys.stderr)
+        print("Fleet attachment unavailable; reconciliation is required.", file=sys.stderr)
         return 1
 
 

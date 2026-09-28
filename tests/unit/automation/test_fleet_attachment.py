@@ -7,7 +7,6 @@ import os
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tomllib
@@ -20,13 +19,6 @@ import pytest
 from tests.unit.automation.test_fleet_containment import Engine, specification, supervisor
 
 pytestmark = pytest.mark.precommit
-
-
-@pytest.fixture
-def tmp_path():
-    """Keep actual Unix socket paths below the macOS path-length limit."""
-    with tempfile.TemporaryDirectory(prefix="hf-", dir="/tmp") as directory:
-        yield Path(directory).resolve()
 
 
 class PipeEngine(Engine):
@@ -199,67 +191,6 @@ def test_installed_style_client_relays_only_the_owned_stream(tmp_path):
         finally:
             thread.join(timeout=3)
         assert not thread.is_alive()
-
-
-def test_client_drains_remote_eof_without_waiting_for_provider_stdin(tmp_path):
-    """A closed remote stream terminates the client while provider input remains open."""
-    path = tmp_path / "endpoint.sock"
-    request = {
-        "schema": "hi/fleet/attachment/v1",
-        "leaseId": "1" * 32,
-        "bindingDigest": "2" * 64,
-    }
-    errors = []
-    payload = b"final bounded remote response\n"
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-        listener.bind(str(path))
-        path.chmod(0o600)
-        listener.listen(1)
-        listener.settimeout(3)
-
-        def respond():
-            try:
-                channel, _ = listener.accept()
-                with channel:
-                    channel.settimeout(3)
-                    with channel.makefile("rb") as stream:
-                        assert json.loads(stream.readline(1024)) == request
-                    channel.sendall(b'{"status":"attached"}\n' + payload)
-            except Exception as error:
-                errors.append(error)
-
-        thread = threading.Thread(target=respond)
-        thread.start()
-        client = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "hephaestus.automation.fleet_attachment",
-                "--socket",
-                str(path),
-                "--lease-id",
-                request["leaseId"],
-                "--binding-digest",
-                request["bindingDigest"],
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        try:
-            assert client.wait(timeout=3) == 0
-            assert client.stdin is not None and not client.stdin.closed
-            assert client.stdout.read() == payload
-            assert client.stderr.read() == b""
-        finally:
-            if client.poll() is None:
-                client.kill()
-            client.wait(timeout=2)
-            for stream in (client.stdin, client.stdout, client.stderr):
-                stream.close()
-            thread.join(timeout=4)
-        assert not thread.is_alive()
-        assert errors == []
 
 
 @pytest.mark.parametrize(
