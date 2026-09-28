@@ -225,13 +225,29 @@ process boundary. Runtime credentials and container-control sockets must remain
 outside those containers. The current selection adapter does not create these
 containers or claim that their process boundaries are enforced.
 
-`EnvironmentLease` binds worker, session, generation, environment ID, complete
-container ID, image digest, workspace, and an absolute Podman launcher path.
+`EnvironmentLease` binds worker, session, execution, generation, environment ID,
+complete container ID, image digest, host workspace, and an absolute Python
+attachment program. It also binds the private supervisor socket, lease ID, and
+immutable lease digest. Use `EnvironmentLease.from_endpoint` with the live
+`AttachmentEndpoint` and the installed Python interpreter.
 `EnvironmentRegistry` rejects overlapping workspaces and repeated container or
 environment IDs. It writes private `environments.toml` once and checks a digest
 of all lease fields on reconstruction. An existing configuration change requires
-reconciliation. The fixed attachment command is `podman start --attach
---interactive --sig-proxy=false CONTAINER_ID`.
+reconciliation. A missing supervisor binding fails with
+`supervised_attachment_required`. The registry never launches Podman directly.
+
+The program transport invokes `python -m hephaestus.automation.fleet_attachment`
+with `--socket`, `--lease-id`, and `--binding-digest`. The private endpoint calls
+the durable supervisor before it exposes process streams. A connection cannot
+supply an engine command. Stream content is not recorded. Closing a connection
+does not dispose its container or release its reservation.
+
+The host workspace maps to `/workspace` in the endpoint. Thread cwd, roots,
+filesystem grants, and tool HOME/XDG values use that contained path. The host
+prepares workspace directories; it does not grant tool access to host authority.
+The registry checks every attachment socket directory against all registered
+workspaces. The supervisor accepts a fixed `protected_roots` tuple for runtime,
+authentication, and spool roots and checks it at new admission and restart.
 
 The registry sets `include_local=false` and `default="none"`. The worker sends an
 explicit singleton `environments` array on every `thread/start` and `turn/start`.

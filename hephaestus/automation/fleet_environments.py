@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.fleet_attachment import AttachmentEndpoint
+
 
 @dataclass(frozen=True)
 class EnvironmentLease:
@@ -27,7 +29,11 @@ class EnvironmentLease:
     container_id: str
     image_digest: str
     workspace: Path
-    engine_program: Path
+    attachment_program: Path
+    execution_id: str | None = None
+    socket_path: Path | None = None
+    lease_id: str | None = None
+    binding_digest: str | None = None
 
     def __post_init__(self) -> None:
         """Reject partial identities and unbounded launcher inputs."""
@@ -40,12 +46,34 @@ class EnvironmentLease:
             raise ValueError("invalid_container_identity")
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", self.image_digest):
             raise ValueError("invalid_image_digest")
-        if not self.engine_program.is_absolute():
-            raise ValueError("engine_program_must_be_absolute")
+        if not self.attachment_program.is_absolute():
+            raise ValueError("attachment_program_must_be_absolute")
         workspace = self.workspace.resolve(strict=True)
         if self.workspace.is_symlink() or not workspace.is_dir():
             raise ValueError("invalid_environment_workspace")
         object.__setattr__(self, "workspace", workspace)
+
+    @classmethod
+    def from_endpoint(
+        cls, endpoint: AttachmentEndpoint, environment_id: str, program: Path
+    ) -> EnvironmentLease:
+        """Use the supervisor's immutable assignment as the registry source."""
+        lease = endpoint.supervisor.inspect(endpoint.lease_id)
+        spec = lease["spec"]
+        return cls(
+            worker_id=spec["workerId"],
+            session_id=spec["sessionId"],
+            execution_id=spec["executionId"],
+            generation=spec["generation"],
+            environment_id=environment_id,
+            container_id=lease["containerId"],
+            image_digest=spec["imageDigest"],
+            workspace=Path(spec["workspace"]),
+            attachment_program=program,
+            socket_path=endpoint.path,
+            lease_id=endpoint.lease_id,
+            binding_digest=endpoint.binding_digest,
+        )
 
 
 class EnvironmentRegistry:
@@ -74,6 +102,13 @@ class EnvironmentRegistry:
             for item in self._leases
         ):
             raise ValueError("worker_storage_overlap")
+        for lease in self._leases:
+            if lease.socket_path is not None and any(
+                lease.socket_path.parent.resolve().is_relative_to(item.workspace)
+                or item.workspace.is_relative_to(lease.socket_path.parent.resolve())
+                for item in self._leases
+            ):
+                raise ValueError("worker_storage_overlap")
         self.path = home / "environments.toml"
         self._contents = self._serialize()
 
@@ -84,15 +119,29 @@ class EnvironmentRegistry:
         digest = hashlib.sha256(bindings).hexdigest()
         lines = [f"# fleetLeaseDigest = {digest}", "include_local = false", 'default = "none"']
         for lease in self._leases:
+            if (
+                lease.socket_path is None
+                or not lease.socket_path.is_absolute()
+                or not isinstance(lease.lease_id, str)
+                or re.fullmatch(r"[0-9a-f]{32}", lease.lease_id) is None
+                or not isinstance(lease.binding_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", lease.binding_digest) is None
+                or not isinstance(lease.execution_id, str)
+                or not lease.execution_id
+            ):
+                raise ValueError("supervised_attachment_required")
             values = {
                 "id": lease.environment_id,
-                "program": str(lease.engine_program),
+                "program": str(lease.attachment_program),
                 "args": [
-                    "start",
-                    "--attach",
-                    "--interactive",
-                    "--sig-proxy=false",
-                    lease.container_id,
+                    "-m",
+                    "hephaestus.automation.fleet_attachment",
+                    "--socket",
+                    str(lease.socket_path),
+                    "--lease-id",
+                    lease.lease_id,
+                    "--binding-digest",
+                    lease.binding_digest,
                 ],
             }
             lines.append("\n[[environments]]")
@@ -137,6 +186,7 @@ class EnvironmentRegistry:
         )
         if lease is None or (
             lease.worker_id != session.get("workerId")
+            or lease.execution_id != session.get("executionId")
             or type(session.get("generation")) is not int
             or lease.generation != session["generation"]
             or str(lease.workspace) != session.get("workspace")

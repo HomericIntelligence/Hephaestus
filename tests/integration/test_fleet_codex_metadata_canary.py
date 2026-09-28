@@ -54,7 +54,11 @@ def test_installed_codex_parses_remote_only_registry_without_starting_environmen
                 container_id=str(number) * 64,
                 image_digest="sha256:" + "a" * 64,
                 workspace=workspace,
-                engine_program=Path("/fleet-metadata-probe-no-engine"),
+                attachment_program=Path(sys.executable),
+                execution_id=f"parser-execution-{number}",
+                socket_path=native_probe_root / "supervisor" / f"s{number}.sock",
+                lease_id=str(number) * 32,
+                binding_digest=str(number) * 64,
             )
         )
     registry = EnvironmentRegistry(home, leases)

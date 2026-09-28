@@ -135,7 +135,11 @@ def test_worker_sends_singleton_environment_on_each_provider_start(worker):
         container_id="1" * 64,
         image_digest="sha256:" + "a" * 64,
         workspace=worker.workspace_root / "one",
-        engine_program=Path("/usr/bin/podman"),
+        attachment_program=Path(sys.executable),
+        execution_id="session-1-exec",
+        socket_path=worker.journal.directory / "a.sock",
+        lease_id="1" * 32,
+        binding_digest="1" * 64,
     )
     registry = EnvironmentRegistry(worker.codex_home, [item])
     registry.write_configuration()
@@ -151,6 +155,12 @@ def test_worker_sends_singleton_environment_on_each_provider_start(worker):
     ]
     parameters = worker.provider.request("fixture/last-request", {"method": "thread/start"})
     assert parameters.get("environments") == expected
+    assert parameters["cwd"] == "/workspace"
+    assert parameters["runtimeWorkspaceRoots"] == ["/workspace"]
+    assert parameters["config"]["shell_environment_policy"]["set"]["HOME"] == (
+        "/workspace/.fleet-runtime/home"
+    )
+    assert str(worker.workspace_root) not in json.dumps(parameters)
     assert (
         worker.handle(command("input", number=2, payload={"text": "tool"}))["status"] == "completed"
     )
@@ -174,7 +184,11 @@ def test_worker_cannot_cold_resume_an_unreconciled_remote_environment(worker):
         container_id="1" * 64,
         image_digest="sha256:" + "a" * 64,
         workspace=worker.workspace_root / "one",
-        engine_program=Path("/usr/bin/podman"),
+        attachment_program=Path(sys.executable),
+        execution_id="session-1-exec",
+        socket_path=worker.journal.directory / "a.sock",
+        lease_id="1" * 32,
+        binding_digest="1" * 64,
     )
     registry = EnvironmentRegistry(worker.codex_home, [item])
     registry.write_configuration()

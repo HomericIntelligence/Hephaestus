@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.fleet_containment import TOOL_ENVIRONMENT
 from hephaestus.automation.fleet_environments import EnvironmentRegistry
 from hephaestus.automation.fleet_isolation import (
     require_execution_platform,
@@ -229,17 +230,24 @@ class FleetWorker:
 
     def _thread_parameters(self, session: dict[str, Any]) -> dict[str, Any]:
         workspace = session["workspace"]
+        selection = self._environment_parameters(session, "thread/start")
+        tool_environment = shell_environment_policy(Path(workspace))
+        filesystem = {
+            ":minimal": "read",
+            workspace: "write",
+            str(self.codex_home): "deny",
+            str(self.journal.directory.resolve()): "deny",
+        }
+        if selection:
+            workspace = selection["environments"][0]["cwd"]
+            filesystem = {":minimal": "read", workspace: "write"}
+            tool_environment = {**tool_environment, "set": dict(TOOL_ENVIRONMENT)}
         profile = {
-            "filesystem": {
-                ":minimal": "read",
-                workspace: "write",
-                str(self.codex_home): "deny",
-                str(self.journal.directory.resolve()): "deny",
-            },
+            "filesystem": filesystem,
             "network": {"enabled": False},
         }
         return {
-            **self._environment_parameters(session, "thread/start"),
+            **selection,
             "cwd": workspace,
             "runtimeWorkspaceRoots": [workspace],
             "permissions": "fleet",
@@ -253,7 +261,7 @@ class FleetWorker:
                     "multi_agent_v2": False,
                     "shell_snapshot": False,
                 },
-                "shell_environment_policy": shell_environment_policy(Path(workspace)),
+                "shell_environment_policy": tool_environment,
             },
         }
 

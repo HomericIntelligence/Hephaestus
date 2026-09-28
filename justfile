@@ -180,3 +180,7 @@ fleet-linux-probe root codex_bin:
 # Measure one contained exec-server through the explicit same-host engine supervisor.
 fleet-supervisor-probe root engine socket image:
     uv run --no-sync python tests/integration/fleet_supervisor_probe.py --root {{quote(root)}} --engine {{quote(engine)}} --socket {{quote(socket)}} --image {{quote(image)}}
+
+# Check restricted thread startup through the owned attachment without a model turn.
+fleet-contained-startup-probe root engine socket codex_bin image:
+    uv run --no-sync python tests/integration/fleet_contained_startup_probe.py {{quote(root)}} {{quote(engine)}} {{quote(socket)}} {{quote(codex_bin)}} {{quote(image)}}

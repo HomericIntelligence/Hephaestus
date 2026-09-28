@@ -5,10 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
@@ -222,19 +225,63 @@ def validate_container(snapshot: dict[str, Any], lease: dict[str, Any]) -> None:
         raise ValueError("container_policy_mismatch")
 
 
+def _serialized[**P, R](method: Callable[P, R]) -> Callable[P, R]:
+    @wraps(method)
+    def invoke(*args: P.args, **kwargs: P.kwargs) -> R:
+        owner = cast(ContainedExecSupervisor, args[0])
+        with owner.operation_lock:
+            return method(*args, **kwargs)
+
+    return invoke
+
+
 class ContainedExecSupervisor:
     """Keep creation, attachment, and causal disposal behind one private writer."""
 
-    def __init__(self, state_dir: Path, engine: Any, kernel: Any) -> None:
+    def __init__(
+        self, state_dir: Path, engine: Any, kernel: Any, *, protected_roots: tuple[Path, ...] = ()
+    ) -> None:
         """Load unresolved leases without restarting or removing their containers."""
+        requested_roots = tuple(root.resolve(strict=True) for root in protected_roots)
         self.journal = WorkerJournal(state_dir)
+        self.operation_lock = threading.RLock()
         self.engine = engine
         self.kernel = kernel
         self.leases: dict[str, dict[str, Any]] = {}
         self.attachments: dict[str, Any] = {}
-        for record in self.journal.records:
-            if record["kind"] == "containment":
-                self.leases[record["value"]["leaseId"]] = record["value"]
+        try:
+            retained_roots: list[str] = []
+            for record in self.journal.records:
+                if record["kind"] == "containment":
+                    self.leases[record["value"]["leaseId"]] = record["value"]
+                elif record["kind"] == "containment_authority":
+                    retained_roots = record["value"]["protectedRoots"]
+            if not isinstance(retained_roots, list) or any(
+                not isinstance(root, str) or not Path(root).is_absolute() for root in retained_roots
+            ):
+                raise ValueError("invalid_protected_roots")
+            paths = sorted(
+                set(retained_roots)
+                | {str(self.journal.directory.resolve()), *(str(root) for root in requested_roots)}
+            )
+            if len(paths) > 128:
+                raise ValueError("protected_root_limit")
+            self.protected_roots = tuple(Path(root) for root in paths)
+            for lease in self.leases.values():
+                if lease["phase"] != "disposed":
+                    self._check_workspace(Path(lease["spec"]["workspace"]))
+            if paths != retained_roots:
+                self.journal.append("containment_authority", {"protectedRoots": paths})
+        except BaseException:
+            self.journal.close()
+            raise
+
+    def _check_workspace(self, workspace: Path) -> None:
+        if any(
+            root.is_relative_to(workspace) or workspace.is_relative_to(root)
+            for root in self.protected_roots
+        ):
+            raise ValueError("supervisor_storage_overlap")
 
     def _save(self, lease: dict[str, Any]) -> dict[str, Any]:
         value = json.loads(json.dumps(lease))
@@ -242,10 +289,12 @@ class ContainedExecSupervisor:
         self.leases[value["leaseId"]] = value
         return cast(dict[str, Any], json.loads(json.dumps(value)))
 
+    @_serialized
     def inspect(self, lease_id: str) -> dict[str, Any]:
         """Return retained metadata without implying an engine observation."""
         return cast(dict[str, Any], json.loads(json.dumps(self.leases[lease_id])))
 
+    @_serialized
     def inventory(self) -> list[dict[str, Any]]:
         """Return all retained leases, including uncertain and disposed outcomes."""
         return [self.inspect(lease_id) for lease_id in self.leases]
@@ -279,11 +328,10 @@ class ContainedExecSupervisor:
                 raise ValueError("kernel_observation_invalid")
         return cast(dict[str, Any], value)
 
+    @_serialized
     def create(self, spec: ContainerSpec) -> dict[str, Any]:
         """Persist creation intent before requesting an immutable contained endpoint."""
-        authority = self.journal.directory.resolve()
-        if authority.is_relative_to(spec.workspace) or spec.workspace.is_relative_to(authority):
-            raise ValueError("supervisor_storage_overlap")
+        self._check_workspace(spec.workspace)
         active = [item for item in self.leases.values() if item["phase"] != "disposed"]
         if len(active) >= 24:
             raise ValueError("supervisor_capacity")
@@ -317,6 +365,7 @@ class ContainedExecSupervisor:
         lease["phase"] = "created"
         return self._save(lease)
 
+    @_serialized
     def start(self, lease_id: str) -> Any:
         """Attach once and record the actual same-host kernel boundary before returning."""
         lease = self.inspect(lease_id)
@@ -376,6 +425,7 @@ class ContainedExecSupervisor:
         lease.pop("waitingReason", None)
         return self._save(lease)
 
+    @_serialized
     def dispose(self, lease_id: str) -> dict[str, Any]:
         """Remove only the owned container and independently observe process/cgroup absence."""
         lease = self.inspect(lease_id)
@@ -404,6 +454,7 @@ class ContainedExecSupervisor:
         except (OSError, ValueError, RuntimeError):
             return self._uncertain(lease, "container_disposal_unconfirmed")
 
+    @_serialized
     def reconcile(self, lease_id: str) -> dict[str, Any]:
         """Observe a retained lease after restart without repeating create/start/remove."""
         lease = self.inspect(lease_id)

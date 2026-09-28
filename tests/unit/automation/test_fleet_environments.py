@@ -1,6 +1,7 @@
 """Check exclusive tool-environment routing without authorizing execution."""
 
 import json
+import sys
 import tomllib
 from dataclasses import replace
 from pathlib import Path
@@ -24,7 +25,11 @@ def lease(tmp_path, number=1):
         container_id=str(number) * 64,
         image_digest="sha256:" + "a" * 64,
         workspace=workspace,
-        engine_program=Path("/usr/bin/podman"),
+        attachment_program=Path(sys.executable),
+        execution_id=f"session-{number}-exec",
+        socket_path=tmp_path / "supervisor" / f"s{number}.sock",
+        lease_id=str(number) * 32,
+        binding_digest=str(number) * 64,
     )
 
 
@@ -42,9 +47,19 @@ def assignment(item):
     return {
         "workerId": item.worker_id,
         "sessionId": item.session_id,
+        "executionId": item.execution_id,
         "generation": item.generation,
         "workspace": str(item.workspace),
     }
+
+
+def test_raw_engine_program_cannot_be_a_provider_attachment(tmp_path):
+    """A provider environment must attach through the private supervisor boundary."""
+    item = lease(tmp_path)
+    with pytest.raises(ValueError, match="supervised_attachment_required"):
+        registry(
+            tmp_path, replace(item, socket_path=None, attachment_program=Path("/usr/bin/podman"))
+        ).write_configuration()
 
 
 def test_private_configuration_disables_implicit_and_local_environments(tmp_path):
@@ -61,11 +76,14 @@ def test_private_configuration_disables_implicit_and_local_environments(tmp_path
         second.environment_id,
     ]
     assert parsed["environments"][0]["args"] == [
-        "start",
-        "--attach",
-        "--interactive",
-        "--sig-proxy=false",
-        first.container_id,
+        "-m",
+        "hephaestus.automation.fleet_attachment",
+        "--socket",
+        str(first.socket_path),
+        "--lease-id",
+        first.lease_id,
+        "--binding-digest",
+        first.binding_digest,
     ]
     assert "auth" not in json.dumps(parsed)
 
