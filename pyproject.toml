@@ -101,6 +101,9 @@ dev = [
     "pytest-xdist>=3.6,<4",
 ]
 automation = [
+    # The build bridge uses the actual SDK in the normal locked profile.
+    # A package-index release needs an indexed SDK version for runtime metadata.
+    "HomericIntelligence-Agamemnon @ git+https://github.com/HomericIntelligence/Agamemnon.git@ef39b3506bb29debe7e728f33e8d80c0923a330c#subdirectory=clients/python",
     "markdown-it-py>=4.0,<5",
     "pydantic>=2.12.5,<3",
     "sigstore>=4.5,<5",
