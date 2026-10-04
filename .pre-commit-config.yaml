@@ -186,6 +186,15 @@ repos:
         pass_filenames: false
         files: ^(AGENTS\.md|CLAUDE\.md|docs/DEFINITION_OF_DONE\.md|pyproject\.toml)$
 
+      # Living-document ownership, source, and freshness guard
+      - id: check-doc-maintenance
+        name: Check normative documentation maintenance
+        description: Reject unowned volatile claims and invalid maintained sources
+        entry: uv run python -m hephaestus.validation.doc_maintenance
+        language: system
+        pass_filenames: false
+        files: ^(.*\.md|pyproject\.toml|hephaestus/automation/pipeline/routing\.py|hephaestus/prompts/catalog\.py|\.github/CODEOWNERS|\.github/workflows/_required\.yml)$
+
   # Claude settings permission path check
   - repo: local
     hooks:

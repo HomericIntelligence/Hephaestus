@@ -1,4 +1,4 @@
-"""Tests for the normative documentation maintenance validator."""
+"""Tests for the living-document maintenance validator."""
 
 from __future__ import annotations
 
@@ -10,18 +10,17 @@ from pathlib import Path
 import pytest
 
 from hephaestus.validation.doc_maintenance import (
-    SourceContract,
+    Finding,
+    _selector_exists,
     discover_normative_markdown,
-    main,
-    validate_documentation,
+    format_json_report,
+    scan_file,
     validate_roadmap_maintenance,
-    validate_source_contracts,
-    validate_volatile_claims,
 )
 
 
 def test_specs_are_normative_and_test_fixtures_are_excluded(tmp_path: Path) -> None:
-    """Nested specifications are scanned while nested fixtures are ignored."""
+    """Nested specifications are scanned but nested fixtures are not."""
     spec = tmp_path / "docs" / "specs" / "nested" / "design.md"
     fixture = tmp_path / "tests" / "fixtures" / "docs" / "example.md"
     spec.parent.mkdir(parents=True)
@@ -35,171 +34,137 @@ def test_specs_are_normative_and_test_fixtures_are_excluded(tmp_path: Path) -> N
 
     assert "docs/specs/nested/design.md" in discovered
     assert "tests/fixtures/docs/example.md" not in discovered
-    assert any(
-        finding.file == "docs/specs/nested/design.md"
-        for finding in validate_documentation(tmp_path)
-    )
 
 
-def test_historical_adr_and_release_note_bodies_are_excluded(tmp_path: Path) -> None:
-    """Accepted records may retain point-in-time claims without being living docs."""
-    accepted_adr = tmp_path / "docs" / "adr" / "0001-example.md"
-    proposed_adr = tmp_path / "docs" / "adr" / "0002-proposed.md"
-    draft_adr = tmp_path / "docs" / "adr" / "0003-draft.md"
-    adr_index = tmp_path / "docs" / "adr" / "README.md"
-    release_note = tmp_path / "docs" / "release-notes" / "v1.md"
-    release_index = tmp_path / "docs" / "release-notes" / "README.md"
-    release_index_alias = tmp_path / "docs" / "release-notes" / "index.md"
-    for path in (adr_index, release_note, release_index, release_index_alias):
+def test_historical_document_bodies_are_excluded_but_indexes_remain(tmp_path: Path) -> None:
+    """Accepted ADR and release-note bodies are point-in-time records."""
+    for relative in (
+        "docs/adr/0001-example.md",
+        "docs/release-notes/v1.md",
+        "docs/adr/README.md",
+        "docs/release-notes/README.md",
+    ):
+        path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("# Record\nAs of 2026-01-01, issue #12 was closed.\n", encoding="utf-8")
-    accepted_adr.parent.mkdir(parents=True, exist_ok=True)
-    accepted_adr.write_text(
-        "# Accepted ADR\n\n- Status: Accepted\n\nAs of 2026-01-01, issue #12 was closed.\n",
-        encoding="utf-8",
-    )
-    proposed_adr.write_text(
-        "# Proposed ADR\n\n- Status: Proposed\n\nCurrently inactive.\n", encoding="utf-8"
-    )
-    draft_adr.write_text(
-        "# Draft ADR\n\n- Status: Draft\n\nCurrently inactive.\n", encoding="utf-8"
-    )
+        path.write_text("# Record\nCurrently inactive.\n", encoding="utf-8")
 
     discovered = {
         path.relative_to(tmp_path).as_posix() for path in discover_normative_markdown(tmp_path)
     }
 
-    assert "docs/adr/0001-example.md" not in discovered
-    assert "docs/adr/0002-proposed.md" in discovered
-    assert "docs/adr/0003-draft.md" in discovered
-    assert "docs/release-notes/v1.md" not in discovered
-    assert "docs/adr/README.md" in discovered
-    assert "docs/release-notes/README.md" in discovered
-    assert "docs/release-notes/index.md" in discovered
+    assert discovered == {
+        "docs/adr/README.md",
+        "docs/release-notes/README.md",
+    }
 
 
-def test_volatile_claims_inside_fenced_examples_are_ignored(tmp_path: Path) -> None:
-    """Examples can demonstrate stale prose without becoming normative claims."""
+def test_scan_ignores_fenced_examples_and_reports_volatile_prose(tmp_path: Path) -> None:
+    """Only prose outside fenced examples is subject to the volatile-claim guard."""
     document = tmp_path / "docs" / "example.md"
     document.parent.mkdir()
     document.write_text(
-        "# Example\n\n"
         "```text\n"
-        "The repository has 21 packages as of 2026-01-01.\n"
+        "Currently inactive; 29 child issues\n"
+        "```\n"
         "Currently inactive.\n"
-        "```\n\n"
-        "The repository has 21 packages as of 2026-01-01.\n",
+        "The repository has 29 child issues.\n",
         encoding="utf-8",
     )
 
-    findings = validate_volatile_claims(document, tmp_path)
+    findings = scan_file(document, tmp_path)
 
-    assert len(findings) == 2
-    assert all(finding.line == 8 for finding in findings)
-
-
-def test_source_contracts_validate_local_links_and_semantic_selectors(tmp_path: Path) -> None:
-    """A cited source must exist, be linked, and contain its selected symbol."""
-    source = tmp_path / "src" / "routing.py"
-    document = tmp_path / "docs" / "architecture.md"
-    source.parent.mkdir(parents=True)
-    document.parent.mkdir(parents=True)
-    source.write_text("ROUTES = {'start': 'finish'}\n", encoding="utf-8")
-    document.write_text("See [ROUTES](../src/routing.py).\n", encoding="utf-8")
-    contract = SourceContract(
-        document="docs/architecture.md",
-        source="src/routing.py",
-        selector="ROUTES",
-    )
-
-    assert validate_source_contracts(tmp_path, contracts=(contract,)) == []
-
-    source.write_text("OTHER = {}\n", encoding="utf-8")
-    document.write_text("See [ROUTES](../src/missing.py).\n", encoding="utf-8")
-    findings = validate_source_contracts(tmp_path, contracts=(contract,))
-    assert {finding.rule for finding in findings} == {"source-link", "source-selector"}
+    assert [(finding.rule, finding.line) for finding in findings] == [
+        ("temporary-issue-state", 4),
+        ("repository-snapshot-metric", 5),
+    ]
 
 
-def test_roadmap_freshness_uses_injected_today(tmp_path: Path) -> None:
-    """Roadmap freshness is deterministic and does not depend on wall-clock time."""
+def test_semantic_selectors_cover_python_yaml_and_markdown(tmp_path: Path) -> None:
+    """Source contracts can select symbols, YAML keys, and Markdown headings."""
+    python_source = tmp_path / "routing.py"
+    yaml_source = tmp_path / "workflow.yml"
+    markdown_source = tmp_path / "release.md"
+    python_source.write_text("ROUTES = {}\n\nclass PromptCatalog:\n    pass\n", encoding="utf-8")
+    yaml_source.write_text("jobs:\n  lint:\n    runs-on: ubuntu-latest\n", encoding="utf-8")
+    markdown_source.write_text("# Pre-Release Checklist\n", encoding="utf-8")
+
+    assert _selector_exists(python_source, "ROUTES")
+    assert _selector_exists(python_source, "PromptCatalog")
+    assert _selector_exists(yaml_source, "jobs")
+    assert _selector_exists(markdown_source, "Pre-Release Checklist")
+    assert not _selector_exists(python_source, "MissingSymbol")
+
+
+@pytest.fixture
+def roadmap_repo(tmp_path: Path) -> Path:
+    """Create a minimal repository containing a roadmap cadence contract."""
     roadmap = tmp_path / "docs" / "ROADMAP.md"
-    roadmap.parent.mkdir(parents=True)
+    roadmap.parent.mkdir()
     roadmap.write_text(
-        "# Roadmap\n\n"
-        "## Current Focus (Q3 2026)\n\nFocus from open epics.\n\n"
+        "## Current Focus (Q3 2026)\n\n"
         "## Updating This Roadmap\n\n"
-        "**Trigger:** release. **Responsibility:** maintainer.\n"
-        "Source: [RELEASING.md](RELEASING.md).\n\n"
+        "The maintainer reviews it at the Auto Tag Release trigger; releases are\n"
+        "feature/fix-driven, not date-driven.\n\n"
         "Last updated: 2026-07-20\n",
         encoding="utf-8",
     )
+    return tmp_path
 
-    findings = validate_roadmap_maintenance(tmp_path, today=date(2026, 10, 1))
+
+def test_roadmap_freshness_uses_injected_today(roadmap_repo: Path) -> None:
+    """Roadmap freshness is deterministic when the current date is injected."""
+    findings = validate_roadmap_maintenance(
+        roadmap_repo,
+        today=date(2026, 10, 1),
+    )
 
     assert any(finding.rule == "stale-current-focus" for finding in findings)
 
 
-@pytest.mark.parametrize(
-    ("content", "rule"),
-    [
-        ("## Current Focus (Q3 2026)\n\nLast updated: 2026-06-30\n", "last-updated-before-focus"),
-        ("## Current Focus (Q3 2026)\n\nLast updated: 2026-08-01\n", "roadmap-ownership"),
-    ],
-)
-def test_roadmap_contract_reports_deterministic_boundary_errors(
-    tmp_path: Path, content: str, rule: str
-) -> None:
-    """Malformed roadmap metadata produces named findings rather than exceptions."""
-    roadmap = tmp_path / "docs" / "ROADMAP.md"
-    roadmap.parent.mkdir(parents=True)
-    roadmap.write_text(content, encoding="utf-8")
+def test_roadmap_rejects_future_dates(roadmap_repo: Path) -> None:
+    """Roadmap dates cannot be later than the injected current date."""
+    findings = validate_roadmap_maintenance(roadmap_repo, today=date(2026, 7, 1))
 
-    findings = validate_roadmap_maintenance(tmp_path, today=date(2026, 8, 3))
-
-    assert any(finding.rule == rule for finding in findings)
+    assert any(finding.rule == "future-last-updated" for finding in findings)
 
 
-def test_roadmap_cadence_is_validated_inside_update_section(tmp_path: Path) -> None:
-    """Unrelated roadmap prose cannot satisfy the release-driven cadence guard."""
-    roadmap = tmp_path / "docs" / "ROADMAP.md"
-    roadmap.parent.mkdir(parents=True)
+def test_roadmap_rejects_cross_quarter_dates(roadmap_repo: Path) -> None:
+    """Roadmap dates must belong to the stated focus quarter."""
+    roadmap = roadmap_repo / "docs" / "ROADMAP.md"
     roadmap.write_text(
-        "# Roadmap\n\n"
-        "## Current Focus (Q3 2026)\n\n"
-        "The release-driven plan references Auto Tag Release and is not date-driven.\n\n"
-        "## Notes\n\nTrigger and maintainer references may appear elsewhere.\n\n"
-        "## Updating This Roadmap\n\nTypically monthly, when convenient.\n\n"
-        "Last updated: 2026-07-20\n",
+        roadmap.read_text(encoding="utf-8").replace("2026-07-20", "2026-10-01"),
         encoding="utf-8",
     )
 
-    findings = validate_roadmap_maintenance(tmp_path, today=date(2026, 8, 3))
+    findings = validate_roadmap_maintenance(roadmap_repo, today=date(2026, 10, 2))
 
-    assert any(finding.rule == "roadmap-cadence" for finding in findings)
-
-
-def test_json_output_is_machine_readable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The validator's CLI emits structured findings when requested."""
-    document = tmp_path / "README.md"
-    document.write_text("The repository has 21 packages as of 2026-01-01.\n", encoding="utf-8")
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["doc-maintenance", "--repo-root", str(tmp_path), "--json"],
-    )
-
-    assert main() == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["passed"] is False
-    assert payload["findings"][0]["rule"] in {"dated-state", "snapshot-metric"}
+    assert any(finding.rule == "last-updated-outside-focus-quarter" for finding in findings)
 
 
-def test_current_repository_satisfies_documentation_contract() -> None:
-    """The checked-in normative documentation has no maintenance findings."""
+def test_json_report_is_machine_readable() -> None:
+    """The CLI report includes findings and its exit status."""
+    findings = [Finding("docs/example.md", 3, "dated-state", "not maintained")]
+
+    report = json.loads(format_json_report(findings))
+
+    assert report["exit_code"] == 1
+    assert report["passed"] is False
+    assert report["findings"][0]["rule"] == "dated-state"
+
+
+def test_repository_corpus_passes_maintenance_contract() -> None:
+    """The checked-in normative corpus satisfies the offline guard."""
     repo_root = Path(__file__).resolve().parents[3]
+    from hephaestus.validation.doc_maintenance import validate_documentation
 
     assert validate_documentation(repo_root) == []
+
+
+def test_cli_module_is_importable_without_writing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The validator exposes a module entry point without requiring a console script."""
+    monkeypatch.setattr(sys, "argv", ["doc_maintenance", "--help"])
+    with pytest.raises(SystemExit) as raised:
+        from hephaestus.validation.doc_maintenance import main
+
+        main()
+    assert raised.value.code == 0

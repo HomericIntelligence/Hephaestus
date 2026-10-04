@@ -1,5 +1,16 @@
 # Required status checks
 
+## Maintenance
+
+- **Owner:** The `.github/` owner in
+  [CODEOWNERS](../../.github/CODEOWNERS).
+- **Versioned source:** The `jobs` mapping in
+  [`_required.yml`](../../.github/workflows/_required.yml).
+- **External source:** The live branch-protection and ruleset output collected
+  by the commands under [Live audit](#live-audit).
+- **Trigger:** Reconcile this document whenever a workflow context,
+  branch-protection rule, or ruleset changes, and during the pre-release review.
+
 This document records the CI contract and the last verified `main` protection
 and ruleset configuration. GitHub policy can change outside git; audit live
 state before relying on this record for a merge decision.
