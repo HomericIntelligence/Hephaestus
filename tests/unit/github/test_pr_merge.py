@@ -422,7 +422,12 @@ class TestMergeBatchOutcomes:
 class TestMain:
     """Tests for the main() entry point."""
 
-    def _make_pr(self, number: int = 1, bucket: str = "pass") -> list[MagicMock]:
+    def _make_pr(
+        self,
+        number: int = 1,
+        status: str = "completed",
+        conclusion: str | None = "success",
+    ) -> list[MagicMock]:
         """Return gh_call side effects for repo view, PR list, checks, and merge."""
         return [
             _gh_result({"nameWithOwner": "owner/repo"}),
@@ -436,7 +441,14 @@ class TestMain:
                     }
                 ]
             ),
-            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": bucket, "workflow": "CI"}]),
+            _gh_result(
+                {
+                    "total_count": 1,
+                    "check_runs": [
+                        {"name": "ci", "status": status, "conclusion": conclusion}
+                    ],
+                }
+            ),
             _gh_result({"merged": True, "sha": "def456", "message": "ok"}),
         ]
 
@@ -483,7 +495,7 @@ class TestMain:
     @patch("hephaestus.github.pr_merge.gh_call")
     def test_skips_pr_when_checks_fail(self, mock_gh_call, _mock_git, mock_push) -> None:
         """main() returns failure when CI checks block a requested merge."""
-        mock_gh_call.side_effect = self._make_pr(bucket="fail")
+        mock_gh_call.side_effect = self._make_pr(conclusion="failure")
         with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
             with patch("sys.argv", ["prog"]):
                 from hephaestus.github.pr_merge import main
@@ -513,7 +525,7 @@ class TestMain:
         monkeypatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Missing current checks cannot be authorized by a legacy success."""
+        """Legacy-status-only success cannot authorize a merge."""
         calls: list[list[str]] = []
 
         def fake_gh_call(args: list[str]) -> MagicMock:
@@ -532,11 +544,14 @@ class TestMain:
                     ]
                 )
             if args[:2] == ["pr", "checks"]:
-                raise subprocess.CalledProcessError(
-                    1,
-                    args,
-                    stderr="no checks reported on branch",
+                return _gh_result(
+                    [{"name": "legacy/status", "state": "SUCCESS", "bucket": "pass"}]
                 )
+            if args == [
+                "api",
+                "/repos/owner/repo/commits/abc123/check-runs?per_page=100",
+            ]:
+                return _gh_result({"total_count": 0, "check_runs": []})
             if args == ["api", "/repos/owner/repo/commits/abc123/status"]:
                 return _gh_result({"state": "success", "statuses": []})
             if args[:3] == ["api", "-X", "PUT"]:
@@ -550,6 +565,7 @@ class TestMain:
         monkeypatch.setattr("sys.argv", ["prog"])
 
         assert pr_merge_module.main() == 1
+        assert not any(args[:2] == ["pr", "checks"] for args in calls)
         assert ["api", "/repos/owner/repo/commits/abc123/status"] not in calls
         assert not any(args[:3] == ["api", "-X", "PUT"] for args in calls)
         assert "No check runs reported for PR #1; refusing merge" in caplog.text
@@ -596,7 +612,7 @@ class TestMain:
     @patch("hephaestus.github.pr_merge.gh_call")
     def test_push_all_pushes_every_pr(self, mock_gh_call, _mock_git, mock_push) -> None:
         """main() with --push-all calls try_push_head_branch for every PR."""
-        mock_gh_call.side_effect = self._make_pr(bucket="fail")
+        mock_gh_call.side_effect = self._make_pr(conclusion="failure")
         with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
             with patch("sys.argv", ["prog", "--push-all"]):
                 from hephaestus.github.pr_merge import main
@@ -623,7 +639,14 @@ class TestMain:
                     },
                 ]
             ),
-            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}]),
+            _gh_result(
+                {
+                    "total_count": 1,
+                    "check_runs": [
+                        {"name": "ci", "status": "completed", "conclusion": "success"}
+                    ],
+                }
+            ),
             _gh_result({"merged": True, "sha": "merged", "message": "ok"}),
         ]
         with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
@@ -656,9 +679,23 @@ class TestMain:
                     },
                 ]
             ),
-            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}]),
+            _gh_result(
+                {
+                    "total_count": 1,
+                    "check_runs": [
+                        {"name": "ci", "status": "completed", "conclusion": "success"}
+                    ],
+                }
+            ),
             subprocess.CalledProcessError(1, ["gh"], stderr="merge conflict"),
-            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}]),
+            _gh_result(
+                {
+                    "total_count": 1,
+                    "check_runs": [
+                        {"name": "ci", "status": "completed", "conclusion": "success"}
+                    ],
+                }
+            ),
             _gh_result({"merged": True, "sha": "merged-two", "message": "ok"}),
         ]
         with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):

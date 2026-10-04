@@ -264,21 +264,28 @@ def _list_open_prs(repo_name: str) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
-_CHECK_BAD_BUCKETS = {"fail", "cancel"}
+_CHECK_FAILURE_CONCLUSIONS = {
+    "action_required",
+    "cancelled",
+    "failure",
+    "startup_failure",
+    "stale",
+    "timed_out",
+}
+_CHECK_NON_BLOCKING_CONCLUSIONS = {"neutral", "skipped"}
 
 
-def _checks_pass_and_log(repo_name: str, pr_number: int) -> bool:
-    """Return whether current GitHub check-run evidence permits a merge."""
+def _fetch_commit_check_runs(
+    repo_name: str,
+    pr_number: int,
+    head_sha: str,
+) -> list[Any] | None:
+    """Return commit-scoped check runs for the PR head, or None on invalid evidence."""
     try:
-        checks = _gh_json(
+        response = _gh_json(
             [
-                "pr",
-                "checks",
-                str(pr_number),
-                "--repo",
-                repo_name,
-                "--json",
-                "name,state,bucket,workflow",
+                "api",
+                f"/repos/{repo_name}/commits/{head_sha}/check-runs?per_page=100",
             ]
         )
     except subprocess.CalledProcessError as exc:
@@ -291,31 +298,84 @@ def _checks_pass_and_log(repo_name: str, pr_number: int) -> bool:
                 pr_number,
                 blob.strip() or exc,
             )
-        return False
+        return None
     except (RuntimeError, json.JSONDecodeError) as exc:
         logger.error("Error getting check runs for PR #%d: %s", pr_number, exc)
-        return False
+        return None
 
+    if not isinstance(response, dict):
+        logger.error("Invalid check-run response for PR #%d; refusing merge", pr_number)
+        return False
+    checks = response.get("check_runs")
     if not isinstance(checks, list):
         logger.error("Invalid check-run response for PR #%d; refusing merge", pr_number)
         return False
     if not checks:
         logger.error("No check runs reported for PR #%d; refusing merge", pr_number)
         return False
+    return checks
+
+
+def _check_run_success_state(check: Any, pr_number: int) -> bool | None:
+    """Return True for success, False for non-blocking, None for blocked/invalid."""
+    if not isinstance(check, dict):
+        logger.error("Invalid check-run entry for PR #%d; refusing merge", pr_number)
+        return None
+
+    name = check.get("name", "")
+    status = str(check.get("status", "")).lower()
+    conclusion_value = check.get("conclusion")
+    conclusion = "" if conclusion_value is None else str(conclusion_value).lower()
+    logger.info(
+        "    - %s: status=%s, conclusion=%s",
+        name,
+        status,
+        conclusion or "none",
+    )
+    if status != "completed":
+        logger.error(
+            "Check run %s for PR #%d is not complete: status=%s",
+            name,
+            pr_number,
+            status or "unknown",
+        )
+        return None
+    if conclusion in _CHECK_FAILURE_CONCLUSIONS:
+        logger.error(
+            "Check run %s for PR #%d failed: conclusion=%s",
+            name,
+            pr_number,
+            conclusion,
+        )
+        return None
+    if conclusion == "success":
+        return True
+    if conclusion in _CHECK_NON_BLOCKING_CONCLUSIONS:
+        return False
+
+    logger.error(
+        "Check run %s for PR #%d is not successful: conclusion=%s",
+        name,
+        pr_number,
+        conclusion or "none",
+    )
+    return None
+
+
+def _checks_pass_and_log(repo_name: str, pr_number: int, head_sha: str) -> bool:
+    """Return whether current GitHub check-run evidence permits a merge."""
+    checks = _fetch_commit_check_runs(repo_name, pr_number, head_sha)
+    if checks is None:
+        return False
 
     any_success = False
     for check in checks:
-        if not isinstance(check, dict):
-            logger.error("Invalid check-run entry for PR #%d; refusing merge", pr_number)
+        success_state = _check_run_success_state(check, pr_number)
+        if success_state is None:
             return False
-        name = check.get("name", "")
-        state = check.get("state", "")
-        bucket = str(check.get("bucket", "")).lower()
-        logger.info("    - %s: state=%s, bucket=%s", name, state, bucket)
-        if bucket in _CHECK_BAD_BUCKETS or bucket == "pending":
-            return False
-        if bucket == "pass":
-            any_success = True
+        any_success = any_success or success_state
+    if not any_success:
+        logger.error("No successful check runs reported for PR #%d; refusing merge", pr_number)
     return any_success
 
 
@@ -487,7 +547,7 @@ def _process_pr(
 
     logger.info("\nChecking PR #%d: %s -> %s", pr_number, head_branch, base_branch)
     logger.info("  Checks API results:")
-    success = _checks_pass_and_log(repo_name, pr_number)
+    success = _checks_pass_and_log(repo_name, pr_number, head_sha)
 
     if push_all:
         logger.info("  Pushing head branch '%s' (--push-all mode)...", head_branch)
