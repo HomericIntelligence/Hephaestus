@@ -106,13 +106,30 @@ def find_violations(repo_root: Path) -> list[UnlinkedMarkerFinding]:
     return findings
 
 
+def _format_finding_detail(finding: UnlinkedMarkerFinding) -> str:
+    """Render one finding for text output without changing its raw data."""
+    return text(
+        "%(path)s:%(line)d has a bare `# %(marker)s` marker; "
+        "use the `# %(marker)s(#N): explanation` form "
+        "(see docs/TECH_DEBT.md)",
+        path=finding.path,
+        line=finding.line,
+        marker=finding.marker,
+    )
+
+
 def format_report(findings: list[UnlinkedMarkerFinding]) -> str:
     """Render *findings* as a human-readable text report."""
     if not findings:
         return text("OK: every tech-debt marker references a tracking issue.")
     lines = [text("FAIL: %(count)d unlinked marker(s):", count=len(findings))]
     lines.extend(
-        text("  [%(marker)s] %(detail)s", marker=f.marker, detail=f.detail) for f in findings
+        text(
+            "  [%(marker)s] %(detail)s",
+            marker=f.marker,
+            detail=_format_finding_detail(f),
+        )
+        for f in findings
     )
     return "\n".join(lines)
 
