@@ -330,7 +330,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | Symbol | Added | Notes |
 |--------|-------|-------|
 | `VersionManager` | 0.1.0 | Read/write/bump the project version |
-| `bump_version` | 0.1.0 | Increment a semantic version component |
+| `bump_version` | 0.1.0 | Compute a semantic version bump without mutating files; returns integer status and accepts `dry_run` for compatibility |
 | `check_package_version_consistency` | 0.1.0 | Verify installed-package versions agree |
 | `check_version_consistency` | 0.1.0 | Verify project version files agree |
 | `parse_version` | 0.1.0 | Parse a semantic version string |
