@@ -6,6 +6,10 @@ import fcntl
 import hashlib
 import json
 import os
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +24,9 @@ class WorkerJournal:
             raise RuntimeError("journal directory must be private")
         self.directory = directory
         self.max_bytes = max_bytes
+        self._thread_lock = threading.RLock()
+        self._write_uncertain = False
+        self._closed = False
         self._lock = (directory / "writer.lock").open("a+b")
         try:
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -75,39 +82,90 @@ class WorkerJournal:
 
     def append(self, kind: str, value: dict[str, Any]) -> None:
         """Flush a receipt before it can affect command acknowledgment."""
-        record = {"kind": kind, "value": value}
-        data = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        self._file.seek(0, os.SEEK_END)
-        if len(data) > 1024 * 1024 or self._file.tell() + len(data) > self.max_bytes:
-            raise RuntimeError("journal is full; stop admission and retain receipts")
-        self._file.write(data)
-        self._file.flush()
-        os.fsync(self._file.fileno())
-        self._apply(json.loads(data))
+        with self.transaction():
+            record = {"kind": kind, "value": value}
+            data = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            self._file.seek(0, os.SEEK_END)
+            if len(data) > 1024 * 1024 or self._file.tell() + len(data) > self.max_bytes:
+                raise RuntimeError("journal is full; stop admission and retain receipts")
+            try:
+                if self._file.write(data) != len(data):
+                    raise OSError("journal write was incomplete")
+                self._file.flush()
+                os.fsync(self._file.fileno())
+                self._apply(json.loads(data))
+            except BaseException:
+                self._write_uncertain = True
+                raise
 
     def begin(self, command: dict[str, Any]) -> dict[str, Any] | None:
         """Persist a command digest, or return its prior or uncertain receipt."""
-        key = command["idempotencyKey"]
-        content = {k: v for k, v in command.items() if k != "commandId"}
-        digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
-        existing = self.commands.get(key)
-        if existing is not None:
-            if existing["digest"] != digest:
-                return result_for(command, "failed", error="idempotency_conflict")
-            return existing.get("result") or result_for(command, "failed", error="outcome_unknown")
-        if command["commandId"] in self.command_ids:
-            return result_for(command, "failed", error="command_id_conflict")
-        self.append("intent", {"key": key, "commandId": command["commandId"], "digest": digest})
-        return None
+        with self.transaction():
+            key = command["idempotencyKey"]
+            content = {k: v for k, v in command.items() if k != "commandId"}
+            digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+            existing = self.commands.get(key)
+            if existing is not None:
+                if existing["digest"] != digest:
+                    return result_for(command, "failed", error="idempotency_conflict")
+                return existing.get("result") or result_for(
+                    command, "failed", error="outcome_unknown"
+                )
+            if command["commandId"] in self.command_ids:
+                return result_for(command, "failed", error="command_id_conflict")
+            self.append("intent", {"key": key, "commandId": command["commandId"], "digest": digest})
+            return None
 
     def complete(self, command: dict[str, Any], result: dict[str, Any]) -> None:
         """Retain the command acknowledgment before returning it."""
         self.append("receipt", {"key": command["idempotencyKey"], "result": result})
 
     def close(self) -> None:
-        """Release journal files and the single-writer lock."""
-        self._file.close()
-        self._lock.close()
+        """Wait for storage operations before releasing the process writer lock."""
+        with self._thread_lock:
+            if self._closed:
+                return
+            try:
+                self._file.close()
+                self._lock.close()
+            except BaseException:
+                self._write_uncertain = True
+                raise
+            self._closed = True
+
+    def require_writable(self) -> None:
+        """Check current writer health without recording or granting admission."""
+        with self._thread_lock:
+            if self._closed:
+                raise RuntimeError("journal is closed")
+            if self._write_uncertain:
+                raise RuntimeError("journal requires recovery after an uncertain write")
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Serialize short compound operations without rollback or external calls."""
+        with self._thread_lock:
+            self.require_writable()
+            yield
+
+    def snapshot(self) -> dict[str, Any]:
+        """Copy projected state for inspection, including closed or uncertain writers."""
+        with self._thread_lock:
+            return deepcopy(
+                {
+                    "records": self.records,
+                    "commands": self.commands,
+                    "command_ids": self.command_ids,
+                    "sessions": self.sessions,
+                    "events": self.events,
+                    "runtime_pid": self.runtime_pid,
+                    "runtime_uncertain": self.runtime_uncertain,
+                    "generation": self.generation,
+                    "draining": self.draining,
+                    "write_uncertain": self._write_uncertain,
+                    "closed": self._closed,
+                }
+            )
 
 
 def result_for(command: dict[str, Any], status: str, **receipt: Any) -> dict[str, Any]:
