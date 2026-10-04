@@ -261,32 +261,23 @@ class _ObservedCompletionQueue(CompletionQueue):
 
 
 class _StalledConsumerHarness:
-    """Synchronize two complete worker waves without relying on sleeps."""
+    """Synchronize one coordinator-owned worker wave without sleeps."""
 
     def __init__(self, workers: int) -> None:
         self.workers = workers
-        self.legitimate_started = 0
-        self.overflow_started = 0
+        self.started = 0
         self.state_lock = threading.Lock()
-        self.legitimate_ready = threading.Event()
-        self.overflow_ready = threading.Event()
-        self.release_legitimate = threading.Event()
-        self.release_overflow = threading.Event()
+        self.ready = threading.Event()
+        self.release = threading.Event()
 
     def run_job(self, _pool: WorkerPool, job: BuildTestJob) -> JobResult:
-        """Hold two worker waves while the coordinator cannot consume."""
-        is_overflow = job.descr.startswith("overflow-")
+        """Hold the coordinator-owned wave while its consumer is paused."""
+        assert job.descr.startswith("recovery-")
         with self.state_lock:
-            if is_overflow:
-                self.overflow_started += 1
-                if self.overflow_started == self.workers:
-                    self.overflow_ready.set()
-            else:
-                self.legitimate_started += 1
-                if self.legitimate_started == self.workers:
-                    self.legitimate_ready.set()
-        release = self.release_overflow if is_overflow else self.release_legitimate
-        assert release.wait(timeout=5.0)
+            self.started += 1
+            if self.started == self.workers:
+                self.ready.set()
+        assert self.release.wait(timeout=5.0)
         return JobResult(ok=True, value=job.descr)
 
 
@@ -584,59 +575,45 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
         lambda pool, job: harness.run_job(pool, job),
     ):
         run_thread.start()
-        assert harness.legitimate_ready.wait(timeout=5.0)
+        assert harness.ready.wait(timeout=5.0)
         assert consumer_paused.wait(timeout=5.0)
-        # Establish that the coordinator is parked before either worker wave
-        # may publish, so subsequent high-water marks cannot race a drain.
+        # Establish that the coordinator is parked before its worker wave may
+        # publish, so the high-water mark cannot race a drain.
         assert stalled.completion_q.paused_publication_state() == (0, 0, 0, 0, 0, False)
 
-        # The coordinator owns C legitimate handles. Queue a separate C+1
-        # publication burst through the same real pool while all workers are
-        # occupied, then release each wave under the stalled consumer.
-        for index in range(workers + 1):
-            stalled.pool.submit(
-                BuildTestJob(
-                    repo="performance/worker-pool",
-                    cwd=Path.cwd(),
-                    argv=("synthetic", f"overflow-{index}"),
-                    timeout_s=2,
-                    descr=f"overflow-{index}",
-                ),
-                StageName.PLANNING,
-            )
-
-        harness.release_legitimate.set()
+        # Every possible publisher is coordinator-owned. The coordinator keeps
+        # each handle in ``in_flight`` until consumption, so its C-work window
+        # makes a C+1 completion wave unreachable.
+        owned_descriptions = {handle.job.descr for handle in stalled.in_flight}
+        harness.release.set()
         stalled.completion_q.wait_for_offers(workers, timeout=5.0)
-        assert harness.overflow_ready.wait(timeout=5.0)
-        assert stalled.completion_q.qsize() == workers
+        # Request shutdown only after all successful results are published at
+        # the exact C-result boundary. Consumption journals each completion
+        # before parking its item resumably.
+        stalled.shutdown.set()
 
-        harness.release_overflow.set()
-        stalled.completion_q.wait_for_offers((2 * workers) + 1, timeout=5.0)
-
-        # C results occupy the channel, C rejected results occupy its bounded
-        # mailbox, and the final publication records overflow. Nothing grows
-        # while consumption is paused, and the worker callback requests stop.
+        # C results exactly fill the channel. No rejection or fallback mailbox
+        # is reachable without violating the coordinator's ownership window.
         assert run_thread.is_alive()
         assert not resume_consumer.is_set()
-        assert harness.legitimate_started == workers
+        assert harness.started == workers
         assert stalled.completion_q.paused_publication_state() == (
-            (2 * workers) + 1,
-            workers,
-            workers + 1,
             workers,
             workers,
-            True,
+            0,
+            workers,
+            0,
+            False,
         )
-        assert stalled.completion_q.offer_count == (2 * workers) + 1
+        assert stalled.completion_q.offer_count == workers
         assert stalled.completion_q.accepted_count == workers
-        assert stalled.completion_q.rejected_count == workers + 1
+        assert stalled.completion_q.rejected_count == 0
         assert set(stalled.completion_q.publication_outcomes) == {
-            *((f"recovery-{issue}", True) for issue in range(workers)),
-            *((f"overflow-{issue}", False) for issue in range(workers + 1)),
+            (description, True) for description in owned_descriptions
         }
         assert stalled.completion_q.result_high_water == workers
-        assert stalled.completion_q.rejection_high_water == workers
-        assert stalled.completion_q.overflow_observed is True
+        assert stalled.completion_q.rejection_high_water == 0
+        assert stalled.completion_q.overflow_observed is False
         assert stalled.completion_q.qsize() == stalled.completion_q.capacity == workers
         assert stalled.shutdown.is_set()
 
@@ -645,13 +622,16 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
 
     assert not run_thread.is_alive()
     assert run_codes == [1]
+    assert not stalled.in_flight
     assert len(stalled.items) == workers
     expected_issues = set(range(workers))
     assert {item.issue for item in stalled.items} == expected_issues
+    assert all(item.payload.get("completed") is True for item in stalled.items)
     assert all(
         item.result is not None and item.result.reason.startswith("resumable at")
         for item in stalled.items
     )
+    assert all(item.history[-1].note == "interrupted; resumable" for item in stalled.items)
 
     recovered = _make_recovery_coordinator(monkeypatch, workers)
     assert recovered._work_window == workers

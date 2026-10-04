@@ -189,6 +189,98 @@ def test_repo_source_is_lossless_and_ordered_at_capacity_one(
     assert all(item.result is not None and item.result.passed for item in issues)
 
 
+def test_two_repo_sources_make_bounded_progress_at_capacity_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full source registry reserves C=1 so the next repo cannot deadlock it."""
+    events: list[tuple[str, str, int]] = []
+    metadata = {
+        "repo-a": iter(
+            [
+                {"number": 100, "labels": ["epic"], "title": "Epic: tracking"},
+                {"number": 101, "labels": ["state:needs-plan"], "title": "first task"},
+            ]
+        ),
+        "repo-b": iter(
+            [
+                {"number": 201, "labels": ["state:needs-plan"], "title": "second task"},
+            ]
+        ),
+    }
+    monkeypatch.setattr(
+        loop_repo_manager,
+        "_iter_open_issue_meta",
+        lambda _org, repo: metadata[repo],
+    )
+
+    def classify(issue: int, github: Any) -> IssueFacts:
+        del github
+        repo = "repo-a" if issue == 101 else "repo-b"
+        events.append(("classify", repo, issue))
+        return _facts(issue)
+
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a", "repo-b"],
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            stage_queue_capacity=1,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+
+    class _RepoAwareImmediatePassStage:
+        def on_enter(self, item: WorkItem, ctx: Any) -> None:
+            del item, ctx
+
+        def step(self, item: WorkItem, ctx: Any) -> StageOutcome:
+            del ctx
+            assert item.issue is not None
+            events.append(("complete", item.repo, item.issue))
+            return StageOutcome(Disposition.FINISH_PASS, f"completed #{item.issue}")
+
+        def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+            del item, result, ctx
+            raise AssertionError("source-pull test must not submit a worker job")
+
+    coordinator.stages[StageName.PLANNING] = _RepoAwareImmediatePassStage()
+    idle_ticks = 0
+
+    def fail_fast_idle_wait() -> None:
+        """Keep a regression deadlock finite while preserving tick semantics."""
+        nonlocal idle_ticks
+        idle_ticks += 1
+        assert idle_ticks <= 50, "two-repository C=1 source admission deadlocked"
+        coordinator._progress = False
+        assert coordinator.live_work_count <= coordinator._work_window == 1
+        assert len(coordinator._repo_issue_sources) <= coordinator._work_window
+        assert all(queue.occupancy <= queue.capacity for queue in coordinator.queues.values())
+        assert len(coordinator._pending_admissions) <= coordinator._admission_spool_capacity
+
+    monkeypatch.setattr(coordinator, "_idle_wait", fail_fast_idle_wait)
+
+    assert coordinator.run() == 0
+    assert events == [
+        ("classify", "repo-a", 101),
+        ("complete", "repo-a", 101),
+        ("classify", "repo-b", 201),
+        ("complete", "repo-b", 201),
+    ]
+    assert idle_ticks <= 50
+    assert coordinator.live_work_count == 0
+    assert not coordinator._repo_issue_sources
+    assert coordinator._seed_entries is None
+    assert not coordinator._pending_admissions
+    assert not coordinator._admission_saturated
+
+
 def test_repo_source_deduplicates_metadata_after_completed_work_at_capacity_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
