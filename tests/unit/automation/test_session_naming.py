@@ -544,6 +544,49 @@ class TestSessionTranscriptResolver:
             with pytest.raises(RuntimeError, match="unable to determine whether"):
                 agent_config._registered_worktree_roots(cwd)
 
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: detected dubious ownership in repository\n",
+            "fatal: cannot access '.git': Permission denied\n",
+            "fatal: invalid gitfile format: .git\n",
+        ],
+    )
+    def test_common_dir_operational_failure_is_not_treated_as_non_repository(
+        self, tmp_path: Path, stderr: str
+    ) -> None:
+        cwd = tmp_path / "checkout"
+        cwd.mkdir()
+
+        with patch.object(
+            subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(
+                128,
+                ["git"],
+                stderr=stderr,
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="unable to determine Git common directory"):
+                agent_config._git_common_dir(cwd)
+
+    def test_common_dir_expected_non_repository_result_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        cwd = tmp_path / "not-a-checkout"
+        cwd.mkdir()
+
+        with patch.object(
+            subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(
+                128,
+                ["git"],
+                stderr="fatal: not a git repository (or any of the parent directories): .git\n",
+            ),
+        ):
+            assert agent_config._git_common_dir(cwd) is None
+
     def test_git_discovery_failure_allows_exact_cwd_session_creation(self, tmp_path: Path) -> None:
         cwd = tmp_path / "checkout"
         cwd.mkdir()
