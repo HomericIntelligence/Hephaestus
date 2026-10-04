@@ -245,15 +245,19 @@ class TestGetLogger:
             assert isinstance(handler.formatter, JsonFormatter)
 
     def test_json_format_output_is_json(self) -> None:
-        """get_logger with json_format=True produces valid JSON output."""
-        logger = get_logger("test.json_output", json_format=True)
+        """JSON output remains structurally stable under an active catalog."""
+        from hephaestus.cli.localization import using_localizer
+
+        with using_localizer({"hello json": "bonjour json"}):
+            logger = get_logger("test.json_output", json_format=True)
         # Capture output from the handler
         stream = StringIO()
         handler = logging.StreamHandler(stream)
         handler.setFormatter(logger.logger.handlers[0].formatter)
         logger.logger.addHandler(handler)
         try:
-            logger.info("hello json")
+            with using_localizer({"hello json": "bonjour json"}):
+                logger.info("hello json")
             output = stream.getvalue().strip()
             parsed = json.loads(output)
             assert parsed["message"] == "hello json"
