@@ -4,7 +4,7 @@
 
 Hephaestus is the foundational utilities and tooling repository of the HomericIntelligence ecosystem, providing standardized components that support development across all other projects. We prioritize modularity, reliability, and consistency across a diverse set of cross-cutting concerns: configuration management, logging, GitHub automation, and agent coordination.
 
-## Current Focus (Q3 2026)
+## Current Focus (Q4 2026)
 
 Current focus is reconciled from
 [open epics](https://github.com/HomericIntelligence/Hephaestus/issues?q=is%3Aopen%20label%3Aepic)
@@ -77,4 +77,4 @@ that is the release maintainer; there is no separate roadmap committee.
 PR editing it directly). The roadmap is refreshed to reflect current focus
 areas as Epics are created or priorities shift.
 
-Last updated: 2026-07-20
+Last updated: 2026-10-05
