@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -120,16 +121,34 @@ class TestMain:
         """Non-literal report output uses the catalog while JSON remains stable."""
         (tmp_path / "hephaestus").mkdir()
         (tmp_path / "hephaestus" / "bad.py").write_text("# TODO nope\n")
-        source = "FAIL: %(count)d unlinked marker(s):"
-        with using_localizer({source: "ÉCHEC : %(count)d marqueur(s) sans lien :"}):
+        header_source = "FAIL: %(count)d unlinked marker(s):"
+        detail_source = (
+            "%(path)s:%(line)d has a bare `# %(marker)s` marker; "
+            "use the `# %(marker)s(#N): explanation` form "
+            "(see docs/TECH_DEBT.md)"
+        )
+        catalog = {
+            header_source: "ÉCHEC : %(count)d marqueur(s) sans lien :",
+            detail_source: (
+                "%(path)s:%(line)d contient un marqueur `# %(marker)s` sans lien ; "
+                "utilisez la forme `# %(marker)s(#N): explication` "
+                "(voir docs/TECH_DEBT.md)"
+            ),
+        }
+        with using_localizer(catalog):
             assert unlinked_todo.main(["--repo-root", str(tmp_path)]) == 1
-        assert "ÉCHEC : 1 marqueur(s) sans lien" in capsys.readouterr().out
+        human_output = capsys.readouterr().out
+        assert "ÉCHEC : 1 marqueur(s) sans lien" in human_output
+        assert "contient un marqueur `# TODO` sans lien" in human_output
+        assert "has a bare" not in human_output
 
-        with using_localizer({source: "ÉCHEC : %(count)d marqueur(s) sans lien :"}):
+        with using_localizer(catalog):
             assert unlinked_todo.main(["--json", "--repo-root", str(tmp_path)]) == 1
-        json_output = capsys.readouterr().out
-        assert '"violations"' in json_output
-        assert "ÉCHEC" not in json_output
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["violations"][0]["detail"] == (
+            "hephaestus/bad.py:1 has a bare `# TODO` marker; "
+            "use the `# TODO(#N): explanation` form (see docs/TECH_DEBT.md)"
+        )
 
     def test_main_repo_root_default(
         self,
