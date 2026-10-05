@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from hephaestus.config.child_environments import build_git_signing_env
 
@@ -66,7 +66,7 @@ RECEIPT_FAILED_TOKEN = "host_capability_receipt_failed"  # noqa: S105
 
 
 def _positive_integer(value: object) -> bool:
-    return type(value) is int and cast(int, value) > 0
+    return type(value) is int and value > 0
 
 
 def _absolute_path(value: object) -> bool:
@@ -132,7 +132,7 @@ class CapabilityRequestTarget:
         data = dict(value)
         data["repository_root"] = Path(str(data["repository_root"]))
         data["checkout_path"] = Path(str(data["checkout_path"]))
-        return cls(**data)  # type: ignore[arg-type]
+        return cls(**data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,9 +188,9 @@ class CapabilityReceiptTarget:
         return cls(
             request=CapabilityRequestTarget.from_dict(value["request"]),
             canonical_repository_root=Path(str(value["canonical_repository_root"])),
-            root_device=value["root_device"],  # type: ignore[arg-type]
-            execution_boundary_id=value["execution_boundary_id"],  # type: ignore[arg-type]
-            source_head_sha=value["source_head_sha"],  # type: ignore[arg-type]
+            root_device=value["root_device"],
+            execution_boundary_id=value["execution_boundary_id"],
+            source_head_sha=value["source_head_sha"],
         )
 
 
@@ -285,7 +285,7 @@ class HostCapabilityReceipt:
             raise ValueError("host capability receipt schema is invalid")
         data = dict(value)
         data["target"] = CapabilityReceiptTarget.from_dict(data["target"])
-        return cls(**data)  # type: ignore[arg-type]
+        return cls(**data)
 
 
 class HostCapabilityError(RuntimeError):

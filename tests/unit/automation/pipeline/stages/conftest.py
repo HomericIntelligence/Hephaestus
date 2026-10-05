@@ -960,7 +960,7 @@ class _Paths:
     worktree = "/tmp/repo/worktree"
 
     def __init__(self) -> None:
-        self.source_workspaces = FakeSourceWorkspaceManager()
+        self.source_workspaces = FakeSourceWorkspaceManager(Path(self.repo_root))
 
 
 @pytest.fixture

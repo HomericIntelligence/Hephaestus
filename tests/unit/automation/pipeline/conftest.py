@@ -156,31 +156,7 @@ class FakeWorkerPool:
         handle = JobHandle(job=job, on_done_state=on_done_state)
         self.submitted.append(handle)
         self.submitted_claims.append((claim_key, claim_stage))
-        if isinstance(job, HostCapabilityJob) and self._scripted:
-            candidate = self._scripted[0]
-            value = candidate.value if isinstance(candidate, JobResult) else None
-            if not isinstance(value, dict) or "host_capability_receipt" not in value:
-                outcome = self._default_result(job)
-            else:
-                outcome = self._scripted.popleft()
-        elif self._scripted:
-            outcome = self._scripted.popleft()
-        elif isinstance(job, GitHubJob):
-            if self.github_job_runner is None:
-                raise AssertionError("GitHubJob requires a scripted runner")
-            try:
-                outcome = JobResult(
-                    ok=True,
-                    value=self.github_job_runner.run(
-                        job,
-                        shutdown=self.shutdown_event,
-                        deadline_s=operation_deadline_after(self.github_job_runner.gh_timeout),
-                    ),
-                )
-            except Exception as error:
-                outcome = error
-        else:
-            outcome = self._default_result(job)
+        outcome = self._next_outcome(job)
         if isinstance(outcome, Exception):
             outcome = JobResult(
                 ok=False,
@@ -223,6 +199,41 @@ class FakeWorkerPool:
             self._saturation.set()
         self._wakeup.set()
         return handle
+
+    def _next_outcome(
+        self,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | CompactJob
+        | AthenaSkillJob
+        | HostCapabilityJob,
+    ) -> JobResult | Exception:
+        """Return one scripted or synthesized result for an accepted job."""
+        if isinstance(job, HostCapabilityJob) and self._scripted:
+            candidate = self._scripted[0]
+            value = candidate.value if isinstance(candidate, JobResult) else None
+            if not isinstance(value, dict) or "host_capability_receipt" not in value:
+                return self._default_result(job)
+            return self._scripted.popleft()
+        if self._scripted:
+            return self._scripted.popleft()
+        if isinstance(job, GitHubJob):
+            if self.github_job_runner is None:
+                raise AssertionError("GitHubJob requires a scripted runner")
+            try:
+                return JobResult(
+                    ok=True,
+                    value=self.github_job_runner.run(
+                        job,
+                        shutdown=self.shutdown_event,
+                        deadline_s=operation_deadline_after(self.github_job_runner.gh_timeout),
+                    ),
+                )
+            except Exception as error:
+                return error
+        return self._default_result(job)
 
     @staticmethod
     def _default_result(
