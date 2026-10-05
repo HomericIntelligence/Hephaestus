@@ -80,14 +80,21 @@ def hdiutil_create_argv(image: Path, maximum_bytes: int) -> tuple[str, ...]:
 
 
 def _quota_path_identity(root: Path, mountpoint: Path) -> tuple[int, int, int, int]:
-    """Bind physical host directories before commands can use their paths."""
-    if (
-        root.resolve(strict=True) != root
-        or mountpoint.resolve(strict=True) != mountpoint
-        or not mountpoint.is_relative_to(root)
-    ):
+    """Bind physical host directories before commands can use their paths.
+
+    Containment is checked on the resolved paths. Resolution can only reveal an
+    escape, so a mountpoint that a symlink redirects outside the quota root is
+    still rejected. A root that reaches its physical directory through a
+    platform symlink stays accepted, because the returned device and inode
+    identity binds the physical directory either way. macOS is such a
+    platform: the temporary directory root is a path under ``/var``, and
+    ``/var`` is a symlink to ``/private/var``.
+    """
+    resolved_root = root.resolve(strict=True)
+    resolved_mountpoint = mountpoint.resolve(strict=True)
+    if not resolved_mountpoint.is_relative_to(resolved_root):
         raise ValueError("The quota directory path is not confined.")
-    root_info, mount_info = root.stat(), mountpoint.stat()
+    root_info, mount_info = resolved_root.stat(), resolved_mountpoint.stat()
     if not stat.S_ISDIR(root_info.st_mode) or not stat.S_ISDIR(mount_info.st_mode):
         raise ValueError("The quota path is not a directory.")
     return root_info.st_dev, root_info.st_ino, mount_info.st_dev, mount_info.st_ino
