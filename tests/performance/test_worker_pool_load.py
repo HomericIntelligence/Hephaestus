@@ -10,17 +10,13 @@ import threading
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.jobs import BuildTestJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue
-from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
-from hephaestus.automation.pipeline.stages.base import JobRequest
-from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from tests.performance.conftest import LoadConfig
 
@@ -387,109 +383,114 @@ def _run_load(
 
 
 @pytest.mark.performance
-def test_worker_pool_stalled_consumer_preserves_and_recovers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A production-wired coordinator bounds completions and resumes a seed burst."""
+def test_worker_pool_stalled_consumer_preserves_and_recovers() -> None:
+    """Paused consumption fills both bounded completion channels without loss."""
     workers = 3
-    seed_count = workers + 1
-
-    class SyntheticStage:
-        """One real worker-pool job followed by a terminal success."""
-
-        def on_enter(self, item: WorkItem, ctx: Any) -> None:
-            del item, ctx
-
-        def step(self, item: WorkItem, ctx: Any) -> JobRequest | StageOutcome:
-            del ctx
-            if item.payload.get("completed"):
-                return StageOutcome(Disposition.FINISH_PASS, "synthetic complete")
-            job = BuildTestJob(
-                repo=item.repo,
-                cwd=Path.cwd(),
-                argv=("synthetic", f"recovery-{item.issue}"),
-                timeout_s=2,
-                descr=f"recovery-{item.issue}",
-            )
-            return JobRequest(job, on_done_state=StageName.PLANNING)
-
-        def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
-            del ctx
-            if result.ok:
-                item.payload["completed"] = True
-
-    def make_coordinator() -> Coordinator:
-        """Build the same C-sized coordinator/pool topology used in production."""
-        completion_q = CompletionQueue(capacity=workers)
-        pool = WorkerPool(size=workers, shutdown=threading.Event(), completion_q=completion_q)
-        coordinator = Coordinator(
-            PipelineConfig(
-                org="org",
-                repos=["performance/worker-pool"],
-                loops=1,
-                max_workers=workers,
-                parallel_repos=1,
-                stage_queue_capacity=workers,
-                projects_dir=Path.cwd(),
-            ),
-            github=cast(Any, object()),
-            pool=pool,
-            install_signals=False,
-        )
-        coordinator.stages[StageName.PLANNING] = SyntheticStage()
-        monkeypatch.setattr(coordinator, "_seed_pass", lambda: 0)
-        for issue in range(seed_count):
-            item = WorkItem(
-                repo="performance/worker-pool",
-                kind=ItemKind.ISSUE,
-                issue=issue,
-                stage=StageName.PLANNING,
-            )
-            assert coordinator._push_item(item, StageName.PLANNING, enter=True)
-        return coordinator
-
-    stalled = make_coordinator()
-    started = 0
-    finished = 0
+    total_jobs = workers * 2
+    completion_q = CompletionQueue(capacity=workers)
+    pool = WorkerPool(size=workers, shutdown=threading.Event(), completion_q=completion_q)
+    first_wave = threading.Barrier(workers)
+    second_wave_release = threading.Event()
+    consumer_release = threading.Event()
     state_lock = threading.Lock()
-    release = threading.Event()
+    started = 0
+    completed = 0
 
     def stalled_handler(_pool: WorkerPool, job: BuildTestJob) -> JobResult:
-        """Release all C workers together, then request graceful shutdown."""
-        nonlocal started, finished
+        """Finish two waves while the consumer remains paused."""
+        nonlocal started, completed
         with state_lock:
             started += 1
-            if started == workers:
-                stalled.shutdown.set()
-                release.set()
-        assert release.wait(timeout=2.0)
+            wave = started
+        if wave <= workers:
+            first_wave.wait(timeout=5.0)
+        else:
+            assert second_wave_release.wait(timeout=5.0)
         with state_lock:
-            finished += 1
+            completed += 1
         return JobResult(ok=True, value=job.descr)
 
+    jobs = [
+        BuildTestJob(
+            repo="performance/worker-pool",
+            cwd=Path.cwd(),
+            argv=("synthetic", str(index)),
+            timeout_s=2,
+            descr=f"stalled-{index}",
+        )
+        for index in range(total_jobs)
+    ]
+
+    consumed: list[tuple[JobHandle, JobResult]] = []
+
+    def consume_after_release() -> None:
+        """Drain queued and rejected completions only after the pause ends."""
+        assert consumer_release.wait(timeout=5.0)
+        while len(consumed) < workers:
+            consumed.append(completion_q.get(timeout=5.0))
+        rejected, overflowed = completion_q.take_rejections()
+        assert overflowed is False
+        consumed.extend((entry.handle, entry.result) for entry in rejected)
+
+    consumer = threading.Thread(target=consume_after_release, daemon=True)
+    consumer.start()
     with patch.object(WorkerPool, "_run_build_test", stalled_handler):
-        assert stalled.run() == 130
+        try:
+            handles = [pool.submit(job, StageName.MERGE_WAIT) for job in jobs]
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                with state_lock:
+                    all_started = started == total_jobs
+                    first_wave_completed = completed == workers
+                if all_started and first_wave_completed and completion_q.qsize() == workers:
+                    break
+                time.sleep(0.01)
+            assert started == total_jobs
+            assert completed == workers
+            assert completion_q.qsize() == workers
+            second_wave_release.set()
 
-    assert stalled._work_window == workers
-    assert stalled.completion_q.capacity == stalled._work_window
-    assert stalled.completion_q.qsize() <= stalled.completion_q.capacity
-    assert finished == workers
-    assert len(stalled.items) == seed_count
-    assert all(
-        item.result is not None and item.result.reason.startswith("resumable at")
-        for item in stalled.items
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                with state_lock:
+                    all_completed = completed == total_jobs
+                if all_completed and completion_q._rejections.qsize() == workers:
+                    break
+                time.sleep(0.01)
+            assert completed == total_jobs
+            assert completion_q._rejections.qsize() == workers
+            assert completion_q._rejection_overflowed is False
+            consumer_release.set()
+            consumer.join(timeout=5.0)
+            assert not consumer.is_alive()
+        finally:
+            pool.shutdown(mark_interrupted=False)
+
+    assert len(consumed) == total_jobs
+    assert {handle for handle, _result in consumed} == set(handles)
+
+    recovery_q = CompletionQueue(capacity=total_jobs)
+    recovery_pool = WorkerPool(
+        size=workers,
+        shutdown=threading.Event(),
+        completion_q=recovery_q,
     )
+    try:
+        with patch.object(
+            WorkerPool,
+            "_run_build_test",
+            lambda _pool, job: JobResult(ok=True, value=job.descr),
+        ):
+            recovery_handles = [
+                recovery_pool.submit(handle.job, StageName.MERGE_WAIT)
+                for handle, _result in consumed
+            ]
+            recovered = [recovery_q.get(timeout=5.0) for _ in recovery_handles]
+    finally:
+        recovery_pool.shutdown(mark_interrupted=False)
 
-    recovered = make_coordinator()
-    with patch.object(
-        WorkerPool,
-        "_run_build_test",
-        lambda _pool, job: JobResult(ok=True, value=job.descr),
-    ):
-        assert recovered.run() == 0
-
-    assert len(recovered.items) == seed_count
-    assert all(item.result is not None and item.result.passed for item in recovered.items)
+    assert {handle for handle, _result in recovered} == set(recovery_handles)
+    assert all(result.ok for _handle, result in recovered)
 
 
 @pytest.mark.performance

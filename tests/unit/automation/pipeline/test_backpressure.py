@@ -149,6 +149,31 @@ def test_stage_burst_is_deferred_until_queue_drains(
     assert any(record["event"] == "queue_deferred" for record in records)
 
 
+def test_stage_admission_spool_is_bounded_under_a_large_burst(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A burst far beyond capacity cannot grow the coordinator's live backlog."""
+    coordinator = _coordinator(tmp_path, monkeypatch, stage_queue_capacity=1)
+
+    for issue in range(10_000):
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=issue,
+            stage=StageName.PLANNING,
+        )
+        coordinator._push_item(item, StageName.PLANNING, enter=True)
+
+    resident_work = sum(len(queue) for queue in coordinator.queues.values())
+    resident_work += len(coordinator._pending_admissions) + len(coordinator.in_flight)
+    assert len(coordinator._pending_admissions) == coordinator._pending_admission_capacity
+    assert resident_work <= 1 + coordinator._pending_admission_capacity
+    assert len(coordinator.items) <= resident_work
+    assert coordinator._saturation_failure is True
+    assert coordinator.shutdown.is_set()
+    assert coordinator._exit_code() == 1
+
+
 def test_c_plus_one_seed_drains_and_recovery_reuses_the_same_seed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -325,7 +350,7 @@ def test_completion_rejection_is_durable_and_terminates(
     coordinator.stages[StageName.PLANNING] = _JobRequestingStage()
 
     started = time.monotonic()
-    assert coordinator.run() == 130
+    assert coordinator.run() == 1
 
     assert time.monotonic() - started < 1.0
     assert coordinator.in_flight == {}
@@ -343,7 +368,7 @@ def test_completion_rejection_recovers_from_the_same_seed(
     first = _coordinator(tmp_path, monkeypatch, pool=first_pool)
     first.stages[StageName.PLANNING] = _JobRequestingStage()
 
-    assert first.run() == 130
+    assert first.run() == 1
     assert first.items[0].result is not None
     assert first.items[0].result.reason.startswith("resumable at planning")
 

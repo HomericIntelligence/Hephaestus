@@ -3,7 +3,9 @@
 Use this when the coordinator emits the critical `queue_saturated` alert or a
 run ends with resumable work after a completion publication was rejected.
 Normal stage backlogs emit `queue_deferred` and drain automatically; they are
-not saturation incidents.
+not saturation incidents. A full bounded admission spool is an internal
+saturation fault and causes exit code `1` so the next run can re-seed durable
+GitHub state.
 
 ## Diagnose
 
@@ -17,7 +19,8 @@ not saturation incidents.
 
 2. Compare the event with the live snapshot or metrics. A stage queue at its
    configured capacity is only a backlog; `queue_saturated` means a completion
-   publication or the bounded rejection mailbox could not accept a result.
+   publication, bounded rejection mailbox, or bounded stage-admission spool
+   could not accept work.
 
 3. Check the run summary for `RESUMABLE at <stage>`. The coordinator parks the
    exact rejected item before graceful shutdown, and parks all remaining live
