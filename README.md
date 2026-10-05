@@ -49,7 +49,8 @@ and intentionally excludes `[dev]` (which carries test/lint tooling such as
 pytest, ruff, and mypy):
 
 - `pip install HomericIntelligence-Hephaestus[all]` — installs all runtime
-  extras: `automation`, `github`, `nats`, `toml`, `xml`, `schema`. Note that
+  extras: `automation`, `fleet-build-mcp`, `github`, `nats`, `toml`, `xml`,
+  `schema`. Note that
   `automation` is the product layer (`hephaestus.automation`) and pulls in
   `pydantic`; see [ADR 0001](docs/adr/0001-automation-library-boundary.md).
 - `uv sync` — installs the editable project plus its default development and
@@ -58,6 +59,10 @@ pytest, ruff, and mypy):
   dependency surface used by CI dependency and license checks.
 - The `[github]` extra is an empty compatibility extra. GitHub commands use the
   external `gh` command and this extra installs no Python dependency.
+- The `[fleet-build-mcp]` extra adds the optional project tool adapter runtime
+  and `[automation]`. The caller supplies its Agamemnon client and registered
+  build owner. Base and `[automation]` installs do not require MCP. See the
+  [Fleet build contract](docs/fleet-builds.md).
 - Individual dependency-bearing extras (e.g. `[nats]`, `[schema]`) are available
   for users who only need one integration.
 

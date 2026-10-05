@@ -2,9 +2,9 @@
 
 ## Scope
 
-This slice supplies local source export and checked restore for subordinate
-Fleet builds. Agamemnon owns build admission. A separate supervisor must own
-transport, run grants, the fixed recipe, resource limits, output and cleanup.
+This module supplies local source export, verification and checked restore for
+subordinate Fleet builds. Agamemnon owns build admission. A separate supervisor
+must own transport, run grants, the fixed recipe, resource limits, output and cleanup.
 The snapshot code does not start a build command or fetch an object reference.
 
 The caller must hold an exclusive lease on a supervisor-owned private output
@@ -82,6 +82,31 @@ removes only its own recorded objects on failure. It checks both artifact files
 as one stable input and verifies actual output bytes before it returns.
 The caller must retain the destination under its own source
 lease after verification; a return value is not a permanent filesystem lock.
+
+## Verification before submission
+
+Call `verify_snapshot(artifact, commitment=commitment, policy=policy, timeout=30)`
+to check an existing local artifact without creating a destination. The
+function returns `None` when the actual manifest and archive bytes match the
+retained commitment. It uses the same bounded reads, stable artifact checks
+and archive validation as `restore_snapshot`. It does not create temporary
+files, publish a workspace, read the current worktree, or submit a build.
+
+The function raises `SnapshotError` for invalid or changed artifacts, malformed
+manifest or archive bytes, unsupported filesystem operations, and an expired
+time budget. The timeout must be a finite number greater than zero and at most
+300 seconds. Boolean values are invalid. The default is 30 seconds. One
+monotonic deadline covers all reads and checks. A caller with an operation
+deadline must pass only its remaining budget and check that deadline again
+before submission. Verification does not renew the operation budget.
+
+The caller owns the artifact lease and must exclude writers through
+verification and transfer. A successful return describes the checked bytes;
+it does not create a lock, prove current working-source identity, or grant
+permission to run a build. The remote receiver must still verify the bytes it
+receives. Registration binds the opaque `reference` to its artifact. The
+manifest contains no reference field, so this function cannot check that
+association.
 
 ## Remaining offload gates
 

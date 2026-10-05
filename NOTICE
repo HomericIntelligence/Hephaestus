@@ -41,6 +41,9 @@ These packages are installed only when the corresponding extra is requested
     pydantic        MIT
     sigstore        Apache-2.0
 
+  fleet-build-mcp extra
+    mcp         MIT
+
   nats extra
     nats-py     Apache-2.0
 

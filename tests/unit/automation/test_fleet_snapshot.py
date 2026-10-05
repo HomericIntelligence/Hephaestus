@@ -9,6 +9,7 @@ import os
 import stat
 import subprocess
 import tarfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from hephaestus.automation.fleet_snapshot import (
     SnapshotPolicy,
     export_snapshot,
     restore_snapshot,
+    verify_snapshot,
 )
 from hephaestus.config.child_environments import build_git_child_env
 
@@ -72,6 +74,68 @@ def capture(source: Path, tmp_path: Path) -> tuple[Path, dict[str, Any], Snapsho
     artifact = tmp_path / "artifact"
     commitment = export_snapshot(source, artifact, reference="snapshot-1", policy=policy)
     return artifact, commitment, policy
+
+
+def tree_state(root: Path) -> dict[str, tuple[int, bytes | None]]:
+    """Record fixture membership, modes and bytes without using access times."""
+    return {
+        path.relative_to(root).as_posix(): (
+            stat.S_IMODE(path.stat().st_mode),
+            None if path.is_dir() else path.read_bytes(),
+        )
+        for path in (root, *root.rglob("*"))
+    }
+
+
+def receive_snapshot(
+    operation: str,
+    artifact: Path,
+    destination: Path,
+    commitment: dict[str, Any],
+    policy: SnapshotPolicy,
+    *,
+    timeout: float = 30,
+) -> None:
+    """Use either public receiver with the same actual artifact and commitment."""
+    if operation == "verify":
+        verify_snapshot(artifact, commitment=commitment, policy=policy, timeout=timeout)
+    else:
+        restore_snapshot(
+            artifact, destination, commitment=commitment, policy=policy, timeout=timeout
+        )
+
+
+def test_verify_checks_actual_snapshot_without_creating_files(
+    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verification leaves source and artifact bytes, modes and membership unchanged."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    before = tree_state(tmp_path)
+    real_os_open = os.open
+    real_io_open = io.open
+
+    def read_only_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        assert not flags & (os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_RDWR)
+        return real_os_open(path, flags, *args, **kwargs)
+
+    def read_only_stream(path: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        assert not set(mode) & set("wax+")
+        return real_io_open(path, mode, *args, **kwargs)
+
+    def unexpected_directory(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("snapshot verification created a directory")
+
+    assert real_os_open in os.supports_dir_fd and os.mkdir in os.supports_dir_fd
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", read_only_open)
+        patch.setattr(
+            os, "supports_dir_fd", os.supports_dir_fd | {read_only_open, unexpected_directory}
+        )
+        patch.setattr(io, "open", read_only_stream)
+        patch.setattr("builtins.open", read_only_stream)
+        patch.setattr(os, "mkdir", unexpected_directory)
+        verify_snapshot(artifact, commitment=commitment, policy=policy)
+    assert tree_state(tmp_path) == before
 
 
 def test_dirty_source_round_trip_is_complete_deterministic_and_private(
@@ -237,22 +301,25 @@ def test_source_bounds_reject_without_a_published_manifest(
 @pytest.mark.parametrize(
     "field", ["reference", "manifestDigest", "baseCommit", "members", "bytes", "policyDigest"]
 )
+@pytest.mark.parametrize("operation", ["restore", "verify"])
 def test_changed_commitment_is_not_content_verification(
-    source: Path, tmp_path: Path, field: str
+    source: Path, tmp_path: Path, field: str, operation: str
 ) -> None:
     """A modified admission commitment does not verify an artifact."""
     artifact, commitment, policy = capture(source, tmp_path)
     commitment[field] = "../foreign" if field == "reference" else 0
     with pytest.raises(SnapshotError):
-        restore_snapshot(artifact, tmp_path / "restored", commitment=commitment, policy=policy)
+        receive_snapshot(operation, artifact, tmp_path / "restored", commitment, policy)
     assert not (tmp_path / "restored").exists()
 
 
 @pytest.mark.parametrize(
-    "corruption", ["content", "mode", "extra", "duplicate", "traversal", "link", "missing"]
+    "corruption",
+    ["content", "mode", "extra", "duplicate", "traversal", "link", "missing", "malformed"],
 )
+@pytest.mark.parametrize("operation", ["restore", "verify"])
 def test_receiver_rejects_corrupt_actual_archive(
-    source: Path, tmp_path: Path, corruption: str
+    source: Path, tmp_path: Path, corruption: str, operation: str
 ) -> None:
     """Actual archive modifications must fail before destination publication."""
     artifact, commitment, policy = capture(source, tmp_path)
@@ -278,15 +345,120 @@ def test_receiver_rejects_corrupt_actual_archive(
         members.append((item, b"x" if item.size else b""))
     elif corruption == "duplicate":
         members.append(members[0])
-    else:
+    elif corruption == "missing":
         members.pop()
     with tarfile.open(archive, "w", format=tarfile.USTAR_FORMAT) as writer:
         for item, data in members:
             writer.addfile(item, io.BytesIO(data))
+    if corruption == "malformed":
+        archive.write_bytes(archive.read_bytes()[:10])
+    before = tree_state(tmp_path)
     with pytest.raises(SnapshotError):
-        restore_snapshot(artifact, tmp_path / "restored", commitment=commitment, policy=policy)
+        receive_snapshot(operation, artifact, tmp_path / "restored", commitment, policy)
     assert not (tmp_path / "escape").exists()
     assert not (tmp_path / "restored").exists()
+    assert tree_state(tmp_path) == before
+
+
+@pytest.mark.parametrize("operation", ["restore", "verify"])
+@pytest.mark.parametrize(
+    "corruption",
+    ["utf8", "json", "whitespace", "duplicate", "schema", "shape", "boolean", "path", "digest"],
+)
+def test_receiver_rejects_corrupt_manifest_bytes(
+    source: Path, tmp_path: Path, operation: str, corruption: str
+) -> None:
+    """A matching manifest hash cannot hide invalid metadata or changed file digests."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    path = artifact / "manifest.json"
+    original = path.read_bytes()
+    manifest = json.loads(original)
+    if corruption == "utf8":
+        data = b"\xff"
+    elif corruption == "json":
+        data = b"{"
+    elif corruption == "whitespace":
+        data = original + b" "
+    elif corruption == "duplicate":
+        data = original.replace(b'"schema":', b'"schema":"invalid","schema":', 1)
+        assert data != original
+    else:
+        if corruption == "schema":
+            manifest["schema"] = "invalid"
+        elif corruption == "shape":
+            del manifest["baseCommit"]
+        elif corruption == "boolean":
+            manifest["files"][0]["size"] = True
+        elif corruption == "path":
+            manifest["files"][0]["path"] = "../escape"
+        elif corruption == "digest":
+            manifest["files"][0]["sha256"] = "0" * 64
+        data = (
+            json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+        ).encode()
+    path.write_bytes(data)
+    commitment["manifestDigest"] = hashlib.sha256(data).hexdigest()
+    before = tree_state(tmp_path)
+    with pytest.raises(SnapshotError):
+        receive_snapshot(operation, artifact, tmp_path / "restored", commitment, policy)
+    assert tree_state(tmp_path) == before
+
+
+@pytest.mark.parametrize("operation", ["restore", "verify"])
+@pytest.mark.parametrize(
+    "field",
+    ["manifestDigest", "baseCommit", "members", "bytes", "policyDigest", "extra", "missing"],
+)
+def test_receiver_rejects_well_formed_but_different_commitment(
+    source: Path, tmp_path: Path, operation: str, field: str
+) -> None:
+    """The retained commitment must match the actual artifact, including its fields."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    if field == "extra":
+        commitment["extra"] = "value"
+    elif field == "missing":
+        del commitment["reference"]
+    elif field in {"members", "bytes"}:
+        commitment[field] += 1
+    else:
+        commitment[field] = "0" * (40 if field == "baseCommit" else 64)
+    before = tree_state(tmp_path)
+    with pytest.raises(SnapshotError):
+        receive_snapshot(operation, artifact, tmp_path / "restored", commitment, policy)
+    assert tree_state(tmp_path) == before
+
+
+def test_verification_does_not_infer_the_opaque_reference_registration(
+    source: Path, tmp_path: Path
+) -> None:
+    """Registration owns the reference; the manifest binds the source bytes."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    commitment["reference"] = "another-registered-reference"
+    before = tree_state(tmp_path)
+    verify_snapshot(artifact, commitment=commitment, policy=policy)
+    assert tree_state(tmp_path) == before
+
+
+@pytest.mark.parametrize("operation", ["restore", "verify"])
+@pytest.mark.parametrize("name", ["manifest.json", "source.tar"])
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_receiver_rejects_linked_artifact_files(
+    source: Path, tmp_path: Path, operation: str, name: str, kind: str
+) -> None:
+    """Matching content through a link cannot supply a regular owned artifact."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    path = artifact / name
+    outside = tmp_path / "outside"
+    outside.write_bytes(path.read_bytes())
+    path.unlink()
+    if kind == "symlink":
+        path.symlink_to(outside)
+    else:
+        os.link(outside, path)
+    before = tree_state(tmp_path)
+    with pytest.raises(SnapshotError):
+        receive_snapshot(operation, artifact, tmp_path / "restored", commitment, policy)
+    assert tree_state(tmp_path) == before
 
 
 def test_receiver_does_not_overwrite_existing_destination(source: Path, tmp_path: Path) -> None:
@@ -346,6 +518,49 @@ def test_expired_capture_does_not_start_git(
     assert not dispatched
 
 
+@pytest.mark.parametrize("timeout", [0, -1, True, 301, float("inf"), float("nan"), "30"])
+def test_invalid_verification_timeout_cannot_read_artifact_bytes(
+    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout: Any
+) -> None:
+    """An invalid time budget fails before the first artifact read."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    before = tree_state(tmp_path)
+
+    def unexpected_read(*args: Any, **kwargs: Any) -> bytes:
+        raise AssertionError("invalid verification budget read artifact bytes")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "read", unexpected_read)
+        with pytest.raises(SnapshotError):
+            verify_snapshot(artifact, commitment=commitment, policy=policy, timeout=timeout)
+    assert tree_state(tmp_path) == before
+
+
+def test_verification_keeps_one_deadline_during_actual_reads(
+    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Expiry during an archive read prevents a successful verification result."""
+    artifact, commitment, policy = capture(source, tmp_path)
+    before = tree_state(tmp_path)
+    original = os.read
+    expired = False
+
+    def read(descriptor: int, count: int) -> bytes:
+        nonlocal expired
+        data = original(descriptor, count)
+        if b"ustar\x00" in data:
+            expired = True
+        return data
+
+    with monkeypatch.context() as patch:
+        patch.setattr(time, "monotonic", lambda: 20.0 if expired else 10.0)
+        patch.setattr(os, "read", read)
+        with pytest.raises(SnapshotError):
+            verify_snapshot(artifact, commitment=commitment, policy=policy, timeout=5)
+    assert expired
+    assert tree_state(tmp_path) == before
+
+
 def test_member_limit_counts_only_present_files(source: Path, tmp_path: Path) -> None:
     """A deleted base path does not consume the quota for four actual files."""
     policy = SnapshotPolicy(4, 8192)
@@ -370,8 +585,9 @@ def test_eligible_non_ascii_source_is_explicitly_rejected(source: Path, tmp_path
     assert not (tmp_path / "artifact").exists()
 
 
+@pytest.mark.parametrize("operation", ["restore", "verify"])
 def test_artifact_change_between_reads_is_rejected(
-    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     """The two actual artifact reads must belong to one stable capture."""
     artifact, commitment, policy = capture(source, tmp_path)
@@ -389,7 +605,7 @@ def test_artifact_change_between_reads_is_rejected(
 
     monkeypatch.setattr(os, "read", mutate)
     with pytest.raises(SnapshotError):
-        restore_snapshot(artifact, tmp_path / "restored", commitment=commitment, policy=policy)
+        receive_snapshot(operation, artifact, tmp_path / "restored", commitment, policy)
     assert changed
     assert not (tmp_path / "restored").exists()
 

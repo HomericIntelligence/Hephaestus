@@ -1,4 +1,4 @@
-"""Export and independently restore bounded Fleet source snapshots."""
+"""Export, verify and restore bounded Fleet source snapshots."""
 
 from __future__ import annotations
 
@@ -470,6 +470,40 @@ def _artifact_identity(artifact: Path, deadline: float) -> str:
     )
 
 
+def _read_snapshot(
+    artifact: Path,
+    commitment: Mapping[str, object],
+    policy: SnapshotPolicy,
+    deadline: float,
+) -> tuple[dict[str, Any], list[bytes]]:
+    artifact_identity = _artifact_identity(artifact, deadline)
+    encoded, _ = _read_regular(artifact, "manifest.json", MAX_MANIFEST_BYTES, deadline)
+    archive_limit = policy.max_bytes + policy.max_members * 1024 + 10240
+    raw, _ = _read_regular(artifact, "source.tar", archive_limit, deadline)
+    manifest, contents = _decode(encoded, raw, commitment, policy, deadline)
+    if _artifact_identity(artifact, deadline) != artifact_identity:
+        raise SnapshotError("snapshot artifact changed between reads")
+    return manifest, contents
+
+
+def verify_snapshot(
+    artifact: Path,
+    *,
+    commitment: Mapping[str, object],
+    policy: SnapshotPolicy,
+    timeout: float = 30,
+) -> None:
+    """Check actual snapshot bytes without creating a destination."""
+    try:
+        deadline = _deadline(timeout)
+        _read_snapshot(_root(artifact), commitment, policy, deadline)
+        remaining(deadline)
+    except SnapshotError:
+        raise
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, tarfile.TarError) as exc:
+        raise SnapshotError("source snapshot verification failed") from exc
+
+
 def restore_snapshot(
     artifact: Path,
     destination: Path,
@@ -483,13 +517,7 @@ def restore_snapshot(
         deadline = _deadline(timeout)
         artifact = _root(artifact)
         _output(destination, artifact)
-        artifact_identity = _artifact_identity(artifact, deadline)
-        encoded, _ = _read_regular(artifact, "manifest.json", MAX_MANIFEST_BYTES, deadline)
-        archive_limit = policy.max_bytes + policy.max_members * 1024 + 10240
-        raw, _ = _read_regular(artifact, "source.tar", archive_limit, deadline)
-        manifest, contents = _decode(encoded, raw, commitment, policy, deadline)
-        if _artifact_identity(artifact, deadline) != artifact_identity:
-            raise SnapshotError("snapshot artifact changed between reads")
+        manifest, contents = _read_snapshot(artifact, commitment, policy, deadline)
         publish(
             destination,
             {

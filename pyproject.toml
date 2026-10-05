@@ -63,12 +63,17 @@ automation = [
     "pydantic>=2.12.5,<3",
     "sigstore>=4.5,<5",
 ]
+fleet-build-mcp = [
+    "HomericIntelligence-Hephaestus[automation]",
+    "mcp==1.30.0",
+]
 all = [
-    "HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]",
+    "HomericIntelligence-Hephaestus[automation,fleet-build-mcp,github,nats,toml,xml,schema]",
 ]
 
 [dependency-groups]
 dev = [
+    "HomericIntelligence-Hephaestus[fleet-build-mcp]",
     # pytest 9.x and pytest-cov 7.x are the latest majors; tight floors are
     # intentional so CI tests against the same majors the install contract
     # advertises.
@@ -101,6 +106,9 @@ dev = [
     "pytest-xdist>=3.6,<4",
 ]
 automation = [
+    # The build bridge uses the actual SDK in the normal locked profile.
+    # This pin is development-only; runtime callers supply their SDK client.
+    "HomericIntelligence-Agamemnon @ git+https://github.com/HomericIntelligence/Agamemnon.git@ef39b3506bb29debe7e728f33e8d80c0923a330c#subdirectory=clients/python",
     "markdown-it-py>=4.0,<5",
     "pydantic>=2.12.5,<3",
     "sigstore>=4.5,<5",

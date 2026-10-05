@@ -10,6 +10,55 @@ capacity one. Native macOS, Linux without that boundary, higher capacity, and
 cold resume remain unsupported. The deployment must separately validate the
 pinned provider's restricted startup and ordinary model/tool route.
 
+## Local controller runtime
+
+Add `--controller-port PORT --controller-timeout SECONDS` to `serve` to select
+the local controller profile. It uses the literal host `127.0.0.1`, captures
+`AGAMEMNON_API_KEY` once, and disables ambient HTTP proxy configuration. The
+timeout must be greater than zero and at most 30 seconds. The current SDK is
+the pinned development dependency; this profile does not add a published SDK
+runtime dependency or a remote TLS configuration.
+
+`FleetWorkerRuntime` owns one continuously running SDK loop and client, one
+private journal, the Codex worker, and one bounded build pool. The worker
+borrows this journal. The state directory must already exist, be canonical,
+and have mode `0700`. The runtime takes an exclusive directory flock and uses
+`journal_directory` to synchronize the journal before starting the provider.
+The normal standalone profile and attachment commands do not import the SDK.
+
+Normal close waits for accepted pool jobs and their completion callbacks before
+closing the SDK on its own loop, then the provider and shared journal. A local
+active-runtime marker remains uncertain until this closure is confirmed. It
+does not change an Agamemnon task outcome or remove retained build intents.
+Unexpected loop return permits cleanup on that same loop; queued build calls
+cannot start during cleanup. An unresponsive loop retains uncertain resources.
+The CLI attempts bounded cleanup of its owned provider, then exits its exact
+process with status 70. It does not terminate an ambient process group.
+
+The profile starts with an empty build registry. A trusted adapter can call
+`register_build()` later on the worker control thread with an admitted session,
+immutable source identity, and genuine source and result capabilities. The
+runtime checks the retained session and copies the context. It creates each
+build owner on the existing SDK loop with the same client and journal. This
+local consistency check does not replace Agamemnon admission or Keystone
+dispatch. There is no build registration or submission socket operation.
+
+`submit_build()` retains capacity until `take_completion()` observes its actual
+pool result. A context can have only one outstanding job. `retire_build()`
+requires that observation; failed or retired identities cannot be rebound.
+The runtime retains at most 4096 context identities during its lifetime.
+Completion queue saturation fences the runtime because evidence can be lost.
+Result observation and retirement do not approve work or delete durable intents.
+
+The local `BuildSupervisor.result_handoff()` capability binds acknowledged
+supervisor identity to actual publisher bytes under a shared directory lease.
+It supplies the execution lease that an ordinary controller record does not
+contain. It does not supply source exclusion or remote artifact transport.
+
+Production source quiescence, snapshot transfer, remote result transfer, and
+stage integration remain required before build activation. A running pool or
+fixture capability does not qualify offload, a cluster, or the 108-agent target.
+
 ## Start and attachment
 
 1. Provision an isolated Linux worker boundary, then install the pinned
