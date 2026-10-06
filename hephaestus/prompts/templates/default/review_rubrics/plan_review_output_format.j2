@@ -3,11 +3,14 @@
 End the response with EXACTLY ONE of these labels on its own line and emit
 nothing after it:
 
-```
 state:plan-go
 state:plan-no-go
 state:plan-blocked
-```
+
+Write the label as plain text. Do not put the label in a code fence, a block
+quote, or any other container. A code fence leaves its closing marker as the
+final line, and the parser then rejects the whole review. Do not repeat the
+label earlier in the response, because the parser accepts exactly one.
 
 Use `state:plan-blocked` only when planning cannot proceed without human
 feedback or an external dependency. The prose before the final label must say

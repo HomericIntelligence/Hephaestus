@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import time
@@ -281,16 +282,48 @@ def repository_worker_path_is_valid(
     )
 
 
+def _copy_durable_state(source: Path, destination_root: Path) -> None:
+    """Copy one durable state directory into a canonical state root.
+
+    The source is copied, never moved. Intake preparation can still fail after
+    this point, and it must not destroy caller state on the way. An entry that
+    already exists in the destination wins, so the copy stays idempotent across
+    runs.
+    """
+    if not source.is_dir() or source.is_symlink():
+        return
+    destination = destination_root / source.name
+    destination.mkdir(parents=True, exist_ok=True)
+    existing = {entry.name for entry in destination.iterdir()}
+    for entry in sorted(source.iterdir()):
+        if entry.name in existing:
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.copytree(entry, destination / entry.name, symlinks=True)
+        else:
+            shutil.copy2(entry, destination / entry.name, follow_symlinks=False)
+
+
 def repository_host_state_root(repo_root: Path) -> Path:
-    """Select durable host storage without changing source identity."""
+    """Select durable host storage without changing source identity.
+
+    The loop's own intake worktree is exempt. Durable state written under its
+    ``build`` directory is the loop's own output, not caller legacy state, so
+    it moves to the intake state root instead of blocking the run. The earlier
+    check refused on bare existence, which made the loop reject the receipts
+    it had just written.
+    """
     root = repo_root.resolve(strict=True)
     base = checkout_intake_worker_base(root)
     if base is None:
         return root
-    legacy = root / DEFAULT_STATE_DIR
-    if legacy.exists() or legacy.is_symlink():
-        raise RepoIntakeError("legacy intake state requires explicit recovery")
-    return base.parent.parent
+    state_root = base.parent.parent
+    for name in _DURABLE_STATE_NAMES:
+        legacy = root / "build" / name
+        if legacy.is_symlink():
+            raise RepoIntakeError("legacy intake state path is unsafe")
+        _copy_durable_state(legacy, state_root / "build")
+    return state_root
 
 
 def _is_valid_branch(value: object) -> TypeGuard[str]:
@@ -469,6 +502,7 @@ class RepoIntakeManager:
         self._validate_origin()
         records = self._worktree_records()
         self._validate_state_paths(records)
+        self._reject_modified_intake_tree(records)
         allowed_paths = self._validate_state_authority(
             records,
             operational_state_paths=operational_state_paths,
@@ -709,13 +743,44 @@ class RepoIntakeManager:
             raise RepoIntakeError("repository-intake receipt ownership does not match")
         return receipt
 
+    def _reject_modified_intake_tree(self, records: tuple[_WorktreeRecord, ...]) -> None:
+        """Block only when the intake worktree holds modified tracked files.
+
+        The caller's own checkout is never inspected. A dirty operator
+        checkout is unrelated local work, and intake uses its own worktree, so
+        it never blocks. Untracked and ignored content never blocks either.
+
+        A modified tracked file inside the intake worktree is different: it
+        means another agent wrote source there and automation must not adopt
+        or overwrite that work.
+        """
+        for root in self._legacy_worktree_roots(records):
+            if self._same_path(root, self.caller_root) or not root.exists():
+                continue
+            result = self._run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=root,
+                check=False,
+            )
+            if result.returncode != 0:
+                continue
+            if result.stdout.strip():
+                raise RepoIntakeError(
+                    "repository-intake requires a clean tracked tree; "
+                    f"preserve the tracked changes in {root}, then commit or stash them"
+                )
+
+    def _migrate_durable_state(self, source: Path, destination_root: Path) -> None:
+        """Copy one durable state directory into the canonical state root."""
+        _copy_durable_state(source, destination_root)
+
     def _validate_state_authority(
         self,
         records: tuple[_WorktreeRecord, ...],
         *,
         operational_state_paths: Collection[Path] = (),
     ) -> frozenset[Path]:
-        """Reject legacy or conflicting durable state before intake changes."""
+        """Migrate durable state into the canonical root instead of blocking."""
         allowed_operational_paths = self._allowed_operational_state_paths(
             records,
             operational_state_paths,
@@ -748,24 +813,9 @@ class RepoIntakeManager:
                 destination=destination_root,
                 label="destination",
             )
-        destination_has_state = self._destination_has_state(
-            destination_root,
-            source=recovery_source,
-        )
-        if not legacy_sources:
-            return allowed_operational_paths
-        sources = ", ".join(str(path) for path in legacy_sources)
-        if destination_has_state:
-            raise RepoIntakeError(
-                "repository-intake conflicting state requires manual reconciliation; "
-                f"preserve source {sources} and destination {destination_root}, "
-                "then reconcile them manually"
-            )
-        raise RepoIntakeError(
-            "repository-intake legacy state requires manual reconciliation; "
-            f"preserve source {sources} and destination {destination_root}, "
-            "then reconcile them manually"
-        )
+        for source in legacy_sources:
+            self._migrate_durable_state(source, destination_root)
+        return allowed_operational_paths
 
     def _legacy_worktree_roots(
         self,
@@ -990,31 +1040,6 @@ class RepoIntakeManager:
             f"preserve source {source} and destination {destination}, "
             "then reconcile them manually"
         )
-
-    def _destination_has_state(self, root: Path, *, source: Path) -> bool:
-        """Return whether the destination durable area contains state."""
-        self._validate_state_path_chain(
-            root,
-            root=self.state_dir,
-            source=source,
-            destination=root,
-            label="destination",
-        )
-        if not root.exists():
-            return False
-        try:
-            for child in root.iterdir():
-                if child.name not in _DURABLE_STATE_NAMES:
-                    return True
-                if next(child.iterdir(), None) is not None:
-                    return True
-        except OSError as exc:
-            raise RepoIntakeError(
-                "repository-intake destination state inspection failed; "
-                f"preserve source {source} and destination {root}, "
-                "then reconcile them manually"
-            ) from exc
-        return False
 
     def _worktree_records(self) -> tuple[_WorktreeRecord, ...]:
         """Read the registered worktrees from the shared Git metadata."""

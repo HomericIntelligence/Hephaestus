@@ -234,6 +234,17 @@ def latest_logical_items(items: Sequence[WorkItem]) -> list[WorkItem]:
     return list(latest.values())
 
 
+def _blocked_detail(reason: str) -> str:
+    """Return the cause that follows the redundant ``blocked`` prefix.
+
+    A blocked item keeps its cause only in the result reason. The summary
+    rendered the bare word ``BLOCKED``, so an operator could not tell which
+    guard stopped the item without reading the durable state by hand.
+    """
+    detail = reason.removeprefix("blocked").lstrip(": ").strip()
+    return detail or "unspecified"
+
+
 def _disposition(item: WorkItem) -> str:
     """Classify one item's summary disposition cell."""
     result = item.result
@@ -246,7 +257,7 @@ def _disposition(item: WorkItem) -> str:
     if result.reason.startswith("skip"):
         return "SKIP"
     if result.reason.startswith("blocked"):
-        return "BLOCKED"
+        return f"BLOCKED:{_blocked_detail(result.reason)}"
     return f"FAIL:{result.reason}"
 
 
@@ -269,7 +280,7 @@ def _display_disposition(item: WorkItem, *, localizer: Localizer | None = None) 
     if result.reason.startswith("skip"):
         return render("SKIP")
     if result.reason.startswith("blocked"):
-        return render("BLOCKED")
+        return render("BLOCKED:%(reason)s", reason=_blocked_detail(result.reason))
     return render("FAIL:%(reason)s", reason=result.reason)
 
 
