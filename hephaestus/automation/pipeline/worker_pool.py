@@ -12488,7 +12488,14 @@ class WorkerPool:
                     },
                 },
             )
-        except (OSError, RuntimeError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as exc:
+        except (
+            OSError,
+            RuntimeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            subprocess.SubprocessError,
+        ) as exc:
             # Retain the cause. The bare code left an operator with a failed
             # implementation stage and no way to learn which check refused.
             return JobResult(

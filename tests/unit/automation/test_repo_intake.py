@@ -265,7 +265,7 @@ def test_rebind_preserves_registered_descendant_worktree(
     tmp_path: Path,
     descendant_is_dirty: bool,
 ) -> None:
-    """A rebind stops when a registered worktree is below the intake path."""
+    """A rebind stops and keeps a registered worktree below the intake path."""
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
     first = manager.prepare()
@@ -280,7 +280,14 @@ def test_rebind_preserves_registered_descendant_worktree(
     caller_state = _caller_state(caller)
     _advance_remote(tmp_path, remote)
 
-    with pytest.raises(RepoIntakeError, match="registered descendant worktree"):
+    # A clean child stops the rebind because it is a registered descendant.
+    # A dirty child stops it earlier, because a modified tracked file in a
+    # registered worktree is the one blocking condition of the intake contract.
+    expected_message = (
+        "clean tracked tree" if descendant_is_dirty else "registered descendant worktree"
+    )
+
+    with pytest.raises(RepoIntakeError, match=expected_message):
         _manager(caller, remote).prepare()
 
     assert child.is_dir()
@@ -629,31 +636,51 @@ def test_mismatched_state_root_is_preserved_and_fails_closed(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("directory_name", [".automation-state", Path(DEFAULT_STATE_DIR).name])
-def test_legacy_caller_state_blocks_before_intake_and_is_preserved(
+def test_legacy_caller_state_migrates_into_the_intake_root(
     tmp_path: Path,
     directory_name: str,
 ) -> None:
-    """Legacy caller state requires manual reconciliation before intake."""
+    """Durable state in the caller migrates instead of blocking intake."""
     caller, remote = _make_repository(tmp_path)
     source = caller / "build" / directory_name
     source.mkdir(parents=True)
     marker = source / "state.json"
-    marker.write_bytes(b'{"preserve":true}\n')
+    marker.write_bytes(b'{"migrated":true}\n')
     manager = _manager(caller, remote)
-    destination = manager.state_dir / "build"
-    before = _caller_state(caller)
+    destination = manager.state_dir / "build" / directory_name
 
-    with pytest.raises(RepoIntakeError, match="legacy state") as caught:
+    manager.prepare()
+
+    assert (destination / "state.json").read_bytes() == b'{"migrated":true}\n'
+    assert manager.worktree_path.exists()
+
+
+def test_dirty_caller_checkout_does_not_block_intake(tmp_path: Path) -> None:
+    """A dirty caller checkout is unrelated local work and must not block."""
+    caller, remote = _make_repository(tmp_path)
+    (caller / "tracked.txt").write_text("local work\n", encoding="utf-8")
+    (caller / "untracked.txt").write_text("keep\n", encoding="utf-8")
+    manager = _manager(caller, remote)
+
+    manager.prepare()
+
+    assert manager.worktree_path.exists()
+    assert (caller / "tracked.txt").read_text(encoding="utf-8") == "local work\n"
+    assert (caller / "untracked.txt").read_text(encoding="utf-8") == "keep\n"
+
+
+def test_modified_tracked_files_in_a_worktree_block_intake(tmp_path: Path) -> None:
+    """Modified tracked files in a registered worktree are another agent's work."""
+    caller, remote = _make_repository(tmp_path)
+    linked = tmp_path / "linked-caller"
+    _run_git(caller, "worktree", "add", "-b", "feature", str(linked), "HEAD")
+    (linked / "tracked.txt").write_text("agent work\n", encoding="utf-8")
+    manager = _manager(caller, remote)
+
+    with pytest.raises(RepoIntakeError, match="clean tracked tree"):
         manager.prepare()
 
-    assert str(source) in str(caught.value)
-    assert str(destination) in str(caught.value)
-    assert "preserve" in str(caught.value)
-    assert "reconcile" in str(caught.value)
-    assert marker.read_bytes() == b'{"preserve":true}\n'
-    assert not destination.exists()
     assert not manager.worktree_path.exists()
-    assert _caller_state(caller) == before
 
 
 @pytest.mark.parametrize("stale_registration", [False, True])
@@ -722,7 +749,7 @@ def test_unreadable_registration_still_blocks_compatibility_locks(
     assert sibling.is_dir()
 
 
-@pytest.mark.parametrize("unsafe_kind", ["extra", "symlink", "mode"])
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode"])
 def test_compatibility_lock_cannot_hide_unsafe_caller_state(
     tmp_path: Path,
     unsafe_kind: str,
@@ -741,10 +768,7 @@ def test_compatibility_lock_cannot_hide_unsafe_caller_state(
     with lock.acquire(operation="prepare_intake", timeout_s=30):
         pass
 
-    if unsafe_kind == "extra":
-        unsafe_path = lock_path.parent / "legacy-state.json"
-        unsafe_path.write_text("preserve\n", encoding="utf-8")
-    elif unsafe_kind == "symlink":
+    if unsafe_kind == "symlink":
         owner_lock_path.unlink()
         unsafe_path = owner_lock_path
         unsafe_path.symlink_to(tmp_path / "foreign-lock")
@@ -758,34 +782,52 @@ def test_compatibility_lock_cannot_hide_unsafe_caller_state(
     assert unsafe_path.exists() or unsafe_path.is_symlink()
 
 
+def test_extra_untracked_caller_state_migrates_through_a_compatibility_lock(
+    tmp_path: Path,
+) -> None:
+    """An extra untracked file in the lock directory is copied, not a failure."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    lock_path = caller / DEFAULT_STATE_DIR / "locks" / "git-repo.lock"
+    compatibility_paths = (
+        lock_path,
+        Path(f"{lock_path}.owner.lock"),
+        Path(f"{lock_path}.owner.json"),
+    )
+    lock = RepositoryOperationLock("repo", lock_path=lock_path)
+    with lock.acquire(operation="prepare_intake", timeout_s=30):
+        pass
+    extra_path = lock_path.parent / "legacy-state.json"
+    extra_path.write_text("preserve\n", encoding="utf-8")
+    destination = manager.state_dir / DEFAULT_STATE_DIR / "locks" / "legacy-state.json"
+
+    manager.validate(operational_state_paths=compatibility_paths)
+
+    assert destination.read_text(encoding="utf-8") == "preserve\n"
+    assert extra_path.read_text(encoding="utf-8") == "preserve\n"
+
+
 @pytest.mark.parametrize("directory_name", [".automation-state", Path(DEFAULT_STATE_DIR).name])
-def test_linked_caller_detects_legacy_state_in_primary_worktree(
+def test_linked_caller_migrates_primary_worktree_state(
     tmp_path: Path,
     directory_name: str,
 ) -> None:
-    """A linked caller cannot miss legacy state in its primary worktree."""
+    """A linked caller migrates durable state in its primary worktree."""
     primary, remote = _make_repository(tmp_path)
     linked = tmp_path / "linked-caller"
     _run_git(primary, "worktree", "add", "-b", "feature", str(linked), "HEAD")
     source = primary / "build" / directory_name
     source.mkdir(parents=True)
     marker = source / "state.json"
-    marker.write_bytes(b'{"preserve":"primary"}\n')
+    marker.write_bytes(b'{"migrated":"primary"}\n')
     manager = _manager(linked, remote)
-    destination = manager.state_dir / "build"
-    primary_before = _caller_state(primary)
-    linked_before = _caller_state(linked)
+    destination = manager.state_dir / "build" / directory_name
 
-    with pytest.raises(RepoIntakeError, match="legacy state") as caught:
-        manager.prepare()
+    receipt = manager.prepare()
 
-    assert str(source) in str(caught.value)
-    assert str(destination) in str(caught.value)
-    assert marker.read_bytes() == b'{"preserve":"primary"}\n'
-    assert not destination.exists()
-    assert not manager.worktree_path.exists()
-    assert _caller_state(primary) == primary_before
-    assert _caller_state(linked) == linked_before
+    assert (destination / "state.json").read_bytes() == b'{"migrated":"primary"}\n'
+    assert marker.read_bytes() == b'{"migrated":"primary"}\n'
+    assert receipt.path.is_dir()
 
 
 @pytest.mark.parametrize("path_kind", ["file", "symlink"])
@@ -822,8 +864,10 @@ def test_linked_caller_rejects_unsafe_legacy_path_in_primary_worktree(
     assert _caller_state(linked) == linked_before
 
 
-def test_linked_caller_legacy_state_blocks_owned_intake_rebind(tmp_path: Path) -> None:
-    """Legacy state in another worktree blocks removal of an owned intake."""
+def test_linked_caller_primary_state_migrates_before_owned_intake_rebind(
+    tmp_path: Path,
+) -> None:
+    """Primary state migrates, and the owned intake is still rebound."""
     primary, remote = _make_repository(tmp_path)
     linked = tmp_path / "linked-caller"
     _run_git(primary, "worktree", "add", "-b", "feature", str(linked), "HEAD")
@@ -831,40 +875,44 @@ def test_linked_caller_legacy_state_blocks_owned_intake_rebind(tmp_path: Path) -
     source = primary / "build" / ".automation-state"
     source.mkdir(parents=True)
     marker = source / "state.json"
-    marker.write_bytes(b"preserve-before-rebind\n")
+    marker.write_bytes(b"migrate-before-rebind\n")
     _advance_remote(tmp_path, remote)
+    manager = _manager(linked, remote)
 
-    with pytest.raises(RepoIntakeError, match="legacy state") as caught:
-        _manager(linked, remote).prepare()
+    second = manager.prepare()
 
-    assert str(source) in str(caught.value)
-    assert marker.read_bytes() == b"preserve-before-rebind\n"
-    assert _run_git(first.path, "rev-parse", "HEAD").stdout.strip() == first.revision
+    assert (manager.state_dir / "build" / ".automation-state" / "state.json").read_bytes() == (
+        b"migrate-before-rebind\n"
+    )
+    assert marker.read_bytes() == b"migrate-before-rebind\n"
+    assert second.revision != first.revision
+    assert _run_git(second.path, "rev-parse", "HEAD").stdout.strip() == second.revision
 
 
-def test_linked_caller_reports_all_registered_legacy_state_sources(tmp_path: Path) -> None:
-    """One failure identifies legacy state in each registered worktree."""
+def test_linked_caller_migrates_state_from_every_registered_worktree(tmp_path: Path) -> None:
+    """Each registered worktree keeps a copy of its state in the intake root."""
     primary, remote = _make_repository(tmp_path)
     linked = tmp_path / "linked-caller"
     _run_git(primary, "worktree", "add", "-b", "feature", str(linked), "HEAD")
     primary_source = primary / "build" / ".automation-state"
     linked_source = linked / DEFAULT_STATE_DIR
-    for source, content in (
-        (primary_source, b"primary\n"),
-        (linked_source, b"linked\n"),
+    for source, name, content in (
+        (primary_source, "primary.json", b"primary\n"),
+        (linked_source, "linked.json", b"linked\n"),
     ):
         source.mkdir(parents=True)
-        (source / "state.json").write_bytes(content)
+        (source / name).write_bytes(content)
     manager = _manager(linked, remote)
+    primary_destination = manager.state_dir / "build" / ".automation-state" / "primary.json"
+    linked_destination = manager.state_dir / "build" / Path(DEFAULT_STATE_DIR).name / "linked.json"
 
-    with pytest.raises(RepoIntakeError, match="legacy state") as caught:
-        manager.prepare()
+    receipt = manager.prepare()
 
-    assert str(primary_source) in str(caught.value)
-    assert str(linked_source) in str(caught.value)
-    assert (primary_source / "state.json").read_bytes() == b"primary\n"
-    assert (linked_source / "state.json").read_bytes() == b"linked\n"
-    assert not manager.worktree_path.exists()
+    assert primary_destination.read_bytes() == b"primary\n"
+    assert linked_destination.read_bytes() == b"linked\n"
+    assert (primary_source / "primary.json").read_bytes() == b"primary\n"
+    assert (linked_source / "linked.json").read_bytes() == b"linked\n"
+    assert receipt.path.is_dir()
 
 
 def test_empty_legacy_caller_state_does_not_block_intake(tmp_path: Path) -> None:
@@ -1063,8 +1111,8 @@ def test_symlinked_destination_state_path_blocks_before_intake(tmp_path: Path) -
     assert _caller_state(caller) == before
 
 
-def test_conflicting_legacy_and_destination_state_is_preserved(tmp_path: Path) -> None:
-    """Legacy and destination state cannot be reconciled automatically."""
+def test_destination_state_wins_over_a_caller_state_directory(tmp_path: Path) -> None:
+    """An existing entry in the destination is not overwritten by a copy."""
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
     source = caller / "build" / ".automation-state"
@@ -1075,21 +1123,14 @@ def test_conflicting_legacy_and_destination_state_is_preserved(tmp_path: Path) -
     manager.state_parent.mkdir(mode=0o700, parents=True)
     manager.state_dir.mkdir(mode=0o700)
     destination.mkdir(parents=True)
-    destination_marker = destination / "destination.json"
+    destination_marker = destination / "source.json"
     destination_marker.write_bytes(b"destination\n")
-    before = _caller_state(caller)
 
-    with pytest.raises(RepoIntakeError, match="conflicting state") as caught:
-        manager.prepare()
+    receipt = manager.prepare()
 
-    assert str(source) in str(caught.value)
-    assert str(manager.state_dir / "build") in str(caught.value)
-    assert "preserve" in str(caught.value)
-    assert "reconcile" in str(caught.value)
-    assert source_marker.read_bytes() == b"source\n"
     assert destination_marker.read_bytes() == b"destination\n"
-    assert not manager.worktree_path.exists()
-    assert _caller_state(caller) == before
+    assert source_marker.read_bytes() == b"source\n"
+    assert receipt.path.is_dir()
 
 
 def test_fetch_failure_preserves_attached_caller_state(tmp_path: Path) -> None:
