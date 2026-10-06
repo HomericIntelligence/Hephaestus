@@ -355,6 +355,8 @@ _REBASE_AGENT_INFLIGHT = "rebase_agent_inflight"
 _REBASE_DISCOVERY_PENDING = "rebase_discovery_pending"
 _REBASE_DISCOVERY_CHECKED = "rebase_discovery_checked"
 _REBASE_DISCOVERY_FAILED = "rebase_discovery_failed"
+#: Upper bound for the retained rebase discovery cause.
+_REBASE_DIAGNOSTIC_MAX = 500
 _PUBLICATION_DISCOVERY_PENDING = "first_publication_discovery_pending"
 _PUBLICATION_DISCOVERY_CHECKED = "first_publication_discovery_checked"
 _PUBLICATION_DISCOVERY_FAILED = "first_publication_discovery_failed"
@@ -2847,7 +2849,12 @@ class ImplementationStage(Stage):
     def _rebase_discovery(item: WorkItem, ctx: StageContext) -> StepResult | None:
         """Request one source-owned read before a fresh rebase attempt."""
         if item.payload.get(_REBASE_DISCOVERY_FAILED):
-            return StageOutcome(Disposition.BLOCKED, "rebase_recovery_unavailable")
+            cause = item.payload.get("rebase_discovery_error")
+            note = "rebase_recovery_unavailable"
+            if isinstance(cause, str) and cause:
+                note = f"{note}: {cause}"
+                logger.warning("implementation:%d: %s", item.issue, note)
+            return StageOutcome(Disposition.BLOCKED, note)
         if item.payload.get(_REBASE_DISCOVERY_CHECKED):
             return None
         pending = item.payload.get(_REBASE_DISCOVERY_PENDING)
@@ -2915,8 +2922,13 @@ class ImplementationStage(Stage):
                 raise
             item.payload["rebase_recovery_candidate"] = candidate
             item.payload[_REBASE_DISCOVERY_CHECKED] = True
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as error:
             item.payload[_REBASE_DISCOVERY_FAILED] = True
+            # Retain the cause. The generic message alone left an operator with
+            # a permanent block and no way to learn which check refused.
+            item.payload["rebase_discovery_error"] = (result.error or str(error))[
+                :_REBASE_DIAGNOSTIC_MAX
+            ]
         return True
 
     def _rebase_request(self, item: WorkItem, ctx: StageContext, reason: str) -> StepResult:

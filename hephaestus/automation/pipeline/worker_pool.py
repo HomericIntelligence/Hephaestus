@@ -12488,10 +12488,15 @@ class WorkerPool:
                     },
                 },
             )
-        except (OSError, RuntimeError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
+        except (OSError, RuntimeError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as exc:
+            # Retain the cause. The bare code left an operator with a failed
+            # implementation stage and no way to learn which check refused.
             return JobResult(
                 ok=False,
-                error="remediation_pretest_recovery_unavailable",
+                error=(
+                    "remediation_pretest_recovery_unavailable: "
+                    f"{redact_diagnostic_text(str(exc))[:_ERR_MAX]}"
+                ),
                 value={"source_workspace_preserve": True, "preserved_worktree": str(preserved)},
             )
 
