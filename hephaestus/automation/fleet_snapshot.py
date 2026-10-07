@@ -1,4 +1,4 @@
-"""Export and independently restore bounded Fleet source snapshots."""
+"""Export, verify and restore bounded Fleet source snapshots."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from hephaestus.automation.fleet_snapshot_policy import (
     MAX_SCAN_ENTRIES,
     SnapshotError as SnapshotError,
     SnapshotPolicy as SnapshotPolicy,
+    admit_member_path,
     canonical,
     digest,
     integer,
@@ -30,21 +31,25 @@ from hephaestus.automation.fleet_snapshot_policy import (
     valid_path,
     validate_manifest,
 )
+from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
+from hephaestus.automation.git_runtime import current_operation_shutdown
 from hephaestus.automation.worktree_snapshot import (
-    _isolated_checkout_git_env,
-    _path_content_identity,
-    _run_bounded_git_output,
-    _secure_dir_fd_supported,
-    _trusted_git_executable,
+    isolated_checkout_git_env,
+    path_content_identity,
+    run_bounded_git_output,
+    secure_dir_fd_supported,
+    trusted_git_executable,
 )
 
 
 def _deadline(timeout: float) -> float:
     if type(timeout) not in {int, float} or not math.isfinite(timeout) or not 0 < timeout <= 300:
         raise SnapshotError("invalid snapshot deadline")
-    if not _secure_dir_fd_supported():
+    deadline = time.monotonic() + timeout
+    remaining(deadline)
+    if not secure_dir_fd_supported():
         raise SnapshotError("secure snapshot filesystem operations are unavailable")
-    return time.monotonic() + timeout
+    return deadline
 
 
 def _root(path: Path) -> Path:
@@ -80,11 +85,14 @@ def _identity(metadata: os.stat_result) -> tuple[int, ...]:
 
 
 def _git(source: Path, arguments: tuple[str, ...], deadline: float) -> str:
-    executable = _trusted_git_executable()
+    executable = trusted_git_executable()
     if executable is None:
         raise SnapshotError("trusted Git is unavailable")
-    # Fixed read commands cannot invoke repository fsmonitor or content filters.
-    return _run_bounded_git_output(
+    environment = isolated_checkout_git_env()
+    # Inspect repository configuration explicitly. Global and system
+    # configuration remain disabled by the controlled child environment.
+    environment.pop("GIT_CONFIG", None)
+    return run_bounded_git_output(
         (
             executable,
             "--no-optional-locks",
@@ -101,8 +109,37 @@ def _git(source: Path, arguments: tuple[str, ...], deadline: float) -> str:
         timeout=remaining(deadline),
         max_bytes=MAX_MANIFEST_BYTES,
         retain_text=True,
-        env=_isolated_checkout_git_env(),
+        env=environment,
+        shutdown=current_operation_shutdown(),
     ).text
+
+
+def _admit_git_configuration(source: Path, deadline: float) -> None:
+    """Check local and linked-worktree settings before source inventory."""
+    configuration = _git(
+        source, ("config", "--local", "--no-includes", "--null", "--list"), deadline
+    )
+    if unsafe_local_git_config_key(configuration) is not None:
+        raise SnapshotError("source has unsafe local Git configuration")
+    worktree_config = _git(
+        source,
+        (
+            "config",
+            "--local",
+            "--no-includes",
+            "--type=bool",
+            "--default=false",
+            "--get",
+            "extensions.worktreeConfig",
+        ),
+        deadline,
+    ).strip()
+    if worktree_config == "true":
+        configuration = _git(
+            source, ("config", "--worktree", "--no-includes", "--null", "--list"), deadline
+        )
+        if unsafe_local_git_config_key(configuration) is not None:
+            raise SnapshotError("source has unsafe local Git configuration")
 
 
 def _records(text: str) -> list[str]:
@@ -111,19 +148,18 @@ def _records(text: str) -> list[str]:
     return text[:-1].split("\0") if text else []
 
 
-def _tracked_paths(base: str, index: str, policy: SnapshotPolicy) -> set[str]:
+def _tracked_paths(index: str, policy: SnapshotPolicy) -> set[str]:
     tracked: set[str] = set()
-    for raw, is_index in ((base, False), (index, True)):
-        for record in _records(raw):
-            header, separator, path = record.partition("\t")
-            fields = header.split(" ")
-            if not separator or len(fields) != 3 or fields[0] not in {"100644", "100755"}:
-                raise SnapshotError("source contains unsupported Git entries")
-            if is_index and fields[2] != "0":
-                raise SnapshotError("source index is unmerged")
-            if not valid_path(path) or policy.excludes(path):
-                raise SnapshotError("tracked source contains a private or unsupported path")
-            tracked.add(path)
+    for record in _records(index):
+        header, separator, path = record.partition("\t")
+        fields = header.split(" ")
+        if not separator or len(fields) != 3 or fields[0] not in {"100644", "100755"}:
+            raise SnapshotError("source contains unsupported Git entries")
+        if fields[2] != "0":
+            raise SnapshotError("source index is unmerged")
+        if not valid_path(path) or policy.excludes(path):
+            raise SnapshotError("tracked source contains a private or unsupported path")
+        tracked.add(path)
     return tracked
 
 
@@ -202,7 +238,7 @@ def _present_paths(
 ) -> tuple[str, ...]:
     present: list[str] = []
     total = 0
-    folded: set[str] = set()
+    names: dict[str, tuple[str, bool]] = {}
     for name in sorted(selected):
         remaining(deadline)
         location = source
@@ -222,9 +258,7 @@ def _present_paths(
             or stat.S_IMODE(metadata.st_mode) & ~0o777
         ):
             raise SnapshotError("source contains an unsupported file type or mode")
-        if name.lower() in folded:
-            raise SnapshotError("snapshot paths collide")
-        folded.add(name.lower())
+        admit_member_path(name, names)
         total += metadata.st_size
         present.append(name)
         if total > policy.max_bytes or len(present) > policy.max_members:
@@ -240,12 +274,12 @@ def _inventory(
     admin = source / ".git"
     if admin.is_symlink() or not (admin.is_file() or admin.is_dir()):
         raise SnapshotError("source is not a Git worktree root")
-    head = _git(source, ("rev-parse", "--verify", "HEAD"), deadline).strip()
+    _admit_git_configuration(source, deadline)
+    head = _git(source, ("rev-parse", "--verify", "HEAD^{commit}"), deadline).strip()
     if not sha(head, 40):
         raise SnapshotError("source base commit is invalid")
-    base = _git(source, ("ls-tree", "-r", "-z", "--full-tree", head), deadline)
     index = _git(source, ("ls-files", "--stage", "-z"), deadline)
-    tracked = _tracked_paths(base, index, policy)
+    tracked = _tracked_paths(index, policy)
     selected = _scan_paths(source, tracked, policy, deadline)
     present = _present_paths(source, selected, tracked, policy, deadline)
     return head, digest(index.encode("utf-8", "surrogateescape")), present
@@ -262,9 +296,9 @@ def _read_regular_at(
 ) -> tuple[bytes, int]:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     descriptors = [os.dup(descriptor)]
-    root_id = _identity(os.fstat(descriptors[0]))
     bindings: list[tuple[int, str, tuple[int, ...]]] = []
     try:
+        root_id = _identity(os.fstat(descriptors[0]))
         for part in name.split("/")[:-1]:
             parent = descriptors[-1]
             descriptor = os.open(part, flags | os.O_DIRECTORY, dir_fd=parent)
@@ -335,12 +369,12 @@ def export_snapshot(
             raise SnapshotError("invalid private snapshot reference")
         before = _inventory(source, policy, deadline)
         paths = "\0".join(before[2]) + "\0"
-        identity = _path_content_identity(
+        identity = path_content_identity(
             source, paths, include_file_content=False, timeout=remaining(deadline)
         )
         with tempfile.TemporaryDirectory(prefix=".snapshot-", dir=artifact.parent) as temporary:
             stage = Path(temporary)
-            _path_content_identity(
+            path_content_identity(
                 source,
                 paths,
                 copy_root=stage,
@@ -349,7 +383,7 @@ def export_snapshot(
             )
             if (
                 _inventory(source, policy, deadline) != before
-                or _path_content_identity(
+                or path_content_identity(
                     source, paths, include_file_content=False, timeout=remaining(deadline)
                 )
                 != identity
@@ -460,14 +494,57 @@ def _decode(
 
 
 def _artifact_identity(artifact: Path, deadline: float) -> str:
-    if {path.name for path in artifact.iterdir()} != {"manifest.json", "source.tar"}:
+    pending = {"manifest.json", "source.tar"}
+    with directory(artifact, deadline) as descriptor:
+        remaining(deadline)
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                remaining(deadline)
+                if entry.name not in pending:
+                    raise SnapshotError("snapshot artifact has unexpected members")
+                pending.remove(entry.name)
+    if pending:
         raise SnapshotError("snapshot artifact has unexpected members")
-    return _path_content_identity(
+    return path_content_identity(
         artifact,
         "manifest.json\0source.tar\0",
         include_file_content=False,
         timeout=remaining(deadline),
     )
+
+
+def _read_snapshot(
+    artifact: Path,
+    commitment: Mapping[str, object],
+    policy: SnapshotPolicy,
+    deadline: float,
+) -> tuple[dict[str, Any], list[bytes]]:
+    artifact_identity = _artifact_identity(artifact, deadline)
+    encoded, _ = _read_regular(artifact, "manifest.json", MAX_MANIFEST_BYTES, deadline)
+    archive_limit = policy.max_bytes + policy.max_members * 1024 + 10240
+    raw, _ = _read_regular(artifact, "source.tar", archive_limit, deadline)
+    manifest, contents = _decode(encoded, raw, commitment, policy, deadline)
+    if _artifact_identity(artifact, deadline) != artifact_identity:
+        raise SnapshotError("snapshot artifact changed between reads")
+    return manifest, contents
+
+
+def verify_snapshot(
+    artifact: Path,
+    *,
+    commitment: Mapping[str, object],
+    policy: SnapshotPolicy,
+    timeout: float = 30,
+) -> None:
+    """Check actual snapshot bytes without creating a destination."""
+    try:
+        deadline = _deadline(timeout)
+        _read_snapshot(_root(artifact), commitment, policy, deadline)
+        remaining(deadline)
+    except SnapshotError:
+        raise
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, tarfile.TarError) as exc:
+        raise SnapshotError("source snapshot verification failed") from exc
 
 
 def restore_snapshot(
@@ -483,13 +560,7 @@ def restore_snapshot(
         deadline = _deadline(timeout)
         artifact = _root(artifact)
         _output(destination, artifact)
-        artifact_identity = _artifact_identity(artifact, deadline)
-        encoded, _ = _read_regular(artifact, "manifest.json", MAX_MANIFEST_BYTES, deadline)
-        archive_limit = policy.max_bytes + policy.max_members * 1024 + 10240
-        raw, _ = _read_regular(artifact, "source.tar", archive_limit, deadline)
-        manifest, contents = _decode(encoded, raw, commitment, policy, deadline)
-        if _artifact_identity(artifact, deadline) != artifact_identity:
-            raise SnapshotError("snapshot artifact changed between reads")
+        manifest, contents = _read_snapshot(artifact, commitment, policy, deadline)
         publish(
             destination,
             {

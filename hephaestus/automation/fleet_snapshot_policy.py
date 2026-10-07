@@ -144,6 +144,18 @@ class SnapshotPolicy:
         )
 
 
+def admit_member_path(path: str, names: dict[str, tuple[str, bool]]) -> None:
+    """Record each file and parent; reject conflicting names or node types."""
+    parts = path.split("/")
+    for index in range(1, len(parts) + 1):
+        name = "/".join(parts[:index])
+        is_file = index == len(parts)
+        previous = names.get(name.lower())
+        if previous is not None and (previous != (name, is_file) or is_file):
+            raise SnapshotError("snapshot paths collide")
+        names[name.lower()] = (name, is_file)
+
+
 def validate_manifest(value: object, policy: SnapshotPolicy) -> dict[str, Any]:
     """Validate complete metadata without claiming actual content verification."""
     if (
@@ -157,7 +169,7 @@ def validate_manifest(value: object, policy: SnapshotPolicy) -> dict[str, Any]:
     ):
         raise SnapshotError("invalid snapshot manifest")
     previous = ""
-    names: set[str] = set()
+    names: dict[str, tuple[str, bool]] = {}
     total = 0
     for entry in value["files"]:
         if (
@@ -166,21 +178,14 @@ def validate_manifest(value: object, policy: SnapshotPolicy) -> dict[str, Any]:
             or not valid_path(entry["path"])
             or policy.excludes(entry["path"])
             or entry["path"] <= previous
-            or entry["path"].lower() in names
-            or any(part.lower() in names for part in _parents(entry["path"]))
             or not integer(entry["mode"], 0, 0o777)
             or not integer(entry["size"], 0, policy.max_bytes)
             or not sha(entry["sha256"])
         ):
             raise SnapshotError("invalid snapshot member")
         previous = entry["path"]
-        names.add(previous.lower())
+        admit_member_path(previous, names)
         total += entry["size"]
     if not 1 <= total <= policy.max_bytes:
         raise SnapshotError("snapshot content limit exceeded")
     return value
-
-
-def _parents(path: str) -> list[str]:
-    parts = path.split("/")
-    return ["/".join(parts[:index]) for index in range(1, len(parts))]

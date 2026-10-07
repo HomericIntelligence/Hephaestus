@@ -5,7 +5,7 @@ one subordinate build attempt. Agamemnon owns admission and the run grant.
 The supervisor owns durable local order, verified source restoration, and the
 execution lease. It does not create a task queue or invoke a model.
 
-The first profile is `hephaestus-test-unit-v1`: `just test-unit` with empty
+The first recipe id is hephaestus-test-unit-v1, which runs `just test-unit` with empty
 parameters, on Linux/aarch64 with zero GPUs. The [command validator](../hephaestus/automation/fleet_build_contract.py)
 checks the exact policy, allocation, parent claim, snapshot, and typed generation.
 It rejects caller shell, environment, workspace, and tool overrides. Policy

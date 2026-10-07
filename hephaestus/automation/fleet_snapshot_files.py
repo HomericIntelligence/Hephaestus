@@ -6,10 +6,12 @@ import os
 import stat
 import time
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 
 from hephaestus.automation.fleet_snapshot_policy import SnapshotError
+from hephaestus.automation.git_runtime import remaining_operation_timeout
 
 _DIRECTORY_FLAGS = (
     os.O_RDONLY
@@ -20,11 +22,11 @@ _DIRECTORY_FLAGS = (
 
 
 def remaining(deadline: float) -> float:
-    """Use one monotonic deadline for all local filesystem operations."""
+    """Keep the snapshot and inherited operation budgets for filesystem work."""
     value = deadline - time.monotonic()
     if value <= 0:
         raise SnapshotError("snapshot deadline exceeded")
-    return value
+    return cast(float, remaining_operation_timeout(value))
 
 
 def node(metadata: os.stat_result) -> tuple[int, int]:
@@ -56,13 +58,15 @@ def _create_directory(parent: int, name: str) -> tuple[int, tuple[int, int]]:
         metadata = os.fstat(descriptor)
         private_parent(metadata)
         return descriptor, node(metadata)
-    except BaseException:
+    except BaseException as failure:
         if descriptor is not None:
             os.close(descriptor)
         # The exclusive construction lease owns this name after successful mkdir.
         # This is setup cleanup, not an inode-based defence against another writer.
-        with suppress(OSError):
+        try:
             os.rmdir(name, dir_fd=parent)
+        except OSError as exc:
+            failure.add_note(f"Snapshot directory setup cleanup is incomplete: {exc}")
         raise
 
 
@@ -130,9 +134,9 @@ class _Publication:
             0o600,
             dir_fd=parent,
         )
-        expected = node(os.fstat(descriptor))
-        self.files.append((parent, leaf, expected, ()))
         try:
+            expected = node(os.fstat(descriptor))
+            self.files.append((parent, leaf, expected, ()))
             offset = 0
             while offset < len(data):
                 remaining(self.deadline)
@@ -183,16 +187,20 @@ class _Publication:
             if set(os.listdir(descriptor)) != expected_names:
                 raise SnapshotError("published snapshot membership changed")
 
-    def cleanup(self) -> None:
-        """Remove only ledger-owned names through their retained parent descriptors."""
+    def cleanup(self, failure: BaseException) -> None:
+        """Remove owned names and report incomplete cleanup on the original failure."""
         for parent, name, expected, _ in reversed(self.files):
-            with suppress(OSError, SnapshotError):
+            try:
                 _check_binding(parent, name, expected)
                 os.unlink(name, dir_fd=parent)
+            except (OSError, SnapshotError) as exc:
+                failure.add_note(f"Snapshot file cleanup is incomplete: {exc}")
         for parent, name, _, expected in reversed(self.directories):
-            with suppress(OSError, SnapshotError):
+            try:
                 _check_binding(parent, name, expected)
                 os.rmdir(name, dir_fd=parent)
+            except (OSError, SnapshotError) as exc:
+                failure.add_note(f"Snapshot directory cleanup is incomplete: {exc}")
 
     def close(self) -> None:
         """Release descriptors after publication or owned cleanup."""
@@ -224,9 +232,9 @@ def publish(path: Path, files: Mapping[str, tuple[bytes, int]], deadline: float)
                 remaining(deadline)
                 publication.write(name, data, mode)
             publication.verify()
-    except BaseException:
+    except BaseException as failure:
         if publication is not None:
-            publication.cleanup()
+            publication.cleanup(failure)
         raise
     finally:
         if publication is not None:
