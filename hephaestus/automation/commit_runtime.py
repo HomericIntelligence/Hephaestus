@@ -44,12 +44,14 @@ _AGENT_COMMIT_NAMES = {
     "codex": "Codex",
     "pi": "Pi",
     "opencode": "OpenCode-AI",
+    "opencode2": "OpenCode-AI",
 }
 _AGENT_PROVENANCE = {
     "claude": "Claude Code",
     "codex": "Codex",
     "pi": "Pi",
     "opencode": "OpenCode",
+    "opencode2": "OpenCode 2",
 }
 _FALLBACK_AGENT_COMMIT_EMAIL = "noreply@hephaestus.invalid"
 

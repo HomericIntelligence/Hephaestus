@@ -90,12 +90,12 @@ LOG = logging.getLogger(__name__)
 
 _AUTH_STATUS_MAX_OUTPUT_BYTES = 64 * 1024
 
-AgentName = Literal["claude", "codex", "pi", "opencode"]
+AgentName = Literal["claude", "codex", "pi", "opencode", "opencode2"]
 ProcessTracker = Callable[[int], contextlib.AbstractContextManager[None]]
 RemainingTimeout = Callable[[], int]
 SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 SubprocessCommand = SubprocessCommandPart | Sequence[SubprocessCommandPart]
-AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi", "opencode")
+AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi", "opencode", "opencode2")
 DEFAULT_AGENT: AgentName = "claude"
 CODEX_HELP_PROBE_SECONDS = 10
 GIT_COMMON_DIR_PROBE_SECONDS = 5
@@ -149,6 +149,10 @@ AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     # "0 credentials" on fully working setups; credential-count parsing would
     # false-negative those. Deeper authentication is verified by the run itself.
     "opencode": (("opencode", "providers", "list"),),
+    # OpenCode 2 removed the V1 `providers list` surface; the probe proves
+    # only that the V2 CLI starts. Provider configuration and authentication
+    # are verified by the run itself, the same contract as the V1 probe.
+    "opencode2": (("opencode", "--version"),),
 }
 
 
@@ -518,6 +522,12 @@ AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
         supports_sandbox=True,
         supports_sessions=True,
     ),
+    "opencode2": AgentCapabilities(
+        direct_runner=True,
+        supports_approval=False,
+        supports_sandbox=True,
+        supports_sessions=True,
+    ),
 }
 
 
@@ -636,7 +646,7 @@ def is_agent_authenticated(
     shutdown: threading.Event | None = None,
 ) -> bool:
     """Return True when the provider CLI is installed and reports logged-in auth."""
-    if shutil.which(agent) is None:
+    if shutil.which(agent_cli_name(agent)) is None:
         return False
 
     for cmd in AGENT_AUTH_STATUS_COMMANDS[agent]:
@@ -647,6 +657,7 @@ def is_agent_authenticated(
             # OpenCode serves models from stored credentials or environment
             # keys, so the approved platform environment is sufficient here.
             "opencode": _platform_child_env,
+            "opencode2": _platform_child_env,
         }[agent]()
         try:
             timeout_s = (
@@ -950,10 +961,10 @@ def resolve_agent(
             **authentication_options,
         )
         if not authenticated:
-            if shutil.which(agent) is None:
+            if shutil.which(agent_cli_name(agent)) is None:
                 raise RuntimeError(
                     f"Agent '{agent}' is not installed on PATH. "
-                    f"Install the '{agent}' CLI and try again, "
+                    f"Install the '{agent_cli_name(agent)}' CLI and try again, "
                     f"or omit --agent to auto-detect an authenticated backend."
                 )
             status_hint = (
@@ -961,6 +972,9 @@ def resolve_agent(
                 if agent == "pi"
                 else "`opencode providers login` (environment keys also work)"
                 if agent == "opencode"
+                else "provider configuration in `opencode.json` or environment keys "
+                "(see https://opencode.ai/v2/docs/)"
+                if agent == "opencode2"
                 else f"`{agent} auth status` (or `{agent} login status`)"
             )
             raise RuntimeError(
@@ -972,7 +986,7 @@ def resolve_agent(
     installed_agents = tuple(
         agent_name
         for agent_name in AGENT_CHOICES
-        if agent_name != "pi" and shutil.which(agent_name)
+        if agent_name != "pi" and shutil.which(agent_cli_name(agent_name))
     )
     if not installed_agents:
         if shutil.which("pi") is not None:
@@ -1027,6 +1041,11 @@ def is_opencode(agent: str) -> bool:
     return agent == "opencode"
 
 
+def is_opencode2(agent: str) -> bool:
+    """Return True when the selected provider is the OpenCode 2 backend."""
+    return agent == "opencode2"
+
+
 def reject_pi_unsupported_surface(agent: str, reason: str) -> None:
     """Fail before a legacy surface can run Pi outside its scoped policy.
 
@@ -1064,6 +1083,8 @@ def agent_cli_name(agent: str) -> str:
     """Return the executable name for a supported agent backend."""
     if agent not in AGENT_CAPABILITIES:
         raise ValueError(f"Unsupported agent: {agent}")
+    if agent == "opencode2":
+        return "opencode"
     return agent
 
 
@@ -1074,6 +1095,7 @@ def agent_display_name(agent: str) -> str:
         "codex": "Codex",
         "pi": "Pi",
         "opencode": "OpenCode",
+        "opencode2": "OpenCode 2",
     }
     try:
         return names[agent]
@@ -4855,6 +4877,7 @@ def _run_opencode_command(
     timeout: int,
     process_tracker: ProcessTracker | None = None,
     remaining_timeout: RemainingTimeout | None = None,
+    diagnostic: Callable[..., str | None] = _opencode_failure_diagnostic,
 ) -> AgentRunResult:
     """Execute OpenCode with JSON events and return final text plus session id.
 
@@ -4897,10 +4920,10 @@ def _run_opencode_command(
         if started_check_complete:
             _terminate_process_group(proc)
         raise
-    diagnostic = _opencode_failure_diagnostic(stdout_text, stderr_text)
-    if proc.returncode != 0 or diagnostic is not None:
-        if diagnostic is not None:
-            raise AgentExecutionError(diagnostic)
+    failure_diagnostic = diagnostic(stdout_text, stderr_text)
+    if proc.returncode != 0 or failure_diagnostic is not None:
+        if failure_diagnostic is not None:
+            raise AgentExecutionError(failure_diagnostic)
         raise subprocess.CalledProcessError(
             proc.returncode,
             cmd,
@@ -5042,6 +5065,187 @@ def run_opencode_text(
 ) -> subprocess.CompletedProcess[str]:
     """Run OpenCode non-interactively and return a text completed process."""
     result = run_opencode_session(
+        prompt,
+        cwd=cwd,
+        timeout=timeout,
+        model=model,
+        sandbox=sandbox,
+        approval=approval,
+    )
+    return subprocess.CompletedProcess(
+        args=["opencode", "run", "--format", "json"],
+        returncode=0,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def _opencode2_failure_diagnostic(*texts: str | None) -> str | None:
+    """Return a bounded diagnostic when an OpenCode 2 stream carries a fatal error.
+
+    OpenCode 2.0.24 emits structured ``{"type":"error", "error":{"type":...,
+    "message":...}}`` JSON events (verified for a provider no-route failure)
+    with a non-zero exit. The shape differs from V1 (``error.name`` +
+    ``error.data.message`` + ``error.ref``), so this diagnostic stays separate
+    from the V1-verified one; the message is bounded like the Codex path.
+    """
+    for output_text in texts:
+        if not output_text:
+            continue
+        for line in output_text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event: Any = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("type") != "error":
+                continue
+            error = event.get("error")
+            if not isinstance(error, dict):
+                continue
+            error_type = error.get("type")
+            if not isinstance(error_type, str) or not error_type:
+                continue
+            raw_message = error.get("message")
+            message = f": {raw_message[:300]}" if isinstance(raw_message, str) else ""
+            return f"opencode2_fatal_error_event: {error_type}{message}"
+    return None
+
+
+def _opencode2_base_cmd(
+    *,
+    session_id: str | None = None,
+    model: str = "",
+    sandbox: str = "workspace-write",
+) -> list[str]:
+    """Build an OpenCode 2 run command that reads the prompt from stdin.
+
+    OpenCode 2.0.24 removed the V1 ``--dir`` flag; the subprocess working
+    directory in :func:`_run_opencode_command` remains the project anchor. A
+    non-default effort joins the model with the V2 ``provider/model#effort``
+    syntax. An effort without an explicit model fails fast because the V2 CLI
+    exposes no separate effort flag.
+    """
+    selection = parse_model_selection(model)
+    cmd = ["opencode", "run", "--format", "json"]
+    effort = selection.reasoning_effort
+    if selection.model:
+        effective = (
+            f"{selection.model}#{effort}" if effort and effort != "default" else selection.model
+        )
+        cmd.extend(["--model", effective])
+    elif effort and effort != "default":
+        raise AgentExecutionError(
+            text(
+                "OpenCode 2 cannot apply effort %(effort)r without an explicit model; "
+                "pass provider/model[:effort]",
+                effort=effort,
+            )
+        )
+    if session_id:
+        cmd.extend(["--session", session_id])
+    cmd.extend(_opencode2_sandbox_args(sandbox))
+    return cmd
+
+
+def _opencode2_sandbox_args(sandbox: str) -> list[str]:
+    """Return the OpenCode 2 enforcement args for a requested sandbox mode.
+
+    Verified against v2.0.24: ``--agent plan`` refuses the write tool (the
+    model declined and no file was written), giving real read-only
+    enforcement. V1 ``--pure`` skill suppression has no V2 CLI equivalent; V2
+    skills load only on explicit invocation, so review output also keeps its
+    structured contract by default. ``danger-full-access`` has no distinct CLI
+    surface and stays fail-closed (#773 precedent).
+    """
+    if sandbox == "read-only":
+        return ["--agent", OPENCODE_PLAN_AGENT]
+    if sandbox == "workspace-write":
+        return []
+    raise AgentExecutionError(
+        text(
+            "OpenCode 2 cannot enforce sandbox mode %(sandbox)r; select claude, codex, or pi "
+            "for stages that require this isolation level",
+            sandbox=sandbox,
+        )
+    )
+
+
+def run_opencode2_session(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+    process_tracker: ProcessTracker | None = None,
+) -> AgentRunResult:
+    """Run a new OpenCode 2 JSON-event session and capture its id.
+
+    Model selections pass through in ``provider/model[:effort]`` form. When
+    empty, OpenCode 2 applies its own configured default. The CLI exposes no
+    approval flag, so that compatibility input is accepted but unused.
+    ``read-only`` is enforced via the built-in ``plan`` agent (verified
+    edit-deny on v2.0.24).
+    """
+    del approval
+    cmd = _opencode2_base_cmd(model=model, sandbox=sandbox)
+    return _run_opencode_command(
+        cmd,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        process_tracker=process_tracker,
+        diagnostic=_opencode2_failure_diagnostic,
+    )
+
+
+def resume_opencode2_session(
+    session_id: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+    process_tracker: ProcessTracker | None = None,
+    remaining_timeout: RemainingTimeout | None = None,
+) -> AgentRunResult:
+    """Resume an OpenCode 2 session by id via ``--session``.
+
+    Verified against opencode v2.0.24: resuming an existing session continues
+    its history, and ``--session`` also creates the session when it does not
+    exist yet. The run completes on the requested ``--model``, so the
+    pass-through is safe for automation flows that switch phase models
+    between calls.
+    """
+    del approval
+    cmd = _opencode2_base_cmd(session_id=session_id, model=model, sandbox=sandbox)
+    return _run_opencode_command(
+        cmd,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        process_tracker=process_tracker,
+        remaining_timeout=remaining_timeout,
+        diagnostic=_opencode2_failure_diagnostic,
+    )
+
+
+def run_opencode2_text(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+) -> subprocess.CompletedProcess[str]:
+    """Run OpenCode 2 non-interactively and return a text completed process."""
+    result = run_opencode2_session(
         prompt,
         cwd=cwd,
         timeout=timeout,
@@ -5657,6 +5861,15 @@ def run_agent_text(
             sandbox=sandbox,
             approval=approval,
         )
+    if is_opencode2(agent):
+        return run_opencode2_text(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+        )
     if is_pi(agent):
         if execution_request is None:
             raise AssertionError("unreachable")
@@ -5729,6 +5942,16 @@ def run_agent_session(
         )
     if is_opencode(agent):
         return run_opencode_session(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+            process_tracker=process_tracker,
+        )
+    if is_opencode2(agent):
+        return run_opencode2_session(
             prompt,
             cwd=cwd,
             timeout=timeout,
@@ -5831,6 +6054,18 @@ def resume_agent_session(
         )
     if is_opencode(agent):
         return resume_opencode_session(
+            session_id,
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+            process_tracker=process_tracker,
+            remaining_timeout=remaining_timeout,
+        )
+    if is_opencode2(agent):
+        return resume_opencode2_session(
             session_id,
             prompt,
             cwd=cwd,
