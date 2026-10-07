@@ -4923,6 +4923,264 @@ def test_resolve_agent_accepts_explicit_authenticated_opencode() -> None:
             assert agent_runtime.resolve_agent("opencode") == "opencode"
 
 
+def test_opencode2_registry_contract() -> None:
+    """OpenCode 2 registers as a direct runner on the shared opencode binary."""
+    assert "opencode2" in agent_runtime.AGENT_CHOICES
+    assert agent_runtime.is_opencode2("opencode2")
+    assert not agent_runtime.is_opencode2("opencode")
+    assert not agent_runtime.is_opencode("opencode2")
+    assert agent_runtime.agent_cli_name("opencode2") == "opencode"
+    assert agent_runtime.agent_display_name("opencode2") == "OpenCode 2"
+    assert agent_runtime.AGENT_AUTH_STATUS_COMMANDS["opencode2"] == (("opencode", "--version"),)
+
+    capabilities = agent_runtime.AGENT_CAPABILITIES["opencode2"]
+    assert capabilities.direct_runner is True
+    assert capabilities.supports_sessions is True
+    assert capabilities.supports_approval is False
+    assert capabilities.supports_sandbox is True
+    assert agent_runtime.uses_direct_agent_runner("opencode2") is True
+
+
+def test_opencode2_base_cmd_omits_dir_and_passes_model_through(tmp_path: Path) -> None:
+    """V2 removed --dir; the subprocess working directory stays the anchor."""
+    assert agent_runtime._opencode2_base_cmd() == [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+    ]
+    assert agent_runtime._opencode2_base_cmd(model="anthropic/claude-sonnet-4-5") == [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--model",
+        "anthropic/claude-sonnet-4-5",
+    ]
+    assert agent_runtime._opencode2_base_cmd(session_id="ses_abc") == [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--session",
+        "ses_abc",
+    ]
+
+    command = agent_runtime._opencode2_base_cmd(sandbox="read-only")
+    assert command[command.index("--agent") + 1] == "plan"
+    assert "--pure" not in command
+
+
+def test_opencode2_base_cmd_joins_a_nondefault_effort_with_hash() -> None:
+    """V2 joins model and effort in provider/model#effort form."""
+    assert agent_runtime._opencode2_base_cmd(model="vendor/Model:high") == [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--model",
+        "vendor/Model#high",
+    ]
+
+
+def test_opencode2_base_cmd_omits_an_explicit_default_effort() -> None:
+    """The default suffix selects the OpenCode 2 effort default."""
+    command = agent_runtime._opencode2_base_cmd(model="vendor/Model:default")
+
+    assert command[command.index("--model") + 1] == "vendor/Model"
+
+
+def test_opencode2_base_cmd_rejects_an_effort_without_a_model() -> None:
+    """The V2 CLI has no separate effort flag; fail fast instead of dropping it."""
+    with pytest.raises(agent_runtime.AgentExecutionError, match="without an explicit model"):
+        agent_runtime._opencode2_base_cmd(model=":high")
+
+
+def test_opencode2_failure_diagnostic_parses_the_v2_error_shape() -> None:
+    """Observed v2.0.24 provider failures emit error.type plus error.message."""
+    text = (
+        '{"type":"error","timestamp":1791325683202,"sessionID":"ses_eecab",'
+        '"error":{"type":"provider.no-route","message":"Model unavailable: comet/no-such-model"}}\n'
+    )
+
+    diagnostic = agent_runtime._opencode2_failure_diagnostic(text, None)
+
+    assert diagnostic is not None
+    assert "opencode2_fatal_error_event: provider.no-route" in diagnostic
+    assert "Model unavailable: comet/no-such-model" in diagnostic
+
+
+def test_opencode2_failure_diagnostic_ignores_other_output() -> None:
+    """V1 errors, malformed lines, and prose carry no V2 diagnostic."""
+    v1_shape = (
+        '{"type":"error","error":{"name":"UnknownError",'
+        '"data":{"message":"Unexpected server error."},"ref":"err_1"}}\n'
+    )
+
+    assert agent_runtime._opencode2_failure_diagnostic(v1_shape) is None
+    assert agent_runtime._opencode2_failure_diagnostic("garbage\n") is None
+    assert agent_runtime._opencode2_failure_diagnostic(None, "") is None
+
+
+def test_run_opencode2_session_returns_session_id_and_final_text(tmp_path: Path) -> None:
+    """The V2 backend parses JSONL events into a session id plus final text."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"step_start","sessionID":"ses_v2","part":{"type":"step-start"}}\n'
+            '{"type":"text","sessionID":"ses_v2","part":{"type":"text","text":"OK"}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        result = agent_runtime.run_opencode2_session("prompt", cwd=tmp_path, timeout=30)
+
+    assert result.session_id == "ses_v2"
+    assert result.stdout == "OK"
+
+
+def test_run_opencode2_session_raises_on_a_v2_error_event(tmp_path: Path) -> None:
+    """Observed v2.0.24 no-route failures emit type:error JSON with rc=1."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"error","sessionID":"ses_v2",'
+            '"error":{"type":"provider.no-route","message":"Model unavailable: m"}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, returncode=1, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(agent_runtime.AgentExecutionError) as excinfo:
+            agent_runtime.run_opencode2_session("prompt", cwd=tmp_path, timeout=30)
+
+    message = str(excinfo.value)
+    assert "opencode2_fatal_error_event: provider.no-route" in message
+    assert "Model unavailable: m" in message
+
+
+def test_run_opencode2_session_raises_on_an_exit0_v2_error_event(tmp_path: Path) -> None:
+    """An exit-0 stream that reports an error must not masquerade as success."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"error","sessionID":"ses_v2",'
+            '"error":{"type":"session.busy","message":"session in use"}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, returncode=0, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(agent_runtime.AgentExecutionError, match=r"session\.busy"):
+            agent_runtime.run_opencode2_session("prompt", cwd=tmp_path, timeout=30)
+
+
+def test_resume_opencode2_session_uses_the_session_flag(tmp_path: Path) -> None:
+    """V2 resume passes --session and the requested model."""
+    captured_cmd: list[str] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        captured_cmd.extend(cmd)
+        stdout = '{"type":"text","sessionID":"ses_v2","part":{"type":"text","text":"ok"}}\n'
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        agent_runtime.resume_opencode2_session(
+            "ses_v2",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="comet/kimi-k3",
+        )
+
+    assert captured_cmd[captured_cmd.index("--session") + 1] == "ses_v2"
+    assert captured_cmd[captured_cmd.index("--model") + 1] == "comet/kimi-k3"
+    assert "--dir" not in captured_cmd
+
+
+def test_agent_dispatch_routes_opencode2_sessions(tmp_path: Path) -> None:
+    """run_agent_session/resume dispatch OpenCode 2 through its own runners."""
+    stdout = '{"type":"text","sessionID":"ses_v2","part":{"type":"text","text":"OK"}}\n'
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        session = agent_runtime.run_agent_session(
+            "opencode2",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+        resumed = agent_runtime.resume_agent_session(
+            "opencode2",
+            "ses_v2",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert session.session_id == "ses_v2"
+    assert resumed.session_id == "ses_v2"
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        text = agent_runtime.run_agent_text(
+            "opencode2",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert isinstance(text, subprocess.CompletedProcess)
+    assert text.args == ["opencode", "run", "--format", "json"]
+    assert text.stdout == "OK"
+
+
+@pytest.mark.parametrize(
+    "runner",
+    ["session", "resume", "agent_session", "agent_resume", "agent_text"],
+)
+def test_opencode2_runners_reject_unenforceable_sandboxes(tmp_path: Path, runner: str) -> None:
+    """danger-full-access has no OpenCode 2 surface; unsupported modes fail closed."""
+    sandbox = "danger-full-access"
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        raise AssertionError("no provider process may start for an unenforceable sandbox")
+
+    with (
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(agent_runtime.AgentExecutionError, match="cannot enforce sandbox"),
+    ):
+        if runner == "session":
+            agent_runtime.run_opencode2_session("prompt", cwd=tmp_path, timeout=30, sandbox=sandbox)
+        elif runner == "resume":
+            agent_runtime.resume_opencode2_session(
+                "ses_v2", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+        elif runner == "agent_session":
+            agent_runtime.run_agent_session(
+                "opencode2", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+        elif runner == "agent_resume":
+            agent_runtime.resume_agent_session(
+                "opencode2", "ses_v2", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+        else:
+            agent_runtime.run_agent_text(
+                "opencode2", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+
+
+def test_resolve_agent_accepts_explicit_authenticated_opencode2() -> None:
+    """An explicit --agent opencode2 resolves after `opencode --version` exits 0."""
+    with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/opencode"):
+        with patch(
+            "hephaestus.agents.runtime.run_subprocess",
+            return_value=subprocess.CompletedProcess(
+                ["opencode", "--version"], 0, stdout="", stderr=""
+            ),
+        ):
+            assert agent_runtime.resolve_agent("opencode2") == "opencode2"
+
+
 def test_private_pi_helpers_reject_unadmitted_execution(tmp_path: Path) -> None:
     """Reflective private-helper access cannot bypass the Pi admission boundary."""
     with (
