@@ -276,7 +276,10 @@ def client_factory(controller, events: dict[str, list[int]]):
         events["created"].append(id(asyncio.get_running_loop()))
         return TrackedClient(
             AgamemnonConfig(
-                host="127.0.0.1", port=controller.port, timeout=2.0, **{"api_key": "fixture-token"}
+                host="127.0.0.1",
+                port=controller.port,
+                timeout=2.0,
+                **{"api_key": "fixture-api-key"},
             ),
             trust_env=False,
         )
@@ -321,7 +324,7 @@ def test_frozen_sdk_and_actual_loopback_endpoint_are_a_valid_control(tmp_path: P
                     host="127.0.0.1",
                     port=controller.port,
                     timeout=2.0,
-                    **{"api_key": "fixture-token"},
+                    **{"api_key": "fixture-api-key"},
                 ),
                 trust_env=False,
             ) as client:

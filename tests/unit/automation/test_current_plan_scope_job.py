@@ -38,6 +38,20 @@ def test_scope_read_uses_one_deadline_and_returns_exact_plan_facts(
         return PlanDiscoveryResult.found(PLAN)
 
     monkeypatch.setattr(PipelineGitHub, "discover_plan", read)
+    # The scope read inspects the live issue body first. Report a plain issue with
+    # no finalized plan so the read falls through to the comment-backed discovery
+    # this test exercises.
+    monkeypatch.setattr(
+        PipelineGitHub,
+        "gh_issue_json",
+        lambda _self, _issue: {
+            "number": 7,
+            "title": "planned",
+            "state": "OPEN",
+            "labels": [],
+            "body": "No finalized plan on the issue body.",
+        },
+    )
     job = github_jobs.GitHubJob("repo", tmp_path, request, "Read current plan scope")
 
     receipt = PipelineGitHubJobRunner("org", dry_run=False).run(job, shutdown=shutdown)
