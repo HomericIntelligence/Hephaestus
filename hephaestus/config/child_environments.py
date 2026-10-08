@@ -17,10 +17,27 @@ def _absolute_path(path: Path) -> str:
     return str(path.expanduser().absolute())
 
 
+def normalize_home_path_entries(value: str) -> str:
+    """Expand a leading tilde in each PATH entry.
+
+    A startup file that quotes a tilde adds the literal characters to PATH.
+    Name lookup treats such an entry as a relative directory name, so the
+    binary becomes invisible. Expand the tilde at this boundary so discovery
+    and subprocess environments agree. Entries without a leading tilde stay
+    unchanged. When the home directory cannot be resolved the entry stays
+    unchanged.
+    """
+    if not value or "~" not in value:
+        return value
+    entries = value.split(os.pathsep)
+    expanded = [os.path.expanduser(entry) if entry.startswith("~") else entry for entry in entries]
+    return os.pathsep.join(expanded)
+
+
 def read_approved_parent_env() -> dict[str, str]:
     """Read the exact non-secret host substrate admitted by policy."""
     values = {
-        "PATH": os.environ.get("PATH", ""),
+        "PATH": normalize_home_path_entries(os.environ.get("PATH", "")),
         "HOME": os.environ.get("HOME", ""),
         "USER": os.environ.get("USER", ""),
         "LOGNAME": os.environ.get("LOGNAME", ""),
@@ -341,6 +358,7 @@ __all__ = [
     "build_python_phase_env",
     "build_remote_git_env",
     "build_sbatch_submission_env",
+    "normalize_home_path_entries",
     "read_approved_parent_env",
     "with_correlation_id",
 ]

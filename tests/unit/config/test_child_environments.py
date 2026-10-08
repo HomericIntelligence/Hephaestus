@@ -136,6 +136,34 @@ def test_parent_builder_rejects_values_that_violate_registered_rules(
     assert "TMPDIR" not in environment
 
 
+def test_parent_builder_expands_literal_tilde_path_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A quoted tilde in a startup file stays literal in PATH; expand it at the boundary."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "~/.opencode/bin", "~"]))
+
+    environment = child_environments.read_approved_parent_env()
+
+    assert environment["PATH"] == os.pathsep.join(
+        ["/usr/bin", str(home / ".opencode" / "bin"), str(home)]
+    )
+
+
+def test_parent_builder_keeps_tilde_free_path_entries_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PATH values without a leading tilde entry stay byte-identical."""
+    path = os.pathsep.join(["/usr/bin", "/opt/x/bin"])
+    monkeypatch.setenv("PATH", path)
+
+    environment = child_environments.read_approved_parent_env()
+
+    assert environment["PATH"] == path
+
+
 def test_correlation_id_is_explicit_validated_and_non_mutating() -> None:
     """Correlation injection copies its input and rejects malformed tokens."""
     source = {"PATH": os.defpath}
