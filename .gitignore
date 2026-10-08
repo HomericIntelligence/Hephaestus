@@ -101,3 +101,6 @@ htmlcov/
 # Claude Code per-machine local settings — accumulates automation-loop
 # permission-prompt artifacts (e.g. Bash(for f:*), Bash(done)); never source (#1494)
 .claude/settings.local.json
+
+# OpenCode session/scratch state
+.opencode/
