@@ -1046,3 +1046,71 @@ def test_terminal_recovery_does_not_create_state_inside_intake(
     stage.step(item, ctx)
 
     assert not (intake.path / "build").exists()
+
+
+def test_completed_item_archives_and_prunes_opencode_sessions() -> None:
+    """Terminal OpenCode sessions are exported, then removed from the database."""
+    from hephaestus.automation.pipeline.stages.finished import FinishedStage
+
+    item = _item()
+    item.session_ids["implementer"] = "ses_opencode_1"
+    item.session_selections["implementer"] = ("opencode", "model")
+    item.session_ids["reviewer"] = "ses_opencode_2"
+    item.session_selections["reviewer"] = ("opencode2", "model")
+    item.session_ids["planner"] = "ses_claude"
+    item.session_selections["planner"] = ("claude", "model")
+    archived = Path("/home/.agent_brain/transcripts/ses_opencode_1.json")
+
+    with patch(
+        "hephaestus.automation.pipeline.stages.finished.archive_and_prune_opencode_session",
+        return_value=archived,
+    ) as archive:
+        FinishedStage._archive_agent_sessions(item)
+
+    assert archive.call_count == 2
+    assert sorted(call.args[0] for call in archive.call_args_list) == [
+        "ses_opencode_1",
+        "ses_opencode_2",
+    ]
+    # Only OpenCode identities are pruned; other providers keep their sessions.
+    assert item.session_ids == {"planner": "ses_claude"}
+    assert item.payload["archived_agent_transcripts"] == [
+        {"session": "ses_opencode_1", "agent": "opencode", "path": str(archived)},
+        {"session": "ses_opencode_2", "agent": "opencode2", "path": str(archived)},
+    ]
+
+
+def test_failed_opencode_export_keeps_the_session() -> None:
+    """A session is retained when its transcript could not be preserved."""
+    from hephaestus.automation.pipeline.stages.finished import FinishedStage
+
+    item = _item()
+    item.session_ids["implementer"] = "ses_opencode_1"
+    item.session_selections["implementer"] = ("opencode", "model")
+
+    with patch(
+        "hephaestus.automation.pipeline.stages.finished.archive_and_prune_opencode_session",
+        return_value=None,
+    ):
+        FinishedStage._archive_agent_sessions(item)
+
+    assert item.session_ids == {"implementer": "ses_opencode_1"}
+    assert "archived_agent_transcripts" not in item.payload
+
+
+def test_opencode_archive_runs_once_per_item() -> None:
+    """The archive step is idempotent across repeated terminal visits."""
+    from hephaestus.automation.pipeline.stages.finished import FinishedStage
+
+    item = _item()
+    item.session_ids["implementer"] = "ses_opencode_1"
+    item.session_selections["implementer"] = ("opencode", "model")
+
+    with patch(
+        "hephaestus.automation.pipeline.stages.finished.archive_and_prune_opencode_session",
+        return_value=None,
+    ) as archive:
+        FinishedStage._archive_agent_sessions(item)
+        FinishedStage._archive_agent_sessions(item)
+
+    assert archive.call_count == 1
