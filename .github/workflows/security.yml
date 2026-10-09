@@ -37,14 +37,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: hephaestus-podman-${{ runner.os }}-${{ hashFiles('ci/Containerfile', 'uv.lock', 'pyproject.toml') }}
-          restore-keys: |
-            hephaestus-podman-${{ runner.os }}-
-
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
@@ -80,14 +72,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: hephaestus-podman-${{ runner.os }}-${{ hashFiles('ci/Containerfile', 'uv.lock', 'pyproject.toml') }}
-          restore-keys: |
-            hephaestus-podman-${{ runner.os }}-
 
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
@@ -137,14 +121,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: hephaestus-podman-${{ runner.os }}-${{ hashFiles('ci/Containerfile', 'uv.lock', 'pyproject.toml') }}
-          restore-keys: |
-            hephaestus-podman-${{ runner.os }}-
-
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
@@ -183,14 +159,6 @@ jobs:
         with:
           fetch-depth: 0  # hatch-vcs needs full history to compute the version
           persist-credentials: false
-
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: hephaestus-podman-${{ runner.os }}-${{ hashFiles('ci/Containerfile', 'uv.lock', 'pyproject.toml') }}
-          restore-keys: |
-            hephaestus-podman-${{ runner.os }}-
 
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
