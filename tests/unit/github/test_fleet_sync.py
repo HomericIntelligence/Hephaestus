@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import shlex
@@ -2478,11 +2479,11 @@ class TestPrClassification:
         monkeypatch.setattr(fleet_pr_api, "_gh", fake_gh)
         return fleet_pr_api.list_prs("Hephaestus", "HomericIntelligence")[0].status
 
-    def test_blocked_mergeable_failing_is_outdated(self, monkeypatch) -> None:
-        """BLOCKED+MERGEABLE with red CI = stale failure → rebase (OUTDATED)."""
+    def test_blocked_mergeable_failing_is_waiting(self, monkeypatch) -> None:
+        """Blocked readiness does not authorize a branch rewrite."""
         assert (
             self._classify(monkeypatch, mergeable="MERGEABLE", state="BLOCKED", ci="FAILURE")
-            == PRStatus.OUTDATED
+            == PRStatus.WAITING
         )
 
     @pytest.mark.parametrize("ci", ["FAILURE", "SUCCESS", "PENDING", "UNKNOWN"])
@@ -2513,6 +2514,284 @@ class TestPrClassification:
             self._classify(monkeypatch, mergeable="MERGEABLE", state="CLEAN", ci="SUCCESS")
             == PRStatus.READY
         )
+
+
+_READINESS_MERGEABILITY = [
+    pytest.param({"mergeable": value}, id=value or "empty-mergeability")
+    for value in ("MERGEABLE", "CONFLICTING", "UNKNOWN", "FUTURE", "")
+] + [
+    pytest.param({}, id="missing-mergeability"),
+    pytest.param({"mergeable": None}, id="null-mergeability"),
+]
+_READINESS_MERGE_STATES = [
+    pytest.param({"mergeStateStatus": value}, id=value or "empty-state")
+    for value in (
+        "CLEAN",
+        "BEHIND",
+        "BLOCKED",
+        "DIRTY",
+        "DRAFT",
+        "HAS_HOOKS",
+        "UNSTABLE",
+        "UNKNOWN",
+        "FUTURE",
+        "",
+    )
+] + [
+    pytest.param({}, id="missing-state"),
+    pytest.param({"mergeStateStatus": None}, id="null-state"),
+]
+_READINESS_CHECKS = [
+    pytest.param([{"conclusion": "SUCCESS"}], "SUCCESS", id="success"),
+    pytest.param([{"conclusion": "FAILURE"}], "FAILURE", id="failure"),
+    pytest.param([{"conclusion": "IN_PROGRESS"}], "PENDING", id="pending"),
+    pytest.param([], "UNKNOWN", id="no-checks"),
+    pytest.param([{"conclusion": None, "state": "SUCCESS"}], "PENDING", id="null-conclusion"),
+    pytest.param([{"state": "SUCCESS"}], "PENDING", id="missing-conclusion"),
+    pytest.param([{"conclusion": "", "state": "SUCCESS"}], "UNKNOWN", id="empty-conclusion"),
+    pytest.param([{"conclusion": "FUTURE", "state": "SUCCESS"}], "UNKNOWN", id="future-conclusion"),
+]
+
+
+def _readiness_github(
+    monkeypatch: pytest.MonkeyPatch,
+    mergeability: dict[str, Any],
+    merge_state: dict[str, Any],
+    checks: list[dict[str, Any]],
+) -> list[list[str]]:
+    """Supply only read-only GitHub responses, below the real discovery adapter."""
+    calls: list[list[str]] = []
+    listed = {
+        "number": 3218,
+        "title": "Readiness fixture",
+        "headRefName": "fixture-head",
+        "baseRefName": "main",
+        "headRefOid": "a" * 40,
+        **mergeability,
+        **merge_state,
+    }
+    list_args = [
+        "--repo",
+        "HomericIntelligence/Hephaestus",
+        "pr",
+        "list",
+        "--state",
+        "open",
+        "--author",
+        "@me",
+        "--json",
+        "number,title,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus",
+        "--limit",
+        "100",
+    ]
+    view_args = [
+        "--repo",
+        "HomericIntelligence/Hephaestus",
+        "pr",
+        "view",
+        "3218",
+        "--json",
+        "statusCheckRollup",
+    ]
+
+    def read_only(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert kwargs["check"] is True
+        calls.append(list(args))
+        if args == list_args:
+            assert len(calls) == 1
+            payload: Any = [listed]
+        elif args == view_args:
+            assert len(calls) == 2
+            payload = {"statusCheckRollup": checks}
+        else:
+            pytest.fail(f"Readiness attempted an unexpected GitHub operation: {args!r}")
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(fleet_pr_api, "gh_call", read_only)
+    return calls
+
+
+def _readiness_expected(
+    mergeability: dict[str, Any], merge_state: dict[str, Any], ci: str
+) -> PRStatus:
+    """Apply the approved matrix, with explicit conflict precedence."""
+    if mergeability.get("mergeable") == "CONFLICTING":
+        return PRStatus.CONFLICTED
+    supported: dict[tuple[Any, Any, str], PRStatus] = {
+        ("MERGEABLE", "CLEAN", "SUCCESS"): PRStatus.READY,
+        ("MERGEABLE", "CLEAN", "FAILURE"): PRStatus.FAILING,
+    }
+    return supported.get(
+        (mergeability.get("mergeable"), merge_state.get("mergeStateStatus"), ci),
+        PRStatus.WAITING,
+    )
+
+
+@pytest.mark.parametrize("mergeability", _READINESS_MERGEABILITY)
+@pytest.mark.parametrize("merge_state", _READINESS_MERGE_STATES)
+@pytest.mark.parametrize("checks,ci", _READINESS_CHECKS)
+class TestReadinessMatrix:
+    """Read raw GitHub facts through the real classifier and coordinator."""
+
+    def test_public_classifier(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mergeability: dict[str, Any],
+        merge_state: dict[str, Any],
+        checks: list[dict[str, Any]],
+        ci: str,
+    ) -> None:
+        """Only supported clean states are ready or failing; ambiguity waits."""
+        calls = _readiness_github(monkeypatch, mergeability, merge_state, checks)
+        prs = fleet_pr_api.list_prs("Hephaestus", "HomericIntelligence")
+        assert len(calls) == 2
+        assert len(prs) == 1
+        assert prs[0].ci_state == ci
+        assert prs[0].status is _readiness_expected(mergeability, merge_state, ci)
+        assert prs[0].head_sha == "a" * 40
+
+    @pytest.mark.parametrize("skip_conflicts", [False, True], ids=["resolve", "skip"])
+    def test_real_discovery_dispatch_has_no_unapproved_mutation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        mergeability: dict[str, Any],
+        merge_state: dict[str, Any],
+        checks: list[dict[str, Any]],
+        ci: str,
+        skip_conflicts: bool,
+    ) -> None:
+        """Wait without Git work, while keeping explicit conflict handling."""
+        calls = _readiness_github(monkeypatch, mergeability, merge_state, checks)
+        expected = _readiness_expected(mergeability, merge_state, ci)
+
+        def forbidden(*args: Any, **kwargs: Any) -> Any:
+            pytest.fail("Readiness attempted a prohibited Git or agent operation")
+
+        clone = MagicMock(side_effect=forbidden)
+        resolve = MagicMock(side_effect=forbidden)
+        rebase = MagicMock(side_effect=forbidden)
+        monkeypatch.setattr(fleet_coordinator, "ensure_repo_clone", clone)
+        monkeypatch.setattr(fleet_coordinator, "resolve_conflict_with_agent", resolve)
+        monkeypatch.setattr(fleet_coordinator, "rebase_and_resign", rebase)
+        monkeypatch.setattr(fleet_git_ops, "_git", forbidden)
+        monkeypatch.setattr(subprocess, "run", forbidden)
+        monkeypatch.setattr(subprocess, "Popen", forbidden)
+        handles_conflict = expected is PRStatus.CONFLICTED and not skip_conflicts
+        if handles_conflict:
+            clone.side_effect = None
+            clone.return_value = tmp_path / "owned-clone"
+            resolve.side_effect = None
+            resolve.return_value = True
+        args = argparse.Namespace(
+            dry_run=False,
+            skip_conflict_resolution=skip_conflicts,
+            agent="codex",
+            model="",
+            resign_email=None,
+            skip_email_key_check=False,
+        )
+        counts = fleet_coordinator.process_repo("Hephaestus", "HomericIntelligence", args, tmp_path)
+        assert len(calls) == 2, "The test must exercise real GitHub discovery"
+        assert counts == {
+            "merged": 0,
+            "rebased": 0,
+            "conflict_resolved": int(handles_conflict),
+            "skipped": int(not handles_conflict),
+            "failed": 0,
+        }
+        rebase.assert_not_called()
+        if handles_conflict:
+            clone.assert_called_once_with(
+                "Hephaestus", "HomericIntelligence", tmp_path, dry_run=False
+            )
+            resolve.assert_called_once()
+            assert resolve.call_args.args[0].status is PRStatus.CONFLICTED
+            assert resolve.call_args.args[0].head_sha == "a" * 40
+            assert resolve.call_args.args[2] == tmp_path / "owned-clone"
+            assert resolve.call_args.kwargs["dry_run"] is False
+        else:
+            clone.assert_not_called()
+            resolve.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "checks,expected",
+    [
+        *[
+            pytest.param([{"conclusion": value}], "SUCCESS", id=value)
+            for value in ("SUCCESS", "NEUTRAL", "SKIPPED", "success")
+        ],
+        *[
+            pytest.param([{"conclusion": value}], "FAILURE", id=value)
+            for value in (
+                "FAILURE",
+                "TIMED_OUT",
+                "CANCELLED",
+                "ACTION_REQUIRED",
+                "ERROR",
+                "failure",
+                "error",
+            )
+        ],
+        *[
+            pytest.param([{"conclusion": value}], "PENDING", id=value)
+            for value in ("PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "pending")
+        ],
+        pytest.param([], "UNKNOWN", id="empty-checks"),
+        pytest.param([{}], "PENDING", id="missing-conclusion"),
+        pytest.param([{"state": "SUCCESS"}], "PENDING", id="state-only-success"),
+        pytest.param([{"conclusion": None}], "PENDING", id="null-conclusion"),
+        pytest.param([{"conclusion": ""}], "UNKNOWN", id="empty-conclusion"),
+        pytest.param(
+            [{"conclusion": "", "state": "SUCCESS"}], "UNKNOWN", id="empty-with-success-state"
+        ),
+        pytest.param([{"conclusion": "FUTURE"}], "UNKNOWN", id="future-conclusion"),
+        pytest.param(
+            [{"conclusion": value} for value in ("SUCCESS", "NEUTRAL", "SKIPPED", "success")],
+            "SUCCESS",
+            id="all-success-types",
+        ),
+        pytest.param(
+            [{"conclusion": "FAILURE"}, {"conclusion": None}],
+            "PENDING",
+            id="null-before-failure",
+        ),
+        pytest.param(
+            [{"conclusion": "FAILURE"}, {"state": "SUCCESS"}],
+            "PENDING",
+            id="missing-before-failure",
+        ),
+        pytest.param(
+            [{"conclusion": "FAILURE"}, {"conclusion": "PENDING"}],
+            "FAILURE",
+            id="failure-before-pending",
+        ),
+        pytest.param(
+            [{"conclusion": "FAILURE"}, {"conclusion": "FUTURE"}],
+            "FAILURE",
+            id="failure-before-unknown",
+        ),
+        pytest.param(
+            [{"conclusion": "PENDING"}, {"conclusion": "FUTURE"}],
+            "PENDING",
+            id="pending-before-unknown",
+        ),
+        pytest.param(
+            [{"conclusion": "SUCCESS"}, {"conclusion": "FUTURE"}],
+            "UNKNOWN",
+            id="success-cannot-hide-unknown",
+        ),
+        pytest.param(
+            [{"conclusion": "SUCCESS"}, {"conclusion": "", "state": "SUCCESS"}],
+            "UNKNOWN",
+            id="success-cannot-hide-empty",
+        ),
+    ],
+)
+def test_readiness_ci_reducer_contract(checks: list[dict[str, Any]], expected: str) -> None:
+    """Recognize success explicitly and retain established reduction precedence."""
+    assert _ci_state(checks) == expected
 
 
 class TestListPrsAuthorScope:
