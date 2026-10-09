@@ -138,7 +138,7 @@ def running_command(config: Path) -> Iterator[dict[str, Any]]:
         if process.poll() is None:
             process.terminate()
         try:
-            _, error = process.communicate(timeout=3)
+            output, error = process.communicate(timeout=3)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate(timeout=3)
@@ -147,6 +147,9 @@ def running_command(config: Path) -> Iterator[dict[str, Any]]:
             assert process.returncode == 0, (
                 f"The service shutdown failed: exit {process.returncode}; {error.decode()}"
             )
+            assert [json.loads(line) for line in output.splitlines()] == [
+                {"status": "ok", "exit_code": 0}
+            ]
 
 
 def read_page(
@@ -426,7 +429,9 @@ def test_installed_command_rejects_nonprivate_input_without_readiness(
         check=False,
     )
     assert result.returncode == 1
-    assert result.stdout == b""
+    assert [json.loads(line) for line in result.stdout.splitlines()] == [
+        {"status": "error", "exit_code": 1}
+    ]
     assert result.stderr == b"The private build-log service failed.\n"
 
 
@@ -454,4 +459,8 @@ def test_shutdown_failure_has_fixed_diagnostic(
     assert fleet_build_artifact_server.main(["--config", str(tmp_path / "unused"), "--json"]) == 1
     output = capsys.readouterr()
     assert output.err == "The private build-log service failed.\n"
+    assert [json.loads(line) for line in output.out.splitlines()] == [
+        {"status": "ready", "host": "127.0.0.1", "port": 12345},
+        {"status": "error", "exit_code": 1},
+    ]
     assert "private fixture detail" not in output.out

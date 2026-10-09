@@ -34,7 +34,7 @@ from hephaestus.automation.fleet_build_artifacts import (
     read_private_file,
 )
 from hephaestus.cli.localization import text
-from hephaestus.cli.utils import add_json_arg, add_version_arg
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 logger = logging.getLogger(__name__)
 _CONNECTIONS = 8
@@ -405,4 +405,6 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             for number, handler in previous.items():
                 signal.signal(number, handler)
+    if args.json:
+        emit_json_status(result)
     return result
