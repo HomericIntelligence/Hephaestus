@@ -12,7 +12,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from html import escape
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast, get_args
 
 from hephaestus.automation.review_finding_history import (
     normalize_review_finding_collection,
@@ -24,8 +24,7 @@ if TYPE_CHECKING:
 
 from hephaestus.automation.pipeline.scope_retraction import (
     SCOPE_RETRACTION_MARKER_PREFIX,
-    is_scope_retraction_finding,
-    normalize_scope_retraction_paths,
+    scope_retraction_paths_from_finding,
 )
 from hephaestus.automation.scope_expansion_domain import (
     ScopeExpansion,
@@ -53,6 +52,15 @@ _INVALID_SUMMARY = "No structured reviewer summary was provided."
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 ReviewVerdict = Literal["GO", "NOGO", "BLOCKED"]
+ReviewAuditInvalidReason = Literal[
+    "invalid_payload",
+    "invalid_grade",
+    "invalid_audit_shape",
+    "invalid_scope_expansions",
+    "invalid_verdict",
+    "invalid_finding",
+]
+REVIEW_AUDIT_INVALID_REASONS = frozenset(get_args(ReviewAuditInvalidReason))
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,7 @@ class ReviewAudit:
     valid: bool
     verdict: ReviewVerdict | None = None
     scope_expansions: tuple[ScopeExpansion, ...] = ()
+    invalid_reason: ReviewAuditInvalidReason | None = None
 
 
 @dataclass(frozen=True)
@@ -192,7 +201,7 @@ def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
     source, payload = _response_payload(response)
     raw_feedback = _bounded_feedback(source, payload)
     if payload is None:
-        return _invalid_audit(raw_feedback)
+        return _invalid_audit(raw_feedback, "invalid_payload")
 
     grade = payload.get("grade")
     raw_verdict = payload.get("verdict")
@@ -200,27 +209,27 @@ def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
     comments = payload.get("comments")
     scope_expansions = payload.get("scope_expansions")
     if not isinstance(grade, str) or grade.strip().upper() not in _VALID_GRADES:
-        return _invalid_audit(raw_feedback)
+        return _invalid_audit(raw_feedback, "invalid_grade")
     if not isinstance(summary, str) or not isinstance(comments, list):
-        return _invalid_audit(raw_feedback)
+        return _invalid_audit(raw_feedback, "invalid_audit_shape")
     normalized_scope_expansions = normalize_scope_expansions(scope_expansions)
     if normalized_scope_expansions is None:
-        return _invalid_audit(raw_feedback)
+        return _invalid_audit(raw_feedback, "invalid_scope_expansions")
 
     # The implementation-GO boundary requires an explicit reviewer verdict.
     # Missing, malformed, or unsupported values invalidate the whole audit so
     # the gate can fail closed instead of inferring from the grade or summary.
     if not isinstance(raw_verdict, str):
-        return _invalid_audit(raw_feedback)
+        return _invalid_audit(raw_feedback, "invalid_verdict")
     verdict = cast(ReviewVerdict, raw_verdict.strip().upper())
     if verdict not in _VALID_VERDICTS:
-        return _invalid_audit(raw_feedback)
+        return _invalid_audit(raw_feedback, "invalid_verdict")
 
     findings: list[dict[str, object]] = []
     for comment in comments:
         normalized = _normalize_finding(comment)
         if normalized is None:
-            return _invalid_audit(raw_feedback)
+            return _invalid_audit(raw_feedback, "invalid_finding")
         findings.append(normalized)
 
     return ReviewAudit(
@@ -290,20 +299,13 @@ def _normalize_finding(comment: object) -> dict[str, object] | None:
         or has_reserved_finding_control(body)
     ):
         return None
-    scope_retraction_paths = comment.get("scope_retraction_paths")
-    if is_scope_retraction_finding(body):
-        paths = normalize_scope_retraction_paths(scope_retraction_paths)
-        if paths is None:
-            return None
-        # A scope retraction is a publication-safety boundary, not advisory
-        # review prose. Host-normalize it to blocking before POST filters
-        # minor/nitpick comments out of the remediation path.
-        normalized_severity = "major"
-    elif scope_retraction_paths is not None:
+    paths = scope_retraction_paths_from_finding({**comment, "path": path.strip()})
+    if paths is None:
         return None
-    else:
-        paths = ()
-        normalized_severity = severity.lower()
+    # A scope retraction is a publication-safety boundary, not advisory
+    # review prose. Host-normalize it to blocking before POST filters
+    # minor/nitpick comments out of the remediation path.
+    normalized_severity = "major" if paths else severity.lower()
     finding: dict[str, object] = {
         "path": path.strip(),
         "line": line,
@@ -373,7 +375,7 @@ def _bounded_feedback(source: str, payload: dict[str, object] | None) -> str:
     return f"{feedback[: MAX_RAW_FEEDBACK_CHARS - 15].rstrip()}... [truncated]"
 
 
-def _invalid_audit(raw_feedback: str) -> ReviewAudit:
+def _invalid_audit(raw_feedback: str, reason: ReviewAuditInvalidReason) -> ReviewAudit:
     """Build a fail-closed audit result."""
     return ReviewAudit(
         grade=None,
@@ -383,6 +385,7 @@ def _invalid_audit(raw_feedback: str) -> ReviewAudit:
         scope_expansions=(),
         raw_feedback=raw_feedback,
         valid=False,
+        invalid_reason=reason,
     )
 
 

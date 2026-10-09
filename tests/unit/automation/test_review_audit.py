@@ -8,6 +8,7 @@ import pytest
 
 from hephaestus.automation import review_audit as review_audit_module
 from hephaestus.automation.github_api import ReviewAnchorCorrection
+from hephaestus.automation.pipeline.scope_retraction import scope_retraction_paths_for_threads
 from hephaestus.automation.review_audit import (
     ReviewAudit,
     parse_review_audit,
@@ -286,16 +287,197 @@ def test_parse_review_audit_promotes_scope_retraction_to_blocking() -> None:
     assert audit.findings[0]["scope_retraction_paths"] == ("a.py", "b.py")
 
 
-def test_parse_review_audit_rejects_scope_retraction_without_complete_paths() -> None:
-    """A reviewer cannot leave the publisher to guess a scope-removal footprint."""
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("Restore the files with unrelated changes.", id="restore"),
+        pytest.param("Keep unrelated files at their base revision.", id="keep"),
+        pytest.param("Drop the unrelated changes.", id="drop"),
+        pytest.param("Remove the unrelated changes.", id="remove"),
+        pytest.param("Split the unrelated changes into another PR.", id="split"),
+        pytest.param("These files are outside the approved scope.", id="no-action-word"),
+    ],
+)
+def test_parse_review_audit_accepts_scope_retraction_manifest_for_all_body_wording(
+    body: str,
+) -> None:
+    """A complete anchored manifest controls retraction for each body text."""
     audit = parse_review_audit(
-        '{"grade":"F","verdict":"BLOCKED","summary":"Split unrelated code",'
-        '"comments":[{"path":"a.py",'
-        '"line":1,"side":"RIGHT","severity":"major",'
-        '"body":"Drop this unrelated change."}]}'
+        json.dumps(
+            {
+                "grade": "F",
+                "verdict": "BLOCKED",
+                "summary": "Changes exceed the approved scope.",
+                "comments": [
+                    {
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "severity": "minor",
+                        "body": body,
+                        "scope_retraction_paths": ["a.py", "b.py"],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert audit.valid is True
+    assert audit.findings == (
+        {
+            "path": "a.py",
+            "line": 1,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": body,
+            "scope_retraction_paths": ("a.py", "b.py"),
+        },
+    )
+
+
+@pytest.mark.parametrize("action", ["Restore", "Keep", "Drop", "Remove", "Split"])
+def test_parse_review_audit_treats_action_words_without_manifest_as_ordinary(action: str) -> None:
+    """Body words alone do not create a retraction request."""
+    audit = parse_review_audit(
+        json.dumps(
+            {
+                "grade": "F",
+                "verdict": "BLOCKED",
+                "summary": "Check scope.",
+                "comments": [
+                    {
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "severity": "minor",
+                        "body": f"{action} unrelated changes.",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert audit.valid is True
+    assert len(audit.findings) == 1
+    assert audit.findings[0]["severity"] == "minor"
+    assert "scope_retraction_paths" not in audit.findings[0]
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        pytest.param(None, id="null"),
+        pytest.param([], id="empty"),
+        pytest.param("a.py", id="string"),
+        pytest.param([123], id="non-string"),
+        pytest.param(["/a.py"], id="absolute"),
+        pytest.param(["b.py"], id="missing-anchor"),
+    ],
+)
+def test_parse_review_audit_rejects_malformed_scope_retraction_manifest(manifest: object) -> None:
+    """Present metadata must be complete, safe, and anchored."""
+    audit = parse_review_audit(
+        json.dumps(
+            {
+                "grade": "F",
+                "verdict": "BLOCKED",
+                "summary": "Check scope.",
+                "comments": [
+                    {
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "severity": "minor",
+                        "body": "Drop unrelated changes.",
+                        "scope_retraction_paths": manifest,
+                    }
+                ],
+            }
+        )
     )
 
     assert audit.valid is False
+    assert audit.findings == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        pytest.param("payload", "not JSON", "invalid_payload", id="payload"),
+        pytest.param("grade", "unknown", "invalid_grade", id="grade"),
+        pytest.param("comments", None, "invalid_audit_shape", id="shape"),
+        pytest.param("scope_expansions", "unknown", "invalid_scope_expansions", id="expansions"),
+        pytest.param("verdict", "unknown", "invalid_verdict", id="verdict"),
+        pytest.param("comments", [None], "invalid_finding", id="finding"),
+    ],
+)
+def test_parse_review_audit_records_bounded_invalid_reason(
+    field: str, value: object, reason: str
+) -> None:
+    """Each parser failure has a fixed reason, not reviewer content."""
+    payload: dict[str, object] = {
+        "grade": "A",
+        "verdict": "GO",
+        "summary": "Checked.",
+        "comments": [],
+    }
+    payload[field] = value
+    audit = parse_review_audit("not JSON" if field == "payload" else json.dumps(payload))
+
+    assert audit.valid is False
+    assert getattr(audit, "invalid_reason", None) == reason
+
+
+def test_valid_review_audit_has_no_invalid_reason() -> None:
+    """A valid audit does not carry a schema failure reason."""
+    audit = parse_review_audit('{"grade":"A","verdict":"GO","summary":"Checked.","comments":[]}')
+
+    assert audit.valid is True
+    assert getattr(audit, "invalid_reason", "missing") is None
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param("Drop unrelated changes.", (), id="words-only"),
+        pytest.param(
+            'Restore the base revision.\n<!-- hephaestus-scope-retraction-paths: ["a.py"] -->',
+            ("a.py",),
+            id="restore-marker",
+        ),
+        pytest.param(
+            'Keep the base revision.\n<!-- hephaestus-scope-retraction-paths: ["a.py"] -->',
+            ("a.py",),
+            id="keep-marker",
+        ),
+        pytest.param(
+            '<!-- hephaestus-scope-retraction-paths: ["a.py"] -->',
+            ("a.py",),
+            id="marker-only",
+        ),
+        pytest.param(
+            '<!-- hephaestus-scope-retraction-paths: ["a.py"] -->\n'
+            '<!-- hephaestus-scope-retraction-paths: ["a.py"] -->',
+            None,
+            id="duplicate",
+        ),
+        pytest.param(
+            '<!-- hephaestus-scope-retraction-paths: ["a.py"]',
+            None,
+            id="partial",
+        ),
+        pytest.param(
+            '<!-- hephaestus-scope-retraction-paths: ["b.py"] -->',
+            None,
+            id="missing-anchor",
+        ),
+    ],
+)
+def test_scope_retraction_marker_validation_fails_closed(
+    body: str, expected: tuple[str, ...] | None
+) -> None:
+    """Published threads use one complete anchored marker, not action words."""
+    assert scope_retraction_paths_for_threads([{"path": "a.py", "body": body}]) == expected
 
 
 def test_parse_review_audit_accepts_scope_expansions() -> None:

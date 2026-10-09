@@ -241,6 +241,7 @@ def _dependency_fake(  # noqa: C901
     pending_retraction: bool = False,
     unbound_projection: bool = False,
     recover_projection: bool = False,
+    metadata_projection: bool = False,
     lifecycle_state: str = "blocked",
     lifecycle_head: str = "a" * 40,
     lifecycle_merge_sha: str | None = None,
@@ -261,16 +262,22 @@ def _dependency_fake(  # noqa: C901
         reviewed_head_sha=lifecycle_head,
         expansion=expansion,
     )
-    projected_finding = {
+    projected_finding: dict[str, object] = {
         "path": "extra.py",
         "line": 1,
         "side": "RIGHT",
-        "body": (
-            "<!-- hephaestus-severity: major -->\n"
-            '<!-- hephaestus-scope-retraction-paths: ["extra.py"] -->\n'
-            "Remove the out-of-scope file."
-        ),
+        "body": "Remove the out-of-scope file.",
+        "scope_retraction_paths": ["extra.py"],
     }
+    if metadata_projection:
+        projected_finding = {
+            "path": "extra.py",
+            "line": 1,
+            "side": "RIGHT",
+            "body": "Keep the approved file boundary.",
+            "severity": "major",
+            "scope_retraction_paths": ["extra.py"],
+        }
     lifecycle = render_scope_expansion_lifecycle_comment(
         repository="org/repo",
         parent_issue=7,
@@ -288,10 +295,11 @@ def _dependency_fake(  # noqa: C901
         else "",
     )
 
-    class Fake:
+    class Fake(_DeadlineAccessor):
         _repo_slug = "org/repo"
         dry_run = False
         posted_projection = False
+        published_body: str | None = None
 
         @staticmethod
         def mark_pr_implementation_no_go(_pr: int) -> None:
@@ -325,7 +333,8 @@ def _dependency_fake(  # noqa: C901
                     "path": "extra.py",
                     "line": 1,
                     "side": "RIGHT",
-                    "body": (
+                    "body": self.published_body
+                    or (
                         "<!-- hephaestus-severity: major -->\n"
                         '<!-- hephaestus-scope-retraction-paths: ["extra.py"] -->\n'
                         "Remove the out-of-scope file."
@@ -346,6 +355,13 @@ def _dependency_fake(  # noqa: C901
             assert findings == [projected_finding]
             assert expected_head_sha == "a" * 40
             assert review_diff
+            if metadata_projection:
+                from hephaestus.automation.pipeline_github_transport import (
+                    _with_severity_marker,
+                )
+
+                assert "hephaestus-scope-retraction-paths" not in str(findings[0]["body"])
+                self.published_body = _with_severity_marker(findings[0])
             self.posted_projection = True
             return [{"id": "thread-1"}]
 
@@ -528,6 +544,63 @@ def test_restart_restores_projected_retraction_before_parking() -> None:
     assert len(cast(list[object], receipt.retraction_threads.thaw())) == 1
 
 
+def test_runner_routes_metadata_projection_after_child_parking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Recover metadata as a host-marked thread while the child remains blocked."""
+    module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
+    github = cast(
+        Any,
+        _dependency_fake(
+            child_state="OPEN",
+            merged=False,
+            in_source=False,
+            recover_projection=True,
+            metadata_projection=True,
+        ),
+    )
+    before = parse_scope_expansion_lifecycle_comment(github.issue_comments(11)[0].body)
+    assert before is not None
+    assert before.state == "blocked"
+    assert before.child_issue_number == 901
+    assert before.retraction_findings[0]["scope_retraction_paths"] == ["extra.py"]
+    assert "hephaestus-scope-retraction-paths" not in str(before.retraction_findings[0]["body"])
+    assert github.list_unresolved_review_threads(11) == []
+    monkeypatch.setattr(module, "PipelineGitHub", lambda *_args, **_kwargs: github)
+    request = ReconcileScopeExpansionDependenciesRequest(
+        issue_number=7, pr_number=11, source_head_sha="a" * 40
+    )
+
+    receipt = PipelineGitHubJobRunner(org="org", dry_run=False).run(
+        GitHubJob(
+            repo="repo",
+            repo_root=tmp_path.resolve(),
+            request=request,
+            descr="recover parked child retraction",
+        )
+    )
+
+    assert isinstance(receipt, ScopeExpansionDependenciesReconciled)
+    assert receipt.status == "retraction_required"
+    assert receipt.child_issue_numbers == (901,)
+    assert github.posted_projection is True
+    assert receipt.retraction_threads.thaw() == [
+        {
+            "thread_id": "thread-1",
+            "path": "extra.py",
+            "line": 1,
+            "body": (
+                "[Review] Keep the approved file boundary.\n"
+                "<!-- hephaestus-severity: major -->\n"
+                '<!-- hephaestus-scope-retraction-paths: ["extra.py"] -->'
+            ),
+        }
+    ]
+    assert github.gh_issue_json(901)["state"] == "OPEN"
+    assert github.pr_has_implementation_state_label(11) == (False, True)
+    assert parse_scope_expansion_lifecycle_comment(github.issue_comments(11)[0].body) == before
+
+
 def test_synchronized_merged_dependency_allows_reviewed_head_drift() -> None:
     """A completed merge record permits the post-sync head and requests fresh review."""
     module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
@@ -577,11 +650,8 @@ def test_scope_request_accepts_a_nonempty_valid_json_projection() -> None:
         "path": "extra.py",
         "line": 1,
         "side": "RIGHT",
-        "body": (
-            "<!-- hephaestus-severity: major -->\n"
-            '<!-- hephaestus-scope-retraction-paths: ["extra.py"] -->\n'
-            "Remove the out-of-scope file."
-        ),
+        "body": "Remove the out-of-scope file.",
+        "scope_retraction_paths": ["extra.py"],
     }
     request = EnsureScopeExpansionChildrenRequest(
         issue_number=7,
@@ -602,6 +672,78 @@ def test_scope_request_accepts_a_nonempty_valid_json_projection() -> None:
     )
 
     assert request.retraction_findings.thaw() == [finding]
+
+
+@pytest.mark.parametrize("body", ["Restore these files.", "Keep the base revision."])
+def test_scope_request_accepts_metadata_retraction_before_publication(body: str) -> None:
+    """The worker accepts anchored metadata before a host marker exists."""
+    finding = {
+        "path": "extra.py",
+        "line": 1,
+        "side": "RIGHT",
+        "severity": "major",
+        "body": body,
+        "scope_retraction_paths": ["extra.py"],
+    }
+    request = EnsureScopeExpansionChildrenRequest(
+        issue_number=7,
+        pr_number=11,
+        reviewed_head_sha="a" * 40,
+        scope_expansions=(
+            ScopeExpansion(
+                title="Extract helper",
+                reason="The helper must merge first",
+                source_path="hephaestus/example.py",
+                source_line=4,
+                required_paths=("hephaestus/example.py",),
+                acceptance_criteria=("The helper exists",),
+            ),
+        ),
+        retraction_findings=FrozenJson.snapshot([finding]),
+        review_diff="diff --git a/extra.py b/extra.py\n",
+    )
+
+    assert request.retraction_findings.thaw() == [finding]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param({}, id="absent"),
+        pytest.param({"scope_retraction_paths": []}, id="empty"),
+        pytest.param({"scope_retraction_paths": None}, id="null"),
+        pytest.param({"scope_retraction_paths": ["/extra.py"]}, id="absolute"),
+        pytest.param({"scope_retraction_paths": ["other.py"]}, id="missing-anchor"),
+    ],
+)
+def test_scope_request_rejects_invalid_metadata_retraction(metadata: dict[str, object]) -> None:
+    """A closed request does not infer a manifest from body words."""
+    finding = {
+        "path": "extra.py",
+        "line": 1,
+        "side": "RIGHT",
+        "severity": "major",
+        "body": "Restore these files.",
+        **metadata,
+    }
+    with pytest.raises(ValueError):
+        EnsureScopeExpansionChildrenRequest(
+            issue_number=7,
+            pr_number=11,
+            reviewed_head_sha="a" * 40,
+            scope_expansions=(
+                ScopeExpansion(
+                    title="Extract helper",
+                    reason="The helper must merge first",
+                    source_path="hephaestus/example.py",
+                    source_line=4,
+                    required_paths=("hephaestus/example.py",),
+                    acceptance_criteria=("The helper exists",),
+                ),
+            ),
+            retraction_findings=FrozenJson.snapshot([finding]),
+            review_diff="diff --git a/extra.py b/extra.py\n",
+        )
 
 
 def test_runner_dispatches_append_with_a_fresh_accessor_per_job(
@@ -1321,10 +1463,8 @@ def test_existing_blocked_child_replaces_projection_before_thread_publication(
         "path": "extra.py",
         "line": 1,
         "side": "RIGHT",
-        "body": (
-            '<!-- hephaestus-scope-retraction-paths: ["extra.py"] -->\n'
-            "Remove the out-of-scope file."
-        ),
+        "body": "Remove the out-of-scope file.",
+        "scope_retraction_paths": ["extra.py"],
     }
     updated = EnsureScopeExpansionChildrenRequest(
         issue_number=original.issue_number,

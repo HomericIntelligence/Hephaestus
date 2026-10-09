@@ -4066,6 +4066,126 @@ class TestPrReviewStageStep:
         assert result == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
         assert item.payload["implementation_remediation"] is True
 
+    @pytest.mark.parametrize("with_expansion", [False, True], ids=["normal", "mixed"])
+    def test_scope_retraction_audit_reaches_remediation_without_format_retry(
+        self, make_ctx: Any, make_work_item: Any, with_expansion: bool
+    ) -> None:
+        """Metadata reaches publication and only retraction work escapes a parked child."""
+        from hephaestus.automation.pipeline_github_transport import _with_severity_marker
+
+        class PublishingGitHub(FakeStageGitHub):
+            def post_review_threads(
+                self,
+                pr_number: int,
+                threads: list[dict[str, Any]],
+                *,
+                expected_head_sha: str,
+                review_diff: str,
+            ) -> list[dict[str, Any]]:
+                published = [
+                    {**finding, "body": _with_severity_marker(finding)} for finding in threads
+                ]
+                return super().post_review_threads(
+                    pr_number,
+                    published,
+                    expected_head_sha=expected_head_sha,
+                    review_diff=review_diff,
+                )
+
+        retraction = {
+            "path": "extra.py",
+            "line": 1,
+            "side": "RIGHT",
+            "severity": "minor",
+            "body": "Restore these files to their base revision.",
+            "scope_retraction_paths": ["extra.py"],
+        }
+        ordinary = {
+            "path": "keep.py",
+            "line": 1,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "Guard the missing value.",
+        }
+        expansion = ScopeExpansion(
+            title="Extract helper",
+            reason="The helper must merge first",
+            source_path="keep.py",
+            source_line=1,
+            required_paths=("keep.py",),
+            acceptance_criteria=("The helper exists",),
+        )
+        findings = [retraction, ordinary] if with_expansion else [retraction]
+        audit = parse_review_audit(
+            json.dumps(
+                {
+                    "grade": "F",
+                    "verdict": "NOGO",
+                    "summary": "Work exceeds the approved scope.",
+                    "comments": findings,
+                    "scope_expansions": [expansion.as_dict()] if with_expansion else [],
+                }
+            )
+        )
+        assert audit.valid is True
+        github = PublishingGitHub(by_severity=[(0, 0, 0), (len(findings), 0, 0)])
+        ctx = make_ctx(github=github)
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.worktree = "/tmp/wt"
+        stage.on_job_done(item, JobResult(ok=True, value=audit), ctx)
+        item.state = "POST"
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        _prepare_direct_post_fixture(item)
+
+        if with_expansion:
+            assert stage.step(item, ctx) == Continue(next_state="SCOPE_EXPANSION_PREPARE_SUBMIT")
+            item.state = "SCOPE_EXPANSION_PREPARE_SUBMIT"
+            child_job = stage.step(item, ctx)
+            assert isinstance(child_job, JobRequest)
+            assert isinstance(child_job.job.request, EnsureScopeExpansionChildrenRequest)
+            projected = child_job.job.request.retraction_findings.thaw()
+            assert isinstance(projected, list)
+            assert [finding["path"] for finding in projected] == ["extra.py"]
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=True,
+                    value=ScopeExpansionChildrenEnsured(
+                        request=child_job.job.request,
+                        status="blocked",
+                        child_issue_numbers=(901,),
+                    ),
+                ),
+                ctx,
+            )
+            item.state = child_job.on_done_state
+
+        result = _complete_github_job(stage, item, ctx)
+
+        expected_reason = (
+            "scope_retraction_before_scope_block"
+            if with_expansion
+            else "implementation_remediation"
+        )
+        if with_expansion:
+            assert result == Continue(next_state="EVAL")
+            assert item.payload.get("review_audit_failure") is not True
+            assert item.payload["posted_thread_ids"]
+            assert {thread["path"] for thread in item.payload["remediation_threads"]} == {
+                "extra.py",
+                "keep.py",
+            }
+            assert item.payload["remediation_thread_snapshots"]
+            item.state = result.next_state
+            result = stage.step(item, ctx)
+        assert result == StageOutcome(Disposition.FAIL_BACK, expected_reason)
+        assert item.payload["implementation_remediation"] is True
+        assert [thread["path"] for thread in item.payload["remediation_threads"]] == ["extra.py"]
+        assert item.attempts.get("pr_review_iter", 0) == 0
+        assert item.payload.get("review_audit_failure") is not True
+        assert github.reviews[1001]
+
     def test_json_only_audit_finding_reaches_fresh_pr_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -5549,7 +5669,9 @@ class TestEvalVerdicts:
         if case in {"missing", "malformed"}:
             assert audit.valid is False
             assert audit.verdict is None
-            assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+            assert result == StageOutcome(
+                Disposition.RETRY, "review audit format failure: invalid_verdict"
+            )
         elif case == "BLOCKED":
             assert audit.valid is True
             assert audit.verdict == case
@@ -5651,7 +5773,7 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        assert result == StageOutcome(Disposition.RETRY, "no review audit found")
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
 
     def test_incomplete_scope_retraction_finishes_without_a_label_mutation(
@@ -5687,7 +5809,7 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
-        assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        assert result == StageOutcome(Disposition.RETRY, "no review audit found")
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
 
     def test_go_with_zero_threads_posts_a_public_audit_and_advances_to_merge_wait(
@@ -6425,10 +6547,8 @@ class TestEvalVerdicts:
             "line": 1,
             "side": "RIGHT",
             "severity": "major",
-            "body": (
-                '<!-- hephaestus-scope-retraction-paths: ["extra.py"] -->\n'
-                "Remove the out-of-scope file."
-            ),
+            "body": "Remove the out-of-scope file.",
+            "scope_retraction_paths": ["extra.py"],
         }
         item = make_work_item(issue=1, pr=1001, state="SCOPE_EXPANSION_PREPARE_SUBMIT")
         item.payload.update(
@@ -6828,6 +6948,39 @@ class TestEvalVerdicts:
 
 class TestEvalErrorNoBurn:
     """The #1554 doctrine: ERROR burns no budget, stamps no labels."""
+
+    @pytest.mark.parametrize("cleanup", [False, True], ids=["retry", "cleanup"])
+    def test_invalid_audit_reason_is_distinct_from_missing_review_result(
+        self, make_ctx: Any, make_work_item: Any, cleanup: bool
+    ) -> None:
+        """A fixed schema reason survives retry and detached-checkout cleanup."""
+        notes: list[str] = []
+        for invalid in (False, True):
+            stage = PrReviewStage()
+            github = FakeStageGitHub()
+            ctx = make_ctx(github=github)
+            item = make_work_item(issue=8, pr=1001, state="EVAL")
+            if invalid:
+                item.payload["review_audit"] = parse_review_audit("not JSON")
+            if cleanup:
+                item.payload["review_worktree"] = "/tmp/detached-review"
+
+            result = stage.step(item, ctx)
+
+            if cleanup:
+                assert result == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+                notes.append(item.payload["review_worktree_cleanup_note"])
+            else:
+                assert isinstance(result, StageOutcome)
+                assert result.disposition == Disposition.RETRY
+                notes.append(result.note)
+            assert github.mutation_log == []
+            assert item.attempts.get("pr_review_iter", 0) == 0
+            assert item.payload["review_error_retries"] == 1
+
+        assert notes[0] != notes[1]
+        assert "invalid_payload" in notes[1]
+        assert "not JSON" not in notes[1]
 
     def test_error_verdict_retries_without_burning(
         self, make_ctx: Any, make_work_item: Any
@@ -8653,9 +8806,7 @@ class TestAuditPublication:
         stage.on_job_done(item, JobResult(ok=True), ctx)
         item.state = removal.on_done_state
 
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.RETRY, "review audit format failure"
-        )
+        assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "no review audit found")
 
     def test_restart_retries_absent_pending_finding_without_reviewer(
         self, make_ctx: Any, make_work_item: Any

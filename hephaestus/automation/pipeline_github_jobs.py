@@ -62,7 +62,10 @@ from hephaestus.automation.pipeline.reply_handoff import (
     journaled_implementation_reply_handoff,
 )
 from hephaestus.automation.pipeline.repository_validation import RepositoryValidationGap
-from hephaestus.automation.pipeline.scope_retraction import normalize_scope_retraction_paths
+from hephaestus.automation.pipeline.scope_retraction import (
+    normalize_scope_retraction_paths,
+    scope_retraction_paths_from_finding,
+)
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
@@ -450,7 +453,7 @@ class PipelineGitHubJobRunner:
         ):
             return receipt("operator_required")
         projection = [dict(finding) for finding in first_record.retraction_findings]
-        if projection and any(not _scope_retraction_paths([finding]) for finding in projection):
+        if any(not scope_retraction_paths_from_finding(finding) for finding in projection):
             return receipt("operator_required")
         child_numbers: list[int] = []
         bound_children: list[tuple[Any, int, str, Any]] = []
