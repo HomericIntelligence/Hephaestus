@@ -477,6 +477,7 @@ class WorktreeManager:
         source_lane: str | None = None,
         implementation_adoption_head: str | None = None,
         implementation_writer_handoff: object = None,
+        implementation_writer_missing_predecessor: bool = False,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -650,12 +651,34 @@ class WorktreeManager:
                         )
                     ):
                         return existing
+                    predecessor_evidence = None
+                    if (
+                        source_lane == "impl"
+                        and base_sha is not None
+                        and implementation_writer_missing_predecessor
+                    ):
+                        if not isinstance(
+                            implementation_writer_handoff, ImplementationWriterHandoff
+                        ):
+                            raise WorktreeCreationReceiptError(
+                                "implementation writer handoff is missing"
+                            )
+                        try:
+                            predecessor_evidence = (
+                                implementation_writer_handoff._consume_missing_writer_transition(
+                                    path=worktree_path,
+                                    successor_branch=branch_name,
+                                    successor_revision=base_sha,
+                                    transition="direct",
+                                )
+                            )
+                        except RuntimeError as exc:
+                            raise WorktreeCreationReceiptError(str(exc)) from exc
                     if source_lane == "impl" and base_sha is not None and worktree_path.exists():
                         if not is_clean_working_tree(worktree_path, timeout=timeout):
                             raise RuntimeError(
                                 f"deterministic implementation worktree is dirty: {worktree_path}"
                             )
-                        predecessor_evidence = None
                         if direct_predecessor:
                             if not isinstance(
                                 implementation_writer_handoff, ImplementationWriterHandoff
@@ -706,8 +729,6 @@ class WorktreeManager:
                             implementation_writer_handoff._mark_transition_phase(
                                 "successor_creating"
                             )
-                    else:
-                        predecessor_evidence = None
                     self._validate_direct_scope_worktree_request(
                         base_sha=base_sha,
                         remote_branch_reserved=remote_branch_reserved,
@@ -737,7 +758,7 @@ class WorktreeManager:
                                 timeout=timeout,
                             )
                             if source_lane == "impl":
-                                if direct_predecessor:
+                                if direct_predecessor or implementation_writer_missing_predecessor:
                                     if not isinstance(
                                         implementation_writer_handoff,
                                         ImplementationWriterHandoff,
@@ -755,7 +776,7 @@ class WorktreeManager:
                                     timeout=timeout,
                                     predecessor_evidence=predecessor_evidence,
                                 )
-                                if direct_predecessor:
+                                if direct_predecessor or implementation_writer_missing_predecessor:
                                     if not isinstance(
                                         implementation_writer_handoff,
                                         ImplementationWriterHandoff,

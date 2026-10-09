@@ -302,6 +302,10 @@ class SourceWorkspaceManager:
         """Return the repository-qualified internal ownership key."""
         return f"{self.repository_identity}:{item_number}:{lane.value}"
 
+    def has_implementation_writer_receipt(self, item_number: int) -> bool:
+        """Return whether an implementation writer has durable ownership state."""
+        return self._read_receipt(item_number, SourceLane.IMPLEMENTATION) is not None
+
     @contextmanager
     def implementation_writer_handoff(
         self, item_number: int
@@ -600,28 +604,34 @@ class SourceWorkspaceManager:
             raise SourceWorkspaceError(str(exc)) from exc
         old = self._read_receipt(item_number, lane)
         self._reject_foreign_owner(old, item_number, lane)
-        if old is None or old.path.resolve() != expected_path or not expected_path.exists():
+        if old is None or old.path.resolve() != expected_path:
             message = (
                 "detached implementation writer predecessor is invalid"
                 if transition == "direct"
                 else "adopted implementation writer predecessor is invalid"
             )
             raise SourceWorkspaceError(message)
-        physical_branch = self._head_branch(expected_path)
-        expected_branch = None if old.detached else f"refs/heads/{old.branch}"
-        if (
-            (old.branch is not None and old.detached)
-            or (not old.detached and old.branch is None)
-            or physical_branch != expected_branch
-            or self._is_dirty(expected_path)
-            or self._head_revision(expected_path) != old.revision
-        ):
+        if (old.branch is not None and old.detached) or (not old.detached and old.branch is None):
             message = (
                 "detached implementation writer predecessor is invalid"
                 if transition == "direct"
                 else "adopted implementation writer predecessor is invalid"
             )
             raise SourceWorkspaceError(message)
+        if expected_path.exists():
+            physical_branch = self._head_branch(expected_path)
+            expected_branch = None if old.detached else f"refs/heads/{old.branch}"
+            if (
+                physical_branch != expected_branch
+                or self._is_dirty(expected_path)
+                or self._head_revision(expected_path) != old.revision
+            ):
+                message = (
+                    "detached implementation writer predecessor is invalid"
+                    if transition == "direct"
+                    else "adopted implementation writer predecessor is invalid"
+                )
+                raise SourceWorkspaceError(message)
         if transition == "direct" and not (
             old.detached or _is_direct_implementation_branch(item_number, old.branch)
         ):
@@ -954,11 +964,11 @@ class SourceWorkspaceManager:
             "authority_minted",
             "receipt_pending",
         } and self._physical_matches_receipt(journal.successor):
-            # A fully materialized successor whose receipt could not be
-            # committed is recovery evidence, not an incomplete deletion.
-            # Keep both the checkout and journal. A later transition cannot
-            # authorize the mismatched receipt, so it fails closed without
-            # discarding this checkout or replacing the original failure.
+            # The checkout proves that the durable transition reached its
+            # successor. Commit its receipt before deleting the journal so a
+            # later restart has one unambiguous owner.
+            self._write_receipt(journal.successor)
+            self._remove_writer_transition(item_number)
             return
         self._restore_transition_predecessor(journal)
         self._remove_writer_transition(item_number)
@@ -1063,6 +1073,7 @@ class SourceWorkspaceManager:
             path,
             json.dumps(receipt.to_dict(), sort_keys=True, indent=2) + "\n",
         )
+        self._fsync_state_dir()
 
     def _reject_foreign_owner(
         self,

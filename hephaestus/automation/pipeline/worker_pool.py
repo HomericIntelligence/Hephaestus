@@ -3959,9 +3959,16 @@ class WorkerPool:
             and (base_sha is not None or adopting_implementation_writer)
         ):
             writer_path = base_dir / source_worktree_name(cast(int, kwargs["issue_number"]), "impl")
-            if writer_path.exists():
+            receipt_owned_predecessor = isinstance(
+                source_manager, SourceWorkspaceManager
+            ) and source_manager.has_implementation_writer_receipt(
+                cast(int, kwargs["issue_number"])
+            )
+            if writer_path.exists() or receipt_owned_predecessor:
                 try:
                     item_number = cast(int, kwargs["issue_number"])
+                    if receipt_owned_predecessor and not writer_path.exists():
+                        kwargs["implementation_writer_missing_predecessor"] = True
                     if adopting_implementation_writer:
                         source_manager.authorize_adopted_implementation_writer_transition(
                             item_number,

@@ -395,6 +395,64 @@ def test_direct_writer_transition_journal_reconciles_after_restart(tmp_path: Pat
     assert not journal_path.exists()
 
 
+def test_writer_transition_reconciles_a_materialized_successor_after_restart(
+    tmp_path: Path,
+) -> None:
+    """A restart commits a verified successor that lacks only its receipt."""
+    repo, first, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source_manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    journal_path = source_manager.state_dir / "9-impl-transition.json"
+    worktree_manager = WorktreeManager(repo_root=repo, base_dir=source_manager.base_dir)
+
+    with source_manager.implementation_writer_handoff(9) as handoff:
+        source_manager.authorize_direct_implementation_writer_transition(
+            9,
+            branch="writer-branch",
+            base_sha=second,
+            handoff=handoff,
+        )
+        worktree_manager.create_worktree(
+            9,
+            "writer-branch",
+            base_sha=second,
+            remote_branch_reserved=True,
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
+
+    restarted = SourceWorkspaceManager(repo, repository="example/project")
+    with restarted.implementation_writer_handoff(9):
+        pass
+
+    receipt = restarted._read_receipt(9, SourceLane.IMPLEMENTATION)
+    assert receipt is not None
+    assert receipt.path == predecessor.cwd
+    assert receipt.revision == second
+    assert receipt.branch == "writer-branch"
+    assert not journal_path.exists()
+
+
+def test_direct_writer_transition_journals_a_receipt_owned_missing_path(
+    tmp_path: Path,
+) -> None:
+    """A missing checkout remains a receipt-owned transition, not a fresh writer."""
+    repo, first, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source_manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    journal_path = source_manager.state_dir / "9-impl-transition.json"
+    _git(repo, "worktree", "remove", str(predecessor.cwd))
+
+    with source_manager.implementation_writer_handoff(9) as handoff:
+        source_manager.authorize_direct_implementation_writer_transition(
+            9,
+            branch="writer-branch",
+            base_sha=second,
+            handoff=handoff,
+        )
+        assert journal_path.is_file()
+
+
 def test_adopted_writer_cannot_bypass_the_common_handoff_lifecycle(tmp_path: Path) -> None:
     """An adopted writer replacement requires consumed source transition evidence."""
     repo, _, second = _repository(tmp_path)

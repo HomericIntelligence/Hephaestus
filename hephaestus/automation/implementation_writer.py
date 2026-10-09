@@ -93,6 +93,16 @@ if TYPE_CHECKING:
         ) -> object:
             raise NotImplementedError
 
+        def _consume_missing_writer_transition(
+            self,
+            *,
+            path: Path,
+            successor_branch: str,
+            successor_revision: str,
+            transition: str,
+        ) -> object:
+            raise NotImplementedError
+
         def _mark_transition_phase(self, phase: str) -> None:
             raise NotImplementedError
 
@@ -365,6 +375,32 @@ def _build_implementation_writer_api() -> tuple[  # noqa: C901
             evidence = self._direct_transition
             if evidence is None:  # pragma: no cover - guarded above
                 raise RuntimeError("implementation writer transition is invalid")
+            object.__setattr__(self, "_direct_transition", None)
+            object.__setattr__(self, "_consumed_direct_transition", evidence)
+            return evidence
+
+        def _consume_missing_writer_transition(
+            self,
+            *,
+            path: Path,
+            successor_branch: str,
+            successor_revision: str,
+            transition: str,
+        ) -> object:
+            evidence = self._direct_transition
+            if (
+                not self._active
+                or evidence is None
+                or evidence.path != path.resolve()
+                or evidence.branch != successor_branch
+                or evidence.successor_revision != successor_revision
+                or evidence.transition != transition
+            ):
+                raise RuntimeError("implementation writer transition is invalid")
+            phase_writer = self._phase_writer
+            if phase_writer is None:
+                raise RuntimeError("implementation writer transition journal is unavailable")
+            phase_writer("successor_creating")
             object.__setattr__(self, "_direct_transition", None)
             object.__setattr__(self, "_consumed_direct_transition", evidence)
             return evidence
