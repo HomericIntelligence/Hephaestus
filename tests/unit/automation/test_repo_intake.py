@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
+from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.utils.file_lock import file_lock
 
 
 def _run_git(cwd: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -150,6 +152,64 @@ def test_stale_clean_owned_intake_is_rebound_under_common_dir_lock(tmp_path: Pat
     assert second.revision != first.revision
     assert second.generation == first.generation + 1
     assert second.revision == _run_git(second.path, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_adoption_guard_accepts_the_prepared_receipt(tmp_path: Path) -> None:
+    """A prepared intake remains valid through its adoption boundary."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    receipt = manager.prepare()
+
+    with manager.adoption_guard(receipt):
+        assert _run_git(receipt.path, "rev-parse", "HEAD").stdout.strip() == receipt.revision
+
+
+def test_adoption_guard_rejects_head_drift_and_releases_the_lock(tmp_path: Path) -> None:
+    """A changed intake HEAD cannot cross the worker-to-coordinator boundary."""
+    caller, remote = _make_repository(tmp_path)
+    caller_head = _run_git(caller, "rev-parse", "HEAD").stdout.strip()
+    _advance_remote(tmp_path, remote)
+    manager = _manager(caller, remote)
+    receipt = manager.prepare()
+    _run_git(receipt.path, "reset", "--hard", caller_head)
+    caller_before = _caller_state(caller)
+
+    with pytest.raises(RepoIntakeError, match="SHA changed before adoption"):
+        with manager.adoption_guard(receipt):
+            raise AssertionError("drifted intake was adopted")
+
+    metadata_lock = WorktreeManager.git_metadata_lock_path(caller)
+    with file_lock(metadata_lock, blocking=False, require_exclusive=True):
+        pass
+    assert _caller_state(caller) == caller_before
+
+
+def test_adoption_guard_rejects_an_origin_change(tmp_path: Path) -> None:
+    """A changed caller origin invalidates the returned intake receipt."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    receipt = manager.prepare()
+    _run_git(caller, "remote", "set-url", "origin", "https://github.com/other/repo.git")
+
+    with pytest.raises(RepoIntakeError, match="unexpected origin"):
+        with manager.adoption_guard(receipt):
+            raise AssertionError("foreign origin was adopted")
+
+    _run_git(caller, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
+    with manager.adoption_guard(receipt):
+        pass
+
+
+def test_adoption_guard_rejects_an_attached_intake(tmp_path: Path) -> None:
+    """A branch-backed intake cannot replace the detached control plane."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    receipt = manager.prepare()
+    _run_git(receipt.path, "switch", "-c", "foreign-branch")
+
+    with pytest.raises(RepoIntakeError, match="attached"):
+        with manager.adoption_guard(receipt):
+            raise AssertionError("attached intake was adopted")
 
 
 def test_direct_scope_from_detached_linked_worktree_prepares_isolated_intake(

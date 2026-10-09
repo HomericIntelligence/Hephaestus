@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +25,136 @@ from hephaestus.automation.pipeline.routing import (
 from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
-from hephaestus.automation.pipeline.work_item import WorkItem
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.repo_intake import RepoIntakeManager, RepoIntakeReceipt
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+
+def _run_fixture_git(cwd: Path, *arguments: str) -> str:
+    """Run one local Git fixture command and return its output."""
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _fixture_git_runner(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    check: bool = True,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    log_errors: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run Git for a local intake fixture."""
+    del log_errors
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        check=check,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+
+
+def _initialize_recording_checkout(path: Path) -> None:
+    """Create the minimum real Git checkout for sequencing-only tests."""
+    path.mkdir()
+    _run_fixture_git(path, "init", "--initial-branch=main")
+    _run_fixture_git(path, "config", "user.name", "Test User")
+    _run_fixture_git(path, "config", "user.email", "test@example.invalid")
+    (path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _run_fixture_git(path, "add", "tracked.txt")
+    _run_fixture_git(path, "commit", "-m", "base")
+
+
+@contextmanager
+def _accept_recording_intake(
+    _manager: RepoIntakeManager,
+    _receipt: RepoIntakeReceipt,
+) -> Iterator[None]:
+    """Accept the synthetic receipt used by sequencing-only tests."""
+    yield
+
+
+def test_adopt_repo_intake_rejects_an_unregistered_replacement(
+    tmp_path: Path,
+) -> None:
+    """Adoption rejects a valid receipt path that Git does not own."""
+    caller = tmp_path / "repo-a"
+    caller.mkdir()
+    _run_fixture_git(caller, "init", "--initial-branch=main")
+    _run_fixture_git(caller, "config", "user.name", "Test User")
+    _run_fixture_git(caller, "config", "user.email", "test@example.invalid")
+    (caller / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _run_fixture_git(caller, "add", "tracked.txt")
+    _run_fixture_git(caller, "commit", "-m", "base")
+    _run_fixture_git(
+        caller,
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/org/repo-a.git",
+    )
+    revision = _run_fixture_git(caller, "rev-parse", "HEAD")
+    manager = RepoIntakeManager(
+        caller,
+        repository="org/repo-a",
+        gh_command="gh",
+        timeout_s=30,
+        git_runner=_fixture_git_runner,
+        git_env={},
+        remote_config=(),
+    )
+    manager.state_dir.mkdir(mode=0o700, parents=True)
+    manager.worktree_path.mkdir()
+    _run_fixture_git(manager.worktree_path, "init", "--initial-branch=main")
+    receipt = RepoIntakeReceipt(
+        repository="org/repo-a",
+        repository_identity=manager.repository_identity,
+        ownership_key=manager.ownership_key,
+        common_dir=manager.common_dir,
+        path=manager.worktree_path.resolve(),
+        default_branch="main",
+        revision=revision,
+        generation=1,
+    )
+    manager.receipt_path.write_text(
+        json.dumps(receipt.to_dict(), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manager.receipt_path.chmod(0o600)
+    config = PipelineConfig(
+        org="org",
+        repos=["repo-a"],
+        projects_dir=tmp_path,
+        repo_roots={"repo-a": caller},
+    )
+    coordinator = Coordinator(
+        config,
+        github=FakeStageGitHub(),
+        **fake_worker_factories(),
+        install_signals=False,
+    )
+    cached = object()
+    coordinator._ctx_cache["repo-a"] = cached  # type: ignore[assignment]
+
+    error = coordinator._adopt_repo_intake(
+        WorkItem(repo="repo-a", kind=ItemKind.REPO),
+        JobResult(ok=True, value=receipt.to_dict()),
+    )
+
+    assert error is not None
+    assert config.repo_roots["repo-a"] == caller
+    assert "repo-a" not in config.repo_state_roots
+    assert coordinator._ctx_cache["repo-a"] is cached
 
 
 class _ImmediatePassStage(Stage):
@@ -93,7 +224,7 @@ def test_explicit_scope_syncs_before_labels_and_classification(
     """A scoped run gates direct source admission on a clean-main sync job."""
     events: list[str] = []
     checkout = tmp_path / "repo-a"
-    checkout.mkdir()
+    _initialize_recording_checkout(checkout)
     pool = _RecordingPool(events)
     github = _RecordingGitHub(events)
 
@@ -107,6 +238,7 @@ def test_explicit_scope_syncs_before_labels_and_classification(
         "hephaestus.automation.pipeline.admission._filter_open_issues",
         lambda _repo, issues, **_kwargs: list(issues),
     )
+    monkeypatch.setattr(RepoIntakeManager, "adoption_guard", _accept_recording_intake)
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -306,9 +438,10 @@ def test_explicit_pr_scope_syncs_before_labels_and_pr_classification(
 ) -> None:
     """An explicit PR follows the same checkout proof before its first read."""
     events: list[str] = []
-    (tmp_path / "repo-a").mkdir()
+    _initialize_recording_checkout(tmp_path / "repo-a")
     pool = _RecordingPool(events)
     github = _RecordingGitHub(events, pr_issue=101, pr_impl_state=(True, False))
+    monkeypatch.setattr(RepoIntakeManager, "adoption_guard", _accept_recording_intake)
 
     coordinator = Coordinator(
         PipelineConfig(

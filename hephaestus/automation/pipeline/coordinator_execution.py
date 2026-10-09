@@ -8,9 +8,15 @@ from dataclasses import replace
 from math import ceil
 from pathlib import Path
 
+import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.pipeline.coordinator_types as ct
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
-from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
+from hephaestus.automation.repo_intake import (
+    RepoIntakeError,
+    RepoIntakeManager,
+    RepoIntakeReceipt,
+)
+from hephaestus.automation.worktree_snapshot import _controlled_git_env
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import session_selection_error, store_agent_session_result
@@ -325,22 +331,25 @@ class ExecutionCoordinator(_CoordinatorHost):
                 return "repository-intake receipt points to the caller checkout"
         except (OSError, RuntimeError):
             return "repository-intake receipt path cannot be resolved"
-        git_entry = receipt.path / ".git"
-        if (
-            receipt.common_dir.is_symlink()
-            or not receipt.common_dir.is_dir()
-            or receipt.path.is_symlink()
-            or not receipt.path.is_dir()
-            or git_entry.is_symlink()
-            or not (git_entry.is_file() or git_entry.is_dir())
-        ):
-            return "repository-intake receipt paths are not materialized Git paths"
-        self.config.repo_roots[item.repo] = receipt.path
-        # The intake worktree can be rebound and removed when the remote
-        # default branch advances.  Keep durable journals beside its receipt,
-        # not inside that replaceable worktree or the caller checkout.
-        self.config.repo_state_roots[item.repo] = receipt.path.parent
-        self._ctx_cache.pop(item.repo, None)
+        try:
+            manager = RepoIntakeManager(
+                current_root,
+                repository=expected_repository,
+                gh_command="gh",
+                timeout_s=self.config.clone_timeout,
+                git_runner=git_utils.run,
+                git_env=_controlled_git_env(),
+                remote_config=(),
+            )
+            with manager.adoption_guard(receipt):
+                self.config.repo_roots[item.repo] = receipt.path
+                # The intake worktree can be rebound and removed when the remote
+                # default branch advances. Keep durable journals beside its receipt,
+                # not inside that replaceable worktree or the caller checkout.
+                self.config.repo_state_roots[item.repo] = receipt.path.parent
+                self._ctx_cache.pop(item.repo, None)
+        except RepoIntakeError as exc:
+            return f"repository-intake adoption failed: {exc}"
         return None
 
     def _record_completion_metrics(

@@ -14,7 +14,8 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self, TypeGuard
@@ -237,6 +238,44 @@ class RepoIntakeManager:
         except (OSError, RuntimeError) as exc:
             raise RepoIntakeError("repository-intake preparation failed safely") from exc
 
+    @contextmanager
+    def adoption_guard(self, receipt: RepoIntakeReceipt) -> Iterator[None]:
+        """Keep a verified intake stable through coordinator adoption."""
+        try:
+            metadata_lock = WorktreeManager.git_metadata_lock_path(self.caller_root)
+            lock_context = file_lock(metadata_lock, require_exclusive=True)
+        except (OSError, RuntimeError) as exc:
+            raise RepoIntakeError("Git metadata lock is unavailable") from exc
+        try:
+            with lock_context:
+                self._validate_adoption_locked(receipt)
+                yield
+        except RepoIntakeError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise RepoIntakeError("repository-intake adoption failed safely") from exc
+
+    def _validate_adoption_locked(self, receipt: RepoIntakeReceipt) -> None:
+        """Verify one returned receipt while the Git metadata lock is held."""
+        self._validate_origin()
+        records = self._worktree_records()
+        self._assert_safe_state_paths(records)
+        durable_receipt = self._read_receipt()
+        if durable_receipt != receipt:
+            raise RepoIntakeError("repository-intake receipt changed before adoption")
+        record = self._record_for_path(records)
+        if record is None:
+            raise RepoIntakeError("repository-intake worktree is not registered")
+        self._assert_clean_detached(record)
+        physical_head = self._head(self.worktree_path)
+        remote_head = self._remote_head(receipt.default_branch)
+        if (
+            record.head != receipt.revision
+            or physical_head != receipt.revision
+            or remote_head != receipt.revision
+        ):
+            raise RepoIntakeError("repository-intake SHA changed before adoption")
+
     def _prepare_locked(self) -> RepoIntakeReceipt:
         """Prepare the intake worktree while the common metadata lock is held."""
         self._validate_origin()
@@ -354,6 +393,16 @@ class RepoIntakeManager:
 
     def _validate_state_paths(self, records: tuple[_WorktreeRecord, ...]) -> None:
         """Reject symlinked or non-directory intake state containers."""
+        self._assert_safe_state_paths(records)
+        self.state_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.state_dir.mkdir(mode=0o700, exist_ok=True)
+        if self.state_parent.stat().st_mode & 0o077 or self.state_dir.stat().st_mode & 0o077:
+            raise RepoIntakeError(
+                f"repository-intake state permissions are unsafe: {self.state_dir}"
+            )
+
+    def _assert_safe_state_paths(self, records: tuple[_WorktreeRecord, ...]) -> None:
+        """Reject unsafe intake paths without creating or changing them."""
         if self.state_parent.is_symlink() or (
             self.state_parent.exists() and not self.state_parent.is_dir()
         ):
@@ -378,12 +427,6 @@ class RepoIntakeManager:
                     raise RepoIntakeError(
                         f"repository-intake state overlaps a registered worktree: {state_path}"
                     )
-        self.state_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.state_dir.mkdir(mode=0o700, exist_ok=True)
-        if self.state_parent.stat().st_mode & 0o077 or self.state_dir.stat().st_mode & 0o077:
-            raise RepoIntakeError(
-                f"repository-intake state permissions are unsafe: {self.state_dir}"
-            )
 
     def _read_receipt(self) -> RepoIntakeReceipt | None:
         """Read the owned receipt, if one exists."""

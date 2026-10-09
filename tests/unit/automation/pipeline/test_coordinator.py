@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import hephaestus.automation.pipeline.coordinator as coordinator_module
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.pipeline.admission import PlanFileClaim
@@ -73,6 +74,50 @@ from tests.unit.automation.pipeline.conftest import (
     script_source_passes,
 )
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+
+def test_run_pipeline_keeps_github_git_root_separate_from_state_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitHub adapters use the checkout and not the durable state path."""
+    checkout = tmp_path / "checkout"
+    state_root = tmp_path / "state"
+    checkout.mkdir()
+    state_root.mkdir()
+    adapter_roots: list[Path] = []
+
+    class _GitHub:
+        def __init__(self, _org: str, **kwargs: Any) -> None:
+            repo_root = kwargs.get("repo_root")
+            if repo_root is not None:
+                adapter_roots.append(Path(repo_root))
+
+    class _Coordinator:
+        def __init__(self, _config: PipelineConfig, **kwargs: Any) -> None:
+            kwargs["github_factory"]("repo-a", checkout)
+
+        def run(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline_github.PipelineGitHub",
+        _GitHub,
+    )
+    monkeypatch.setattr(coordinator_module, "Coordinator", _Coordinator)
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.coordinator.ct._preflight_prompt_catalog",
+        lambda: None,
+    )
+    config = PipelineConfig(
+        org="org",
+        repos=["repo-a"],
+        projects_dir=tmp_path,
+        repo_roots={"repo-a": checkout},
+        repo_state_roots={"repo-a": state_root},
+    )
+
+    assert coordinator_module.run_pipeline(config) == 0
+    assert adapter_roots == [checkout, checkout]
 
 
 def _agent_job(repo: str = "repo-a", issue: int = 1) -> AgentJob:
