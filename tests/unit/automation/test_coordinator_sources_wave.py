@@ -12,8 +12,10 @@ from hephaestus.automation.issue_waves import (
     WAVE_NON_CODE_INTENT_PAYLOAD,
     IssueWaveStore,
 )
-from hephaestus.automation.pipeline import seeding as seeding_mod
-from hephaestus.automation.pipeline import coordinator_types as coordinator_types
+from hephaestus.automation.pipeline import (
+    coordinator_types as coordinator_types,
+    seeding as seeding_mod,
+)
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import IssueFacts
@@ -215,9 +217,7 @@ def test_repo_source_does_not_misclassify_queue_failure_as_issue_failure(
     source = coordinator_types._ActiveRepoIssueSource(
         repo="repo-a",
         source=RepoIssueSource(
-            metadata=iter(
-                [{"number": 471, "labels": ["state:needs-plan"], "title": "valid plan"}]
-            )
+            metadata=iter([{"number": 471, "labels": ["state:needs-plan"], "title": "valid plan"}])
         ),
     )
     monkeypatch.setattr(
