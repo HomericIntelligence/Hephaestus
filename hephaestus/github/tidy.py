@@ -64,6 +64,7 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # Pattern that gh-tidy emits when rebase fails (from gh-tidy lines 297-301)
 _PROBLEM_HEADER = re.compile(r"WARNING:\s*Unable to auto-rebase the following branches")
 _PROBLEM_BULLET = re.compile(r"^\s*\*\s+(\S+)")
+_WORKTREE_LIST_Z_MIN_GIT = "2.36"
 
 
 def _detect_default_branch(override: str | None, *, gh_timeout: int = DEFAULT_GH_TIMEOUT) -> str:
@@ -112,9 +113,36 @@ def _repo_root() -> Path:
     return _shared_repo_root()
 
 
+class WorktreeInventoryError(RuntimeError):
+    """The Git worktree inventory could not be collected safely."""
+
+
 def _worktree_porcelain() -> str:
     """Return the current repository's NUL-delimited worktree inventory."""
-    return run_git(["worktree", "list", "--porcelain", "-z"]).stdout
+    try:
+        return run_git(
+            ["worktree", "list", "--porcelain", "-z"],
+            log_on_error=False,
+        ).stdout
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 129:
+            message = (
+                f"Git {_WORKTREE_LIST_Z_MIN_GIT} or later is required for "
+                "stale-worktree cleanup. Upgrade Git and retry. "
+                "No cleanup changes were made."
+            )
+        else:
+            message = (
+                "Could not inspect worktrees: Git inventory command exited "
+                f"with status {error.returncode}. No cleanup changes were made."
+            )
+        raise WorktreeInventoryError(message) from error
+    except subprocess.TimeoutExpired as error:
+        message = (
+            "Could not inspect worktrees: Git inventory command timed out. "
+            "No cleanup changes were made."
+        )
+        raise WorktreeInventoryError(message) from error
 
 
 def _parse_worktree_porcelain(output: str, root: Path) -> list[tuple[Path, str]]:
@@ -469,7 +497,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cleanup-stale-worktrees",
         action="store_true",
-        help="Interactively remove clean worktrees for closed issues or merged branches",
+        help=(
+            "Interactively remove clean worktrees for closed issues or merged "
+            "branches (requires Git 2.36+)"
+        ),
     )
     parser.add_argument(
         "--trunk",
@@ -712,12 +743,20 @@ def main() -> int:
     logger.info("Repo: %s  |  Trunk: %s  |  Path: %s", repo_slug, trunk, repo_path)
 
     if args.cleanup_stale_worktrees:
-        return _cleanup_stale_worktrees(
-            repo_path,
-            trunk,
-            args.dry_run,
-            **({"gh_timeout": args.gh_timeout} if args.gh_timeout != DEFAULT_GH_TIMEOUT else {}),
-        )
+        try:
+            return _cleanup_stale_worktrees(
+                repo_path,
+                trunk,
+                args.dry_run,
+                **(
+                    {"gh_timeout": args.gh_timeout} if args.gh_timeout != DEFAULT_GH_TIMEOUT else {}
+                ),
+            )
+        except WorktreeInventoryError as error:
+            logger.error("%s", error)
+            if args.json:
+                emit_json_status(1, message=str(error))
+            return 1
 
     try:
         problem_branches = _run_tidy_and_find_problem_branches(trunk, args.dry_run)
