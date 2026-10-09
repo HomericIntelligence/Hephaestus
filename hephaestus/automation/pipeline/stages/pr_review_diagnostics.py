@@ -8,6 +8,7 @@ from logging import Logger
 from typing import Protocol
 
 from ..diagnostics import redact_diagnostic_text
+from .pr_review_receipts import UNSUPPORTED_HOST_VERIFICATION_ERROR
 from .pr_review_verification import (
     HOST_VERIFICATION_DIAGNOSTIC_MAX,
     _HostVerificationSpec,
@@ -70,6 +71,18 @@ def host_verification_failure_comment(
             _indented_diagnostic(diagnostic.get("error")),
         ]
     )
+    if diagnostic.get("error") == UNSUPPORTED_HOST_VERIFICATION_ERROR:
+        sections.extend(
+            [
+                "",
+                "**Recovery**",
+                "",
+                "The current host cannot execute this boundary. The supported "
+                "bootstrap path is the reviewed actor-owned grant for PR #3006. "
+                "That grant permits source review only and does not prove that "
+                "the skipped command passed.",
+            ]
+        )
     stdout_tail = str(diagnostic.get("stdout_tail") or "")
     if stdout_tail:
         sections.extend(["", "**Standard output (tail)**", "", _indented_diagnostic(stdout_tail)])

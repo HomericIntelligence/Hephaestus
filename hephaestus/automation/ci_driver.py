@@ -138,6 +138,16 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--host-verification-bootstrap-comment",
+        type=positive_int,
+        default=None,
+        metavar="COMMENT_ID",
+        help=(
+            "Use one actor-owned bootstrap comment for PR 3006. This option "
+            "requires --prs 3006 and does not authorize any other PR."
+        ),
+    )
+    parser.add_argument(
         "--no-advise",
         action="store_true",
         help="Skip the advise step before loop review",
@@ -257,6 +267,17 @@ def main() -> int:
         issues = list(dict.fromkeys(args.issues))
         prs = list(dict.fromkeys(args.prs))
 
+        if args.host_verification_bootstrap_comment is not None and (
+            org != "HomericIntelligence"
+            or repo != "Hephaestus"
+            or issues
+            or prs != [3006]
+        ):
+            raise SystemExit(
+                "--host-verification-bootstrap-comment requires direct --prs 3006 "
+                "in HomericIntelligence/Hephaestus"
+            )
+
         # No-scope discovery mode keeps the compatibility flag true, but the
         # coordinator now consumes only the bounded linked-issue source. It
         # never enumerates unrelated open PRs; a scoped run stays narrow (POLA).
@@ -302,6 +323,7 @@ def main() -> int:
             poll_max_wait=args.poll_max_wait,
             json_out=args.json,
             scope=PipelineScope(_CI_DRIVER_SCOPE_STAGES),
+            host_verification_bootstrap_comment_id=args.host_verification_bootstrap_comment,
         )
 
         rc = run_pipeline(config)

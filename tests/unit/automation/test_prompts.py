@@ -361,6 +361,7 @@ def test_untrusted_prompt_inputs_are_nonce_paired_and_contained() -> None:
                 pr_description=injection,
                 advise_findings=injection,
                 host_verifications_json=injection,
+                host_verification_bootstrap_json=injection,
             ),
             {
                 "PR_DIFF": injection,
@@ -368,6 +369,7 @@ def test_untrusted_prompt_inputs_are_nonce_paired_and_contained() -> None:
                 "PR_DESCRIPTION": injection,
                 "ADVISE_FINDINGS": injection,
                 "HOST_VERIFICATIONS": injection,
+                "HOST_VERIFICATION_BOOTSTRAP": injection,
             },
         ),
         (

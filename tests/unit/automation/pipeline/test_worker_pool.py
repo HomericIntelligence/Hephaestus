@@ -5108,6 +5108,7 @@ class TestGitOps:
                     MagicMock(stdout="d" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for stale base"),
                     MagicMock(stdout="stale.py\0"),
+                    MagicMock(stdout="M\0stale.py\0"),
                 ],
             ) as mock_run,
         ):
@@ -5121,6 +5122,7 @@ class TestGitOps:
             "base": "d" * 40,
             "diff": "checkout diff for stale base",
             "changed_paths": ["stale.py"],
+            "changed_file_manifest": [{"path": "stale.py", "status": "M"}],
         }
         assert mock_run.call_args_list[1].args[0] == [
             "git",
@@ -5175,6 +5177,7 @@ class TestGitOps:
                     MagicMock(stdout="b" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for A"),
                     MagicMock(stdout="old.py\0new.py\0"),
+                    MagicMock(stdout="M\0old.py\0A\0new.py\0"),
                 ],
             ) as mock_run,
         ):
@@ -5188,6 +5191,10 @@ class TestGitOps:
             "base": "b" * 40,
             "diff": "checkout diff for A",
             "changed_paths": ["old.py", "new.py"],
+            "changed_file_manifest": [
+                {"path": "old.py", "status": "M"},
+                {"path": "new.py", "status": "A"},
+            ],
         }
         mock_sync.assert_called_once()
         assert mock_sync.call_args.args == (tmp_path, "70-existing")
@@ -5211,6 +5218,14 @@ class TestGitOps:
             "diff",
             "--no-renames",
             "--name-only",
+            "-z",
+            f"{'b' * 40}...{'a' * 40}",
+        ]
+        assert mock_run.call_args_list[5].args[0] == [
+            "git",
+            "diff",
+            "--no-renames",
+            "--name-status",
             "-z",
             f"{'b' * 40}...{'a' * 40}",
         ]

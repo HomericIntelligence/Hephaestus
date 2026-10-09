@@ -259,6 +259,7 @@ def get_pr_review_analysis_prompt(
     host_verifications_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
+    host_verification_bootstrap_json: str = "",
 ) -> str:
     """Get the `$athena:pr-review` analysis prompt for inline review comments.
 
@@ -278,6 +279,8 @@ def get_pr_review_analysis_prompt(
             reviewer continuity with the advise-first implementation turn.
         host_verifications_json: Host-captured output from every fixed,
             repository-owned validation command bound to the reviewed head.
+        host_verification_bootstrap_json: Separate proof that the selected
+            review host has an approved bootstrap grant.
         include_nitpicks: When False (default), the reviewer is told to OMIT
             ``nitpick``-severity comments entirely. When True (``--nitpick``),
             nitpick comments are re-enabled. Either way every emitted comment
@@ -299,6 +302,7 @@ def get_pr_review_analysis_prompt(
         pr_description=pr_description,
         advise_findings=advise_findings,
         host_verifications_json=host_verifications_json,
+        host_verification_bootstrap_json=host_verification_bootstrap_json,
         include_nitpicks=include_nitpicks,
         review_context_kind=review_context_kind,
         fenced=fence_content(),
@@ -314,6 +318,7 @@ def _render_pr_review_analysis_prompt(
     pr_description: str,
     advise_findings: str,
     host_verifications_json: str,
+    host_verification_bootstrap_json: str,
     include_nitpicks: bool,
     review_context_kind: str,
     fenced: FencedContent,
@@ -337,6 +342,10 @@ def _render_pr_review_analysis_prompt(
         host_verifications_block=fenced.fence(
             "HOST_VERIFICATIONS",
             host_verifications_json or "[]",
+        ),
+        host_verification_bootstrap_block=fenced.fence(
+            "HOST_VERIFICATION_BOOTSTRAP",
+            host_verification_bootstrap_json or "{}",
         ),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
@@ -363,6 +372,7 @@ def build_bounded_pr_review_analysis_prompt(
     host_verifications_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
+    host_verification_bootstrap_json: str = "",
 ) -> str:
     """Render a direct analysis prompt within the provider-safe limit."""
     fenced = fence_content()
@@ -374,6 +384,7 @@ def build_bounded_pr_review_analysis_prompt(
         description: str,
         advise: str,
         receipts: str,
+        bootstrap: str,
     ) -> str:
         return _render_pr_review_analysis_prompt(
             pr_number=pr_number,
@@ -383,6 +394,7 @@ def build_bounded_pr_review_analysis_prompt(
             pr_description=description,
             advise_findings=advise,
             host_verifications_json=receipts,
+            host_verification_bootstrap_json=bootstrap,
             include_nitpicks=include_nitpicks,
             review_context_kind=review_context_kind,
             fenced=fenced,
@@ -394,6 +406,7 @@ def build_bounded_pr_review_analysis_prompt(
         description=pr_description,
         advise=advise_findings,
         receipts=host_verifications_json,
+        bootstrap=host_verification_bootstrap_json,
     )
     if len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS:
         return prompt
@@ -415,6 +428,7 @@ def build_bounded_pr_review_analysis_prompt(
             label="advise findings",
         ),
         "receipts": _compact_host_verifications_json(host_verifications_json),
+        "bootstrap": host_verification_bootstrap_json,
     }
     fixed_prompt = render(diff="", **bounded_context)
     remaining = MAX_PR_REVIEW_RENDERED_CHARS - len(fixed_prompt)

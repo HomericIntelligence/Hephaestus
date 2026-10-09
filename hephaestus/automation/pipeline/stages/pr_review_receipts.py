@@ -56,9 +56,30 @@ def _host_verification_receipt_matches(
     )
 
 
+def _host_verification_unsupported_receipt_matches(
+    receipt: object,
+    argv: tuple[str, ...],
+    reviewed_head: str,
+) -> bool:
+    """Return whether a receipt proves the narrow unsupported Linux boundary."""
+    if not isinstance(receipt, dict):
+        return False
+    return (
+        receipt.get("argv") == list(argv)
+        and receipt.get("head_sha") == reviewed_head
+        and receipt.get("failure_kind") == "runner"
+        and receipt.get("error") == UNSUPPORTED_HOST_VERIFICATION_ERROR
+        and receipt.get("platform") == "linux"
+        and receipt.get("status") == "skipped"
+        and receipt.get("ok") is False
+        and receipt.get("immutable_source") is False
+    )
+
+
 __all__ = [
     "UNSUPPORTED_HOST_VERIFICATION_ERROR",
     "_host_verification_failure_kind",
     "_host_verification_receipt_matches",
     "_host_verification_result_status",
+    "_host_verification_unsupported_receipt_matches",
 ]

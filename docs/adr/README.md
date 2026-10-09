@@ -52,3 +52,4 @@ numbered, and listed here.
 | [0037](0037-version-bound-mnemosyne-checkout.md) | Version-bound Mnemosyne checkout | Accepted |
 | [0038](0038-reviewed-head-ci-merge-gate.md) | Reviewed-head CI gate authorizes queue merge | Accepted (historical; superseded by 0039) |
 | [0039](0039-policy-selected-server-merge-route.md) | Policy-selected server merge route | Accepted |
+| [0040](0040-review-host-verification-bootstrap.md) | Actor-owned bootstrap for one unsupported review host | Accepted |

@@ -193,6 +193,7 @@ class RunMergeWaitCycleRequest:
     cancellation: threading.Event
     issue_number: int | None = None
     queue_admitted: bool = False
+    host_verification_bootstrap_proof: FrozenJson | None = None
 
     def __post_init__(self) -> None:
         """Validate the exact-head merge proof and readiness fingerprint."""
@@ -223,6 +224,10 @@ class RunMergeWaitCycleRequest:
             _positive_identifier(self.issue_number, "issue_number")
         if not isinstance(self.queue_admitted, bool):
             raise ValueError("queue_admitted must be a Boolean")
+        if self.host_verification_bootstrap_proof is not None:
+            from hephaestus.automation.host_verification_bootstrap import BootstrapProof
+
+            BootstrapProof.from_dict(self.host_verification_bootstrap_proof.thaw())
 
 
 @dataclass(frozen=True)

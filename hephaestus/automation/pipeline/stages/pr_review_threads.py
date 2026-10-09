@@ -168,6 +168,7 @@ from .pr_review_receipts import (
     _host_verification_failure_kind,
     _host_verification_receipt_matches,
     _host_verification_result_status,
+    _host_verification_unsupported_receipt_matches,
 )
 from .pr_review_repository import (
     _payload_host_verification_specs,
@@ -347,6 +348,8 @@ _ROUND_PAYLOAD_KEYS = (
     "_scope_expansion_receipt_error",
     "_scope_expansion_prepared_receipt",
     "reviewed_pr_base_sha",
+    "review_changed_file_manifest",
+    "host_verification_bootstrap_proof",
     "host_verification_receipts",
     "host_verification_repository_profile",
     "host_verification_failure",
@@ -361,6 +364,8 @@ def _clear_round_review_state(item: WorkItem) -> None:
     item.payload.pop("reviewed_pr_head_sha", None)
     item.payload.pop("pr_diff", None)
     item.payload.pop("review_changed_paths", None)
+    item.payload.pop("review_changed_file_manifest", None)
+    item.payload.pop("host_verification_bootstrap_proof", None)
 
 
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
@@ -832,6 +837,7 @@ __all__ = [
     '_host_verification_failure_kind', '_host_verification_receipt_matches',
     '_host_verification_receipts_match',
     '_host_verification_result_status', '_host_verification_specs',
+    '_host_verification_unsupported_receipt_matches',
     '_implementation_reply_handoff', '_is_confirmed_open_unarmed',
     '_is_postable_finding', '_issue_number', '_normalize_remediation_threads',
     '_parse_review_response', '_parse_validation_result', '_payload_host_verification_specs',

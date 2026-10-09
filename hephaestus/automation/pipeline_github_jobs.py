@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal, assert_never
 
+from hephaestus.automation.host_verification_bootstrap import (
+    BOOTSTRAP_ISSUE_NUMBER,
+    BOOTSTRAP_REPOSITORY,
+    BootstrapProof,
+    BootstrapResolutionStatus,
+    validate_host_verification_proof,
+)
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -30,6 +38,8 @@ from hephaestus.automation.pipeline.reply_handoff import (
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -895,8 +905,71 @@ class PipelineGitHubJobRunner:
                 return "merge_cycle_cancelled"
             return None
 
-        def admit() -> tuple[dict[str, object], str] | str:
+        def bootstrap_admission() -> str | None:
+            """Revalidate the durable bootstrap grant before mutable actions."""
+            proof_snapshot = request.host_verification_bootstrap_proof
+            if proof_snapshot is None:
+                return None
+            try:
+                proof = BootstrapProof.from_dict(proof_snapshot.thaw())
+                if (
+                    proof.repository != BOOTSTRAP_REPOSITORY
+                    or proof.issue_number != BOOTSTRAP_ISSUE_NUMBER
+                    or proof.pr_number != request.pr_number
+                    or proof.head_sha != request.reviewed_head_sha
+                ):
+                    raise ValueError("bootstrap proof target changed")
+                resolution = validate_host_verification_proof(
+                    proof,
+                    github.issue_comments(BOOTSTRAP_ISSUE_NUMBER),
+                )
+                if resolution.status is BootstrapResolutionStatus.APPROVED:
+                    return None
+                reason = resolution.reason or "rejected"
+            except Exception as error:
+                reason = type(error).__name__
+
+            # A revoked proof must remove stale GO only after a fresh exact-head
+            # open/unarmed read. Never mutate a moved, closed, or armed PR.
+            try:
+                state = github.gh_pr_state(request.pr_number)
+            except Exception:
+                return "host_verification_bootstrap_revoked"
+            if (
+                not isinstance(state, dict)
+                or state.get("state") != "OPEN"
+                or state.get("autoMergeRequest") is not None
+                or state.get("baseRefName") != "main"
+                or state.get("headRefOid") != request.reviewed_head_sha
+            ):
+                return "host_verification_bootstrap_revoked"
+            try:
+                github.mark_pr_implementation_no_go(request.pr_number)
+                readback = github.gh_pr_state(request.pr_number)
+                has_go, has_no_go = github.pr_has_implementation_state_label(request.pr_number)
+            except Exception:
+                return "host_verification_bootstrap_revoked_no_go_readback_failed"
+            if (
+                not isinstance(readback, dict)
+                or readback.get("state") != "OPEN"
+                or readback.get("autoMergeRequest") is not None
+                or readback.get("headRefOid") != request.reviewed_head_sha
+                or has_go
+                or not has_no_go
+            ):
+                return "host_verification_bootstrap_revoked_no_go_readback_failed"
+            logger.warning(
+                "merge_wait: revoked bootstrap proof for PR #%d (%s)",
+                request.pr_number,
+                reason,
+            )
+            return "host_verification_bootstrap_revoked"
+
+        def admit() -> tuple[dict[str, object], str] | str:  # noqa: C901
             nonlocal terminal_merge_sha
+            bootstrap_failure = bootstrap_admission()
+            if bootstrap_failure is not None:
+                return bootstrap_failure
             try:
                 state = github.gh_pr_state(request.pr_number)
             except Exception:
@@ -1068,6 +1141,10 @@ class PipelineGitHubJobRunner:
         if isinstance(admitted, str):
             return complete(admitted, merge_sha=terminal_merge_sha)
         final_state, _ = admitted
+
+        bootstrap_failure = bootstrap_admission()
+        if bootstrap_failure is not None:
+            return complete(bootstrap_failure)
 
         try:
             result = github.merge_pr_if_head(

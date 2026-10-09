@@ -247,6 +247,14 @@ def test_parse_args_accepts_pr_scope() -> None:
     assert args.prs == [77, 78]
 
 
+def test_parse_args_accepts_target_host_bootstrap_comment() -> None:
+    """The bootstrap selector is a positive comment identifier."""
+    args = loop_runner._parse_args(
+        ["--prs", "3006", "--host-verification-bootstrap-comment", "42"]
+    )
+    assert args.host_verification_bootstrap_comment == 42
+
+
 @pytest.mark.parametrize("bad", ["0", "-1", "33", "100"])
 def test_parse_args_rejects_out_of_range_max_workers(bad: str) -> None:
     """Regression for #723: loop_runner must reject --max-workers outside 1-32."""

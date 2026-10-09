@@ -1121,6 +1121,14 @@ before they resolve tools, archive source, or execute PR code. That receipt is
 a blocking host-verification gap. It is not passing execution evidence, and it
 cannot grant implementation authority. Add a Linux or Windows backend as a
 separately reviewed isolation implementation; there is no unsandboxed fallback.
+Until the Linux boundary is available, one explicit direct review of PR #3006
+may use an actor-owned bootstrap comment. The comment is bound to issue #2701,
+PR #3006, the exact reviewed head, the checkout-derived branch point, and a
+closed changed-file manifest. The grant is checked before source review, before
+the GO label, and before each merge request. It permits source review only; it
+does not make a skipped command passing evidence and does not use CI as review
+authority. A missing, changed, foreign, duplicate, malformed, or revoked grant
+blocks the path. A restart must read the comment again.
 
 Every host-verification failure also upserts an automation-owned diagnostic on
 the pull request after the exact-head NOGO label is read back. The comment is

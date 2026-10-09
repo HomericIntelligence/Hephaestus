@@ -33,6 +33,7 @@ from hephaestus.automation.issue_waves import (
 )
 
 from ..github_jobs import (
+    FrozenJson,
     GitHubJob,
     MergeWaitCycleCompleted,
     RunMergeWaitCycleRequest,
@@ -109,6 +110,10 @@ class MergeWaitStage(Stage):
         reviewed_head = item.payload.get("reviewed_pr_head_sha")
         if not isinstance(reviewed_head, str) or not reviewed_head:
             return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
+        if ctx.config.host_verification_bootstrap_comment_id is not None and not isinstance(
+            item.payload.get("host_verification_bootstrap_proof"), dict
+        ):
+            return StageOutcome(Disposition.FAIL_BACK, "host_verification_bootstrap_missing")
         deadline = self._matching_readiness_deadline_outcome(item, ctx)
         if deadline is not None:
             return deadline
@@ -143,6 +148,11 @@ class MergeWaitStage(Stage):
                 queue_admitted=(
                     item.payload.get(_QUEUE_ADMITTED_HEAD) == reviewed_head
                     and item.payload.get(_QUEUE_ADMITTED_PROOF_GENERATION) == proof_generation
+                ),
+                host_verification_bootstrap_proof=(
+                    FrozenJson.snapshot(item.payload["host_verification_bootstrap_proof"])
+                    if isinstance(item.payload.get("host_verification_bootstrap_proof"), dict)
+                    else None
                 ),
             )
         except ValueError:
@@ -220,7 +230,13 @@ class MergeWaitStage(Stage):
         if outcome == "merge_queue_wait":
             item.state = MERGE
             return self._park_for_readiness(item, ctx)
-        if outcome in {"not_implementation_go", "reviewed_head_drift"}:
+        if outcome in {
+            "not_implementation_go",
+            "reviewed_head_drift",
+            "host_verification_bootstrap_revoked",
+            "host_verification_bootstrap_revoked_no_go_readback_failed",
+            "host_verification_bootstrap_missing",
+        }:
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome in {"merge_conflicting", "post_review_rebase_required"}:
             return self._post_review_rebase(item, outcome)

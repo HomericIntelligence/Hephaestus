@@ -4488,6 +4488,33 @@ class WorkerPool:
         if not isinstance(changed_paths_output, str):
             return JobResult(ok=False, error="review checkout path manifest unavailable")
         changed_paths = [path for path in changed_paths_output.split("\0") if path]
+        changed_status_output = git_utils.run(
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-status",
+                "-z",
+                f"{base}...{head}",
+            ],
+            cwd=worktree,
+            timeout=job.timeout_s,
+        ).stdout
+        if not isinstance(changed_status_output, str):
+            return JobResult(ok=False, error="review checkout status manifest unavailable")
+        status_tokens = [token for token in changed_status_output.split("\0") if token]
+        if len(status_tokens) % 2:
+            return JobResult(ok=False, error="review checkout status manifest malformed")
+        changed_file_manifest: list[dict[str, str]] = []
+        seen_paths: set[str] = set()
+        for index in range(0, len(status_tokens), 2):
+            status, path = status_tokens[index : index + 2]
+            if len(status) != 1 or not path or path in seen_paths:
+                return JobResult(ok=False, error="review checkout status manifest malformed")
+            seen_paths.add(path)
+            changed_file_manifest.append({"path": path, "status": status})
+        if [entry["path"] for entry in changed_file_manifest] != changed_paths:
+            return JobResult(ok=False, error="review checkout manifests disagree")
         return JobResult(
             ok=True,
             value={
@@ -4496,6 +4523,7 @@ class WorkerPool:
                 "base": base,
                 "diff": diff,
                 "changed_paths": changed_paths,
+                "changed_file_manifest": changed_file_manifest,
             },
         )
 

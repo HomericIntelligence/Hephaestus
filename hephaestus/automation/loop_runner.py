@@ -244,6 +244,7 @@ class LoopConfig:
     issues: list[int] = field(default_factory=list)
     reset_plan_review_session: bool = False
     prs: list[int] = field(default_factory=list)
+    host_verification_bootstrap_comment_id: int | None = None
     dry_run: bool = False
     no_advise: bool = False
     no_learn: bool = False
@@ -411,6 +412,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated PR numbers to seed directly into pipeline PR stages. "
             "Default: no direct PR scope."
+        ),
+    )
+    p.add_argument(
+        "--host-verification-bootstrap-comment",
+        type=_parse_positive_int,
+        default=None,
+        metavar="COMMENT_ID",
+        help=(
+            "Use one actor-owned bootstrap comment for direct PR 3006 review. "
+            "The option is valid only for HomericIntelligence/Hephaestus."
         ),
     )
     p.add_argument(
@@ -960,6 +971,7 @@ def _build_pipeline_config(
         repo_roots=cfg.repo_roots,
         json_out=args.json,
         scope=_pipeline_scope_for_phases(cfg.phases),
+        host_verification_bootstrap_comment_id=cfg.host_verification_bootstrap_comment_id,
     )
 
 
@@ -1093,6 +1105,18 @@ def main(argv: list[str] | None = None) -> int:
     org, repos, err = _resolve_org_and_repos(args)
     if err:
         return _error_exit(args, err)
+    bootstrap_comment_id = getattr(args, "host_verification_bootstrap_comment", None)
+    if bootstrap_comment_id is not None and (
+        org != "HomericIntelligence"
+        or repos != ["Hephaestus"]
+        or args.issues
+        or args.prs != [3006]
+    ):
+        return _error_exit(
+            args,
+            "--host-verification-bootstrap-comment requires direct --prs 3006 "
+            "in HomericIntelligence/Hephaestus",
+        )
 
     projects_dir = resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True)
     streaming_org_scope = args.org is not None and not args.repos and not (args.issues or args.prs)
@@ -1121,6 +1145,7 @@ def main(argv: list[str] | None = None) -> int:
         issues=args.issues or [],
         reset_plan_review_session=args.reset_plan_review_session,
         prs=args.prs or [],
+        host_verification_bootstrap_comment_id=bootstrap_comment_id,
         issue_limit=args.issue_limit,
         dry_run=args.dry_run,
         no_advise=args.no_advise,

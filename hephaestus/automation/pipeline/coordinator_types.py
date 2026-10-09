@@ -307,6 +307,9 @@ class PipelineConfig:
     # Set only by the standalone PR-review wrapper. Marks direct requests so
     # stale implementation labels do not route a retry into remediation first.
     explicit_pr_review: bool = False
+    # A narrow, actor-owned bootstrap grant is valid only for the fixed target
+    # PR and is checked again at each review and merge boundary.
+    host_verification_bootstrap_comment_id: int | None = None
 
     @property
     def enable_advise(self) -> bool:

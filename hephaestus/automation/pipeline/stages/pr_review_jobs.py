@@ -31,6 +31,10 @@ from .pr_review_recovery import (
     empty_diff_outcome,
     restart_direct_pr_review,
 )
+from .pr_review_repository import (
+    _resolve_host_verification_bootstrap,
+    _validate_host_verification_bootstrap,
+)
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 from .pr_review_threads import (
@@ -295,6 +299,38 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item,
                 StageOutcome(Disposition.FINISH_FAIL, "review_checkout_head_drift"),
             )
+        bootstrap_comment_id = ctx.config.host_verification_bootstrap_comment_id
+        if bootstrap_comment_id is not None:
+            try:
+                bootstrap_proof = _resolve_host_verification_bootstrap(
+                    ctx.github,
+                    comment_id=bootstrap_comment_id,
+                    repository=f"{ctx.org}/{item.repo}",
+                    pr_number=cast(int, item.pr),
+                    head_sha=expected_head,
+                    base_sha=str(item.payload.get("reviewed_pr_base_sha") or ""),
+                    manifest=item.payload.get("review_changed_file_manifest"),
+                )
+            except Exception as error:
+                logger.warning(
+                    "pr_review:%d: host-verification bootstrap rejected (%s)",
+                    _issue_number(item),
+                    type(error).__name__,
+                )
+                return self._cleanup_review_worktree_then(
+                    item,
+                    StageOutcome(
+                        Disposition.FINISH_FAIL, "host_verification_bootstrap_unavailable"
+                    ),
+                )
+            if bootstrap_proof is None:
+                return self._cleanup_review_worktree_then(
+                    item,
+                    StageOutcome(
+                        Disposition.FINISH_FAIL, "host_verification_bootstrap_unavailable"
+                    ),
+                )
+            item.payload["host_verification_bootstrap_proof"] = bootstrap_proof
         item.payload["reviewed_pr_head_sha"] = expected_head
         prior_generation = item.payload.get("reviewed_pr_proof_generation", 0)
         if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
@@ -388,6 +424,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
+                "host_verification_bootstrap_json": json.dumps(
+                    item.payload.get("host_verification_bootstrap_proof", {}), sort_keys=True
+                ),
                 "include_nitpicks": ctx.config.nitpick,
                 "review_context_kind": _review_context_kind(item),
             },
@@ -412,6 +451,29 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 item,
                 StageOutcome(Disposition.FINISH_FAIL, "reviewed_head_unavailable"),
             )
+        if ctx.config.host_verification_bootstrap_comment_id is not None:
+            try:
+                _validate_host_verification_bootstrap(
+                    ctx.github,
+                    proof=item.payload.get("host_verification_bootstrap_proof"),
+                    repository=f"{ctx.org}/{item.repo}",
+                    pr_number=item.pr,
+                    head_sha=reviewed_head,
+                    base_sha=str(item.payload.get("reviewed_pr_base_sha") or ""),
+                    manifest=item.payload.get("review_changed_file_manifest"),
+                )
+            except Exception as error:
+                logger.warning(
+                    "pr_review:%d: bootstrap changed before source review (%s)",
+                    _issue_number(item),
+                    type(error).__name__,
+                )
+                return self._cleanup_review_worktree_then(
+                    item,
+                    StageOutcome(
+                        Disposition.FINISH_FAIL, "host_verification_bootstrap_unavailable"
+                    ),
+                )
         try:
             live_threads = ctx.github.list_unresolved_review_threads(item.pr)
             receipts = ctx.github.reviewer_validation_receipts(
@@ -586,7 +648,14 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             )
         matched_receipts = cast(list[dict[str, Any]], receipts)
         for verification, receipt in zip(verifications, matched_receipts, strict=False):
-            if not _host_verification_receipt_matches(receipt, verification, reviewed_head):
+            supported = _host_verification_receipt_matches(receipt, verification, reviewed_head)
+            bootstrap_unsupported = bool(
+                item.payload.get("host_verification_bootstrap_proof")
+                and _host_verification_unsupported_receipt_matches(
+                    receipt, verification.argv, reviewed_head
+                )
+            )
+            if not supported and not bootstrap_unsupported:
                 return self._handle_host_verification_failure(
                     item,
                     ctx,
@@ -596,12 +665,24 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         if len(matched_receipts) < len(verifications):
             return self._submit_host_verification(item, ctx, verifications[len(matched_receipts)])
         if not _host_verification_receipts_match(receipts, verifications, reviewed_head):
-            return self._handle_host_verification_failure(
-                item,
-                ctx,
-                None,
-                "host_verification_receipt_invalid",
+            all_bootstrap_receipts = bool(
+                item.payload.get("host_verification_bootstrap_proof")
+                and len(receipts) == len(verifications)
+                and all(
+                    _host_verification_receipt_matches(receipt, verification, reviewed_head)
+                    or _host_verification_unsupported_receipt_matches(
+                        receipt, verification.argv, reviewed_head
+                    )
+                    for receipt, verification in zip(receipts, verifications, strict=True)
+                )
             )
+            if not all_bootstrap_receipts:
+                return self._handle_host_verification_failure(
+                    item,
+                    ctx,
+                    None,
+                    "host_verification_receipt_invalid",
+                )
         return self._route_threads_before_broad_review(item, ctx)
 
     def _handle_host_verification_failure(
@@ -968,6 +1049,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         review_diff = value.get("diff") if isinstance(value, dict) else None
         review_base = value.get("base") if isinstance(value, dict) else None
         changed_paths = value.get("changed_paths") if isinstance(value, dict) else None
+        changed_file_manifest = (
+            value.get("changed_file_manifest") if isinstance(value, dict) else None
+        )
         if ready and not isinstance(review_diff, str):
             item.payload["review_checkout_error"] = "checkout job returned no bound diff"
             ready = False
@@ -977,6 +1061,18 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
                 isinstance(path, str) and bool(path) for path in changed_paths
             ):
                 item.payload["review_changed_paths"] = list(changed_paths)
+            if isinstance(changed_file_manifest, list) and all(
+                isinstance(entry, dict)
+                and isinstance(entry.get("path"), str)
+                and bool(entry.get("path"))
+                and isinstance(entry.get("status"), str)
+                and len(entry["status"]) == 1
+                for entry in changed_file_manifest
+            ):
+                item.payload["review_changed_file_manifest"] = [
+                    {"path": entry["path"], "status": entry["status"]}
+                    for entry in changed_file_manifest
+                ]
             if is_full_commit_sha(review_base):
                 item.payload["reviewed_pr_base_sha"] = review_base
         item.payload["review_checkout_ready"] = ready

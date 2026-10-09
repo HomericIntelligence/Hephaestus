@@ -87,6 +87,23 @@ uv run hephaestus-automation-loop --prs <N> --loops 1 --max-workers 1
 
 ## Follow-Up
 
+For PR #3006, a Linux host that reports
+`unsupported_host_verification_boundary` can use the reviewed bootstrap path
+only after issue #3007 has supplied the supported actor-owned grant. The direct
+command must select PR #3006 and the comment ID:
+
+```bash
+uv run hephaestus-drive-prs-green --prs 3006 \
+  --host-verification-bootstrap-comment <COMMENT_ID>
+```
+
+The queue checks the grant against the exact PR head, branch point, and changed
+file manifest. It then performs source review. The skipped host command did not
+run, so the grant does not prove a passing test and CI does not replace source
+review. Do not use the option for another PR, issue, repository, or local host.
+If the comment is missing, changed, revoked, or malformed, the path stops. A
+later restart must select the comment again.
+
 If the label is absent, do not attempt to merge: the loop must complete its
 fresh GitHub snapshot plus clean-checkout `$athena:pr-review` path first.
 

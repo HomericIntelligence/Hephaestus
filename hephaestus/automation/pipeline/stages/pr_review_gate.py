@@ -2,6 +2,7 @@
 # ruff: noqa: F403, F405
 from hephaestus.automation.review_audit import is_clean_go_review
 
+from .pr_review_repository import _validate_host_verification_bootstrap
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 
@@ -645,6 +646,26 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         return None
 
     def _write_go(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        if ctx.config.host_verification_bootstrap_comment_id is not None:
+            try:
+                _validate_host_verification_bootstrap(
+                    ctx.github,
+                    proof=item.payload.get("host_verification_bootstrap_proof"),
+                    repository=f"{ctx.org}/{item.repo}",
+                    pr_number=item.pr if item.pr is not None else 0,
+                    head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
+                    base_sha=str(item.payload.get("reviewed_pr_base_sha") or ""),
+                    manifest=item.payload.get("review_changed_file_manifest"),
+                )
+            except Exception as error:
+                logger.warning(
+                    "pr_review: bootstrap changed before GO label (%s)", type(error).__name__
+                )
+                item.payload.pop("host_verification_bootstrap_proof", None)
+                no_go_outcome = self._write_no_go(item, ctx)
+                if no_go_outcome is not None:
+                    return no_go_outcome
+                return StageOutcome(Disposition.FINISH_FAIL, "host_verification_bootstrap_revoked")
         return self.write_go(item, ctx.github)
 
     def write_go(self, item: WorkItem, github: Any) -> StepResult:  # noqa: C901 - proof gate
