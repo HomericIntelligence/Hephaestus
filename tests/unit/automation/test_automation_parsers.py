@@ -12,7 +12,7 @@ from hephaestus.automation import ensure_state_labels, pipeline_cli
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.cli.utils import DRY_RUN_HELP_CAVEAT, MODEL_REFERENCE_HELP
 
-AGENT_CHOICES = ("claude", "codex", "pi", "opencode")
+AGENT_CHOICES = ("claude", "codex", "pi", "opencode", "opencode2")
 WORKER_CHOICES = tuple(range(1, 33))
 SUPPRESS_DEFAULT = "==SUPPRESS=="
 AGENT_HELP = (

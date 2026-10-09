@@ -22,8 +22,10 @@ when the sink emits its final outcome).
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 
+from hephaestus.agents.runtime import archive_and_prune_opencode_session
 from hephaestus.automation.direct_review_recovery import (
     is_inspection_only_detached_push_failure,
     list_direct_review_recovery_paths,
@@ -187,10 +189,50 @@ class FinishedStage(Stage):
             return self._cleanup(item, ctx)
 
         if item.state == "DONE":
+            self._archive_agent_sessions(item)
             self._record_cleanup_terminal(item, ctx)
             return StageOutcome(Disposition.FINISH_PASS, note="done")
 
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
+
+    @staticmethod
+    def _archive_agent_sessions(item: WorkItem) -> None:
+        """Preserve completed OpenCode transcripts, then drop their sessions.
+
+        An OpenCode session is resumed across the jobs of one work item, so
+        teardown belongs here at item completion rather than after each job. The
+        exported transcript is the durable record; when the export fails the
+        session is kept so no trace is lost.
+        """
+        if item.payload.get("_agent_sessions_archived", False):
+            return
+        item.payload["_agent_sessions_archived"] = True
+        for key, session_id in sorted(item.session_ids.items()):
+            selection = item.session_selections.get(key)
+            agent = selection[0] if selection else ""
+            if agent not in ("opencode", "opencode2") or not session_id:
+                continue
+            try:
+                destination = archive_and_prune_opencode_session(
+                    session_id,
+                    log=lambda message: logger.info(
+                        "finished:%s: %s", item.issue or item.repo, message
+                    ),
+                )
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                logger.warning(
+                    "finished:%s: could not archive OpenCode session %s: %s",
+                    item.issue or item.repo,
+                    session_id,
+                    exc,
+                )
+                continue
+            if destination is None:
+                continue
+            item.session_ids.pop(key, None)
+            item.payload.setdefault("archived_agent_transcripts", []).append(
+                {"session": session_id, "agent": agent, "path": str(destination)}
+            )
 
     @staticmethod
     def _record_cleanup_terminal(item: WorkItem, ctx: StageContext) -> None:

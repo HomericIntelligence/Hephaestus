@@ -37,10 +37,20 @@ def test_plan_admission_reads_share_one_deadline_and_cancel_signal(tmp_path: Pat
 
     def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append((argv, kwargs))
-        body = (
-            "bot"
-            if argv == ["api", "user", "--jq", ".login"]
-            else json.dumps(
+        if argv == ["api", "user", "--jq", ".login"]:
+            body = "bot"
+        elif argv[:2] == ["issue", "view"]:
+            body = json.dumps(
+                {
+                    "number": 7,
+                    "title": "planned",
+                    "state": "OPEN",
+                    "labels": [{"name": STATE_PLAN_GO}],
+                    "body": "Planned by a comment-backed plan.",
+                }
+            )
+        else:
+            body = json.dumps(
                 [
                     {
                         "id": 8,
@@ -49,7 +59,6 @@ def test_plan_admission_reads_share_one_deadline_and_cancel_signal(tmp_path: Pat
                     }
                 ]
             )
-        )
         return subprocess.CompletedProcess(argv, 0, stdout=body)
 
     github = PipelineGitHub("org", repo="repo", repo_root=tmp_path, command_runner=run)
@@ -59,8 +68,13 @@ def test_plan_admission_reads_share_one_deadline_and_cancel_signal(tmp_path: Pat
     )
 
     assert files == {"src/worker.py"}
-    assert len(calls) == 2
-    assert "/repos/org/repo/issues/7/comments" in calls[0][0][1]
+    # The current issue body is read first, then the comment-backed journal and
+    # one actor lookup. Each uses the same bounded deadline and cancel signal.
+    assert [argv[:2] for argv, _options in calls] == [
+        ["issue", "view"],
+        ["api", "/repos/org/repo/issues/7/comments?per_page=100&page=1"],
+        ["api", "user"],
+    ]
     for _argv, options in calls:
         assert options["deadline_s"] == deadline_s
         assert options["shutdown"] is shutdown

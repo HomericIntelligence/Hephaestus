@@ -7302,3 +7302,93 @@ def test_retired_direct_stage_policy_selector_is_unavailable(name: str) -> None:
     """Generic direct stages have no alternate runtime dispatch path."""
     with pytest.raises(AttributeError):
         getattr(agent_runtime, name)
+
+
+class TestArchiveAndPruneOpencodeSession:
+    """Export an OpenCode transcript once, then remove the session."""
+
+    @staticmethod
+    def _completed(stdout: str = '{"info": {"id": "ses_1"}, "messages": []}') -> Any:
+        return subprocess.CompletedProcess(["opencode"], 0, stdout=stdout, stderr="")
+
+    def test_export_is_written_and_the_session_is_deleted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A preserved transcript is followed by a delete of the same session."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            return self._completed()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        result = agent_runtime.archive_and_prune_opencode_session("ses_1")
+
+        destination = tmp_path / ".agent_brain" / "transcripts" / "ses_1.json"
+        assert result == destination
+        assert json.loads(destination.read_text())["info"]["id"] == "ses_1"
+        assert calls == [
+            ["opencode", "export", "ses_1"],
+            ["opencode", "session", "delete", "ses_1"],
+        ]
+
+    def test_a_failed_export_keeps_the_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Losing a transcript must never delete the only copy."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        messages: list[str] = []
+
+        result = agent_runtime.archive_and_prune_opencode_session("ses_1", log=messages.append)
+
+        assert result is None
+        assert calls == [["opencode", "export", "ses_1"]]
+        assert messages == ["opencode_archive_export_failed:exit1"]
+
+    @pytest.mark.parametrize("session_id", ["", "ses/../etc", "ses 1", "x" * 300, "ses;rm"])
+    def test_unusable_session_ids_are_refused_without_a_subprocess(
+        self, session_id: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An identity that could reach a shell never becomes a subprocess argument."""
+
+        def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("no subprocess may run")
+
+        monkeypatch.setattr(subprocess, "run", forbidden)
+
+        assert agent_runtime.archive_and_prune_opencode_session(session_id) is None
+
+    def test_export_noise_before_the_json_object_is_tolerated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CLI announces the export on stdout before the payload."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+        payload = 'Exporting session: ses_1\n{"info": {"id": "ses_1"}}'
+        monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: self._completed(payload))
+
+        result = agent_runtime.archive_and_prune_opencode_session("ses_1")
+
+        assert result is not None
+        assert json.loads(result.read_text())["info"]["id"] == "ses_1"
+
+    def test_a_malformed_export_keeps_the_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Output without a usable session object is not treated as a transcript."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: self._completed("not json"))
+        messages: list[str] = []
+
+        assert (
+            agent_runtime.archive_and_prune_opencode_session("ses_1", log=messages.append) is None
+        )
+        assert messages == ["opencode_archive_export_malformed"]

@@ -16,6 +16,7 @@ import secrets
 import shutil
 import signal
 import stat
+import string
 import subprocess
 import sys
 import tempfile
@@ -5052,6 +5053,110 @@ def resume_opencode_session(
         process_tracker=process_tracker,
         remaining_timeout=remaining_timeout,
     )
+
+
+def opencode_transcript_root() -> Path:
+    """Return the durable directory that preserves archived agent transcripts."""
+    return Path.home() / ".agent_brain" / "transcripts"
+
+
+def _opencode_session_arg(session_id: str) -> list[str] | None:
+    """Return a validated session argument, or None when the id is unusable."""
+    if not session_id or len(session_id) > 255:
+        return None
+    allowed = set(string.ascii_letters + string.digits + "_-")
+    if not set(session_id) <= allowed:
+        return None
+    return [session_id]
+
+
+def archive_and_prune_opencode_session(
+    session_id: str,
+    *,
+    timeout: int = 120,
+    log: Callable[[str], None] | None = None,
+) -> Path | None:
+    """Preserve one OpenCode transcript, then remove the session from its database.
+
+    OpenCode keeps every session in a local SQLite database that automation
+    never reads back. Left alone, an unattended loop grows that database without
+    bound, so completed sessions are exported once and then deleted.
+
+    The export is the durable record, so a session is deleted only after its
+    transcript is safely written. A failed export keeps the session so the
+    trace is never lost.
+
+    Args:
+        session_id: The OpenCode session identity to archive.
+        timeout: Seconds allowed for each of the export and delete commands.
+        log: Optional diagnostic sink.
+
+    Returns:
+        The written transcript path, or None when the session was kept.
+
+    """
+    emit = log or (lambda _message: None)
+    argument = _opencode_session_arg(session_id)
+    if argument is None:
+        emit("opencode_archive_invalid_session_id")
+        return None
+    if timeout <= 0:
+        raise ValueError("opencode archive timeout must be positive")
+    env = _platform_child_env()
+    try:
+        exported = subprocess.run(
+            ["opencode", "export", *argument],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        emit(f"opencode_archive_export_failed:{type(exc).__name__}")
+        return None
+    if exported.returncode != 0:
+        emit(f"opencode_archive_export_failed:exit{exported.returncode}")
+        return None
+    payload = exported.stdout.strip()
+    start = payload.find("{")
+    if start < 0:
+        emit("opencode_archive_export_malformed")
+        return None
+    payload = payload[start:]
+    try:
+        decoded = json.loads(payload)
+    except (TypeError, ValueError):
+        emit("opencode_archive_export_malformed")
+        return None
+    if not isinstance(decoded, dict) or not decoded.get("info", {}).get("id"):
+        emit("opencode_archive_export_malformed")
+        return None
+    try:
+        root = opencode_transcript_root()
+        root.mkdir(parents=True, exist_ok=True)
+        destination = root / f"{session_id}.json"
+        write_secure(destination, json.dumps(decoded, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        emit(f"opencode_archive_write_failed:{type(exc).__name__}")
+        return None
+    try:
+        deleted = subprocess.run(
+            ["opencode", "session", "delete", *argument],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        emit(f"opencode_archive_delete_failed:{type(exc).__name__}")
+        return destination
+    if deleted.returncode != 0:
+        emit(f"opencode_archive_delete_failed:exit{deleted.returncode}")
+        return destination
+    emit("opencode_archive_pruned")
+    return destination
 
 
 def run_opencode_text(
