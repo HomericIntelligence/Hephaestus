@@ -587,6 +587,24 @@ class TestGlobalThrottle:
 
         return sleep_calls, state_path
 
+    @pytest.mark.parametrize("rate", [0.0, 10.0])
+    def test_missing_lock_primitive_only_allows_explicitly_disabled_throttle(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rate: float
+    ) -> None:
+        """An enabled throttle cannot report success without its lock primitive."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        monkeypatch.setitem(sys.modules, "fcntl", None)
+        configure_gh_global_throttle(rate=rate, burst=10)
+        state_path = _global_throttle_state_path()
+
+        if rate == 0:
+            gh_global_throttle_acquire()
+        else:
+            with pytest.raises(ImportError):
+                gh_global_throttle_acquire()
+
+        assert not state_path.exists()
+
     def test_no_op_when_rate_zero(self, monkeypatch, tmp_path) -> None:
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
         monkeypatch.setenv("TMPDIR", str(tmp_path))

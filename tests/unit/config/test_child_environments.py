@@ -136,6 +136,38 @@ def test_parent_builder_rejects_values_that_violate_registered_rules(
     assert "TMPDIR" not in environment
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "SYSTEMROOT",
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "COMSPEC",
+        "PATHEXT",
+    ],
+)
+def test_child_builders_do_not_forward_ambient_windows_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    """Unsupported Windows configuration cannot cross a parent boundary."""
+    monkeypatch.setenv(name, str(tmp_path / "operator-configuration"))
+
+    environments = (
+        child_environments.read_approved_parent_env(),
+        child_environments.build_claude_child_env(),
+        child_environments.build_codex_child_env(codex_home=tmp_path / "codex"),
+        child_environments.build_pi_child_env(),
+        child_environments.build_git_child_env(),
+        child_environments.build_gh_child_env(),
+    )
+
+    assert all(name not in environment for environment in environments)
+
+
 def test_correlation_id_is_explicit_validated_and_non_mutating() -> None:
     """Correlation injection copies its input and rejects malformed tokens."""
     source = {"PATH": os.defpath}

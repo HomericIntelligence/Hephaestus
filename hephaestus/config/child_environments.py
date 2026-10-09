@@ -32,18 +32,9 @@ def read_approved_parent_env() -> dict[str, str]:
         "TMPDIR": os.environ.get("TMPDIR", ""),
         "TMP": os.environ.get("TMP", ""),
         "TEMP": os.environ.get("TEMP", ""),
-        "USERPROFILE": os.environ.get("USERPROFILE", ""),
-        "APPDATA": os.environ.get("APPDATA", ""),
-        "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
         "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", ""),
         "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME", ""),
         "XDG_DATA_HOME": os.environ.get("XDG_DATA_HOME", ""),
-        "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
-        "SystemRoot": os.environ.get("SystemRoot", ""),  # noqa: SIM112 - Windows alias
-        "WINDIR": os.environ.get("WINDIR", ""),
-        "ComSpec": os.environ.get("ComSpec", ""),  # noqa: SIM112 - Windows alias
-        "COMSPEC": os.environ.get("COMSPEC", ""),
-        "PATHEXT": os.environ.get("PATHEXT", ""),
     }
     env = {
         name: value

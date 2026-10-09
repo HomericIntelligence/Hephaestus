@@ -52,41 +52,6 @@ readers = [
 ]
 
 [[variables]]
-name = "APPDATA"
-category = "platform"
-owner = "config.child_environments"
-purpose = "Windows application configuration"
-sensitivity = "sensitive"
-validation = "path"
-direction = "input"
-readers = [
-  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
-]
-[[variables]]
-name = "COMSPEC"
-category = "platform"
-owner = "config.child_environments"
-purpose = "Windows command processor alias"
-sensitivity = "public"
-validation = "path"
-direction = "input"
-readers = [
-  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
-]
-
-[[variables]]
-name = "ComSpec"
-category = "platform"
-owner = "config.child_environments"
-purpose = "Windows command processor"
-sensitivity = "public"
-validation = "path"
-direction = "input"
-readers = [
-  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
-]
-
-[[variables]]
 name = "GH_TOKEN"
 category = "child-process"
 owner = "config.child_environments"
@@ -222,18 +187,6 @@ readers = [
 ]
 
 [[variables]]
-name = "LOCALAPPDATA"
-category = "platform"
-owner = "config.child_environments"
-purpose = "Windows application cache"
-sensitivity = "sensitive"
-validation = "path"
-direction = "input"
-readers = [
-  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
-]
-
-[[variables]]
 name = "LOGNAME"
 category = "platform"
 owner = "config.child_environments"
@@ -256,18 +209,6 @@ direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
   {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
-]
-
-[[variables]]
-name = "PATHEXT"
-category = "platform"
-owner = "config.child_environments"
-purpose = "Windows executable suffixes"
-sensitivity = "public"
-validation = "string"
-direction = "input"
-readers = [
-  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
 ]
 
 [[variables]]
@@ -295,34 +236,10 @@ readers = [
 ]
 
 [[variables]]
-name = "SYSTEMROOT"
-category = "platform"
-owner = "config.child_environments"
-purpose = "Windows system root"
-sensitivity = "public"
-validation = "path"
-direction = "input"
-readers = [
-  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
-]
-
-[[variables]]
-name = "SystemRoot"
-category = "platform"
-owner = "config.child_environments"
-purpose = "Windows system root alias"
-sensitivity = "public"
-validation = "path"
-direction = "input"
-readers = [
-  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
-]
-
-[[variables]]
 name = "TEMP"
 category = "platform"
 owner = "config.child_environments"
-purpose = "Windows temporary directory"
+purpose = "Temporary directory for child tools"
 sensitivity = "sensitive"
 validation = "path"
 direction = "input"
@@ -335,7 +252,7 @@ readers = [
 name = "TMP"
 category = "platform"
 owner = "config.child_environments"
-purpose = "Windows temporary directory"
+purpose = "Temporary directory for child tools"
 sensitivity = "sensitive"
 validation = "path"
 direction = "input"
@@ -377,30 +294,6 @@ owner = "config.child_environments"
 purpose = "Host identity hint"
 sensitivity = "public"
 validation = "string"
-direction = "input"
-readers = [
-  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
-]
-
-[[variables]]
-name = "USERPROFILE"
-category = "platform"
-owner = "config.child_environments"
-purpose = "Windows home directory"
-sensitivity = "sensitive"
-validation = "path"
-direction = "input"
-readers = [
-  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
-]
-
-[[variables]]
-name = "WINDIR"
-category = "platform"
-owner = "config.child_environments"
-purpose = "Windows system directory"
-sensitivity = "public"
-validation = "path"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },

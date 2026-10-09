@@ -6,8 +6,6 @@ Covers CodeBlock, ValidationResult, ValidationReport dataclasses and
 all ReadmeValidator public methods with mocked subprocess/shutil calls.
 """
 
-import platform
-import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,11 +17,6 @@ from hephaestus.validation.readme_commands import (
     ReadmeValidator,
     ValidationReport,
     ValidationResult,
-)
-
-requires_bash = pytest.mark.skipif(
-    platform.system() == "Windows" or not shutil.which("bash"),
-    reason="requires bash shell",
 )
 
 

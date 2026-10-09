@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import signal
+import subprocess
 import sys
+import threading
 import time
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
-from unittest import skipUnless
 from unittest.mock import Mock
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -663,6 +670,366 @@ def test_catalog_rejects_mutable_or_incomplete_pins(tmp_path: Path) -> None:
         raise AssertionError("mutable npm version was accepted")
 
 
+_EOF_CHILD = """
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+signal.alarm(20)
+if mode != 'missing-startup':
+    receipt = {'pid': os.getpid(), 'ppid': os.getppid()}
+    receipt.update({'pgid': os.getpgrp(), 'sid': os.getsid(0)})
+    pending = root / 'ready.pending'
+    pending.write_text(json.dumps(receipt), encoding='utf-8')
+    pending.replace(root / 'ready.json')
+while not (root / 'release').exists():
+    time.sleep(0.01)
+os.write(1, b'output-marker\\n')
+os.write(2, b'error-marker\\n')
+os.close(1)
+os.close(2)
+(root / 'eof').touch()
+if mode.startswith('exit-'):
+    time.sleep(0.05)
+    os._exit(int(mode.split('-', 1)[1]))
+time.sleep(30)
+"""
+
+_LINUX_PIDFD = pytest.mark.skipif(
+    not sys.platform.startswith("linux")
+    or not hasattr(os, "pidfd_open")
+    or not hasattr(signal, "pidfd_send_signal"),
+    reason="This supervisor requires native Linux pidfd ownership; other hosts are unqualified",
+)
+
+
+class _EofStartupError(RuntimeError):
+    """The child did not complete the private startup handshake."""
+
+
+class _EofSupervisor:
+    """Own one fixed child independently of the runner's wait and cleanup code."""
+
+    def __init__(self, root: Path, mode: str) -> None:
+        self.root = root
+        self.argv = (sys.executable, "-c", _EOF_CHILD, str(root), mode)
+        self.env = {"PATH": os.defpath}
+        self.process = subprocess.Popen(
+            self.argv,
+            cwd=root,
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            self.pidfd = os.pidfd_open(self.process.pid)
+        except BaseException:
+            # No other waiter can reap this direct child before this cleanup.
+            self.process.kill()
+            self.process.wait(timeout=2)
+            for stream in (self.process.stdout, self.process.stderr):
+                if stream is not None:
+                    stream.close()
+            raise
+        self.thread: threading.Thread | None = None
+        self.entered = threading.Event()
+        self.result: Any = None
+        self.error: BaseException | None = None
+        self.forced_cleanup = False
+        self.reaped = False
+        self.closed = False
+        self.outer_expired = False
+        self.elapsed = 0.0
+
+    def wait_for_startup(self, timeout: float = 3.0) -> None:
+        """Check the real child identity before allowing it to close output."""
+        deadline = time.monotonic() + timeout
+        while not (self.root / "ready.json").exists():
+            if time.monotonic() >= deadline:
+                raise _EofStartupError("child startup receipt is missing")
+            time.sleep(0.01)
+        receipt = json.loads((self.root / "ready.json").read_text(encoding="utf-8"))
+        assert receipt == {
+            "pid": self.process.pid,
+            "ppid": os.getpid(),
+            "pgid": self.process.pid,
+            "sid": self.process.pid,
+        }
+        assert os.getpgid(self.process.pid) == self.process.pid
+        assert os.getsid(self.process.pid) == self.process.pid
+
+    def launch(self, argv: tuple[str, ...], **kwargs: Any) -> subprocess.Popen[bytes]:
+        """Supply the owned real child without replacing reader or wait behavior."""
+        assert not self.entered.is_set(), "runner attempted a second launch"
+        assert argv == self.argv
+        assert kwargs == {
+            "cwd": self.root,
+            "env": self.env,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "start_new_session": True,
+        }
+        self.entered.set()
+        return self.process
+
+    def run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        wait_only_stub: bool = False,
+        outer_timeout: float = 4.0,
+    ) -> None:
+        """Run the public EOF path under a separate finite supervisor deadline."""
+        from hephaestus.agents import pi_plugins
+
+        def invoke() -> None:
+            try:
+                if wait_only_stub:
+                    self.entered.set()
+                    self.process.wait()
+                else:
+                    self.result = pi_plugins.run_bounded_command(
+                        self.argv, cwd=self.root, env=self.env, timeout=1.0
+                    )
+            except BaseException as exc:
+                self.error = exc
+
+        self.wait_for_startup()
+        # Only launch is substituted. Pipes, EOF, selectors, wait, and results are real.
+        # This checks the EOF contract, not production launch ownership.
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", self.launch)
+            self.thread = threading.Thread(target=invoke, daemon=True)
+            started = time.monotonic()
+            try:
+                self.thread.start()
+                assert self.entered.wait(timeout=1), "runner did not accept the owned process"
+                (self.root / "release").touch()
+                self.thread.join(timeout=max(0.0, started + outer_timeout - time.monotonic()))
+                self.outer_expired = self.thread.is_alive()
+                self.elapsed = time.monotonic() - started
+                assert (self.root / "eof").exists(), "child did not close both output pipes"
+            finally:
+                self.close()
+        if self.error is not None:
+            raise AssertionError(
+                "runner raised instead of returning a process result"
+            ) from self.error
+
+    def close(self) -> None:
+        """Stop the exact child, reap it, and confirm that the runner thread stopped."""
+        if self.closed:
+            return
+        try:
+            # A pidfd cannot signal a different process after PID reuse. The fixed
+            # fixture creates no descendants; its one child owns a separate session.
+            if self.process.returncode is None:
+                with suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
+                    self.forced_cleanup = True
+            self.process.wait(timeout=2)
+            self.reaped = self.process.returncode is not None
+            if self.thread is not None:
+                self.thread.join(timeout=2)
+                assert not self.thread.is_alive(), "runner thread survived independent cleanup"
+            assert self.reaped, "owned child was not reaped"
+        finally:
+            os.close(self.pidfd)
+            # Do not wait for a buffered-stream lock held by an unjoined thread.
+            # An unjoined thread already makes the cleanup qualification fail.
+            if self.thread is None or not self.thread.is_alive():
+                for stream in (self.process.stdout, self.process.stderr):
+                    if stream is not None:
+                        stream.close()
+            self.closed = True
+
+
+@contextmanager
+def _owned_eof_child(tmp_path: Path, mode: str = "hang") -> Iterator[_EofSupervisor]:
+    """Clean the direct child, including an incomplete startup."""
+    owner = _EofSupervisor(tmp_path, mode)
+    try:
+        yield owner
+    finally:
+        owner.close()
+
+
+@_LINUX_PIDFD
+def test_runner_supervisor_forced_cleanup_owns_new_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Qualify cleanup without relying on any runner timeout or termination code."""
+    with _owned_eof_child(tmp_path) as owner:
+        owner.run(monkeypatch, wait_only_stub=True, outer_timeout=0.25)
+    assert owner.outer_expired
+    assert owner.forced_cleanup
+    assert owner.reaped
+    assert owner.thread is not None and not owner.thread.is_alive()
+    assert owner.process.returncode == -signal.SIGKILL
+
+
+@_LINUX_PIDFD
+def test_runner_supervisor_rejects_incomplete_startup(tmp_path: Path) -> None:
+    """A missing receipt fails setup but leaves no unowned or unreaped child."""
+    with pytest.raises(_EofStartupError, match="startup receipt is missing"):
+        with _owned_eof_child(tmp_path, "missing-startup") as owner:
+            owner.wait_for_startup(timeout=0.25)
+    assert owner.forced_cleanup
+    assert owner.reaped
+    assert owner.thread is None
+    assert not (tmp_path / "release").exists()
+    assert owner.process.returncode == -signal.SIGKILL
+
+
+@_LINUX_PIDFD
+def test_bounded_runner_deadline_survives_output_eof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EOF must not remove the command deadline while the real child stays alive."""
+    with _owned_eof_child(tmp_path) as owner:
+        owner.run(monkeypatch)
+    assert owner.reaped
+    assert not owner.outer_expired, "public runner exceeded its deadline after output EOF"
+    assert not owner.forced_cleanup, "supervisor, not the runner, stopped the child"
+    assert owner.result.timed_out
+    assert owner.result.returncode != 0
+    assert owner.result.stdout == "output-marker\n"
+    assert owner.result.stderr == "error-marker\n"
+    # One second is harness scheduling tolerance, not another product allowance.
+    assert owner.elapsed <= 1.0 + 2.0 + 1.0
+
+
+@_LINUX_PIDFD
+@pytest.mark.parametrize("returncode", [0, 7], ids=["zero", "nonzero"])
+def test_bounded_runner_eof_preserves_timely_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int
+) -> None:
+    """A timely exit keeps separate output and the child's actual status."""
+    with _owned_eof_child(tmp_path, f"exit-{returncode}") as owner:
+        owner.run(monkeypatch)
+    assert owner.reaped
+    assert not owner.outer_expired
+    assert not owner.forced_cleanup
+    assert not owner.result.timed_out
+    assert owner.result.returncode == returncode
+    assert owner.result.stdout == "output-marker\n"
+    assert owner.result.stderr == "error-marker\n"
+
+
+def test_bounded_runner_cleanup_failure_preserves_specific_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unconfirmed exit raises OSError without fabricating a completed result."""
+    from hephaestus.agents import pi_plugins
+
+    failure = subprocess.TimeoutExpired("private-command", 2)
+    process = Mock(returncode=None, stdout=None, stderr=None)
+    process.wait.side_effect = failure
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(pi_plugins, "_terminate_process", Mock())
+
+    def expired_reader(
+        child: Any, _input: Any, _timeout: Any, _keep_open: Any, cleanup: Any
+    ) -> Any:
+        return pi_plugins._wait_for_process_exit(child, 0, cleanup, timed_out=True, overflow=False)
+
+    monkeypatch.setattr(pi_plugins, "_run_posix_process", expired_reader)
+    with pytest.raises(OSError, match="process cleanup could not be confirmed") as caught:
+        pi_plugins.run_bounded_command(("private-command",), env={})
+    assert caught.value.__cause__ is failure
+    assert process.wait.call_count == 1
+    assert 0 <= process.wait.call_args.kwargs["timeout"] <= 2
+    assert "private-command" not in str(caught.value)
+
+
+@pytest.mark.parametrize("error_type", [ValueError, KeyboardInterrupt])
+def test_bounded_runner_cleanup_keeps_original_exception(
+    monkeypatch: pytest.MonkeyPatch, error_type: type[BaseException]
+) -> None:
+    """Cleanup uncertainty cannot replace an earlier exception or its cause."""
+    from hephaestus.agents import pi_plugins
+
+    cause = LookupError("original cause")
+    original = error_type("original operation failed")
+    original.__cause__ = cause
+    process = Mock(returncode=None, stdout=None, stderr=None)
+    process.wait.side_effect = subprocess.TimeoutExpired("private-command", 2)
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(pi_plugins, "_terminate_process", Mock())
+
+    def operation_failure(*_args: Any) -> Any:
+        raise original
+
+    monkeypatch.setattr(pi_plugins, "_run_posix_process", operation_failure)
+    with pytest.raises(error_type) as caught:
+        pi_plugins.run_bounded_command(("private-command",), env={"PRIVATE": "secret-value"})
+    assert caught.value is original
+    assert caught.value.__cause__ is cause
+    assert original.__notes__ == [
+        "Process cleanup is unconfirmed; inspect retained process ownership."
+    ]
+    traceback = original.__traceback__
+    while traceback is not None and traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    assert traceback is not None
+    assert traceback.tb_frame.f_code.co_name == "operation_failure"
+    assert process.wait.call_count == 1
+    assert 0 <= process.wait.call_args.kwargs["timeout"] <= 2
+
+
+def test_process_cleanup_shares_one_allowance_for_termination_and_reaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Termination consumes part of the same allowance used for reaping."""
+    from hephaestus.agents import pi_plugins
+
+    now = [100.0]
+    timeouts: list[float] = []
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    process = Mock(returncode=-9, stdout=None, stderr=None)
+
+    def terminate(*_args: Any) -> None:
+        now[0] += 0.25
+
+    def reap(*, timeout: float) -> int:
+        timeouts.append(timeout)
+        now[0] += 1.0
+        return -9
+
+    process.wait.side_effect = reap
+    monkeypatch.setattr(pi_plugins, "_terminate_process", terminate)
+    cleanup = pi_plugins._ProcessCleanup()
+    pi_plugins._complete_process_cleanup(process, cleanup, terminate=True)
+    assert timeouts == [1.75]
+    assert cleanup.remaining() == 0.75
+    now[0] = 102.0
+    assert cleanup.remaining() == 0
+
+
+def test_process_cleanup_retains_group_error_after_direct_child_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reaped direct child cannot conceal a failed group termination."""
+    from hephaestus.agents import pi_plugins
+
+    failure = PermissionError("fixed group could not be stopped")
+    process = Mock(returncode=-9, stdout=None, stderr=None)
+    monkeypatch.setattr(pi_plugins, "_terminate_process", Mock(side_effect=failure))
+    with pytest.raises(OSError, match="process cleanup could not be confirmed") as caught:
+        pi_plugins._complete_process_cleanup(process, pi_plugins._ProcessCleanup(), terminate=True)
+    assert caught.value.__cause__ is failure
+    process.kill.assert_called_once_with()
+    assert process.wait.call_count == 1
+
+
 def test_bounded_runner_times_out_and_stops_output_overflow() -> None:
     """The real subprocess seam bounds both runtime and captured output."""
     from hephaestus.agents.pi_plugins import run_bounded_command
@@ -678,41 +1045,6 @@ def test_bounded_runner_times_out_and_stops_output_overflow() -> None:
     assert timed_out.returncode != 0
     assert overflow.output_overflow is True
     assert len(overflow.stdout.encode()) <= 1_048_576
-
-
-@skipUnless(sys.platform == "win32", "requires Windows process semantics")
-def test_bounded_runner_windows_timeout_terminates_descendants(tmp_path: Path) -> None:
-    """A timed-out Windows command cannot leave a spawned installer child running."""
-    from hephaestus.agents.pi_plugins import run_bounded_command
-
-    started = tmp_path / "descendant-started"
-    sentinel = tmp_path / "descendant-survived"
-    child = (
-        "import pathlib, sys, time\n"
-        "pathlib.Path(sys.argv[1]).write_text('started', encoding='utf-8')\n"
-        "time.sleep(1.5)\n"
-        "pathlib.Path(sys.argv[2]).write_text('survived', encoding='utf-8')\n"
-    )
-    parent = (
-        "import pathlib, subprocess, sys, time\n"
-        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]])\n"
-        "started = pathlib.Path(sys.argv[2])\n"
-        "deadline = time.monotonic() + 0.8\n"
-        "while not started.exists() and time.monotonic() < deadline:\n"
-        "    time.sleep(0.01)\n"
-        "time.sleep(30)\n"
-    )
-
-    result = run_bounded_command(
-        (sys.executable, "-c", parent, child, str(started), str(sentinel)), timeout=1.0
-    )
-
-    assert result.timed_out is True
-    assert started.exists(), "test descendant did not start before the timeout"
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline and not sentinel.exists():
-        time.sleep(0.05)
-    assert not sentinel.exists(), "timed-out child process survived its parent"
 
 
 def test_bounded_runner_delivers_stdin_and_keeps_streams_separate() -> None:

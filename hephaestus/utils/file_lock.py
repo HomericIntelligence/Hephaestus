@@ -9,8 +9,7 @@ the issue-major automation loop's per-issue phase subprocesses) must not race on
 a shared on-disk resource such as a git worktree path or a state-record sweep.
 
 The lock is advisory (cooperating processes must all use it) and POSIX-only.
-On platforms without ``fcntl`` (Windows) it degrades to a no-op so callers stay
-portable; the underlying race simply isn't guarded there.
+If ``fcntl`` is unavailable, acquisition fails before the protected operation.
 
 Extracted from the previously-inline ``fcntl.flock`` patterns in
 ``hephaestus.github.rate_limit`` and ``hephaestus.automation.advise_runner`` so
@@ -123,13 +122,10 @@ def file_lock_at(
     """Hold a lock file relative to one existing bound directory."""
     try:
         import fcntl
-    except ImportError:  # pragma: no cover - Windows path
-        if require_exclusive:
-            raise ExclusiveLockUnavailableError(
-                f"Exclusive file locking is unavailable for: {name}"
-            ) from None
-        yield
-        return
+    except ImportError:
+        raise ExclusiveLockUnavailableError(
+            f"Exclusive file locking is unavailable for: {name}"
+        ) from None
     fh = _open_secure_lock_file_at(
         parent_fd,
         name,
@@ -172,30 +168,25 @@ def file_lock(
         path: Sentinel file backing the lock. Created if absent.
         blocking: When True (default) block until the lock is free. When False,
             raise :class:`LockUnavailableError` immediately if another holder exists.
-        require_exclusive: When True, raise :class:`LockUnavailableError` if
-            this platform has no reliable ``fcntl`` lock rather than degrading
-            to a no-op. Use for non-idempotent external side effects.
+        require_exclusive: When True, translate unsupported lock-operation errors
+            to :class:`LockUnavailableError`. Use for non-idempotent external
+            side effects. A missing ``fcntl`` module always prevents acquisition.
 
     Yields:
         None. Use as ``with file_lock(path): ...``.
 
     Raises:
         LockUnavailableError: ``blocking=False`` and the lock is already held,
-            or ``require_exclusive=True`` without a supported lock primitive.
+            or the lock primitive is unavailable.
         RuntimeError: ``path`` exists and is a symlink.
 
     """
     try:
         import fcntl
-    except ImportError:  # pragma: no cover - Windows path
-        if require_exclusive:
-            raise ExclusiveLockUnavailableError(
-                f"Exclusive file locking is unavailable on this platform: {path}"
-            ) from None
-        # No advisory locking available; degrade to a no-op so callers stay
-        # portable. The guarded race is simply unprotected on this platform.
-        yield
-        return
+    except ImportError:
+        raise ExclusiveLockUnavailableError(
+            f"Exclusive file locking is unavailable on this platform: {path}"
+        ) from None
 
     fh = _open_secure_lock_file(path)
     try:

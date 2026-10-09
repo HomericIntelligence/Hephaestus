@@ -31,8 +31,8 @@ Adopt a **dual-layer package** with four guarantees:
 
 2. **Product layer** — `hephaestus.automation`. Opt-in via the
    `HomericIntelligence-Hephaestus[automation]` extra. The extra declares
-   `pydantic` (used by `hephaestus/automation/models.py`) and `tzdata` on
-   Windows (used indirectly via `hephaestus.github.rate_limit`).
+   `pydantic` (used by `hephaestus/automation/models.py`). Windows is unsupported;
+   the package no longer declares its Windows-only timezone-data fallback.
 
 3. **The automation console scripts** ship registered in `[project.scripts]` —
    `hephaestus-automation-loop`, `hephaestus-plan-issues`,

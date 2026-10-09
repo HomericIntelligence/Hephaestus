@@ -320,19 +320,13 @@ def configure_gh_global_throttle(rate: float, burst: float) -> None:
 
 def _current_uid_fragment() -> str:
     """Return a stable user identifier for fallback runtime paths."""
-    getuid = getattr(os, "getuid", None)
-    if getuid is None:  # pragma: no cover - Windows path
-        return "user"
-    return str(getuid())
+    return str(os.getuid())
 
 
 def _owned_by_current_user(path: Path) -> bool:
-    """Return whether ``path`` is owned by the current user when POSIX uid exists."""
-    getuid = getattr(os, "getuid", None)
-    if getuid is None:  # pragma: no cover - Windows path
-        return True
+    """Return whether ``path`` is owned by the current POSIX user."""
     try:
-        return path.stat().st_uid == int(getuid())
+        return path.stat().st_uid == os.getuid()
     except OSError:
         return False
 
@@ -453,9 +447,8 @@ def gh_global_throttle_acquire(
     ``0`` disables the throttle entirely (useful for tests and for callers
     that already hold a known budget).
 
-    On platforms without ``fcntl`` (Windows) the throttle silently no-ops;
-    the per-thread throttle in :mod:`hephaestus.automation.github_api`
-    still applies.
+    An enabled throttle requires ``fcntl``. If that primitive is unavailable,
+    its import error propagates before token acquisition.
     """
     if deadline_s is not None and (
         isinstance(deadline_s, bool) or not math.isfinite(deadline_s) or deadline_s <= 0
@@ -467,10 +460,7 @@ def gh_global_throttle_acquire(
         return
     burst = _global_throttle_burst
 
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover — Windows path
-        return
+    import fcntl
 
     state_path = _global_throttle_state_path()
 

@@ -16,6 +16,8 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: BSD License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -26,9 +28,6 @@ dependencies = [
     "Jinja2>=3.1,<4",
     "packaging>=21.0,<27",
     "pyyaml>=6.0,<7",
-    # IANA timezone data is bundled with Python on POSIX but not on Windows;
-    # rate_limit.py uses ZoneInfo which needs it on Windows.
-    "tzdata>=2026.2,<2027; platform_system == 'Windows'",
 ]
 
 # Optional-dependency groups. The `all` aggregator below intentionally lists
@@ -252,7 +251,7 @@ markers = [
     "performance: bounded capacity, latency, and sustained-concurrency tests",
     "precommit: deterministic smoke tests run by pre-commit and pull-request CI",
     "nightly: high-cost functional tests run by the scheduled nightly workflow",
-    "requires_posix: requires POSIX coreutils (echo, false, ls) and/or git on PATH; skipped on win32",
+    "requires_posix: requires POSIX coreutils (echo, false, ls) and/or git on PATH",
     "contract: opt-in sandboxed contract tests against real gh/agent CLIs; selected with --run-contract-tests",
     "pyxis: live Linux Pyxis/Enroot host-verification integration test",
 ]

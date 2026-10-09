@@ -87,6 +87,33 @@ def test_reader_and_writer_authorization_is_exact() -> None:
     assert not reader_is_authorized("HEPH_GH_TIMEOUT", "anything")
 
 
+@pytest.mark.parametrize("name", ["USERPROFILE", "APPDATA", "LOCALAPPDATA"])
+def test_alternate_configuration_paths_allow_only_private_child_writes(name: str) -> None:
+    """Private child paths grant no authority to read operator configuration."""
+    spec = APPROVED_ENV_BY_NAME[name]
+
+    assert spec.direction == "child-write"
+    assert spec.sensitivity == "private"
+    assert spec.qualified_readers == ()
+    assert writer_is_authorized(
+        name, "hephaestus.config.child_environments.build_codex_implementation_child_env"
+    )
+    assert not reader_is_authorized(
+        name, "hephaestus.config.child_environments.read_approved_parent_env"
+    )
+
+
+@pytest.mark.parametrize(
+    "name", ["SYSTEMROOT", "SystemRoot", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT"]
+)
+def test_windows_runtime_variables_have_no_boundary_authority(name: str) -> None:
+    """Unsupported runtime variables have no registered reader or writer."""
+    assert name not in APPROVED_ENV_BY_NAME
+    assert not reader_is_authorized(
+        name, "hephaestus.config.child_environments.read_approved_parent_env"
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "valid", "invalid"),
     [

@@ -363,7 +363,11 @@ def test_rejects_smoke_when_user_only_log_permissions_are_unavailable(
     """The smoke seam must fail before execution if it cannot protect its log artifact."""
     run_pi = Mock(return_value=AgentRunResult(stdout="OK", stderr=""))
     monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
-    monkeypatch.setattr(_mod, "_private_smoke_log_permissions_supported", lambda: False)
+    monkeypatch.setattr(
+        _mod,
+        "prepare_pi_private_log_dir",
+        Mock(side_effect=PermissionError("user-only log permissions unavailable")),
+    )
 
     assert (
         _mod.main([*_alias_args(tmp_path, model="private-test-alias"), "--cwd", str(tmp_path)]) == 1

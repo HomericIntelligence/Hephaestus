@@ -8,11 +8,9 @@ module, never the reverse.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import hashlib
 import json
 import os
-import queue
 import re
 import secrets
 import selectors
@@ -21,7 +19,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
@@ -38,62 +35,7 @@ _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _VERSION_OUTPUT_RE = re.compile(r"(?:pi\s+|v)?([0-9]+\.[0-9]+\.[0-9]+)\n?\Z")
 _MAX_OUTPUT_BYTES = 1_048_576
-_CREATE_SUSPENDED = 0x00000004
-_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
-_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-_PROCESS_TERMINATE = 0x0001
-_PROCESS_SET_QUOTA = 0x0100
-_THREAD_SUSPEND_RESUME = 0x0002
-_TH32CS_SNAPTHREAD = 0x00000004
-_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
-
-class _JobObjectBasicLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("per_process_user_time_limit", ctypes.c_int64),
-        ("per_job_user_time_limit", ctypes.c_int64),
-        ("limit_flags", ctypes.c_uint32),
-        ("minimum_working_set_size", ctypes.c_size_t),
-        ("maximum_working_set_size", ctypes.c_size_t),
-        ("active_process_limit", ctypes.c_uint32),
-        ("affinity", ctypes.c_size_t),
-        ("priority_class", ctypes.c_uint32),
-        ("scheduling_class", ctypes.c_uint32),
-    ]
-
-
-class _IoCounters(ctypes.Structure):
-    _fields_ = [
-        ("read_operation_count", ctypes.c_uint64),
-        ("write_operation_count", ctypes.c_uint64),
-        ("other_operation_count", ctypes.c_uint64),
-        ("read_transfer_count", ctypes.c_uint64),
-        ("write_transfer_count", ctypes.c_uint64),
-        ("other_transfer_count", ctypes.c_uint64),
-    ]
-
-
-class _JobObjectExtendedLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("basic_limit_information", _JobObjectBasicLimitInformation),
-        ("io_info", _IoCounters),
-        ("process_memory_limit", ctypes.c_size_t),
-        ("job_memory_limit", ctypes.c_size_t),
-        ("peak_process_memory_used", ctypes.c_size_t),
-        ("peak_job_memory_used", ctypes.c_size_t),
-    ]
-
-
-class _ThreadEntry32(ctypes.Structure):
-    _fields_ = [
-        ("size", ctypes.c_uint32),
-        ("usage_count", ctypes.c_uint32),
-        ("thread_id", ctypes.c_uint32),
-        ("owner_process_id", ctypes.c_uint32),
-        ("base_priority", ctypes.c_int32),
-        ("delta_priority", ctypes.c_int32),
-        ("flags", ctypes.c_uint32),
-    ]
+_PROCESS_CLEANUP_SECONDS = 2.0
 
 
 def _object(value: Any, context: str) -> dict[str, Any]:
@@ -261,130 +203,94 @@ class CommandRunner(Protocol):
         """Execute one bounded argument vector."""
 
 
-class _WindowsJob:
-    """Windows Job Object that owns a subprocess and all of its descendants."""
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    """Stop the process group owned by this command."""
+    # The child can exit before signal delivery.
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
 
-    def __init__(self) -> None:  # pragma: no cover - exercised on Windows CI
-        win_dll = cast(Any, vars(ctypes)["WinDLL"])
-        self._kernel32 = win_dll("kernel32", use_last_error=True)
-        self._configure_signatures()
-        self._handle = cast(int | None, self._kernel32.CreateJobObjectW(None, None))
-        if not self._handle:
-            raise self._error("CreateJobObjectW")
-        limits = _JobObjectExtendedLimitInformation()
-        limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not self._kernel32.SetInformationJobObject(
-            self._handle,
-            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-            ctypes.byref(limits),
-            ctypes.sizeof(limits),
-        ):
-            error = self._error("SetInformationJobObject")
-            self.close()
-            raise error
 
-    def _configure_signatures(self) -> None:  # pragma: no cover - exercised on Windows CI
-        pointer = ctypes.c_void_p
-        dword = ctypes.c_uint32
-        bool_type = ctypes.c_int32
-        self._kernel32.CreateJobObjectW.argtypes = [pointer, ctypes.c_wchar_p]
-        self._kernel32.CreateJobObjectW.restype = pointer
-        self._kernel32.SetInformationJobObject.argtypes = [pointer, dword, pointer, dword]
-        self._kernel32.SetInformationJobObject.restype = bool_type
-        self._kernel32.OpenProcess.argtypes = [dword, bool_type, dword]
-        self._kernel32.OpenProcess.restype = pointer
-        self._kernel32.AssignProcessToJobObject.argtypes = [pointer, pointer]
-        self._kernel32.AssignProcessToJobObject.restype = bool_type
-        self._kernel32.TerminateJobObject.argtypes = [pointer, dword]
-        self._kernel32.TerminateJobObject.restype = bool_type
-        self._kernel32.CreateToolhelp32Snapshot.argtypes = [dword, dword]
-        self._kernel32.CreateToolhelp32Snapshot.restype = pointer
-        self._kernel32.Thread32First.argtypes = [pointer, pointer]
-        self._kernel32.Thread32First.restype = bool_type
-        self._kernel32.Thread32Next.argtypes = [pointer, pointer]
-        self._kernel32.Thread32Next.restype = bool_type
-        self._kernel32.OpenThread.argtypes = [dword, bool_type, dword]
-        self._kernel32.OpenThread.restype = pointer
-        self._kernel32.ResumeThread.argtypes = [pointer]
-        self._kernel32.ResumeThread.restype = dword
-        self._kernel32.CloseHandle.argtypes = [pointer]
-        self._kernel32.CloseHandle.restype = bool_type
+@dataclass
+class _ProcessCleanup:
+    """Share one cleanup allowance across termination and reaping."""
 
-    @staticmethod
-    def _error(operation: str) -> OSError:  # pragma: no cover - exercised on Windows CI
-        get_last_error = cast(Callable[[], int], vars(ctypes)["get_last_error"])
-        error = get_last_error()
-        return OSError(error, f"{operation} failed with Windows error {error}")
+    deadline: float | None = None
+    attempted: bool = False
 
-    def assign(self, pid: int) -> None:  # pragma: no cover - exercised on Windows CI
-        process_handle = self._kernel32.OpenProcess(
-            _PROCESS_TERMINATE | _PROCESS_SET_QUOTA, False, pid
-        )
-        if not process_handle:
-            raise self._error("OpenProcess")
+    def remaining(self) -> float:
+        """Start cleanup once and return its remaining aggregate allowance."""
+        if self.deadline is None:
+            self.deadline = time.monotonic() + _PROCESS_CLEANUP_SECONDS
+        return max(0.0, self.deadline - time.monotonic())
+
+
+def _terminate_for_cleanup(
+    process: subprocess.Popen[bytes],
+) -> list[Exception]:
+    """Retain a group failure while still trying to stop the direct child."""
+    failures: list[Exception] = []
+    try:
+        _terminate_process(process)
+    except OSError as exc:
+        failures.append(exc)
         try:
-            if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
-                raise self._error("AssignProcessToJobObject")
-        finally:
-            self._kernel32.CloseHandle(process_handle)
+            process.kill()
+        except ProcessLookupError:
+            pass
+        except OSError as direct_error:
+            failures.append(direct_error)
+    return failures
 
-    def resume(self, pid: int) -> None:  # pragma: no cover - exercised on Windows CI
-        snapshot = self._kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
-        if not snapshot or snapshot == _INVALID_HANDLE_VALUE:
-            raise self._error("CreateToolhelp32Snapshot")
+
+def _close_process_output(process: subprocess.Popen[bytes]) -> list[Exception]:
+    """Close output streams and retain each close failure."""
+    failures: list[Exception] = []
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError as exc:
+                failures.append(exc)
+    return failures
+
+
+def _complete_process_cleanup(
+    process: subprocess.Popen[bytes],
+    cleanup: _ProcessCleanup,
+    *,
+    terminate: bool,
+) -> None:
+    """Confirm cleanup or raise a compatible error with its specific cause."""
+    cleanup.attempted = True
+    cleanup.remaining()
+    failures = _terminate_for_cleanup(process) if terminate else []
+    try:
+        process.wait(timeout=cleanup.remaining())
+        if process.returncode is None:
+            failures.append(RuntimeError("process exit was not confirmed"))
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append(exc)
+    failures.extend(_close_process_output(process))
+    if failures:
+        raise OSError("process cleanup could not be confirmed") from failures[0]
+
+
+def _wait_for_process_exit(
+    process: subprocess.Popen[bytes],
+    deadline: float,
+    cleanup: _ProcessCleanup,
+    *,
+    timed_out: bool,
+    overflow: bool,
+) -> bool:
+    """Keep the output deadline through exit, then use one cleanup allowance."""
+    if not timed_out and not overflow:
         try:
-            entry = _ThreadEntry32()
-            entry.size = ctypes.sizeof(entry)
-            found = bool(self._kernel32.Thread32First(snapshot, ctypes.byref(entry)))
-            while found:
-                if entry.owner_process_id == pid:
-                    thread_handle = self._kernel32.OpenThread(
-                        _THREAD_SUSPEND_RESUME, False, entry.thread_id
-                    )
-                    if not thread_handle:
-                        raise self._error("OpenThread")
-                    try:
-                        if self._kernel32.ResumeThread(thread_handle) == 0xFFFFFFFF:
-                            raise self._error("ResumeThread")
-                    finally:
-                        self._kernel32.CloseHandle(thread_handle)
-                    return
-                found = bool(self._kernel32.Thread32Next(snapshot, ctypes.byref(entry)))
-        finally:
-            self._kernel32.CloseHandle(snapshot)
-        raise OSError(f"suspended process {pid} has no resumable thread")
-
-    def terminate(self) -> None:  # pragma: no cover - exercised on Windows CI
-        if self._handle and not self._kernel32.TerminateJobObject(self._handle, 1):
-            raise self._error("TerminateJobObject")
-
-    def close(self) -> None:  # pragma: no cover - exercised on Windows CI
-        if self._handle:
-            self._kernel32.CloseHandle(self._handle)
-            self._handle = None
-
-
-def _terminate_process(
-    process: subprocess.Popen[bytes], windows_job: _WindowsJob | None = None
-) -> None:
-    if os.name == "posix":
-        # The child may exit between the liveness check and signal delivery.
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
-        return
-    if windows_job is not None:  # pragma: no cover - exercised on Windows CI
-        with suppress(OSError):
-            windows_job.terminate()
-    with suppress(OSError):  # pragma: no cover - exercised on Windows CI
-        process.kill()
-
-
-def _read_process_pipe(
-    name: str, stream: Any, events: queue.Queue[tuple[str, bytes | None]]
-) -> None:
-    while chunk := os.read(stream.fileno(), 65_536):
-        events.put((name, chunk))
-    events.put((name, None))
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+    _complete_process_cleanup(process, cleanup, terminate=timed_out or overflow)
+    return timed_out
 
 
 def _write_process_input(
@@ -404,107 +310,51 @@ def _close_process_input(process: subprocess.Popen[bytes]) -> None:
         process.stdin.close()
 
 
-def _run_windows_process(
-    process: subprocess.Popen[bytes],
-    windows_job: _WindowsJob,
-    input_text: str | None,
-    timeout: float,
-    keep_stdin_open: bool,
-) -> ProcessResult:  # pragma: no cover - exercised on Windows CI
-    _write_process_input(process, input_text, keep_stdin_open)
-    stdout_pipe = cast(Any, process.stdout)
-    stderr_pipe = cast(Any, process.stderr)
-    events: queue.Queue[tuple[str, bytes | None]] = queue.Queue()
-    threads = [
-        threading.Thread(target=_read_process_pipe, args=(name, stream, events), daemon=True)
-        for name, stream in (("stdout", stdout_pipe), ("stderr", stderr_pipe))
-    ]
-    for thread in threads:
-        thread.start()
-    buffers = {"stdout": bytearray(), "stderr": bytearray()}
-    deadline = time.monotonic() + timeout
-    finished = 0
-    total = 0
-    timed_out = False
-    overflow = False
-    while finished < 2:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            _terminate_process(process, windows_job)
-            break
-        try:
-            name, chunk = events.get(timeout=min(remaining, 0.1))
-        except queue.Empty:
-            continue
-        if chunk is None:
-            finished += 1
-            continue
-        available = max(0, _MAX_OUTPUT_BYTES - total)
-        buffers[name].extend(chunk[:available])
-        total += len(chunk)
-        if total > _MAX_OUTPUT_BYTES:
-            overflow = True
-            _terminate_process(process, windows_job)
-            break
-    _close_process_input(process)
-    process.wait()
-    for thread in threads:
-        thread.join(timeout=1)
-    return ProcessResult(
-        process.returncode or (-9 if timed_out or overflow else 0),
-        buffers["stdout"].decode(errors="replace"),
-        buffers["stderr"].decode(errors="replace"),
-        timed_out=timed_out,
-        output_overflow=overflow,
-    )
-
-
 def _run_posix_process(
     process: subprocess.Popen[bytes],
     input_text: str | None,
     timeout: float,
     keep_stdin_open: bool,
+    cleanup: _ProcessCleanup,
 ) -> ProcessResult:
     _write_process_input(process, input_text, keep_stdin_open)
     stdout_pipe = cast(Any, process.stdout)
     stderr_pipe = cast(Any, process.stderr)
     streams = {stdout_pipe: bytearray(), stderr_pipe: bytearray()}
-    selector = selectors.DefaultSelector()
-    for stream in streams:
-        selector.register(stream, selectors.EVENT_READ)
     deadline = time.monotonic() + timeout
     timed_out = False
     overflow = False
     total = 0
-    while selector.get_map():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            _terminate_process(process)
-            break
-        for key, _mask in selector.select(min(remaining, 0.1)):
-            stream = cast(Any, key.fileobj)
-            chunk = os.read(stream.fileno(), 65_536)
-            if not chunk:
-                selector.unregister(stream)
-                stream.close()
-                continue
-            available = max(0, _MAX_OUTPUT_BYTES - total)
-            streams[stream].extend(chunk[:available])
-            total += len(chunk)
-            if total > _MAX_OUTPUT_BYTES:
-                overflow = True
-                _terminate_process(process)
+    with selectors.DefaultSelector() as selector:
+        for stream in streams:
+            selector.register(stream, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
                 break
-        if overflow:
-            break
-    selector.close()
+            for key, _mask in selector.select(min(remaining, 0.1)):
+                stream = cast(Any, key.fileobj)
+                chunk = os.read(stream.fileno(), 65_536)
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                available = max(0, _MAX_OUTPUT_BYTES - total)
+                streams[stream].extend(chunk[:available])
+                total += len(chunk)
+                if total > _MAX_OUTPUT_BYTES:
+                    overflow = True
+                    break
+            if overflow:
+                break
     _close_process_input(process)
     for stream in streams:
         if not stream.closed:
             stream.close()
-    process.wait()
+    timed_out = _wait_for_process_exit(
+        process, deadline, cleanup, timed_out=timed_out, overflow=overflow
+    )
     stdout = streams[stdout_pipe].decode(errors="replace")
     stderr = streams[stderr_pipe].decode(errors="replace")
     return ProcessResult(
@@ -525,38 +375,33 @@ def run_bounded_command(
     input_text: str | None = None,
     keep_stdin_open: bool = False,
 ) -> ProcessResult:
-    """Run one argv without a shell and kill it on timeout or output overflow."""
+    """Run one argv with a deadline and a two-second aggregate cleanup allowance.
+
+    EOF does not end the command deadline. Unconfirmed cleanup raises OSError.
+    Synchronous stdin writes retain their existing behavior.
+    """
     if timeout <= 0:
         raise ValueError("timeout must be positive")
     child_env = env if env is not None else build_pi_child_env()
-    windows_job = _WindowsJob() if os.name != "posix" else None
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=child_env,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    cleanup = _ProcessCleanup()
     try:
-        process = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=child_env,
-            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=os.name == "posix",
-            creationflags=_CREATE_SUSPENDED if windows_job is not None else 0,
-        )
-    except BaseException:
-        if windows_job is not None:
-            windows_job.close()
+        return _run_posix_process(process, input_text, timeout, keep_stdin_open, cleanup)
+    except BaseException as exc:
+        if not cleanup.attempted:
+            try:
+                _complete_process_cleanup(process, cleanup, terminate=True)
+            except BaseException:
+                exc.add_note("Process cleanup is unconfirmed; inspect retained process ownership.")
         raise
-    if windows_job is not None:
-        try:
-            windows_job.assign(process.pid)
-            windows_job.resume(process.pid)
-            return _run_windows_process(process, windows_job, input_text, timeout, keep_stdin_open)
-        except BaseException:
-            _terminate_process(process, windows_job)
-            process.wait()
-            raise
-        finally:
-            windows_job.close()
-    return _run_posix_process(process, input_text, timeout, keep_stdin_open)
 
 
 @dataclass(frozen=True)

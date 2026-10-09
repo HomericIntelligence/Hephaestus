@@ -5400,16 +5400,15 @@ class TestTestsAndFix:
             "`bash scripts/run_ci_local.sh all --rebuild` — passed"
         )
 
-    @pytest.mark.parametrize("platform", ["linux", "win32"])
-    def test_non_darwin_exact_handoff_finishes_runner_unavailable(
-        self, make_ctx: Any, make_work_item: Any, platform: str
+    def test_linux_exact_handoff_finishes_runner_unavailable(
+        self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A valid non-Darwin signal fails closed without a test-fix run."""
+        """A valid Linux signal fails closed without a test-fix run."""
         stage = ImplementationStage()
         ctx = make_ctx(org="HomericIntelligence")
         item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
         stage.step(item, ctx)
-        with patch(_IMPLEMENTATION_PLATFORM, platform):
+        with patch(_IMPLEMENTATION_PLATFORM, "linux"):
             stage.on_job_done(
                 item,
                 JobResult(

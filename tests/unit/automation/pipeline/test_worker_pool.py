@@ -164,10 +164,7 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
     consume_implementation_writer_authority,
 )
-from hephaestus.automation.worktree_snapshot import (
-    _read_bounded_git_output_with_threads,
-    _terminate_bounded_process_tree,
-)
+from hephaestus.automation.worktree_snapshot import _terminate_bounded_process_tree
 from hephaestus.config.child_environments import (
     build_git_child_env,
     build_nested_host_verification_env,
@@ -4119,11 +4116,8 @@ class TestWorkerPoolSubmitComplete:
         assert host_command.call_args.kwargs["git_system_config"] == (tmp_path / "gitconfig")
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
 
-    @pytest.mark.parametrize("selector_supported", [True, False])
-    def test_immutable_archive_failure_redacts_pem_in_durable_receipt(
-        self, tmp_path: Path, selector_supported: bool
-    ) -> None:
-        """Both archive readers mask a PEM assignment before durable storage."""
+    def test_immutable_archive_failure_redacts_pem_in_durable_receipt(self, tmp_path: Path) -> None:
+        """Archive capture masks a PEM assignment before durable storage."""
         receipt_dir = tmp_path / f"pipeline-receipts-{'a' * 32}"
         worker = WorkerPool(
             size=1,
@@ -4189,10 +4183,6 @@ class TestWorkerPoolSubmitComplete:
                 patch(
                     f"{_WP}._verifier_owned_runtime_environment",
                     return_value=Path(sys.prefix),
-                ),
-                patch(
-                    "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
-                    return_value=selector_supported,
                 ),
                 patch(f"{_WP}._run_bounded_git_output", side_effect=fail_archive_reader),
             ):
@@ -6366,11 +6356,13 @@ class TestGitOps:
             "worktree_path": str(writer),
         }
 
-    def test_path_content_identity_accepts_an_empty_set_without_posix_support(
+    def test_path_content_identity_accepts_an_empty_set_without_path_traversal(
         self, tmp_path: Path
     ) -> None:
         """A clean writer does not require host path-traversal primitives."""
-        with patch(f"{_WP}.os.name", "nt"):
+        with patch(
+            "hephaestus.automation.worktree_snapshot._secure_dir_fd_supported", return_value=False
+        ):
             digest = _path_content_identity(tmp_path, "", seed_digest="seed")
 
         expected = hashlib.sha256(b"Dseed").hexdigest()
@@ -7097,15 +7089,9 @@ class TestGitOps:
                 timeout=0,
             )
 
-    def test_bounded_git_output_thread_backend_preserves_the_limit(self) -> None:
-        """The pipe-thread backend keeps the same stdout byte limit."""
-        with (
-            patch(
-                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
-                return_value=False,
-            ),
-            pytest.raises(RuntimeError, match="Git output limit exceeded"),
-        ):
+    def test_bounded_git_output_preserves_the_limit(self) -> None:
+        """Capture rejects output above the stdout byte limit."""
+        with pytest.raises(RuntimeError, match="Git output limit exceeded"):
             _run_bounded_git_output(
                 (sys.executable, "-c", "import sys; sys.stdout.write('abcdef')"),
                 cwd=Path.cwd(),
@@ -7114,34 +7100,24 @@ class TestGitOps:
                 retain_text=True,
             )
 
-    def test_bounded_git_output_thread_backend_returns_exact_output(self) -> None:
-        """The pipe-thread backend returns the exact text and digest."""
-        with patch(
-            "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
-            return_value=False,
-        ):
-            result = _run_bounded_git_output(
-                (sys.executable, "-c", "import sys; sys.stdout.write('bounded')"),
-                cwd=Path.cwd(),
-                timeout=10,
-                max_bytes=64,
-                retain_text=True,
-            )
+    def test_bounded_git_output_returns_exact_output(self) -> None:
+        """Capture returns the exact text, byte count, and digest."""
+        result = _run_bounded_git_output(
+            (sys.executable, "-c", "import sys; sys.stdout.write('bounded')"),
+            cwd=Path.cwd(),
+            timeout=10,
+            max_bytes=64,
+            retain_text=True,
+        )
 
         assert result.text == "bounded"
         assert result.byte_count == 7
         assert result.sha256 == hashlib.sha256(b"bounded").hexdigest()
 
-    def test_bounded_git_output_thread_backend_keeps_a_bounded_stderr_tail(self) -> None:
-        """The pipe-thread backend reports only the configured stderr tail."""
+    def test_bounded_git_output_keeps_a_bounded_stderr_tail(self) -> None:
+        """Failed capture reports only the configured stderr tail."""
         script = "import sys; sys.stderr.write('x' * 5000 + 'end'); raise SystemExit(3)"
-        with (
-            patch(
-                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
-                return_value=False,
-            ),
-            pytest.raises(subprocess.CalledProcessError) as raised,
-        ):
+        with pytest.raises(subprocess.CalledProcessError) as raised:
             _run_bounded_git_output(
                 (sys.executable, "-c", script),
                 cwd=Path.cwd(),
@@ -7154,15 +7130,9 @@ class TestGitOps:
         assert len(raised.value.stderr.encode()) <= 4096
         assert raised.value.stderr.endswith("end")
 
-    def test_bounded_git_output_thread_backend_enforces_timeout(self) -> None:
-        """The pipe-thread backend terminates a child after its deadline."""
-        with (
-            patch(
-                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
-                return_value=False,
-            ),
-            pytest.raises(subprocess.TimeoutExpired),
-        ):
+    def test_bounded_git_output_enforces_timeout(self) -> None:
+        """Capture terminates a child after its deadline."""
+        with pytest.raises(subprocess.TimeoutExpired):
             _run_bounded_git_output(
                 (sys.executable, "-c", "import time; time.sleep(1)"),
                 cwd=Path.cwd(),
@@ -7171,9 +7141,7 @@ class TestGitOps:
                 retain_text=True,
             )
 
-    def test_bounded_git_output_thread_backend_does_not_wait_for_inherited_pipe(
-        self,
-    ) -> None:
+    def test_bounded_git_output_does_not_wait_for_inherited_pipe(self) -> None:
         """A descendant-held pipe cannot extend the configured deadline."""
         script = (
             "import subprocess, sys; "
@@ -7181,14 +7149,7 @@ class TestGitOps:
             "'import time; time.sleep(3)'], start_new_session=True)"
         )
         started = time.monotonic()
-        prior_threads = set(threading.enumerate())
-        with (
-            patch(
-                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
-                return_value=False,
-            ),
-            pytest.raises(subprocess.TimeoutExpired),
-        ):
+        with pytest.raises(subprocess.TimeoutExpired):
             _run_bounded_git_output(
                 (sys.executable, "-c", script),
                 cwd=Path.cwd(),
@@ -7198,60 +7159,21 @@ class TestGitOps:
             )
 
         assert time.monotonic() - started < 2.0
-        assert [thread for thread in threading.enumerate() if thread not in prior_threads] == []
 
-    @pytest.mark.parametrize(
-        "termination_error",
-        (OSError("missing taskkill"), subprocess.TimeoutExpired(("taskkill",), 5)),
-    )
-    def test_windows_tree_termination_always_kills_and_waits_for_the_parent(
+    @pytest.mark.parametrize("termination_error", [PermissionError("denied"), ProcessLookupError()])
+    def test_posix_tree_termination_always_kills_and_waits_for_the_parent(
         self, termination_error: BaseException
     ) -> None:
-        """A Windows tree-helper failure cannot skip direct-child cleanup."""
+        """A group termination error cannot skip direct-child cleanup."""
         process = MagicMock(pid=1234)
-        with (
-            patch(f"{_WP}.os.name", "nt"),
-            patch(
-                "hephaestus.automation.worktree_snapshot._trusted_windows_taskkill",
-                return_value=r"C:\Windows\taskkill.exe",
-            ),
-            patch(f"{_WP}.subprocess.run", side_effect=termination_error),
-        ):
+        with patch(
+            "hephaestus.automation.worktree_snapshot.os.killpg", side_effect=termination_error
+        ) as kill_group:
             _terminate_bounded_process_tree(process, process_group=True)
 
+        kill_group.assert_called_once_with(1234, signal.SIGKILL)
         process.kill.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=5)
-
-    def test_bounded_git_output_thread_backend_reports_pipe_read_errors(self) -> None:
-        """A reader failure cannot produce a successful inspection receipt."""
-        process = subprocess.Popen(
-            (sys.executable, "-c", "import time; time.sleep(10)"),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert process.stdout is not None
-        stdout_fd = process.stdout.fileno()
-        original_read = os.read
-
-        def fail_stdout(fd: int, size: int) -> bytes:
-            if fd == stdout_fd:
-                raise OSError("read failed")
-            return original_read(fd, size)
-
-        with (
-            patch(f"{_WP}.os.read", side_effect=fail_stdout),
-            pytest.raises(RuntimeError, match="stdout pipe read failed"),
-        ):
-            _read_bounded_git_output_with_threads(
-                process,
-                ("git", "status"),
-                timeout=1,
-                max_bytes=64,
-                retain_text=True,
-            )
-
-        assert process.poll() is not None
 
     @pytest.mark.parametrize("failure_point", ("register", "read"))
     def test_bounded_git_output_selector_setup_and_read_failures_reap_child(
@@ -7311,51 +7233,6 @@ class TestGitOps:
         assert created[0].stdout.closed
         assert created[0].stderr.closed
         assert not selector.get_map()
-
-    def test_bounded_git_output_partial_thread_start_reaps_child_and_reader(self) -> None:
-        """A second reader start failure stops the child and first reader."""
-        original_popen = subprocess.Popen
-        original_start = threading.Thread.start
-        created: list[subprocess.Popen[bytes]] = []
-        starts = 0
-
-        def launch(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
-            process = cast(subprocess.Popen[bytes], original_popen(*args, **kwargs))
-            created.append(process)
-            return process
-
-        def fail_second_start(thread: threading.Thread) -> None:
-            nonlocal starts
-            starts += 1
-            if starts == 2:
-                raise RuntimeError("thread resource unavailable")
-            original_start(thread)
-
-        prior_threads = set(threading.enumerate())
-        with (
-            patch(
-                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
-                return_value=False,
-            ),
-            patch(f"{_WP}.subprocess.Popen", side_effect=launch),
-            patch(f"{_WP}.threading.Thread.start", new=fail_second_start),
-            pytest.raises(RuntimeError, match="thread resource unavailable"),
-        ):
-            _run_bounded_git_output(
-                (sys.executable, "-c", "import time; time.sleep(30)"),
-                cwd=Path.cwd(),
-                timeout=10,
-                max_bytes=64,
-                retain_text=True,
-            )
-
-        assert len(created) == 1
-        assert created[0].poll() is not None
-        assert created[0].stdout is not None
-        assert created[0].stderr is not None
-        assert created[0].stdout.closed
-        assert created[0].stderr.closed
-        assert [thread for thread in threading.enumerate() if thread not in prior_threads] == []
 
     def test_inspect_implementation_worktree_includes_staged_changes_in_diff(
         self,
@@ -20436,7 +20313,6 @@ class TestGitLocking:
         repo_lock.assert_not_called()
         dispatch.assert_not_called()
 
-    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     @pytest.mark.parametrize("repo_path_kind", ["canonical", "parent-alias"])
     def test_remove_worktree_reuses_admitted_common_lock(
         self,
@@ -21606,7 +21482,6 @@ class TestGitLocking:
         dispatch.assert_not_called()
         assert result.error == "Git common directory changed before operation admission"
 
-    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     def test_fetch_uses_admitted_checkout_after_parent_alias_moves(
         self,
         completion_q: CompletionQueue,
@@ -21754,7 +21629,6 @@ class TestGitLocking:
         assert result.error == "Git common directory changed before operation admission"
 
     @pytest.mark.parametrize("change", ["remove", "replace"])
-    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     def test_common_directory_change_at_lock_open_does_not_write_new_parent(
         self,
         completion_q: CompletionQueue,
@@ -25066,7 +24940,6 @@ def test_linked_intake_waits_for_primary_default_compatibility_lock(
         pool.shutdown()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="hard-link lock validation requires POSIX")
 def test_linked_intake_rejects_hard_linked_primary_compatibility_lock(
     completion_q: CompletionQueue,
     shutdown_event: threading.Event,

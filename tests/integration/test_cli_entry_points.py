@@ -22,7 +22,6 @@ import importlib
 import os
 import shutil
 import subprocess
-import sys
 import tomllib
 from pathlib import Path
 
@@ -89,9 +88,6 @@ class TestCLITargetImportable:
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
     def test_target_importable(self, command: str, module_path: str, attr: str) -> None:
-        # The agent runtime requires fcntl, which Windows does not provide.
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require fcntl, which is unavailable on Windows")
         mod = importlib.import_module(module_path)
         assert hasattr(mod, attr), f"{module_path} has no '{attr}' attribute"
         assert callable(getattr(mod, attr)), f"{module_path}.{attr} is not callable"
@@ -102,9 +98,6 @@ class TestCLIHelpFlag:
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
     def test_help_flag(self, command: str, module_path: str, attr: str, require_cli: bool) -> None:
-        # Queue commands require fcntl through the agent runtime.
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -138,8 +131,6 @@ class TestCLIJsonFlag:
         appears in ``--help`` text proves the parser registered it without
         having to execute the CLI's main logic.
         """
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -171,8 +162,6 @@ class TestCLIVersionFlag:
         self, command: str, module_path: str, attr: str, require_cli: bool
     ) -> None:
         """``<cmd> --version`` must exit 0 and print a version line."""
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -198,8 +187,6 @@ class TestCLIVersionFlag:
         self, command: str, module_path: str, attr: str, require_cli: bool
     ) -> None:
         """``<cmd> -V`` must also work (short form of --version)."""
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -259,6 +246,4 @@ class TestRequireCliGate:
             _resolve_binary("hephaestus-definitely-not-a-real-binary", required=True)
 
     def test_present_binary_resolves(self) -> None:
-        # `python3` (POSIX) / `python` is always on PATH in the test env.
-        command = "python3" if sys.platform != "win32" else "python"
-        assert _resolve_binary(command, required=True)
+        assert _resolve_binary("python3", required=True)

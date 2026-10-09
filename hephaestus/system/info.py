@@ -102,9 +102,6 @@ def get_os_info() -> str:
             return f"macOS {version}"
         return "macOS (unknown version)"
 
-    elif system == "Windows":
-        return f"Windows {platform.release()}"
-
     else:
         return f"{system} (unknown)"
 

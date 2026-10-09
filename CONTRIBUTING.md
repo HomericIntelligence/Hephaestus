@@ -151,34 +151,27 @@ does not exist. Handle a finding as follows:
 
 ### Platform Support
 
-The uv developer environment and the published wheel intentionally cover
-different platform sets. Contributors and downstream users should know which
-they are using:
+Hephaestus supports Linux and macOS. Windows is unsupported for development,
+installed packages, and automation. Feature-specific host requirements still apply.
 
 | Install path                        | Platforms supported                    | Python      |
 | ----------------------------------- | -------------------------------------- | ----------- |
-| `uv sync` (development) | Linux, macOS, Windows | 3.13 (see `requires-python` in `pyproject.toml`) |
-| `pip install HomericIntelligence-Hephaestus` (wheel) | Linux, macOS, Windows (any OS) | 3.13 (see `requires-python` in `pyproject.toml`) |
+| `uv sync` (development) | Linux, macOS | 3.13 (see `requires-python` in `pyproject.toml`) |
+| `pip install HomericIntelligence-Hephaestus` (wheel) | Linux, macOS | 3.13 (see `requires-python` in `pyproject.toml`) |
 
 Platform notes:
 
-- **uv manages the development environment on every platform supported by its
-  selected Python interpreter.** The project requires Python 3.13; `uv sync`
-  installs the editable checkout and the default development groups.
-- **Required CI currently runs on Linux.** Native-Windows runs skip tests marked
-  `requires_posix`; Linux, macOS, and WSL run those POSIX subprocess checks.
-- **The wheel supports the same Python range.** `requires-python` in
-  `pyproject.toml` describes what `pip install` accepts; no platform-restriction
-  classifier is published.
-- **Windows wheels pull in `tzdata` automatically.** The
-  `"tzdata>=2026.2,<2027; platform_system == 'Windows'"` marker in
-  `[project.dependencies]` exists because `hephaestus.github.rate_limit` uses
-  `zoneinfo.ZoneInfo`, which has no IANA database bundled on Windows. POSIX
-  installs skip this dependency.
+- Use `uv sync` for the editable checkout and default development groups on
+  Linux or macOS. Support from uv or Python does not extend Hephaestus support.
+- Required CI currently runs on Linux. Report the actual host for platform
+  verification; Linux results do not establish native macOS results.
+- The pure-Python wheel uses the same Python range. Successful installation
+  does not establish support for another operating system.
 
-Use `uv sync` to develop and run the test suite on macOS, Linux, or Windows.
-Native-Windows runs skip only the tests explicitly marked `requires_posix`; do
-not substitute a second environment manager for the uv workflow.
+This is a breaking support-policy change. Move Windows workloads to a supported
+Linux or macOS host. Native Windows cleanup, execution paths, and qualification
+are no longer maintained. Windows-style input rejection and CRLF handling remain
+where supported hosts require them. Do not infer Windows support from those checks.
 
 ### The `build/` directory
 
@@ -302,11 +295,9 @@ assumes a POSIX-like development environment. Specifically:
   via `_git_test_env()` so the tests do not depend on the contributor's
   `~/.gitconfig`.
 
-These cases are tagged with the `requires_posix` pytest marker and are skipped
-automatically on `sys.platform == "win32"`. They run under macOS, Linux, and
-WSL with no extra setup beyond `uv sync`. Windows contributors using Git
-Bash / MSYS2 will execute them; pure-Windows-Python runs will skip them.
-Tracking: #742.
+These cases use the `requires_posix` pytest marker. Run them on a supported
+Linux or macOS host with the required tools installed. Windows qualification
+is not part of the test contract.
 
 The command `bash scripts/run_ci_local.sh build` also requires `python3` and
 `zstd` on `PATH`. It uses these tools to provision and extract the fixed Codex

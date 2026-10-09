@@ -3,7 +3,7 @@
 
 Covers the cross-process advisory lock context manager: acquire/release
 round-trip, sequential re-acquisition, non-blocking contention, symlink refusal,
-and graceful no-op when ``fcntl`` is unavailable (Windows).
+and failure before entry when ``fcntl`` is unavailable.
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from hephaestus.utils.file_lock import (
 class TestFileLock:
     """Behaviour of the ``file_lock`` context manager."""
 
-    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     @pytest.mark.parametrize("name", ["metadata.lock", "metadata.lock.owner.lock"])
     @pytest.mark.parametrize("unsafe_kind", ["symlink", "hardlink", "fifo", "mode", "owner"])
     def test_file_lock_at_rejects_unsafe_existing_entry(
@@ -63,7 +62,6 @@ class TestFileLock:
         if unsafe_kind == "mode":
             assert entry.stat().st_mode & 0o777 == 0o644
 
-    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     @pytest.mark.parametrize("name", ["metadata.lock", "metadata.lock.owner.lock"])
     def test_file_lock_at_creates_one_safe_entry(self, tmp_path: Path, name: str) -> None:
         """A missing descriptor-relative entry is created with exact safe metadata."""
@@ -152,8 +150,14 @@ class TestFileLock:
             with file_lock(link):
                 pass
 
-    def test_no_fcntl_is_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When ``fcntl`` import fails (Windows), the lock degrades to a no-op."""
+    @pytest.mark.parametrize("descriptor_relative", [False, True])
+    def test_no_fcntl_default_lock_fails_before_entry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        descriptor_relative: bool,
+    ) -> None:
+        """A missing lock primitive cannot admit an unprotected operation."""
         real_import = builtins.__import__
 
         def fake_import(name: str, *args: object, **kwargs: object) -> object:
@@ -162,14 +166,16 @@ class TestFileLock:
             return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
-        # Must not raise, and must not require/lock anything.
-        with file_lock(tmp_path / "x.lock"):
-            pass
+        lock = file_lock_at(-1, "x.lock") if descriptor_relative else file_lock(tmp_path / "x.lock")
+        with pytest.raises(LockUnavailableError):
+            with lock:
+                pytest.fail("the operation entered without a lock")
+        assert not (tmp_path / "x.lock").exists()
 
     def test_no_fcntl_required_lock_fails_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A non-idempotent caller can reject a no-op lock on Windows."""
+        """A required exclusive lock rejects an unavailable primitive."""
         real_import = builtins.__import__
 
         def fake_import(name: str, *args: object, **kwargs: object) -> object:

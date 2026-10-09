@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,15 +21,8 @@ DEFAULT_TEMPLATE = Path("scripts/slurm/pi_smoke.sbatch")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _private_smoke_log_permissions_supported() -> bool:
-    """Return whether this platform can establish the required private log mode."""
-    return os.name != "nt"
-
-
 def _prepare_private_log_dir(log_dir: Path) -> Path:
     """Create or tighten the owner-only directory used for Slurm artifacts."""
-    if not _private_smoke_log_permissions_supported():
-        raise OSError("Pi smoke requires user-only log permissions on this platform")
     return prepare_pi_private_log_dir(log_dir)
 
 
