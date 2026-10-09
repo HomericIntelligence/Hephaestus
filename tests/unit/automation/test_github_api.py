@@ -42,6 +42,10 @@ from hephaestus.automation.github_api import (
 )
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER
+from hephaestus.automation.requirements_recovery import (
+    RECOVERY_PROVENANCE_PREFIX,
+    render_recovered_requirements,
+)
 from hephaestus.github.rate_limit import configure_gh_global_throttle
 from hephaestus.io import utils as io_utils
 
@@ -2858,6 +2862,147 @@ class TestFetchCompleteIssueCommentJournal:
 
 class TestUpsertAndDeleteComment:
     """Idempotent plan/review comment lifecycle (one comment per role)."""
+
+    @staticmethod
+    def _recovery_body(requirements: str = "Recovered requirements") -> str:
+        """Return a valid versioned recovery comment for identity tests."""
+        return render_recovered_requirements("source", requirements, "a" * 64)
+
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_recovery_upsert_creates_and_confirms_body(
+        self, mock_create: Any, mock_fetch: Any, _mock_login: Any
+    ) -> None:
+        """A versioned recovery marker publishes one actor-owned comment."""
+        body = self._recovery_body()
+        mock_fetch.side_effect = [
+            [],
+            [
+                {
+                    "databaseId": 99,
+                    "body": body,
+                    "user": {"login": "hephaestus-bot"},
+                }
+            ],
+        ]
+
+        result = gh_issue_upsert_comment(5, RECOVERY_PROVENANCE_PREFIX, body)
+
+        mock_create.assert_called_once_with(5, body, repo=None)
+        assert result == 99
+
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_recovery_upsert_updates_and_confirms_body(
+        self, mock_gh_call: Any, mock_fetch: Any, _mock_login: Any
+    ) -> None:
+        """A later recovery body updates the stable actor-owned comment."""
+        old_body = self._recovery_body("old requirements")
+        new_body = self._recovery_body("new requirements")
+        mock_fetch.side_effect = [
+            [
+                {
+                    "databaseId": 99,
+                    "body": old_body,
+                    "user": {"login": "hephaestus-bot"},
+                }
+            ],
+            [
+                {
+                    "databaseId": 99,
+                    "body": new_body,
+                    "user": {"login": "hephaestus-bot"},
+                }
+            ],
+        ]
+
+        result = gh_issue_upsert_comment(5, RECOVERY_PROVENANCE_PREFIX, new_body)
+
+        assert result == 99
+        mock_gh_call.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "existing_body, expected_error",
+        [
+            (f"{RECOVERY_PROVENANCE_PREFIX}bad -->\n\ntext", "malformed"),
+            (
+                render_recovered_requirements("source", "foreign requirements", "a" * 64),
+                "foreign or unverifiable",
+            ),
+        ],
+        ids=["malformed", "foreign"],
+    )
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_recovery_upsert_rejects_unsafe_existing_comment(
+        self,
+        mock_create: Any,
+        mock_fetch: Any,
+        _mock_login: Any,
+        existing_body: str,
+        expected_error: str,
+    ) -> None:
+        """Malformed or noncanonical recovery identity cannot be selected."""
+        body = self._recovery_body()
+        mock_fetch.return_value = [
+            {
+                "databaseId": 99,
+                "body": existing_body,
+                "user": {"login": "hephaestus-bot"}
+                if expected_error == "malformed"
+                else {"login": "someone-else"},
+            }
+        ]
+
+        with pytest.raises(RuntimeError, match=expected_error):
+            gh_issue_upsert_comment(5, RECOVERY_PROVENANCE_PREFIX, body)
+
+        mock_create.assert_not_called()
+
+    @pytest.mark.parametrize("count", [2])
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_recovery_upsert_rejects_duplicate_valid_comments(
+        self,
+        mock_create: Any,
+        mock_fetch: Any,
+        _mock_login: Any,
+        count: int,
+    ) -> None:
+        """Duplicate valid recovery identities require manual recovery."""
+        body = self._recovery_body()
+        mock_fetch.return_value = [
+            {
+                "databaseId": index,
+                "body": self._recovery_body(f"requirements {index}"),
+                "user": {"login": "hephaestus-bot"},
+            }
+            for index in range(1, count + 1)
+        ]
+
+        with pytest.raises(RuntimeError, match="ambiguous"):
+            gh_issue_upsert_comment(5, RECOVERY_PROVENANCE_PREFIX, body)
+
+        mock_create.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_recovery_upsert_rejects_malformed_outgoing_body(
+        self, mock_create: Any, mock_fetch: Any, _mock_login: Any
+    ) -> None:
+        """A recovery family prefix is not enough for an outgoing body."""
+        body = f"{RECOVERY_PROVENANCE_PREFIX}not-valid -->\n\ntext"
+
+        with pytest.raises(ValueError, match="valid recovered"):
+            gh_issue_upsert_comment(5, RECOVERY_PROVENANCE_PREFIX, body)
+
+        mock_fetch.assert_not_called()
+        mock_create.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
     @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")

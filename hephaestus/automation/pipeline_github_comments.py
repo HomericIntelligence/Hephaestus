@@ -1,36 +1,23 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
 import subprocess
-from collections.abc import Callable
 
 from hephaestus.automation.comment_identity import (
-    has_marker_alias,
-    is_current_planning_marker,
     is_planning_marker,
-    select_unambiguous_comment,
+    validate_current_planning_marker,
     validate_planning_body_for_write,
-    validate_planning_comment_identities,
 )
 from hephaestus.automation.protocol import comment_marker_aliases
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
+from .recovery_comment_identity import (
+    marker_body_error,
+    marker_matches_body,
+    select_marker_target,
+    validate_marker_identities,
+)
 from .review_journal import has_exact_leading_marker
-
-
-def _validate_shared_planning_identities(
-    comments: list[dict[str, Any]],
-    *,
-    planning_marker: bool,
-    owned_of: Callable[[dict[str, Any]], bool],
-) -> None:
-    """Reject unsafe shared planning identities before an upsert mutation."""
-    if planning_marker:
-        validate_planning_comment_identities(
-            comments,
-            body_of=lambda comment: str(comment.get("body", "")),
-            owned_of=owned_of,
-        )
 
 
 class PipelineGitHubIssueComments(_PipelineGitHubHost):
@@ -82,8 +69,7 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
     ) -> None:
         """Execute canonical comment upsert after the public error boundary."""
         planning_marker = is_planning_marker(marker)
-        if planning_marker and not is_current_planning_marker(marker):
-            raise ValueError("new planning comments must use a shared HomericIntelligence marker")
+        validate_current_planning_marker(marker)
         marker_aliases = comment_marker_aliases(marker)
         if planning_marker and legacy_marker is not None and legacy_marker not in marker_aliases:
             raise ValueError(
@@ -97,23 +83,26 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             return [
                 comment
                 for comment in comments
-                if has_marker_alias(str(comment.get("body", "")), markers)
+                if marker_matches_body(str(comment.get("body", "")), marker, markers)
                 and self._comment_owned_by_viewer(comment)
             ]
 
-        if not has_exact_leading_marker(body, marker):
-            raise ValueError(f"canonical comment body must start with marker {marker!r}")
+        marker_error = marker_body_error(body, marker)
+        if marker_error is not None:
+            raise ValueError(marker_error)
         validate_planning_body_for_write(marker, body)
         if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
             return
         comments = self._repo_issue_comments(issue_number)
-        _validate_shared_planning_identities(
+        validate_marker_identities(
             comments,
+            marker=marker,
             planning_marker=planning_marker,
+            body_of=lambda comment: str(comment.get("body", "")),
             owned_of=self._comment_owned_by_viewer,
         )
         owned = owned_matching(comments)
-        target = select_unambiguous_comment(
+        target = select_marker_target(
             owned,
             marker=marker,
             aliases=markers,
@@ -122,13 +111,15 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         if target is None:
             self._post_issue_comment(issue_number, body)
             comments = self._repo_issue_comments(issue_number)
-            _validate_shared_planning_identities(
+            validate_marker_identities(
                 comments,
+                marker=marker,
                 planning_marker=planning_marker,
+                body_of=lambda comment: str(comment.get("body", "")),
                 owned_of=self._comment_owned_by_viewer,
             )
             owned = owned_matching(comments)
-            target = select_unambiguous_comment(
+            target = select_marker_target(
                 owned,
                 marker=marker,
                 aliases=markers,
@@ -146,13 +137,15 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         if str(target.get("body", "")) != body:
             self._patch_issue_comment(int(target_id), body, repo=(owner, name))
             comments = self._repo_issue_comments(issue_number)
-            _validate_shared_planning_identities(
+            validate_marker_identities(
                 comments,
+                marker=marker,
                 planning_marker=planning_marker,
+                body_of=lambda comment: str(comment.get("body", "")),
                 owned_of=self._comment_owned_by_viewer,
             )
             owned = owned_matching(comments)
-            target = select_unambiguous_comment(
+            target = select_marker_target(
                 owned,
                 marker=marker,
                 aliases=markers,

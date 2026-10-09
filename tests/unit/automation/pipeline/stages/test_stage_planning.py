@@ -1345,7 +1345,13 @@ class TestPlanningStageStep:
         assert github.labels[1] == {STATE_PLAN_NO_GO}
         assert item.payload["requires_plan_revision"] is True
         assert github.gh_issue_json(1)["body"] == old_body
-        assert any(comment.startswith(RECOVERY_PROVENANCE_PREFIX) for comment in github.comments[1])
+        recovery_comments = [
+            comment
+            for comment in github.comments[1]
+            if comment.startswith(RECOVERY_PROVENANCE_PREFIX)
+        ]
+        assert len(recovery_comments) == 1
+        assert parse_recovery_provenance(recovery_comments[0]) is not None
         assert "requirements_recovery_required" not in item.payload
         assert config.reset_plan_review_sessions == {1}
 

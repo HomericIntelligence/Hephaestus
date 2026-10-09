@@ -18,15 +18,20 @@ from hephaestus.utils.helpers import strip_null_bytes
 
 from ..comment_identity import (
     has_marker_alias,
-    is_current_planning_marker,
     is_planning_marker,
     select_unambiguous_comment,
+    validate_current_planning_marker,
     validate_planning_body_for_write,
-    validate_planning_comment_identities,
 )
 from ..models import IssueInfo, IssueState
 from ..protocol import comment_marker_aliases
-from ..review_journal import has_exact_leading_marker
+from ..recovery_comment_identity import (
+    is_recovery_provenance_marker,
+    marker_body_error,
+    marker_matches_body,
+    select_marker_target,
+    validate_marker_identities,
+)
 
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
 MAX_ISSUE_JOURNAL_BODY_BYTES = 16 * 1024 * 1024
@@ -333,8 +338,9 @@ def gh_issue_upsert_comment(
 ) -> int | None:
     """Create-or-update the single issue comment keyed by ``marker_prefix``.
 
-    The marker must be an opaque canonical marker at byte zero of the outgoing
-    body. Display headings and historical heading-only comments are inert.
+    The outgoing body must start at byte zero with the exact marker or with a
+    valid versioned recovery marker from the supplied marker family. Display
+    headings and historical heading-only comments are inert.
 
     For a shared plan or review marker, this function delegates to the
     authenticated-actor upsert path. That path rejects foreign, unverifiable,
@@ -362,12 +368,13 @@ def gh_issue_upsert_comment(
         RuntimeError: If a create/update/delete call fails.
 
     """
-    if not has_exact_leading_marker(body, marker_prefix):
-        raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
-    if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
-        raise ValueError("new planning comments must use a shared HomericIntelligence marker")
+    recovery_marker = is_recovery_provenance_marker(marker_prefix)
+    marker_error = marker_body_error(body, marker_prefix)
+    if marker_error is not None:
+        raise ValueError(marker_error)
+    validate_current_planning_marker(marker_prefix)
     validate_planning_body_for_write(marker_prefix, body)
-    if is_planning_marker(marker_prefix):
+    if is_planning_marker(marker_prefix) or recovery_marker:
         return gh_issue_upsert_owned_comment(
             issue_number,
             marker_prefix,
@@ -438,21 +445,6 @@ def gh_issue_upsert_comment(
     return target_id
 
 
-def _validate_shared_planning_identities(
-    marker_prefix: str,
-    comments: list[dict[str, Any]],
-    *,
-    owned_of: Callable[[dict[str, Any]], bool],
-) -> None:
-    """Reject unsafe shared planning identities before a role mutation."""
-    if is_planning_marker(marker_prefix):
-        validate_planning_comment_identities(
-            comments,
-            body_of=lambda comment: str(comment.get("body", "")),
-            owned_of=owned_of,
-        )
-
-
 def gh_issue_upsert_owned_comment(
     issue_number: int,
     marker_prefix: str,
@@ -466,10 +458,10 @@ def gh_issue_upsert_owned_comment(
     behavior. This helper is the standalone automation equivalent of
     ``PipelineGitHub.upsert_issue_comment``.
     """
-    if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
-        raise ValueError("new planning comments must use a shared HomericIntelligence marker")
-    if not has_exact_leading_marker(body, marker_prefix):
-        raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
+    validate_current_planning_marker(marker_prefix)
+    marker_error = marker_body_error(body, marker_prefix)
+    if marker_error is not None:
+        raise ValueError(marker_error)
     validate_planning_body_for_write(marker_prefix, body)
     viewer_login = (_api.gh_current_login() or "").lower()
     if not viewer_login:
@@ -489,14 +481,20 @@ def gh_issue_upsert_owned_comment(
             comment
             for comment in comments
             if is_owned(comment)
-            and has_marker_alias(str(comment.get("body", "")), marker_aliases)
+            and marker_matches_body(str(comment.get("body", "")), marker_prefix, marker_aliases)
             and comment.get("databaseId") is not None
         ]
 
     comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-    _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
+    validate_marker_identities(
+        comments,
+        marker=marker_prefix,
+        planning_marker=is_planning_marker(marker_prefix),
+        body_of=lambda comment: str(comment.get("body", "")),
+        owned_of=is_owned,
+    )
     owned = owned_with(comments)
-    target = select_unambiguous_comment(
+    target = select_marker_target(
         owned,
         marker=marker_prefix,
         aliases=marker_aliases,
@@ -507,9 +505,15 @@ def gh_issue_upsert_owned_comment(
         # Re-read after create. This closes the concurrent-create window and
         # proves that the authenticated actor owns the canonical pointer.
         comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-        _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
+        validate_marker_identities(
+            comments,
+            marker=marker_prefix,
+            planning_marker=is_planning_marker(marker_prefix),
+            body_of=lambda comment: str(comment.get("body", "")),
+            owned_of=is_owned,
+        )
         owned = owned_with(comments)
-        target = select_unambiguous_comment(
+        target = select_marker_target(
             owned,
             marker=marker_prefix,
             aliases=marker_aliases,
@@ -540,9 +544,15 @@ def gh_issue_upsert_owned_comment(
                 f"Failed to update issue comment {target_id} on #{issue_number}: {error}"
             ) from error
         comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-        _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
+        validate_marker_identities(
+            comments,
+            marker=marker_prefix,
+            planning_marker=is_planning_marker(marker_prefix),
+            body_of=lambda comment: str(comment.get("body", "")),
+            owned_of=is_owned,
+        )
         owned = owned_with(comments)
-        target = select_unambiguous_comment(
+        target = select_marker_target(
             owned,
             marker=marker_prefix,
             aliases=marker_aliases,

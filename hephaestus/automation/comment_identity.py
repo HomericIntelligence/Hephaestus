@@ -51,6 +51,12 @@ def is_current_planning_marker(marker: str) -> bool:
     return marker in (PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER)
 
 
+def validate_current_planning_marker(marker: str) -> None:
+    """Reject a legacy planning marker as a new write target."""
+    if is_planning_marker(marker) and not is_current_planning_marker(marker):
+        raise ValueError("new planning comments must use a shared HomericIntelligence marker")
+
+
 def validate_planning_comment_identities[T](
     comments: Sequence[T],
     *,

@@ -45,6 +45,10 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
     PLAN_REVIEW_PREFIX,
 )
+from hephaestus.automation.requirements_recovery import (
+    RECOVERY_PROVENANCE_PREFIX,
+    render_recovered_requirements,
+)
 from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
 from hephaestus.automation.review_journal import (
     IssueComment,
@@ -2984,6 +2988,71 @@ class TestMutatorMapping:
 
         assert fetch.call_args_list == [call(5), call(5)]
         post.assert_called_once_with(5, body)
+
+    def test_upsert_recovery_comment_uses_versioned_marker_family(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The production adapter accepts and confirms a rendered recovery body."""
+        body = render_recovered_requirements("source", "requirements", "a" * 64)
+        fetch = MagicMock(
+            side_effect=[
+                [],
+                [{"body": body, "databaseId": 100, "viewerDidAuthor": True}],
+            ]
+        )
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, body)
+
+        assert fetch.call_args_list == [call(5), call(5)]
+        post.assert_called_once_with(5, body)
+
+    def test_upsert_recovery_comment_updates_and_confirms_exact_body(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An existing recovery comment is patched only after a validated read."""
+        old_body = render_recovered_requirements("source", "old", "a" * 64)
+        new_body = render_recovered_requirements("source", "new", "a" * 64)
+        fetch = MagicMock(
+            side_effect=[
+                [{"body": old_body, "databaseId": 100, "viewerDidAuthor": True}],
+                [{"body": new_body, "databaseId": 100, "viewerDidAuthor": True}],
+            ]
+        )
+        patch_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+
+        adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, new_body)
+
+        patch_comment.assert_called_once()
+        assert patch_comment.call_args.args == (100, new_body)
+
+    def test_upsert_recovery_comment_rejects_malformed_existing_body(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed recovery marker stops before any mutation."""
+        malformed = f"{RECOVERY_PROVENANCE_PREFIX}bad -->\n\ntext"
+        fetch = MagicMock(
+            return_value=[{"body": malformed, "databaseId": 100, "viewerDidAuthor": True}]
+        )
+        post = MagicMock()
+        patch_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(RuntimeError, match="malformed"):
+            adapter.upsert_issue_comment(
+                5,
+                RECOVERY_PROVENANCE_PREFIX,
+                render_recovered_requirements("source", "new", "a" * 64),
+            )
+
+        post.assert_not_called()
+        patch_comment.assert_not_called()
 
     def test_upsert_plan_comment_migrates_owned_legacy_marker_in_place(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
