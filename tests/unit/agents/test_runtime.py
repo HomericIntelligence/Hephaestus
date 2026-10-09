@@ -4294,7 +4294,7 @@ def test_codex_base_cmd_adds_git_common_dir_for_worktree_metadata(tmp_path: Path
 
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
-        patch("hephaestus.agents.agent_runtime.subprocess.run", side_effect=fake_run),
+        patch("hephaestus.agents.runtime.subprocess.run", side_effect=fake_run),
     ):
         cmd = agent_runtime._codex_base_cmd(cwd=worktree)
 
@@ -4312,7 +4312,7 @@ def test_codex_base_cmd_does_not_add_git_common_dir_for_read_only(
 
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
-        patch("hephaestus.agents.agent_runtime.subprocess.run") as run_mock,
+        patch("hephaestus.agents.runtime.subprocess.run") as run_mock,
     ):
         cmd = agent_runtime._codex_base_cmd(cwd=worktree, sandbox="read-only")
 
@@ -4332,7 +4332,7 @@ def test_codex_base_cmd_omits_add_dir_when_git_common_dir_is_inside_cwd(
 
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
-        patch("hephaestus.agents.agent_runtime.subprocess.run", side_effect=fake_run),
+        patch("hephaestus.agents.runtime.subprocess.run", side_effect=fake_run),
     ):
         cmd = agent_runtime._codex_base_cmd(cwd=repo)
 
