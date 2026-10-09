@@ -21,11 +21,10 @@ from hephaestus.automation.address_review_core import parse_addressed_replies
 from hephaestus.automation.pipeline.github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
+    ImplementationReplyProgress,
     ReplyHandoffAttempted,
 )
 from hephaestus.automation.review_journal import IssueComment
-
-from .stages.base import ImplementationReplyProgress
 
 IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP = 2
 IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP = 2
