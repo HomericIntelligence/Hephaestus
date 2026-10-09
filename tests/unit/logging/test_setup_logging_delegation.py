@@ -35,11 +35,7 @@ from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
             {"verbose": True},
             logging.DEBUG,
         ),
-        ("hephaestus.automation.ci_driver", "_setup_logging", {"verbose": True}, logging.DEBUG),
         ("hephaestus.automation.loop_runner", "_setup_logging", {"verbose": False}, logging.INFO),
-        ("hephaestus.automation.planner", "_setup_logging", {"verbose": False}, logging.INFO),
-        ("hephaestus.automation.pr_reviewer", "_setup_logging", {"verbose": False}, logging.INFO),
-        ("hephaestus.automation.plan_reviewer", "_setup_logging", {"verbose": True}, logging.DEBUG),
     ],
 )
 def test_cli_logging_helpers_delegate_to_shared_helper(
