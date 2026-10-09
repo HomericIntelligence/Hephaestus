@@ -32,3 +32,14 @@ def test_mcp_posture_is_documented() -> None:
     assert doc.exists(), "docs/mcp.md must document the MCP posture"
     assert "Model Context Protocol" in doc.read_text()
     assert "MCP" in (REPO_ROOT / "AGENTS.md").read_text()
+
+
+def test_mcp_posture_defines_boundary_and_alternative_contracts() -> None:
+    """The MCP document must preserve the integration capability boundary."""
+    content = (REPO_ROOT / "docs" / "mcp.md").read_text()
+
+    assert "## Capability boundary" in content
+    assert "does not provide an MCP client, server, or bridge" in content
+    assert "Plugin marketplace contract" in content
+    assert "NATS contract" in content
+    assert "HTTP REST contract" in content
