@@ -17,6 +17,7 @@ import pytest
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
+from hephaestus.automation.pipeline.host_capabilities import CapabilityRequestTarget
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import BuildTestJob
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
@@ -36,11 +37,25 @@ def test_initial_rebase_reuses_the_source_lease_and_keeps_its_recorded_head(
     pool = WorkerPool(
         size=1, shutdown=threading.Event(), completion_q=queue.Queue(), lock_dir=tmp_path / "locks"
     )
+    capability_target = CapabilityRequestTarget(
+        "repo",
+        42,
+        None,
+        root,
+        binding.cwd,
+        head,
+        "rebase",
+        "scratch",
+        "a" * 32,
+        workspace=binding,
+        generation=1,
+    )
     job = GitJob(
         "repo",
         "rebase",
         30,
         workspace=binding,
+        capability_target=capability_target,
         kwargs={
             "repo_root": str(root),
             "cwd": str(binding.cwd),

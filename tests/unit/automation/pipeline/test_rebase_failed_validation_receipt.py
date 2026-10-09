@@ -3,6 +3,7 @@
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -10,11 +11,17 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation.pipeline.git_jobs import GitJob
+from hephaestus.automation.pipeline.git_jobs import GitJob, PendingRebaseRecord
+from hephaestus.automation.pipeline.host_capabilities import CapabilityRequestTarget
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.source_worktree import SourceWorkspaceManager, SourceWorkspaceReceipt
+from hephaestus.automation.rebase_recovery import PendingRebaseStore
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceManager,
+    SourceWorkspaceReceipt,
+    _PreparationDeadline,
+)
 
 
 def _git(path: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -40,12 +47,12 @@ def test_completed_rebase_keeps_local_receipt_when_validation_fails(
     _git(root, "init", "-b", "main")
     _git(root, "config", "user.email", "test@example.invalid")
     _git(root, "config", "user.name", "Test User")
-    _git(root, "remote", "add", "origin", "https://github.com/repo.git")
+    _git(root, "remote", "add", "origin", "https://github.com/org/repo.git")
     (root / "tracked.txt").write_text("initial\n")
     _git(root, "add", "tracked.txt")
     _git(root, "commit", "-m", "initial")
     initial = _git(root, "rev-parse", "HEAD").stdout.strip()
-    manager = SourceWorkspaceManager(root, repository="repo")
+    manager = SourceWorkspaceManager(root, repository="org/repo")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, initial, branch="writer")
     with manager.implementation_local_commit(42, branch="writer", path=binding.cwd) as record:
         (binding.cwd / "tracked.txt").write_text("writer\n")
@@ -57,9 +64,42 @@ def test_completed_rebase_keeps_local_receipt_when_validation_fails(
     base_head = _git(root, "rev-parse", "HEAD").stdout.strip()
     assert _git(binding.cwd, "rebase", base_head, check=False).returncode == 1
     paused_head = _git(binding.cwd, "rev-parse", "HEAD").stdout.strip()
+    shutdown = threading.Event()
+    capability_target = CapabilityRequestTarget(
+        "org/repo",
+        42,
+        1001,
+        root,
+        binding.cwd,
+        writer_head,
+        "rebase",
+        "scratch",
+        "a" * 32,
+        workspace=binding,
+        generation=binding.generation + 1,
+    )
+    pending_store = PendingRebaseStore(
+        manager.common_dir,
+        deadline=_PreparationDeadline(time.monotonic() + 30, time.monotonic, shutdown),
+    )
+    pending_store.write(
+        PendingRebaseRecord(
+            request=capability_target,
+            operation="rebase",
+            scheduler_repository="org/repo",
+            branch="writer",
+            destination="https://github.com/org/repo.git",
+            publication_mode="existing",
+            remote_head_sha=writer_head,
+            target_base_sha=base_head,
+            policy_name=None,
+            phase="intent",
+        ),
+        expected=None,
+    )
     pool = WorkerPool(
         size=1,
-        shutdown=threading.Event(),
+        shutdown=shutdown,
         completion_q=CompletionQueue(maxsize=1),
         lock_dir=tmp_path / "locks",
     )
@@ -86,10 +126,12 @@ def test_completed_rebase_keeps_local_receipt_when_validation_fails(
     publication = Mock(side_effect=AssertionError("Failed validation must prevent publication"))
     monkeypatch.setattr(pool, "_prepare_rebase_review_publication", publication)
     job = GitJob(
-        "repo",
+        "org/repo",
         "continue_rebase",
         30,
+        expected_repository="org/repo",
         workspace=binding,
+        capability_target=capability_target,
         kwargs={
             "cwd": str(binding.cwd),
             "repo_root": str(root),
@@ -97,12 +139,16 @@ def test_completed_rebase_keeps_local_receipt_when_validation_fails(
             "branch": "writer",
             "base_sha": base_head,
             "expected_remote_sha": writer_head,
+            "expected_head_sha": writer_head,
             "conflict_paths": ("tracked.txt",),
             "conflict_snapshot": {},
             "conflict_index_snapshot": "f" * 64,
             "paused_head_sha": paused_head,
             "rebase_reason": "review_conflict",
             "publish_rebased_head": True,
+            "pr_number": 1001,
+            "direct_scope_reservation": None,
+            "rebase_recovery_intent_id": capability_target.request_id,
         },
     )
     try:
