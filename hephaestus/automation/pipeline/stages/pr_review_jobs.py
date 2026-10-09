@@ -788,9 +788,13 @@ class PrReviewJobs(_PrReviewHost):
         review_worktree = item.payload.get("review_worktree")
         if not isinstance(review_worktree, str) or not review_worktree:
             return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_invalid")
-        if item.payload.pop("review_worktree_cleanup_error", None):
+        cleanup_error = item.payload.pop("review_worktree_cleanup_error", None)
+        if cleanup_error:
             item.worktree = review_worktree
-            return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_failed")
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                f"review_worktree_cleanup_failed: {cleanup_error}",
+            )
         cleanup_state = item.payload.get("review_worktree_cleanup_done")
         if cleanup_state == "pending":
             expected_head = item.payload.get("review_worktree_expected_head")
@@ -808,6 +812,7 @@ class PrReviewJobs(_PrReviewHost):
                     "issue_number": item.issue or item.pr or 0,
                     "expected_head": expected_head,
                     "expected_detached": True,
+                    "source_lane": SourceLane.REVIEW.value,
                     "force": False,
                 },
                 descr="remove_read_only_review_worktree",

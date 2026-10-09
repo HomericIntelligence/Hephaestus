@@ -286,28 +286,79 @@ class SourceWorkspaceManager:
                 )
             )
 
-    def cleanup(self, item_number: int, lane: SourceLane) -> None:
-        """Remove a clean terminal lane; preserve dirty or obligated state."""
+    def cleanup(
+        self,
+        item_number: int,
+        lane: SourceLane,
+        *,
+        expected_path: Path | None = None,
+        expected_revision: str | None = None,
+    ) -> None:
+        """Remove a clean terminal lane and reconcile its durable receipt.
+
+        Args:
+            item_number: Issue or pull request number that owns the lane.
+            lane: Source lane to clean.
+            expected_path: Optional path bound to the cleanup request.
+            expected_revision: Optional revision bound to the cleanup request.
+
+        Raises:
+            SourceWorkspaceError: If the receipt, checkout, or cleanup proof is
+                invalid, or if the receipt cannot be removed.
+
+        """
         with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
             receipt = self._require_receipt(item_number, lane)
             self._reject_foreign_owner(receipt, item_number, lane)
+            receipt_path = self._receipt_path(item_number, lane)
+            if expected_path is not None and receipt.path.resolve() != expected_path.resolve():
+                raise SourceWorkspaceError(
+                    f"source workspace cleanup path mismatch for receipt {receipt_path}"
+                )
+            if expected_revision is not None and receipt.revision != expected_revision:
+                raise SourceWorkspaceError(
+                    f"source workspace cleanup revision mismatch for receipt {receipt_path}"
+                )
             if receipt.obligations:
-                raise SourceWorkspaceError("source workspace still has active obligations")
+                raise SourceWorkspaceError(
+                    f"source workspace still has active obligations: {receipt_path}"
+                )
             if receipt.path.exists() and self._is_dirty(receipt.path):
                 raise SourceWorkspaceError(
-                    f"source workspace is dirty and preserved: {receipt.path}"
+                    "source workspace is dirty and preserved: "
+                    f"{receipt.path} (receipt: {receipt_path})"
                 )
             with file_lock(WorktreeManager.git_metadata_lock_path(self.repo_root)):
-                result = _git(
+                if receipt.path.exists():
+                    result = _git(
+                        self.repo_root,
+                        "worktree",
+                        "remove",
+                        str(receipt.path),
+                        check=False,
+                    )
+                    if result.returncode and receipt.path.exists():
+                        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+                        raise SourceWorkspaceError(
+                            f"source workspace worktree removal failed for {receipt.path}: {detail}"
+                        )
+                prune = _git(
                     self.repo_root,
                     "worktree",
-                    "remove",
-                    str(receipt.path),
+                    "prune",
                     check=False,
                 )
-                if result.returncode and receipt.path.exists():
-                    raise SourceWorkspaceError(result.stderr.strip() or "worktree cleanup failed")
-            self._receipt_path(item_number, lane).unlink(missing_ok=True)
+                if prune.returncode:
+                    detail = prune.stderr.strip() or prune.stdout.strip() or "unknown error"
+                    raise SourceWorkspaceError(
+                        f"source workspace Git metadata cleanup failed for {receipt_path}: {detail}"
+                    )
+            try:
+                receipt_path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise SourceWorkspaceError(
+                    f"source workspace receipt cleanup failed for {receipt_path}: {exc}"
+                ) from exc
 
     def compare_and_swap_guard(
         self, item_number: int, *, expected: str | None, revision: str
@@ -420,13 +471,20 @@ class SourceWorkspaceManager:
         except (OSError, json.JSONDecodeError) as exc:
             raise SourceWorkspaceError(f"cannot read source workspace receipt: {path}") from exc
         if not isinstance(payload, dict):
-            raise SourceWorkspaceError("source workspace receipt must be an object")
-        return SourceWorkspaceReceipt.from_dict(payload)
+            raise SourceWorkspaceError(f"source workspace receipt must be an object: {path}")
+        try:
+            return SourceWorkspaceReceipt.from_dict(payload)
+        except SourceWorkspaceError as exc:
+            raise SourceWorkspaceError(
+                f"cannot parse source workspace receipt {path}: {exc}"
+            ) from exc
 
     def _require_receipt(self, item_number: int, lane: SourceLane) -> SourceWorkspaceReceipt:
         receipt = self._read_receipt(item_number, lane)
         if receipt is None:
-            raise SourceWorkspaceError("source workspace receipt does not exist")
+            raise SourceWorkspaceError(
+                f"source workspace receipt does not exist: {self._receipt_path(item_number, lane)}"
+            )
         return receipt
 
     def _write_receipt(self, receipt: SourceWorkspaceReceipt) -> None:
@@ -444,5 +502,6 @@ class SourceWorkspaceManager:
     ) -> None:
         if receipt is not None and receipt.ownership_key != self.ownership_key(item_number, lane):
             raise SourceWorkspaceError(
-                f"source workspace is owned by another repository: {receipt.ownership_key}"
+                "source workspace is owned by another repository: "
+                f"{receipt.ownership_key} (receipt: {self._receipt_path(item_number, lane)})"
             )

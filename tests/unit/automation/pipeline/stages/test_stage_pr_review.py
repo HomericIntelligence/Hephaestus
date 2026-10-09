@@ -889,6 +889,7 @@ class TestPrReviewStageStep:
         assert removal.job.op == "remove_worktree"
         assert removal.job.kwargs["expected_head"] == "a" * 40
         assert removal.job.kwargs["expected_detached"] is True
+        assert removal.job.kwargs["source_lane"] == "review"
         stage.on_job_done(item, JobResult(ok=True), ctx)
 
         assert stage.step(item, ctx) == StageOutcome(
@@ -936,6 +937,39 @@ class TestPrReviewStageStep:
         fresh_snapshot = stage.step(item, ctx)
         assert isinstance(fresh_snapshot, JobRequest)
         assert fresh_snapshot.job.descr == "direct_pr_review_worktree"
+
+    def test_review_cleanup_failure_preserves_registry_diagnostic(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A source receipt failure remains visible in the terminal outcome."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(
+            issue=1,
+            pr=1001,
+            kind=ItemKind.PR,
+            state=CLEANUP_REVIEW_WORKTREE_WAIT,
+        )
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "review_worktree": item.worktree,
+                "review_worktree_cleanup_error": (
+                    "source workspace receipt cleanup failed for "
+                    "/repo/.git/hephaestus-source-workspaces/1-review.json: "
+                    "read-only file system"
+                ),
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "review_worktree_cleanup_failed: source workspace receipt cleanup failed for "
+            "/repo/.git/hephaestus-source-workspaces/1-review.json: read-only file system",
+        )
+        assert item.worktree == "/tmp/detached-review"
 
     def test_checkout_barrier_renews_the_proof_for_an_unchanged_head(
         self, make_ctx: Any, make_work_item: Any

@@ -6,11 +6,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.git_utils import (
     delete_local_branch_if_unchanged,
     delete_reserved_branch_if_unchanged,
     run,
 )
+from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.helpers import get_repo_root
@@ -80,6 +82,54 @@ def _ownership_changed(
     return branch_changed or head_changed or detached_changed
 
 
+def _run_source_workspace_cleanup(job: GitJob) -> JobResult:
+    """Remove one source lane and reconcile its receipt under one owner lock."""
+    worktree_path_value = job.kwargs.get("worktree_path")
+    repo_root_value = job.kwargs.get("repo_root")
+    issue_number = job.kwargs.get("issue_number")
+    expected_head = job.kwargs.get("expected_head")
+    source_lane = job.kwargs.get("source_lane")
+    if (
+        not isinstance(worktree_path_value, str)
+        or not worktree_path_value
+        or not isinstance(repo_root_value, str)
+        or not repo_root_value
+        or isinstance(issue_number, bool)
+        or not isinstance(issue_number, int)
+        or not _is_full_commit_sha(expected_head)
+    ):
+        return JobResult(ok=False, error="source workspace cleanup identity is invalid")
+    try:
+        lane = SourceLane(source_lane)
+    except (TypeError, ValueError):
+        return JobResult(ok=False, error="source workspace cleanup lane is invalid")
+
+    worktree_path = Path(worktree_path_value)
+    repo_root = Path(repo_root_value)
+    if not repo_root.is_dir() or not _is_expected_worktree_path(
+        worktree_path,
+        repo_root=repo_root,
+        issue_number=issue_number,
+    ):
+        return JobResult(ok=False, error="source workspace cleanup identity is invalid")
+
+    manager = SourceWorkspaceManager(
+        repo_root,
+        repository=job.repo,
+        base_dir=worktree_path.parent,
+    )
+    try:
+        manager.cleanup(
+            issue_number,
+            lane,
+            expected_path=worktree_path,
+            expected_revision=expected_head,
+        )
+    except SourceWorkspaceError as exc:
+        return JobResult(ok=False, error=str(exc))
+    return JobResult(ok=True)
+
+
 def run_cleanup_job(
     job: GitJob,
     *,
@@ -117,6 +167,8 @@ def run_cleanup_job(
 
     if job.op != "remove_worktree":
         raise TypeError(f"unsupported cleanup Git operation: {job.op}")
+    if job.kwargs.get("source_lane") is not None:
+        return _run_source_workspace_cleanup(job)
     if job.kwargs.get("worktree_path"):
         worktree_path = Path(str(job.kwargs["worktree_path"]))
         repo_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -211,6 +212,7 @@ def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path)
     repo, _, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     binding = manager.prepare(7, SourceLane.REVIEW, second)
+    receipt_path = manager._receipt_path(7, SourceLane.REVIEW)
 
     result = run_cleanup_job(
         GitJob(
@@ -223,12 +225,83 @@ def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path)
                 "issue_number": 7,
                 "expected_head": second,
                 "expected_detached": True,
+                "source_lane": SourceLane.REVIEW.value,
             },
         )
     )
 
     assert result.ok is True
     assert not binding.cwd.exists()
+    assert not receipt_path.exists()
+
+
+def test_review_cleanup_reconciles_absent_worktree_and_receipt(tmp_path: Path) -> None:
+    """Review cleanup removes a receipt after Git already removed its checkout."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(8, SourceLane.REVIEW, second)
+    receipt_path = manager._receipt_path(8, SourceLane.REVIEW)
+    _git(repo, "worktree", "remove", str(binding.cwd))
+    worktree_paths = {
+        line.removeprefix("worktree ")
+        for line in _git(repo, "worktree", "list", "--porcelain").splitlines()
+        if line.startswith("worktree ")
+    }
+    assert str(binding.cwd) not in worktree_paths
+
+    result = run_cleanup_job(
+        GitJob(
+            repo="example/project",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(binding.cwd),
+                "repo_root": str(repo),
+                "issue_number": 8,
+                "expected_head": second,
+                "expected_detached": True,
+                "source_lane": SourceLane.REVIEW.value,
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert not binding.cwd.exists()
+    assert not receipt_path.exists()
+
+
+def test_review_cleanup_reports_receipt_failure_and_metadata_path(tmp_path: Path) -> None:
+    """Receipt cleanup errors identify the operation and metadata file."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(9, SourceLane.REVIEW, second)
+    receipt_path = manager._receipt_path(9, SourceLane.REVIEW)
+
+    with patch(
+        "hephaestus.automation.source_worktree.Path.unlink",
+        side_effect=OSError("read-only file system"),
+    ):
+        result = run_cleanup_job(
+            GitJob(
+                repo="example/project",
+                op="remove_worktree",
+                timeout_s=60,
+                kwargs={
+                    "worktree_path": str(binding.cwd),
+                    "repo_root": str(repo),
+                    "issue_number": 9,
+                    "expected_head": second,
+                    "expected_detached": True,
+                    "source_lane": SourceLane.REVIEW.value,
+                },
+            )
+        )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert "source workspace receipt cleanup failed" in result.error
+    assert str(receipt_path) in result.error
+    assert "read-only file system" in result.error
 
 
 def test_dirty_lane_is_preserved_and_rejected(tmp_path: Path) -> None:
