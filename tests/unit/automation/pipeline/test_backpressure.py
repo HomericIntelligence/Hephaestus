@@ -29,12 +29,11 @@ class _RecordingWorkerPool:
         gh_extra_path_root: Path | None = None,
         github_job_runner: Any = None,
         athena_skill_executor: Any = None,
-        rebase_adr_validator: Any = None,
-        rebase_structural_test_argv: Any = None,
+        rebase_policy_selector: Any = None,
         evidence_receipt_dir: Path | None = None,
     ) -> None:
         del lock_dir
-        del rebase_adr_validator, rebase_structural_test_argv
+        del rebase_policy_selector
         self.size = size
         self.shutdown_event = shutdown
         self.completion_q = completion_q

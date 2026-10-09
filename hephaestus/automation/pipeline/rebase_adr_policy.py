@@ -1,18 +1,32 @@
-"""Repository-owned ADR rebase policy injected into the shared WorkerPool.
+"""Repository-owned ADR rebase policies for the shared WorkerPool.
 
 The shared ``WorkerPool`` executor is deliberately repository-agnostic.  The
 ADR filename/section/README-index contract and the structural test argv below
-are this repository's own policy and are injected by the host coordinator so
-that another repository with a different valid ``docs/adr`` layout is
-unaffected during rebase.
+are this repository's own policy.  The host coordinator selects this policy
+only for this repository, so another repository with a different valid
+``docs/adr`` layout is unaffected during rebase.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .job_results import JobResult
+
+HEPHAESTUS_REPOSITORY = "homericintelligence/hephaestus"
+
+
+@dataclass(frozen=True)
+class RebasePolicy:
+    """Host-owned validation policy for one target repository."""
+
+    name: str
+    adr_validator: Callable[[Path], JobResult | None]
+    structural_test_argv: tuple[str, ...] | None
+
 
 ADR_FILENAME_RE = re.compile(r"^(?P<number>[0-9]{4})-[a-z0-9-]+\.md$")
 ADR_README_LINK_RE = re.compile(r"\(([0-9]{4}-[a-z0-9-]+\.md)\)")
@@ -33,6 +47,15 @@ REBASE_STRUCTURAL_TEST_ARGV = (
     "-q",
     "--tb=short",
 )
+
+
+def _repository_slug(org: str, repo: str) -> str:
+    """Return a normalized repository slug from configured target values."""
+    normalized_repo = repo.strip().strip("/")
+    if "/" in normalized_repo:
+        return normalized_repo.casefold()
+    normalized_org = org.strip().strip("/")
+    return f"{normalized_org}/{normalized_repo}".casefold()
 
 
 def validate_rebased_adr_tree(cwd: Path) -> JobResult | None:
@@ -109,3 +132,18 @@ def validate_rebased_adr_tree(cwd: Path) -> JobResult | None:
             error=f"rebase semantic validation failed: cannot inspect ADR records ({exc})",
         )
     return None
+
+
+def select_rebase_policy(org: str, repo: str) -> RebasePolicy | None:
+    """Return the policy configured for one exact target repository.
+
+    The coordinator calls this selector for each Git job.  A missing result is
+    intentional: the shared worker must not infer a policy from a target tree.
+    """
+    if _repository_slug(org, repo) != HEPHAESTUS_REPOSITORY:
+        return None
+    return RebasePolicy(
+        name=HEPHAESTUS_REPOSITORY,
+        adr_validator=validate_rebased_adr_tree,
+        structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
+    )

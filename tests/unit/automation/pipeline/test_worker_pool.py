@@ -273,23 +273,17 @@ def pool(
 ) -> Iterator[WorkerPool]:
     """Worker pool with a single thread and a temp cross-process lock dir.
 
-    Injects the repository-owned ADR rebase policy so the ADR semantic and
-    structural validation gates behave as they do in the production
-    coordinator wiring.  A deliberately policy-free pool is exercised by the
-    unaffected-layout regression tests below.
+    Injects the host policy selector used by the production coordinator.  The
+    selector applies the Hephaestus policy only to the Hephaestus repository.
     """
-    from hephaestus.automation.pipeline.rebase_adr_policy import (
-        REBASE_STRUCTURAL_TEST_ARGV,
-        validate_rebased_adr_tree,
-    )
+    from hephaestus.automation.pipeline.rebase_adr_policy import select_rebase_policy
 
     p = WorkerPool(
         size=1,
         shutdown=shutdown_event,
         completion_q=completion_q,
         lock_dir=tmp_path / "locks",
-        rebase_adr_validator=validate_rebased_adr_tree,
-        rebase_structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
+        rebase_policy_selector=lambda repo: select_rebase_policy("HomericIntelligence", repo),
     )
     yield p
     p.shutdown()
@@ -3859,7 +3853,7 @@ class TestGitOps:
     @staticmethod
     def _continue_rebase_job(tmp_path: Path) -> GitJob:
         return GitJob(
-            repo="test/repo",
+            repo="Hephaestus",
             op="continue_rebase",
             timeout_s=60,
             kwargs={
@@ -3908,11 +3902,14 @@ class TestGitOps:
             "- [Host-owned learning preparation](0027-host-owned-learning-preparation.md)\n"
         )
 
-        result = pool._validate_rebased_tree(tmp_path)
+        result = pool._validate_rebased_tree(tmp_path, repo="Hephaestus")
 
         assert result == JobResult(
             ok=False,
-            value={"failure_kind": "semantic_validation"},
+            value={
+                "failure_kind": "semantic_validation",
+                "rebase_policy": "homericintelligence/hephaestus",
+            },
             error=(
                 "rebase semantic validation failed: duplicate ADR number 0027 "
                 "(0027-durable-plan-review-conversations.md, "
@@ -3931,13 +3928,51 @@ class TestGitOps:
         )
         (adr_dir / "README.md").write_text("- [First decision](0001-first-decision.md)\n")
 
-        result = pool._validate_rebased_tree(tmp_path)
+        result = pool._validate_rebased_tree(tmp_path, repo="Hephaestus")
 
         assert result == JobResult(
             ok=False,
-            value={"failure_kind": "semantic_validation"},
+            value={
+                "failure_kind": "semantic_validation",
+                "rebase_policy": "homericintelligence/hephaestus",
+            },
             error=(
                 "rebase semantic validation failed: malformed ADR record 0001-first-decision.md"
+            ),
+        )
+
+    def test_rebase_semantic_validation_rejects_stale_adr_readme_link(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The selected Hephaestus policy still checks the ADR README index."""
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0001-first-decision.md").write_text(
+            "# ADR-0001: First decision\n"
+            "- Status: Accepted\n"
+            "- Date: 2026-01-01\n\n"
+            "## Context\nContext.\n\n"
+            "## Decision\nDecision.\n\n"
+            "## Alternatives considered\nAlternatives.\n\n"
+            "## Consequences\nConsequences.\n",
+            encoding="utf-8",
+        )
+        (adr_dir / "README.md").write_text(
+            "- [Removed decision](0002-removed-decision.md)\n",
+            encoding="utf-8",
+        )
+
+        result = pool._validate_rebased_tree(tmp_path, repo="Hephaestus")
+
+        assert result == JobResult(
+            ok=False,
+            value={
+                "failure_kind": "semantic_validation",
+                "rebase_policy": "homericintelligence/hephaestus",
+            },
+            error=(
+                "rebase semantic validation failed: ADR README index out of sync "
+                "(missing=['0001-first-decision.md'], stale=['0002-removed-decision.md'])"
             ),
         )
 
@@ -3973,7 +4008,10 @@ class TestGitOps:
             result = pool._git_continue_rebase(job)
 
         assert result.ok is False
-        assert result.value == {"failure_kind": "semantic_validation"}
+        assert result.value == {
+            "failure_kind": "semantic_validation",
+            "rebase_policy": "homericintelligence/hephaestus",
+        }
         assert result.error == (
             "rebase semantic validation failed: duplicate ADR number 0027 "
             "(0027-durable-plan-review-conversations.md, "
@@ -4031,7 +4069,7 @@ class TestGitOps:
             result = pool._git_continue_rebase(job)
 
         assert result.ok is True
-        validate.assert_called_once_with(tmp_path, timeout=60)
+        validate.assert_called_once_with(tmp_path, repo="Hephaestus", timeout=60)
         push.assert_called_once()
 
     def test_rebase_structural_validation_preserves_bounded_diagnostics(
@@ -4053,44 +4091,65 @@ class TestGitOps:
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch.object(pool, "_run_immutable_build_test", return_value=failed) as run_test,
         ):
-            result = pool._run_rebase_structural_validation(tmp_path, timeout=60)
+            result = pool._run_rebase_structural_validation(tmp_path, repo="Hephaestus", timeout=60)
 
         assert result == JobResult(
             ok=False,
-            value={"failure_kind": "validation"},
+            value={
+                "failure_kind": "validation",
+                "rebase_policy": "homericintelligence/hephaestus",
+            },
             error="rebase structural validation failed",
             stdout_tail="duplicate ADR number 0027",
             stderr_tail="pytest diagnostics",
         )
         run_test.assert_called_once()
 
-    def test_rebase_semantic_validation_unaffected_without_injected_policy(
+    def test_rebase_semantic_validation_uses_target_policy_selection(
         self, shutdown_event: threading.Event, completion_q: CompletionQueue, tmp_path: Path
     ) -> None:
-        """A different valid ADR layout passes when no repository policy is injected.
+        """A different valid ADR layout passes when no policy selects the target.
 
         The shared executor must not apply the owning repository's ADR
         filename/section/README-index contract to another repository.  A
-        policy-free pool leaves a non-4-digit ADR layout with a custom
-        section structure untouched.
+        target-policy selector leaves a custom index, template, and numbered
+        ADR layout untouched.
         """
-        policy_free = WorkerPool(
+        from hephaestus.automation.pipeline.rebase_adr_policy import select_rebase_policy
+
+        target_pool = WorkerPool(
             size=1,
             shutdown=shutdown_event,
             completion_q=completion_q,
             lock_dir=tmp_path / "locks",
+            rebase_policy_selector=lambda repo: select_rebase_policy("HomericIntelligence", repo),
         )
         adr_dir = tmp_path / "docs" / "adr"
         adr_dir.mkdir(parents=True)
-        (adr_dir / "01-fleet-routing.md").write_text(
-            "# ADR-01: Fleet routing\n- Status: Accepted\n- Date: 2026-01-01\n"
+        (adr_dir / "index.md").write_text(
+            "# Architecture decisions\n\n- [Routing](0001-routing.md)\n",
+            encoding="utf-8",
         )
-        (adr_dir / "README.md").write_text("- [Fleet routing](01-fleet-routing.md)\n")
+        (adr_dir / "0000-template.md").write_text(
+            "# ADR template\n\nUse this file to create an ADR.\n",
+            encoding="utf-8",
+        )
+        (adr_dir / "0001-routing.md").write_text(
+            "# Routing decision\n\n## Context\nTarget context.\n",
+            encoding="utf-8",
+        )
+        (adr_dir / "0002-observability.md").write_text(
+            "# Observability decision\n\n## Decision\nTarget decision.\n",
+            encoding="utf-8",
+        )
 
-        assert policy_free._validate_rebased_tree(tmp_path) is None
-        assert policy_free._run_rebase_structural_validation(tmp_path, timeout=60) is None
+        assert target_pool._validate_rebased_tree(tmp_path, repo="TargetRepo") is None
+        assert (
+            target_pool._run_rebase_structural_validation(tmp_path, repo="TargetRepo", timeout=60)
+            is None
+        )
 
-        policy_free.shutdown()
+        target_pool.shutdown()
 
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path

@@ -30,7 +30,7 @@ from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, TypeGuard, cast
+from typing import Any, Protocol, TypeGuard, cast
 
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
@@ -102,6 +102,19 @@ logger = logging.getLogger(__name__)
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
+
+
+class _RebasePolicy(Protocol):
+    """Structural contract for a host-selected repository policy."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def adr_validator(self) -> Callable[[Path], JobResult | None]: ...
+
+    @property
+    def structural_test_argv(self) -> tuple[str, ...] | None: ...
 
 
 @contextmanager
@@ -1663,8 +1676,7 @@ class WorkerPool:
         gh_extra_path_root: Path | None = None,
         github_job_runner: GitHubJobRunner | None = None,
         athena_skill_executor: AthenaSkillExecutor | None = None,
-        rebase_adr_validator: Callable[[Path], JobResult | None] | None = None,
-        rebase_structural_test_argv: tuple[str, ...] | None = None,
+        rebase_policy_selector: Callable[[str], _RebasePolicy | None] | None = None,
         evidence_receipt_dir: Path | None = None,
     ) -> None:
         """Initialize the pool.
@@ -1682,13 +1694,9 @@ class WorkerPool:
                 only ``bin/gh`` for checkout synchronization.
             github_job_runner: Closed worker-side GitHub operation runner.
             athena_skill_executor: Closed host-owned Athena skill executor.
-            rebase_adr_validator: Host-trusted, repository-owned ADR semantic
-                validator invoked after a conflict-resolved rebase.  ``None``
-                keeps the shared executor repository-agnostic; the owning
-                repository injects its own policy.
-            rebase_structural_test_argv: Host-trusted, repository-owned pytest
-                argv run against the immutable rebased tree.  ``None`` disables
-                the structural gate for repositories without a matching test.
+            rebase_policy_selector: Host-trusted selector for the target
+                repository's validation policy.  ``None`` keeps the shared
+                executor repository-agnostic.
             evidence_receipt_dir: Optional private directory for bounded typed
                 agent and Athena result receipts.
 
@@ -1707,8 +1715,7 @@ class WorkerPool:
         self._gh_extra_path_root = gh_extra_path_root
         self._github_job_runner = github_job_runner
         self._athena_skill_executor = athena_skill_executor
-        self._rebase_adr_validator = rebase_adr_validator
-        self._rebase_structural_test_argv = rebase_structural_test_argv
+        self._rebase_policy_selector = rebase_policy_selector
         self._evidence_receipt_dir = evidence_receipt_dir
 
     @contextmanager
@@ -2982,30 +2989,48 @@ class WorkerPool:
             return "<absent>"
         return hashlib.sha256(target.read_bytes()).hexdigest()
 
-    def _validate_rebased_tree(self, cwd: Path) -> JobResult | None:
-        """Delegate to the injected repository-owned ADR semantic validator.
-
-        The shared executor carries no repository policy of its own: a
-        host-trusted validator is injected at construction (see
-        ``rebase_adr_validator``).  Repositories without an injected policy
-        are unaffected, so a different valid ``docs/adr`` layout cannot be
-        rejected during rebase.
-        """
-        if self._rebase_adr_validator is None:
+    def _selected_rebase_policy(self, repo: str) -> _RebasePolicy | None:
+        """Resolve the host policy for one target repository."""
+        if self._rebase_policy_selector is None:
             return None
-        return self._rebase_adr_validator(cwd)
+        return self._rebase_policy_selector(repo)
 
-    def _run_rebase_structural_validation(self, cwd: Path, *, timeout: int) -> JobResult | None:
-        """Run the injected repository-owned test against an immutable rebased tree.
+    @staticmethod
+    def _annotate_rebase_policy(result: JobResult, policy: _RebasePolicy) -> JobResult:
+        """Add selected-policy context while preserving the policy failure."""
+        value = dict(result.value) if isinstance(result.value, dict) else {}
+        if not isinstance(result.value, dict):
+            value["policy_result"] = result.value
+        value["rebase_policy"] = policy.name
+        return replace(result, value=value)
 
-        The structural test argv is host-injected (see
-        ``rebase_structural_test_argv``); when no argv is provided the gate is
-        disabled so unrelated repositories remain unaffected.
+    def _validate_rebased_tree(self, cwd: Path, *, repo: str) -> JobResult | None:
+        """Run the selected repository's ADR semantic validator.
+
+        The shared executor carries no repository policy of its own.  A
+        missing selection leaves the target tree untouched.
         """
-        if self._rebase_structural_test_argv is None:
+        policy = self._selected_rebase_policy(repo)
+        if policy is None:
+            return None
+        result = policy.adr_validator(cwd)
+        if result is None:
+            return None
+        return self._annotate_rebase_policy(result, policy)
+
+    def _run_rebase_structural_validation(
+        self, cwd: Path, *, repo: str, timeout: int
+    ) -> JobResult | None:
+        """Run the selected repository test against an immutable rebased tree.
+
+        A missing policy or structural command disables this gate for the
+        target.  This keeps the shared worker repository-agnostic.
+        """
+        policy = self._selected_rebase_policy(repo)
+        if policy is None or policy.structural_test_argv is None:
             return None
         relative_test = next(
-            (part for part in self._rebase_structural_test_argv if part.endswith(".py")),
+            (part for part in policy.structural_test_argv if part.endswith(".py")),
             None,
         )
         if relative_test is None:
@@ -3015,16 +3040,19 @@ class WorkerPool:
             return None
         source_sha = self._read_publish_head(cwd, timeout=timeout)
         if isinstance(source_sha, JobResult):
-            return JobResult(
-                ok=False,
-                value={"failure_kind": "validation_runner"},
-                error="rebase structural validation could not bind the rebased head",
+            return self._annotate_rebase_policy(
+                JobResult(
+                    ok=False,
+                    value={"failure_kind": "validation_runner"},
+                    error="rebase structural validation could not bind the rebased head",
+                ),
+                policy,
             )
         result = self._run_immutable_build_test(
             BuildTestJob(
                 repo="rebase-structural-validation",
                 cwd=cwd,
-                argv=self._rebase_structural_test_argv,
+                argv=policy.structural_test_argv,
                 timeout_s=timeout,
                 expected_head_sha=source_sha,
                 immutable_source=True,
@@ -3043,12 +3071,15 @@ class WorkerPool:
         else:
             failure_kind = "validation_runner"
             error = "rebase structural validation runner failed"
-        return JobResult(
-            ok=False,
-            value={"failure_kind": failure_kind},
-            stdout_tail=result.stdout_tail,
-            stderr_tail=result.stderr_tail,
-            error=error,
+        return self._annotate_rebase_policy(
+            JobResult(
+                ok=False,
+                value={"failure_kind": failure_kind},
+                stdout_tail=result.stdout_tail,
+                stderr_tail=result.stderr_tail,
+                error=error,
+            ),
+            policy,
         )
 
     def _git_continue_rebase(self, job: GitJob) -> JobResult:
@@ -3103,10 +3134,12 @@ class WorkerPool:
         )
         if continued is not None:
             return continued
-        structural = self._run_rebase_structural_validation(cwd, timeout=job.timeout_s)
+        structural = self._run_rebase_structural_validation(
+            cwd, repo=job.repo, timeout=job.timeout_s
+        )
         if structural is not None:
             return structural
-        semantic = self._validate_rebased_tree(cwd)
+        semantic = self._validate_rebased_tree(cwd, repo=job.repo)
         if semantic is not None:
             return semantic
         metadata = self._verify_rebased_commit_metadata(

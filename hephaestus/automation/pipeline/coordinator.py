@@ -155,8 +155,7 @@ class Coordinator(
             # I/O-capable module and tests never need it.
             from hephaestus.automation.mnemosyne_skill_host import MnemosyneSkillHost
             from hephaestus.automation.pipeline.rebase_adr_policy import (
-                REBASE_STRUCTURAL_TEST_ARGV,
-                validate_rebased_adr_tree,
+                select_rebase_policy,
             )
             from hephaestus.automation.pipeline.worker_pool import WorkerPool
             from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
@@ -164,6 +163,11 @@ class Coordinator(
             athena_executor = (
                 MnemosyneSkillHost() if pipeline_requires_athena_executor(config) else None
             )
+
+            def rebase_policy_selector(repo: str) -> Any:
+                """Select only the policy configured for this target repo."""
+                return select_rebase_policy(config.org, repo)
+
             pool = WorkerPool(
                 size=work_window,
                 shutdown=self.shutdown,
@@ -175,11 +179,9 @@ class Coordinator(
                     gh_timeout=config.gh_timeout,
                 ),
                 athena_skill_executor=athena_executor,
-                # The owning repository injects its own ADR policy so the
-                # shared executor never applies it to another repository with
-                # a different valid docs/adr layout.
-                rebase_adr_validator=validate_rebased_adr_tree,
-                rebase_structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
+                # Select policy per target so the shared executor does not
+                # apply Hephaestus rules to another repository.
+                rebase_policy_selector=rebase_policy_selector,
                 evidence_receipt_dir=config.evidence_receipt_dir,
             )
         else:
