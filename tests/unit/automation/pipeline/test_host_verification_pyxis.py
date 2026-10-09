@@ -398,10 +398,10 @@ def test_validate_pyxis_image_rejects_digest_mismatch(tmp_path: Path) -> None:
         )
 
 
-def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
+def test_build_pyxis_srun_command_uses_read_only_source_and_private_namespaces(
     tmp_path: Path,
 ) -> None:
-    """Pyxis receives fixed isolation flags and explicit mount modes."""
+    """The trusted image creates namespaces before it starts the test payload."""
     image, digest = _image(tmp_path)
     authority = _authority(image, digest)
     source = tmp_path / "source"
@@ -412,6 +412,7 @@ def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
         path.mkdir(parents=True)
 
     command = build_pyxis_srun_command(
+        srun_executable=Path("/usr/bin/srun"),
         image=validate_pyxis_image(
             image,
             expected_sha256=digest,
@@ -426,10 +427,11 @@ def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
         timeout_s=300,
     )
 
-    assert command[0] == "srun"
+    assert command[0] == "/usr/bin/srun"
     assert "--container-readonly" in command
     assert "--no-container-mount-home" in command
-    assert "--container-unshare=net,ipc,uts" in command
+    assert "--no-container-remap-root" in command
+    assert not any(value.startswith("--container-unshare") for value in command)
     assert "--export=NONE" in command
     assert "--nodes=1" in command
     assert "--ntasks=1" in command
@@ -444,7 +446,27 @@ def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
     assert f"{metadata.resolve()}:{metadata.resolve()}:ro" in mounts
     assert f"{scratch.resolve()}:{scratch.resolve()}:rw" in mounts
     assert f"{logs.resolve()}:{(source / 'pi-smoke-logs').resolve()}:rw" in mounts
-    assert command[command.index("/usr/bin/env") + 1] == "-i"
+    bootstrap_start = command.index("/usr/local/bin/python")
+    assert command[bootstrap_start : bootstrap_start + 4] == (
+        "/usr/local/bin/python",
+        "-I",
+        "-S",
+        "-c",
+    )
+    compile(command[bootstrap_start + 4], "<pyxis-parent-bootstrap>", "exec")
+    namespace_start = command.index("/usr/bin/unshare")
+    assert bootstrap_start < namespace_start
+    assert command[namespace_start : namespace_start + 9] == (
+        "/usr/bin/unshare",
+        "--user",
+        "--map-current-user",
+        "--net",
+        "--ipc",
+        "--uts",
+        "--",
+        "/usr/bin/env",
+        "-i",
+    )
     assert "/usr/local/bin/uv" in command
     assert (
         digest
@@ -454,6 +476,35 @@ def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
             provenance=authority,
         ).sha256
     )
+
+
+def test_build_pyxis_srun_command_rejects_non_absolute_srun(tmp_path: Path) -> None:
+    """The launch command must not resolve Slurm through an inherited path."""
+    image, digest = _image(tmp_path)
+    authority = _authority(image, digest)
+    source = tmp_path / "source"
+    metadata = tmp_path / "metadata.git"
+    scratch = tmp_path / "scratch"
+    logs = tmp_path / "logs"
+    for path in (source, metadata, scratch, logs):
+        path.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="absolute"):
+        build_pyxis_srun_command(
+            srun_executable=Path("srun"),
+            image=validate_pyxis_image(
+                image,
+                expected_sha256=digest,
+                provenance=authority,
+            ),
+            source=source,
+            git_metadata=metadata,
+            scratch=scratch,
+            pi_smoke_logs=logs,
+            argv=("uv", "run", "pytest", "tests/unit"),
+            environment={"UV_OFFLINE": "1"},
+            timeout_s=300,
+        )
 
 
 def test_validate_pyxis_quota_root_requires_finite_private_filesystem(

@@ -1426,7 +1426,7 @@ class TestWorkerPoolSubmitComplete:
     def test_bounded_host_command_stops_immediately_when_pool_is_interrupted(
         self, tmp_path: Path
     ) -> None:
-        """A stopping loop terminates a host child rather than waiting for timeout."""
+        """A stopping loop does not create a host child."""
         source = tmp_path / "source"
         scratch = tmp_path / "scratch"
         source.mkdir()
@@ -1434,19 +1434,53 @@ class TestWorkerPoolSubmitComplete:
         shutdown = threading.Event()
         shutdown.set()
 
-        result = _run_bounded_host_command(
-            (sys.executable, "-c", "import time; time.sleep(30)"),
-            validation_argv=("uv", "run", "pytest", "tests/unit"),
-            source=source,
-            scratch=scratch,
-            environment=dict(os.environ),
-            timeout_s=60,
-            shutdown=shutdown,
-        )
+        pre_launch = MagicMock()
+        with patch(f"{_WP}.subprocess.Popen") as popen:
+            result = _run_bounded_host_command(
+                (sys.executable, "-c", "import time; time.sleep(30)"),
+                validation_argv=("uv", "run", "pytest", "tests/unit"),
+                source=source,
+                scratch=scratch,
+                environment=dict(os.environ),
+                timeout_s=60,
+                shutdown=shutdown,
+                pre_launch=pre_launch,
+            )
 
         assert result.interrupted is True
         assert result.error == "interrupted"
+        pre_launch.assert_not_called()
+        popen.assert_not_called()
         assert subprocess_registry.live_count() == 0
+
+    def test_bounded_host_command_stops_if_cancelled_after_revalidation(
+        self, tmp_path: Path
+    ) -> None:
+        """A cancellation during revalidation does not create a host child."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        source.mkdir()
+        scratch.mkdir()
+        shutdown = threading.Event()
+
+        def cancel_during_revalidation() -> None:
+            shutdown.set()
+
+        with patch(f"{_WP}.subprocess.Popen") as popen:
+            result = _run_bounded_host_command(
+                (sys.executable, "-c", "raise SystemExit(0)"),
+                validation_argv=("uv", "run", "pytest", "tests/unit"),
+                source=source,
+                scratch=scratch,
+                environment={},
+                timeout_s=60,
+                shutdown=shutdown,
+                pre_launch=cancel_during_revalidation,
+            )
+
+        assert result.interrupted is True
+        assert result.error == "interrupted"
+        popen.assert_not_called()
 
     def test_immutable_build_test_runs_from_disposable_head_snapshot(
         self, pool: WorkerPool, tmp_path: Path
@@ -1553,6 +1587,36 @@ class TestWorkerPoolSubmitComplete:
         }
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
 
+    @pytest.mark.parametrize(
+        "job_id",
+        (None, "", "0", "01", "-1", "1\n2", "4294967295"),
+    )
+    def test_immutable_build_test_rejects_invalid_slurm_allocation_before_execution(
+        self, pool: WorkerPool, tmp_path: Path, job_id: str | None
+    ) -> None:
+        """Linux does not launch when the active Slurm job ID is not valid."""
+        environment = {} if job_id is None else {"SLURM_JOB_ID": job_id}
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=("uv", "run", "pytest", "tests/unit"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+        )
+
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._validate_pyxis_image") as validate_image,
+        ):
+            result = pool._run_build_test(job)
+
+        assert result.ok is False
+        assert result.error == "host_verification_slurm_allocation_unavailable"
+        validate_image.assert_not_called()
+
     def test_immutable_build_test_rejects_missing_linux_pyxis_image_before_execution(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
@@ -1568,8 +1632,10 @@ class TestWorkerPoolSubmitComplete:
 
         archive = MagicMock(return_value=(b"", ""))
         with (
+            patch.dict(os.environ, {"SLURM_JOB_ID": "2338842"}, clear=True),
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}._trusted_executable", return_value=sys.executable),
+            patch(f"{_WP}._resolve_trusted_srun_executable", return_value="/usr/bin/srun"),
             patch(
                 f"{_WP}._verifier_owned_runtime_environment",
                 return_value=Path(sys.prefix),
@@ -1593,6 +1659,32 @@ class TestWorkerPoolSubmitComplete:
         assert result.value["platform"] == "linux"
         assert result.value["status"] != "skipped"
         archive.assert_not_called()
+
+    def test_immutable_build_test_rejects_missing_trusted_srun_before_image_access(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Linux fails closed when the fixed Slurm launcher is unavailable."""
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=("uv", "run", "pytest", "tests/unit"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+        )
+
+        with (
+            patch.dict(os.environ, {"SLURM_JOB_ID": "2338842"}, clear=True),
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._resolve_trusted_srun_executable", return_value=None),
+            patch(f"{_WP}._validate_pyxis_image") as validate_image,
+        ):
+            result = pool._run_build_test(job)
+
+        assert result.ok is False
+        assert result.error == "host_verification_srun_unavailable"
+        validate_image.assert_not_called()
 
     def test_immutable_build_test_runs_linux_pyxis_and_records_image_digest(
         self, pool: WorkerPool, tmp_path: Path
@@ -1623,8 +1715,18 @@ class TestWorkerPoolSubmitComplete:
         command_result = JobResult(ok=True, value={"failure_kind": "none"})
 
         with (
+            patch.dict(
+                os.environ,
+                {
+                    "AWS_SECRET_ACCESS_KEY": "secret",
+                    "SLURM_JOB_ID": "2338842",
+                    "SLURM_STEP_ID": "7",
+                },
+                clear=True,
+            ),
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._resolve_trusted_srun_executable", return_value="/usr/bin/srun"),
             patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
             patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
             patch(f"{_WP}._stage_verified_pyxis_image", return_value=metadata) as stage_image,
@@ -1633,7 +1735,9 @@ class TestWorkerPoolSubmitComplete:
             patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata"),
             patch(f"{_WP}._prepare_host_output_aliases"),
             patch(f"{_WP}._build_pyxis_environment", return_value={"UV_OFFLINE": "1"}),
-            patch(f"{_WP}._build_pyxis_srun_command", return_value=("srun", "true")),
+            patch(
+                f"{_WP}._build_pyxis_srun_command", return_value=("/usr/bin/srun", "true")
+            ) as build_srun,
             patch(f"{_WP}._run_bounded_host_command", return_value=command_result) as run_command,
         ):
             result = pool._run_build_test(job)
@@ -1655,6 +1759,11 @@ class TestWorkerPoolSubmitComplete:
         }
         (pi_smoke_logs,) = run_command.call_args.kwargs["additional_writable_paths"]
         assert pi_smoke_logs.name == "pi-smoke-logs"
+        assert run_command.call_args.kwargs["environment"] == {
+            "PATH": os.defpath,
+            "SLURM_JOB_ID": "2338842",
+        }
+        assert build_srun.call_args.kwargs["srun_executable"] == Path("/usr/bin/srun")
         staging_root = stage_image.call_args.args[1]
         immutable_source = extract_archive.call_args.args[1]
         assert immutable_source.parent == staging_root
@@ -1737,14 +1846,18 @@ class TestWorkerPoolSubmitComplete:
                 selected.chmod(0o400)
             else:
                 selected.mkdir(mode=0o500 if replaced_path != "quota_root" else 0o700)
+            if replaced_path != "quota_root":
+                selected.parent.chmod(0o500)
             pre_launch = kwargs.get("pre_launch")
             if callable(pre_launch):
                 pre_launch()
             return JobResult(ok=True, value={"failure_kind": "none"})
 
         with (
+            patch.dict(os.environ, {"SLURM_JOB_ID": "2338842"}, clear=True),
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._resolve_trusted_srun_executable", return_value="/usr/bin/srun"),
             patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
             patch(f"{_WP}._validate_pyxis_quota_root", return_value=quota_root),
             patch(f"{_WP}._trusted_git_executable", return_value="/usr/bin/git"),
@@ -1761,7 +1874,12 @@ class TestWorkerPoolSubmitComplete:
 
         assert result.ok is False
         assert result.error is not None
-        assert "cross-node" in result.error
+        expected_error = (
+            "cross-node root path changed"
+            if replaced_path == "quota_root"
+            else "cross-node artifact path changed"
+        )
+        assert expected_error in result.error
 
     def test_linux_resource_wrapper_sets_all_inherited_limits(self) -> None:
         """The Linux Slurm launcher inherits fixed OS limits before dispatch."""

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -25,6 +27,49 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 PYXIS_AUTHORITY_SCHEMA = "hephaestus-host-verification-pyxis-v2"
 PYXIS_WRITABLE_FILESYSTEM_MAX_BYTES = 1024 * 1024 * 1024
+_TRUSTED_SRUN = Path("/usr/bin/srun")
+_PYXIS_PARENT_BOOTSTRAP = (
+    "import json, os, socket, sys\n"
+    "names = ('user', 'net', 'ipc', 'uts')\n"
+    "parent_namespaces = {name: os.readlink('/proc/self/ns/' + name) for name in names}\n"
+    "node = socket.gethostname()\n"
+    "required = {\n"
+    "    'job_id': os.environ.get('SLURM_JOB_ID', ''),\n"
+    "    'step_id': os.environ.get('SLURM_STEP_ID', ''),\n"
+    "    'step_nodelist': os.environ.get('SLURM_STEP_NODELIST', ''),\n"
+    "    'step_nodes': os.environ.get('SLURM_STEP_NUM_NODES', ''),\n"
+    "    'cpus_per_task': os.environ.get('SLURM_CPUS_PER_TASK', ''),\n"
+    "    'job_start_time': os.environ.get('SLURM_JOB_START_TIME', ''),\n"
+    "    'job_end_time': os.environ.get('SLURM_JOB_END_TIME', ''),\n"
+    "}\n"
+    "if (required['step_nodelist'] != node or required['step_nodes'] != '1' "
+    "or required['cpus_per_task'] != '2'):\n"
+    "    raise SystemExit('Slurm step evidence is invalid')\n"
+    "if any(not value.isdecimal() for key, value in required.items() "
+    "if key != 'step_nodelist'):\n"
+    "    raise SystemExit('Slurm numeric evidence is invalid')\n"
+    "if int(required['job_end_time']) <= int(required['job_start_time']):\n"
+    "    raise SystemExit('Slurm wall-time evidence is invalid')\n"
+    "argv = sys.argv[1:]\n"
+    "try:\n"
+    "    env_index = argv.index('/usr/bin/env')\n"
+    "except ValueError:\n"
+    "    raise SystemExit('scrubbed environment boundary is missing') from None\n"
+    "if argv[env_index + 1:env_index + 2] != ['-i']:\n"
+    "    raise SystemExit('scrubbed environment boundary is invalid')\n"
+    "with socket.socket() as listener:\n"
+    "    listener.bind(('127.0.0.1', 0))\n"
+    "    listener.listen(1)\n"
+    "    listener.set_inheritable(True)\n"
+    "    evidence = [\n"
+    "        'HEPHAESTUS_PYXIS_PARENT_NAMESPACES=' + json.dumps(parent_namespaces),\n"
+    "        'HEPHAESTUS_PYXIS_PARENT_NODE=' + node,\n"
+    "        'HEPHAESTUS_PYXIS_PARENT_PORT=' + str(listener.getsockname()[1]),\n"
+    "        'HEPHAESTUS_PYXIS_SLURM_EVIDENCE=' + json.dumps(required),\n"
+    "    ]\n"
+    "    argv[env_index + 2:env_index + 2] = evidence\n"
+    "    os.execv(argv[0], argv)\n"
+)
 
 
 class PyxisImageValidationError(ValueError):
@@ -47,6 +92,24 @@ class PyxisImageMetadata:
         compare=False,
         repr=False,
     )
+
+
+def resolve_trusted_srun_executable() -> str | None:
+    """Return the fixed trusted Slurm launcher when it is safe to execute."""
+    try:
+        resolved = _TRUSTED_SRUN.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError:
+        return None
+    if (
+        not resolved.is_file()
+        or not os.access(resolved, os.X_OK)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        return None
+    return str(resolved)
 
 
 def validate_pyxis_image(
@@ -167,6 +230,7 @@ def build_pyxis_environment(*, source: Path, scratch: Path) -> dict[str, str]:
 
 def build_pyxis_srun_command(
     *,
+    srun_executable: Path,
     image: PyxisImageMetadata,
     source: Path,
     git_metadata: Path,
@@ -179,6 +243,8 @@ def build_pyxis_srun_command(
     """Build one fixed ``srun`` command with Pyxis isolation flags."""
     if not argv:
         raise ValueError("host-verification argv cannot be empty")
+    if not srun_executable.is_absolute():
+        raise ValueError("srun executable must be absolute")
     source_path = source.expanduser().resolve()
     metadata_path = git_metadata.expanduser().resolve()
     scratch_path = scratch.expanduser().resolve()
@@ -200,7 +266,7 @@ def build_pyxis_srun_command(
     minutes, seconds = divmod(seconds, 60)
     slurm_time = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     return (
-        "srun",
+        str(srun_executable),
         "--exclusive",
         "--nodes=1",
         "--ntasks=1",
@@ -213,10 +279,24 @@ def build_pyxis_srun_command(
         "--container-image=" + str(image.path),
         "--container-readonly",
         "--no-container-mount-home",
-        "--container-unshare=net,ipc,uts",
+        "--no-container-remap-root",
         "--container-workdir=" + str(source_path),
         "--container-mounts=" + mounts,
         "--export=NONE",
+        "/usr/local/bin/python",
+        "-I",
+        "-S",
+        "-c",
+        _PYXIS_PARENT_BOOTSTRAP,
+        # Older Pyxis versions do not supply a namespace option. The trusted
+        # image must create all required namespaces before the payload starts.
+        "/usr/bin/unshare",
+        "--user",
+        "--map-current-user",
+        "--net",
+        "--ipc",
+        "--uts",
+        "--",
         "/usr/bin/env",
         "-i",
         *environment_items,
@@ -260,6 +340,7 @@ __all__ = [
     "build_pyxis_environment",
     "build_pyxis_srun_command",
     "image_sha256",
+    "resolve_trusted_srun_executable",
     "stage_verified_pyxis_image",
     "validate_pyxis_image",
     "validate_pyxis_quota_root",

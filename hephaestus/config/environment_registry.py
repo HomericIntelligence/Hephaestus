@@ -23,6 +23,7 @@ class EnvVarSpec:
 _PARENT_READER = "hephaestus.config.child_environments.read_approved_parent_env"
 _GH_READER = "hephaestus.config.child_environments.build_gh_child_env"
 _SIGNING_READER = "hephaestus.config.child_environments.build_git_signing_env"
+_SLURM_READER = "hephaestus.config.child_environments.read_slurm_allocation_env"
 _COLOR_READER = "hephaestus.cli.colors._automatic_colors_enabled"
 
 
@@ -140,6 +141,12 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
     _parent("ComSpec", "Windows command processor", validation="path"),
     _parent("COMSPEC", "Windows command processor alias", validation="path"),
     _parent("PATHEXT", "Windows executable suffixes"),
+    _parent(
+        "SLURM_JOB_ID",
+        "Active Slurm allocation identity",
+        validation="string-no-nul",
+        readers=(_SLURM_READER,),
+    ),
     _workflow("CI", "CI runtime detection", "scripts.check_license_compatibility.main"),
     _workflow(
         "GITHUB_ACTIONS",

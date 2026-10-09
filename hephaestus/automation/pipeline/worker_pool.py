@@ -70,6 +70,7 @@ from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
     build_pyxis_environment as _build_pyxis_environment,
     build_pyxis_srun_command as _build_pyxis_srun_command,
+    resolve_trusted_srun_executable as _resolve_trusted_srun_executable,
     stage_verified_pyxis_image as _stage_verified_pyxis_image,
     validate_pyxis_image as _validate_pyxis_image,
     validate_pyxis_quota_root as _validate_pyxis_quota_root,
@@ -122,6 +123,7 @@ from hephaestus.config.child_environments import (
     build_host_verification_env,
     build_python_phase_env,
     read_approved_parent_env,
+    read_slurm_allocation_env,
 )
 from hephaestus.diagnostics import bounded_git_diagnostic
 from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
@@ -1032,6 +1034,39 @@ def _linux_resource_limited_command(command: tuple[str, ...], *, timeout_s: int)
     )
 
 
+def _pyxis_host_environment() -> dict[str, str]:
+    """Return the minimum host environment for an existing Slurm allocation."""
+    allocation = read_slurm_allocation_env()
+    if "SLURM_JOB_ID" not in allocation:
+        raise _HostVerificationBoundaryError("host_verification_slurm_allocation_unavailable")
+    return {"PATH": os.defpath, **allocation}
+
+
+def _pyxis_srun_executable() -> Path:
+    """Return the trusted Slurm launcher or stop the Linux boundary."""
+    executable = _resolve_trusted_srun_executable()
+    if executable is None:
+        raise _HostVerificationBoundaryError("host_verification_srun_unavailable")
+    return Path(executable)
+
+
+def _cross_node_quota_binding(
+    value: Path | CrossNodePathBinding,
+) -> CrossNodePathBinding:
+    """Return one retained cross-node binding for a validated quota root."""
+    if isinstance(value, CrossNodePathBinding):
+        return value
+    return bind_cross_node_root(value)
+
+
+def _configured_pyxis_image_path(value: Path | None) -> Path:
+    """Return one absolute path for the configured Pyxis image."""
+    path = Path(value or DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE)
+    if path.is_absolute():
+        return path
+    return Path.cwd() / path
+
+
 def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
     """Return the valid blank HFS+ image creation argv for quota scratch."""
     return (
@@ -1456,10 +1491,23 @@ def _run_bounded_host_command(
     output.mkdir()
     stdout_path = output / "stdout.log"
     stderr_path = output / "stderr.log"
+
+    def interrupted_result() -> JobResult:
+        return JobResult(
+            ok=False,
+            error="interrupted",
+            value={"failure_kind": "runner"},
+            interrupted=True,
+        )
+
     try:
         with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            if shutdown.is_set():
+                return interrupted_result()
             if pre_launch is not None:
                 pre_launch()
+            if shutdown.is_set():
+                return interrupted_result()
             process = subprocess.Popen(
                 command,
                 cwd=str(source),
@@ -1476,12 +1524,7 @@ def _run_bounded_host_command(
                     if shutdown.is_set():
                         _terminate_process_group(process)
                         process.wait()
-                        return JobResult(
-                            ok=False,
-                            error="interrupted",
-                            value={"failure_kind": "runner"},
-                            interrupted=True,
-                        )
+                        return interrupted_result()
                     if any(
                         _scratch_usage_exceeds_limit(writable_path)
                         for writable_path in (scratch, *additional_writable_paths)
@@ -2811,10 +2854,22 @@ class WorkerPool:
 
     def _run_linux_immutable_build_test(self, job: BuildTestJob) -> JobResult:
         """Run one fixed check in the local, read-only Pyxis CI image."""
-        configured_image = self._host_verification_pyxis_image
-        image_path = Path(configured_image or DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE)
-        if not image_path.is_absolute():
-            image_path = Path.cwd() / image_path
+        try:
+            host_environment = _pyxis_host_environment()
+            srun_executable = _pyxis_srun_executable()
+        except _HostVerificationBoundaryError as exc:
+            return JobResult(
+                ok=False,
+                error=str(exc),
+                value={
+                    "head_sha": job.expected_head_sha,
+                    "immutable_source": False,
+                    "failure_kind": "runner",
+                    "platform": "linux",
+                    "status": "failed",
+                },
+            )
+        image_path = _configured_pyxis_image_path(self._host_verification_pyxis_image)
         try:
             image = _validate_pyxis_image(
                 image_path,
@@ -2847,11 +2902,7 @@ class WorkerPool:
             return JobResult(ok=False, error="host_verification_git_unavailable")
         try:
             with ExitStack() as bindings:
-                quota_binding = (
-                    quota_value
-                    if isinstance(quota_value, CrossNodePathBinding)
-                    else bind_cross_node_root(Path(quota_value))
-                )
+                quota_binding = _cross_node_quota_binding(quota_value)
                 bindings.callback(quota_binding.close)
                 quota_root = quota_binding.path
                 with tempfile.TemporaryDirectory(
@@ -2906,17 +2957,18 @@ class WorkerPool:
                                 shared_binding.seal_root()
                                 run_binding.bind_path(scratch, kind="directory")
                                 run_binding.bind_path(pi_smoke_logs, kind="directory")
-                                environment = _build_pyxis_environment(
+                                container_environment = _build_pyxis_environment(
                                     source=source, scratch=scratch
                                 )
                                 command = _build_pyxis_srun_command(
+                                    srun_executable=srun_executable,
                                     image=staged_image,
                                     source=source,
                                     git_metadata=git_metadata,
                                     scratch=scratch,
                                     pi_smoke_logs=pi_smoke_logs,
                                     argv=job.argv,
-                                    environment=environment,
+                                    environment=container_environment,
                                     timeout_s=job.timeout_s,
                                 )
 
@@ -2933,7 +2985,7 @@ class WorkerPool:
                                     source=source,
                                     scratch=scratch,
                                     additional_writable_paths=(pi_smoke_logs,),
-                                    environment=environment,
+                                    environment=host_environment,
                                     timeout_s=job.timeout_s,
                                     shutdown=self._shutdown,
                                     pre_launch=revalidate_launch_paths,

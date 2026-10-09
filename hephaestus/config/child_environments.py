@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -52,6 +53,18 @@ def read_approved_parent_env() -> dict[str, str]:
     }
     env.setdefault("PATH", os.defpath)
     return env
+
+
+def read_slurm_allocation_env() -> dict[str, str]:
+    """Read one validated active Slurm allocation identity."""
+    job_id = os.environ.get("SLURM_JOB_ID", "")
+    spec = APPROVED_ENV_BY_NAME["SLURM_JOB_ID"]
+    valid = (
+        validate_environment_value(spec, job_id)
+        and re.fullmatch(r"[1-9][0-9]{0,9}", job_id) is not None
+        and int(job_id) <= (1 << 32) - 2
+    )
+    return {"SLURM_JOB_ID": job_id} if valid else {}
 
 
 def _platform_env() -> dict[str, str]:
@@ -206,5 +219,6 @@ __all__ = [
     "build_python_phase_env",
     "build_sbatch_submission_env",
     "read_approved_parent_env",
+    "read_slurm_allocation_env",
     "with_correlation_id",
 ]

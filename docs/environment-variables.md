@@ -64,6 +64,7 @@ This table is generated from the ambient-reader projection. “Reader” is a st
 | `PATH` | platform | config.child_environments | Command discovery | public | non-empty | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `PATHEXT` | platform | config.child_environments | Windows executable suffixes | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `SHELL` | platform | config.child_environments | Interactive shell hint | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `SLURM_JOB_ID` | platform | config.child_environments | Active Slurm allocation identity | public | string | input | `hephaestus/config/child_environments.py:read_slurm_allocation_env:read` |
 | `SSH_AUTH_SOCK` | child-process | config.child_environments | Git SSH authentication and signing bridge | secret | path | input | `hephaestus/config/child_environments.py:build_git_signing_env:read` |
 | `SYSTEMROOT` | platform | config.child_environments | Windows system root | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `SystemRoot` | platform | config.child_environments | Windows system root alias | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |

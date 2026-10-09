@@ -243,6 +243,18 @@ readers = [
 ]
 
 [[variables]]
+name = "SLURM_JOB_ID"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Active Slurm allocation identity"
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_slurm_allocation_env", access = "read" },
+]
+
+[[variables]]
 name = "SSH_AUTH_SOCK"
 category = "child-process"
 owner = "config.child_environments"
