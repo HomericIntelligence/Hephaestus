@@ -638,6 +638,16 @@ def _positive_timeout(value: str) -> int:
     return parsed
 
 
+def _provider_cli_which(executable: str) -> str | None:
+    """Locate a provider CLI, tolerating literal tilde entries in PATH.
+
+    Discovery uses the same approved and normalized PATH that provider
+    subprocesses receive, so an executable found here also runs there.
+    """
+    approved_path = read_approved_parent_env().get("PATH", os.defpath)
+    return shutil.which(executable, path=approved_path)
+
+
 def is_agent_authenticated(
     agent: AgentName,
     *,
@@ -647,7 +657,7 @@ def is_agent_authenticated(
     shutdown: threading.Event | None = None,
 ) -> bool:
     """Return True when the provider CLI is installed and reports logged-in auth."""
-    if shutil.which(agent_cli_name(agent)) is None:
+    if _provider_cli_which(agent_cli_name(agent)) is None:
         return False
 
     for cmd in AGENT_AUTH_STATUS_COMMANDS[agent]:
@@ -962,7 +972,7 @@ def resolve_agent(
             **authentication_options,
         )
         if not authenticated:
-            if shutil.which(agent_cli_name(agent)) is None:
+            if _provider_cli_which(agent_cli_name(agent)) is None:
                 raise RuntimeError(
                     f"Agent '{agent}' is not installed on PATH. "
                     f"Install the '{agent_cli_name(agent)}' CLI and try again, "
@@ -987,10 +997,10 @@ def resolve_agent(
     installed_agents = tuple(
         agent_name
         for agent_name in AGENT_CHOICES
-        if agent_name != "pi" and shutil.which(agent_cli_name(agent_name))
+        if agent_name != "pi" and _provider_cli_which(agent_cli_name(agent_name))
     )
     if not installed_agents:
-        if shutil.which("pi") is not None:
+        if _provider_cli_which("pi") is not None:
             _require_pi_automation_admission(
                 effective_cwd,
                 disable_pi_automation=disable_pi_automation,
@@ -1012,9 +1022,9 @@ def resolve_agent(
 
     raise RuntimeError(
         "Supported agent backends are installed but none are authenticated. "
-        "Run `claude auth status`, `codex login status`, `pi --version`, or "
-        "`opencode providers list`, then log in/configure the provider you want "
-        "automation to use."
+        "Run `claude auth status`, `codex login status`, `pi --version`, "
+        "`opencode providers list` (OpenCode 1), or `opencode --version` (OpenCode 2), "
+        "then log in/configure the provider you want automation to use."
     )
 
 

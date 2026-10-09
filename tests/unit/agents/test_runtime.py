@@ -6723,7 +6723,7 @@ def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Pa
 def test_resolve_agent_prefers_claude_when_both_are_authenticated() -> None:
     """Omitted --agent prefers Claude only when both CLIs are authenticated."""
     with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
-        mock_which.side_effect = lambda name: (
+        mock_which.side_effect = lambda name, path=None: (
             f"/bin/{name}" if name in {"claude", "codex"} else None
         )
 
@@ -6738,7 +6738,7 @@ def test_resolve_agent_prefers_claude_when_both_are_authenticated() -> None:
 def test_resolve_agent_uses_authenticated_codex_when_claude_absent() -> None:
     """Codex is the fallback when Claude is not installed and Codex is authenticated."""
     with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
-        mock_which.side_effect = lambda name: "/bin/codex" if name == "codex" else None
+        mock_which.side_effect = lambda name, path=None: "/bin/codex" if name == "codex" else None
 
         with patch(
             "hephaestus.agents.runtime.run_subprocess",
@@ -6752,7 +6752,7 @@ def test_resolve_agent_uses_authenticated_codex_when_claude_absent() -> None:
 def test_resolve_agent_uses_codex_when_only_codex_is_authenticated() -> None:
     """An installed but unauthenticated Claude CLI should not beat authenticated Codex."""
     with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
-        mock_which.side_effect = lambda name: (
+        mock_which.side_effect = lambda name, path=None: (
             f"/bin/{name}" if name in {"claude", "codex"} else None
         )
 
@@ -6823,7 +6823,7 @@ def test_resolve_agent_rejects_pi_auto_detection_until_preflight_exists(tmp_path
     """Pi cannot enter normal automation before the required preflight exists."""
     _write_pi_models_config(tmp_path)
     with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
-        mock_which.side_effect = lambda name: "/bin/pi" if name == "pi" else None
+        mock_which.side_effect = lambda name, path=None: "/bin/pi" if name == "pi" else None
 
         with (
             patch("hephaestus.agents.runtime.Path.home", return_value=tmp_path),
@@ -7012,7 +7012,7 @@ def test_resolve_agent_errors_when_no_provider_exists() -> None:
 def test_resolve_agent_errors_when_no_provider_is_authenticated() -> None:
     """Installed providers must prove authentication before auto-selection."""
     with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
-        mock_which.side_effect = lambda name: (
+        mock_which.side_effect = lambda name, path=None: (
             f"/bin/{name}" if name in {"claude", "codex"} else None
         )
 
@@ -7023,6 +7023,65 @@ def test_resolve_agent_errors_when_no_provider_is_authenticated() -> None:
             ),
         ):
             with pytest.raises(RuntimeError, match="none are authenticated"):
+                agent_runtime.resolve_agent(None)
+
+
+def _install_literal_tilde_opencode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Install an opencode binary behind a literal, unexpanded tilde PATH entry."""
+    home = tmp_path / "home"
+    bindir = home / ".opencode" / "bin"
+    bindir.mkdir(parents=True)
+    sysbin = tmp_path / "sysbin"
+    sysbin.mkdir()
+    binary = bindir / "opencode"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(sysbin), "~/.opencode/bin"]))
+
+
+def test_resolve_agent_auto_detects_opencode2_behind_literal_tilde_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Auto-detection sees the OpenCode 2 CLI behind an unexpanded tilde PATH entry."""
+    _install_literal_tilde_opencode(monkeypatch, tmp_path)
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        returncode = 0 if cmd == ["opencode", "--version"] else 1
+        return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr="")
+
+    with patch("hephaestus.agents.runtime.run_subprocess", side_effect=fake_run):
+        assert agent_runtime.resolve_agent(None) == "opencode2"
+
+
+def test_resolve_agent_accepts_explicit_opencode2_behind_literal_tilde_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An explicit selection passes the installed gate behind a literal tilde PATH entry."""
+    _install_literal_tilde_opencode(monkeypatch, tmp_path)
+    with patch(
+        "hephaestus.agents.runtime.run_subprocess",
+        return_value=subprocess.CompletedProcess(
+            ["opencode", "--version"], 0, stdout="", stderr=""
+        ),
+    ):
+        assert agent_runtime.resolve_agent("opencode2") == "opencode2"
+
+
+def test_resolve_agent_auto_detect_failure_guides_the_opencode2_probe() -> None:
+    """The auto-detect failure names the OpenCode 2 authentication probe."""
+    with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
+        mock_which.side_effect = lambda name, path=None: (
+            f"/bin/{name}" if name in {"claude", "codex", "opencode"} else None
+        )
+
+        with patch(
+            "hephaestus.agents.runtime.run_subprocess",
+            return_value=subprocess.CompletedProcess(
+                ["auth", "status"], 1, stdout="", stderr="Not logged in"
+            ),
+        ):
+            with pytest.raises(RuntimeError, match=r"opencode --version"):
                 agent_runtime.resolve_agent(None)
 
 
