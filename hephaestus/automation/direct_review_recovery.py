@@ -16,6 +16,7 @@ from typing import Any
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.git import _is_full_commit_sha as _is_full_sha
 
 _RECEIPT_DIR = "direct-review-recovery"
 _RECEIPT_VERSION = 3
@@ -32,15 +33,6 @@ _INSPECTION_ONLY_FAILURES = frozenset(
         "retry_checkout_unconfirmed",
     }
 )
-
-
-def _is_full_sha(value: object) -> bool:
-    """Return whether *value* is a full SHA-1 or SHA-256 commit identifier."""
-    return (
-        isinstance(value, str)
-        and len(value) in (40, 64)
-        and all(char in "0123456789abcdef" for char in value)
-    )
 
 
 def is_inspection_only_detached_push_failure(value: object) -> bool:

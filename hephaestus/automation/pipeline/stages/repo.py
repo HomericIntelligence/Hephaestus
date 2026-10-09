@@ -95,14 +95,8 @@ WAVE_PLAN_KEY = "_issue_wave_admission_plan"
 WAVE_ANCESTRY_VERIFIED_KEY = "_issue_wave_ancestry_verified"
 WAVE_ANCESTRY_ERROR_KEY = "_issue_wave_ancestry_error"
 
-
-def is_full_commit_sha(value: object) -> TypeGuard[str]:
-    """Return whether ``value`` is a full SHA-1 or SHA-256 commit id."""
-    return bool(
-        isinstance(value, str)
-        and len(value) in (40, 64)
-        and all(character in "0123456789abcdef" for character in value)
-    )
+# Preserve the stage's existing import seam while keeping validation shared.
+is_full_commit_sha = is_wave_commit_sha
 
 
 def is_direct_scope_worktree_nonce(value: object) -> TypeGuard[str]:
@@ -229,7 +223,7 @@ class RepoStage(Stage):
         repo_root = Path(str(ctx.paths.repo_root))
         if (
             ctx.dry_run
-            and not is_wave_commit_sha(main_sha)
+            and not is_full_commit_sha(main_sha)
             and requested is None
             and not repo_root.is_dir()
         ):
@@ -239,7 +233,7 @@ class RepoStage(Stage):
             return Continue(next_state="LABELS")
         try:
             store = self._wave_store(item, ctx)
-            if ctx.dry_run and not is_wave_commit_sha(main_sha):
+            if ctx.dry_run and not is_full_commit_sha(main_sha):
                 # A dry-run has no truthful checkout SHA.  It may preserve the
                 # ordinary absent-checkpoint behavior, but cannot bypass an
                 # existing staged rollout.

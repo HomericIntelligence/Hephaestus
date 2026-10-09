@@ -30,6 +30,7 @@ from hephaestus.automation.pipeline.reply_handoff import (
 )
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
+from hephaestus.utils.git import _is_full_commit_sha
 
 
 @dataclass(frozen=True)
@@ -416,11 +417,7 @@ class PipelineGitHubJobRunner:
             if result.body is None or result.body.get("merged") is not True:
                 return complete("merge_not_merged", attempted=True)
             merge_sha = result.body.get("sha")
-            if not (
-                isinstance(merge_sha, str)
-                and len(merge_sha) in (40, 64)
-                and all(character in "0123456789abcdef" for character in merge_sha)
-            ):
+            if not _is_full_commit_sha(merge_sha):
                 # Older GitHub-compatible transports omit the merge SHA. The
                 # non-wave path remains compatible; MergeWaitStage rejects
                 # this result when a durable wave receipt requires the proof.

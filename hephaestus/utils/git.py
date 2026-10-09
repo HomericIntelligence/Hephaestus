@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.diagnostics import redact_git_diagnostic as _redact_git_diagnostics
@@ -46,6 +46,16 @@ _GIT_GLOBAL_FLAGS = frozenset(
     }
 )
 _LOG_STREAM_TAIL_MAX = 2000
+_FULL_COMMIT_SHA_LENGTHS = (40, 64)
+
+
+def _is_full_commit_sha(value: object) -> TypeGuard[str]:
+    """Return whether *value* is a lowercase full Git commit identifier."""
+    return bool(
+        isinstance(value, str)
+        and len(value) in _FULL_COMMIT_SHA_LENGTHS
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _cwd_arg(cwd: Path | str | None) -> str | None:
