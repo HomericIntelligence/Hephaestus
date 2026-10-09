@@ -32,11 +32,17 @@ class AgentJob:
     prompt_builder: Callable[..., str]
     cwd: Path
     timeout_s: int
+    allowed_tools: str = "Read,Glob,Grep"
     session_agent: str = ""
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
     parse: Callable[[str], Any] | None = None  # e.g. claude_invoke.parse_review_verdict
     descr: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject empty capability scopes before a worker can execute the job."""
+        if not isinstance(self.allowed_tools, str) or not self.allowed_tools.strip():
+            raise ValueError("AgentJob.allowed_tools must be a non-empty string")
 
 
 @dataclass(frozen=True)

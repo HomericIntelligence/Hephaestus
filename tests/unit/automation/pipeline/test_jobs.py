@@ -36,6 +36,38 @@ class TestGitJobValidation:
             GitJob(repo="test/repo", op="invalid", timeout_s=60)
 
 
+class TestAgentJobValidation:
+    """Tests for the fail-closed AgentJob capability contract."""
+
+    def test_agent_job_defaults_to_read_only_allowed_tools(self) -> None:
+        """Agent jobs default to the least-privilege analysis scope."""
+        job = AgentJob(
+            repo="test/repo",
+            issue=123,
+            agent="claude",
+            model="opus-4-8",
+            prompt_builder=lambda: "prompt",
+            cwd=Path("/tmp"),
+            timeout_s=60,
+        )
+
+        assert job.allowed_tools == "Read,Glob,Grep"
+
+    def test_agent_job_rejects_empty_allowed_tools(self) -> None:
+        """Agent jobs reject an empty tool scope instead of widening by default."""
+        with pytest.raises(ValueError, match="allowed_tools"):
+            AgentJob(
+                repo="test/repo",
+                issue=123,
+                agent="claude",
+                model="opus-4-8",
+                prompt_builder=lambda: "prompt",
+                cwd=Path("/tmp"),
+                timeout_s=60,
+                allowed_tools="",
+            )
+
+
 class TestJobDataclassesFrozen:
     """Tests that job dataclasses are frozen."""
 

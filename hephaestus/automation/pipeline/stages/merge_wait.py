@@ -270,6 +270,7 @@ class MergeWaitStage(Stage):
             prompt_builder=build_drive_green_learn_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=learn_claude_timeout(),
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_CI_DRIVER,
             prompt_kwargs={
                 "issue_number": item.issue if item.issue is not None else 0,
