@@ -29,6 +29,7 @@ from hephaestus.automation.fleet_build_contract import encoded
 from hephaestus.automation.fleet_build_executor import SlurmStepOwner
 from hephaestus.automation.fleet_journal import WorkerJournal
 from hephaestus.automation.fleet_snapshot import SnapshotPolicy
+from tests.fixtures.just_requirement import requires_just
 
 FIXTURE = Path(__file__).parents[2] / "fixtures" / "fleet_build"
 _LAUNCHER = """
@@ -255,6 +256,7 @@ def run(owner: SlurmStepOwner, lease: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
+@requires_just
 def test_fixture_really_gates_and_executes_the_producer_justfile(tmp_path: Path) -> None:
     """Positive fixture control proves a real Just child, separate from the new owner."""
     lease, binding = inputs(tmp_path)
@@ -283,6 +285,7 @@ def test_fixture_really_gates_and_executes_the_producer_justfile(tmp_path: Path)
         scheduler.close()
 
 
+@requires_just
 def test_owner_persists_exact_step_before_recipe_release_and_replays_once(tmp_path: Path) -> None:
     """A real output requires durable intent and step ownership before release."""
     with owner_fixture(tmp_path) as (owner, scheduler, lease):
@@ -298,6 +301,7 @@ def test_owner_persists_exact_step_before_recipe_release_and_replays_once(tmp_pa
         }
 
 
+@requires_just
 def test_lost_start_reply_restart_never_starts_or_releases_a_second_step(tmp_path: Path) -> None:
     """A real gated child survives a lost response; restart can only reconcile it."""
     with owner_fixture(tmp_path) as (owner, scheduler, lease):
@@ -326,6 +330,7 @@ def test_lost_start_reply_restart_never_starts_or_releases_a_second_step(tmp_pat
             restarted.close()
 
 
+@requires_just
 def test_wrong_scheduler_incarnation_is_never_released(tmp_path: Path) -> None:
     """A reused job number cannot substitute for the operator-bound incarnation."""
     with owner_fixture(tmp_path) as (owner, scheduler, lease):
@@ -337,6 +342,7 @@ def test_wrong_scheduler_incarnation_is_never_released(tmp_path: Path) -> None:
         assert scheduler.cancels == []
 
 
+@requires_just
 def test_accounting_without_kernel_absence_cannot_confirm_disposal(tmp_path: Path) -> None:
     """An exited local child and scheduler terminal flag cannot invent node proof."""
     with owner_fixture(tmp_path) as (owner, scheduler, lease):
@@ -352,6 +358,7 @@ def test_accounting_without_kernel_absence_cannot_confirm_disposal(tmp_path: Pat
         }
 
 
+@requires_just
 def test_cancelled_or_expired_start_has_no_scheduler_effect(tmp_path: Path) -> None:
     """The owner rejects admission before any submission or recipe release."""
     with owner_fixture(tmp_path) as (owner, scheduler, lease):
@@ -376,6 +383,7 @@ def test_cancelled_or_expired_start_has_no_scheduler_effect(tmp_path: Path) -> N
         assert scheduler.starts == scheduler.releases == scheduler.cancels == []
 
 
+@requires_just
 @pytest.mark.parametrize("required_sync", ["trusted-parent", "owner-directory", "intent-file"])
 def test_owner_syncs_created_state_before_transport_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, required_sync: str
