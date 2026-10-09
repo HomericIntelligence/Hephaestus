@@ -12,7 +12,7 @@ from collections import deque
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -66,11 +66,12 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     _validation_thread_snapshots,
     _without_duplicate_live_findings,
 )
+from hephaestus.automation.pipeline.stages.pr_review_jobs import PrReviewJobs
 from hephaestus.automation.pipeline.stages.pr_review_threads import _scope_retraction_paths
 from hephaestus.automation.pipeline.stages.pr_review_verification import (
     _FULL_UNIT_COVERAGE_SPEC,
 )
-from hephaestus.automation.pipeline.work_item import ItemKind
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
@@ -100,6 +101,22 @@ def _invalid_audit() -> ReviewAudit:
         raw_feedback="fixture review text",
         valid=False,
     )
+
+
+def test_implementation_remediation_fail_back_uses_the_inherited_jobs_method() -> None:
+    """The review façade keeps the jobs implementation as its sole method."""
+    item = cast(WorkItem, SimpleNamespace(payload={}))
+
+    assert "_fail_back_implementation_remediation" not in PrReviewStage.__dict__
+    assert (
+        PrReviewStage._fail_back_implementation_remediation
+        is PrReviewJobs._fail_back_implementation_remediation
+    )
+
+    outcome = PrReviewStage._fail_back_implementation_remediation(item)
+
+    assert item.payload["implementation_remediation"] is True
+    assert outcome == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
 
 
 def _make_hephaestus_checkout(root: Path) -> str:

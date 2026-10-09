@@ -24,14 +24,15 @@ from hephaestus.automation.pipeline.stages import (
     plan_review,
     planning,
     pr_review,
+    pr_review_jobs,
 )
 
-_STAGE_MODULES: dict[StageName, ModuleType] = {
-    StageName.PLANNING: planning,
-    StageName.PLAN_REVIEW: plan_review,
-    StageName.IMPLEMENTATION: implementation,
-    StageName.PR_REVIEW: pr_review,
-    StageName.MERGE_WAIT: merge_wait,
+_STAGE_MODULES: dict[StageName, tuple[ModuleType, ...]] = {
+    StageName.PLANNING: (planning,),
+    StageName.PLAN_REVIEW: (plan_review,),
+    StageName.IMPLEMENTATION: (implementation,),
+    StageName.PR_REVIEW: (pr_review, pr_review_jobs),
+    StageName.MERGE_WAIT: (merge_wait,),
 }
 
 #: Reasons each stage is EXPECTED to emit (lock: additions must edit this).
@@ -48,36 +49,37 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
 }
 
 
-def _fail_back_reason_literals(module: ModuleType) -> set[str]:
-    """Collect the string literals passed to StageOutcome(FAIL_BACK, ...)."""
-    tree = ast.parse(inspect.getsource(module))
+def _fail_back_reason_literals(*modules: ModuleType) -> set[str]:
+    """Collect FAIL_BACK reason literals from a stage and its collaborators."""
     reasons: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = getattr(func, "id", None) or getattr(func, "attr", None)
-        if name != "StageOutcome":
-            continue
-        args = node.args
-        if not args:
-            continue
-        first = args[0]
-        if not (isinstance(first, ast.Attribute) and first.attr == "FAIL_BACK"):
-            continue
-        note_nodes: list[ast.expr] = list(args[1:2])
-        note_nodes.extend(kw.value for kw in node.keywords if kw.arg == "note")
-        for note in note_nodes:
-            if isinstance(note, ast.Constant) and isinstance(note.value, str):
-                reasons.add(note.value)
+    for module in modules:
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "id", None) or getattr(func, "attr", None)
+            if name != "StageOutcome":
+                continue
+            args = node.args
+            if not args:
+                continue
+            first = args[0]
+            if not (isinstance(first, ast.Attribute) and first.attr == "FAIL_BACK"):
+                continue
+            note_nodes: list[ast.expr] = list(args[1:2])
+            note_nodes.extend(kw.value for kw in node.keywords if kw.arg == "note")
+            for note in note_nodes:
+                if isinstance(note, ast.Constant) and isinstance(note.value, str):
+                    reasons.add(note.value)
     return reasons
 
 
 @pytest.mark.parametrize("stage_name", list(_STAGE_MODULES), ids=lambda s: s.value)
 def test_every_fail_back_reason_is_routes_covered(stage_name: StageName) -> None:
     """Each emitted FAIL_BACK reason literal resolves in the stage's row."""
-    module = _STAGE_MODULES[stage_name]
-    reasons = _fail_back_reason_literals(module)
+    modules = _STAGE_MODULES[stage_name]
+    reasons = _fail_back_reason_literals(*modules)
     fail_routes = ROUTES[stage_name].fail_routes
     uncovered = {r for r in reasons if r not in fail_routes and "*" not in fail_routes}
     assert not uncovered, (
@@ -89,8 +91,8 @@ def test_every_fail_back_reason_is_routes_covered(stage_name: StageName) -> None
 @pytest.mark.parametrize("stage_name", list(_STAGE_MODULES), ids=lambda s: s.value)
 def test_emitted_reason_set_is_pinned(stage_name: StageName) -> None:
     """The set of emitted reasons matches the lock (no silent vocabulary drift)."""
-    module = _STAGE_MODULES[stage_name]
-    assert _fail_back_reason_literals(module) == _EXPECTED_REASONS[stage_name]
+    modules = _STAGE_MODULES[stage_name]
+    assert _fail_back_reason_literals(*modules) == _EXPECTED_REASONS[stage_name]
 
 
 def test_scan_is_not_vacuous() -> None:
