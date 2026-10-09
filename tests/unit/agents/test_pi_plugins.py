@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
+import os
 import shutil
+import signal
+import subprocess
 import sys
+import threading
 import time
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest import skipUnless
 from unittest.mock import Mock
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -661,6 +671,946 @@ def test_catalog_rejects_mutable_or_incomplete_pins(tmp_path: Path) -> None:
         assert "exact npm version" in str(exc)
     else:
         raise AssertionError("mutable npm version was accepted")
+
+
+_EOF_CHILD = """
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+if os.name == 'posix':
+    signal.alarm(20)
+if mode != 'missing-startup':
+    receipt = {'pid': os.getpid(), 'ppid': os.getppid()}
+    if os.name == 'posix':
+        receipt.update({'pgid': os.getpgrp(), 'sid': os.getsid(0)})
+    pending = root / 'ready.pending'
+    pending.write_text(json.dumps(receipt), encoding='utf-8')
+    pending.replace(root / 'ready.json')
+while not (root / 'release').exists():
+    time.sleep(0.01)
+os.write(1, b'output-marker\\n')
+os.write(2, b'error-marker\\n')
+os.close(1)
+os.close(2)
+(root / 'eof').touch()
+if mode.startswith('exit-'):
+    time.sleep(0.05)
+    os._exit(int(mode.split('-', 1)[1]))
+time.sleep(30)
+"""
+
+_LINUX_PIDFD = pytest.mark.skipif(
+    not sys.platform.startswith("linux")
+    or not hasattr(os, "pidfd_open")
+    or not hasattr(signal, "pidfd_send_signal"),
+    reason="This supervisor requires native Linux pidfd ownership; other hosts are unqualified",
+)
+
+
+class _EofStartupError(RuntimeError):
+    """The child did not complete the private startup handshake."""
+
+
+class _EofSupervisor:
+    """Own one fixed child independently of the runner's wait and cleanup code."""
+
+    def __init__(self, root: Path, mode: str) -> None:
+        self.root = root
+        self.argv = (sys.executable, "-c", _EOF_CHILD, str(root), mode)
+        self.env = {"PATH": os.defpath}
+        self.process = subprocess.Popen(
+            self.argv,
+            cwd=root,
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            creationflags=0,
+        )
+        try:
+            self.pidfd = os.pidfd_open(self.process.pid)
+        except BaseException:
+            # No other waiter can reap this direct child before this cleanup.
+            self.process.kill()
+            self.process.wait(timeout=2)
+            for stream in (self.process.stdout, self.process.stderr):
+                if stream is not None:
+                    stream.close()
+            raise
+        self.thread: threading.Thread | None = None
+        self.entered = threading.Event()
+        self.result: Any = None
+        self.error: BaseException | None = None
+        self.forced_cleanup = False
+        self.reaped = False
+        self.closed = False
+        self.outer_expired = False
+        self.elapsed = 0.0
+
+    def wait_for_startup(self, timeout: float = 3.0) -> None:
+        """Check the real child identity before allowing it to close output."""
+        deadline = time.monotonic() + timeout
+        while not (self.root / "ready.json").exists():
+            if time.monotonic() >= deadline:
+                raise _EofStartupError("child startup receipt is missing")
+            time.sleep(0.01)
+        receipt = json.loads((self.root / "ready.json").read_text(encoding="utf-8"))
+        assert receipt == {
+            "pid": self.process.pid,
+            "ppid": os.getpid(),
+            "pgid": self.process.pid,
+            "sid": self.process.pid,
+        }
+        assert os.getpgid(self.process.pid) == self.process.pid
+        assert os.getsid(self.process.pid) == self.process.pid
+
+    def launch(self, argv: tuple[str, ...], **kwargs: Any) -> subprocess.Popen[bytes]:
+        """Supply the owned real child without replacing reader or wait behavior."""
+        assert not self.entered.is_set(), "runner attempted a second launch"
+        assert argv == self.argv
+        assert kwargs == {
+            "cwd": self.root,
+            "env": self.env,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "start_new_session": True,
+            "creationflags": 0,
+        }
+        self.entered.set()
+        return self.process
+
+    def run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        wait_only_stub: bool = False,
+        outer_timeout: float = 4.0,
+    ) -> None:
+        """Run the public EOF path under a separate finite supervisor deadline."""
+        from hephaestus.agents import pi_plugins
+
+        def invoke() -> None:
+            try:
+                if wait_only_stub:
+                    self.entered.set()
+                    self.process.wait()
+                else:
+                    self.result = pi_plugins.run_bounded_command(
+                        self.argv, cwd=self.root, env=self.env, timeout=1.0
+                    )
+            except BaseException as exc:
+                self.error = exc
+
+        self.wait_for_startup()
+        # Only launch is substituted. Pipes, EOF, selectors, wait, and results are real.
+        # This checks the EOF contract, not production launch ownership.
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", self.launch)
+            self.thread = threading.Thread(target=invoke, daemon=True)
+            started = time.monotonic()
+            try:
+                self.thread.start()
+                assert self.entered.wait(timeout=1), "runner did not accept the owned process"
+                (self.root / "release").touch()
+                self.thread.join(timeout=max(0.0, started + outer_timeout - time.monotonic()))
+                self.outer_expired = self.thread.is_alive()
+                self.elapsed = time.monotonic() - started
+                assert (self.root / "eof").exists(), "child did not close both output pipes"
+            finally:
+                self.close()
+        if self.error is not None:
+            raise AssertionError(
+                "runner raised instead of returning a process result"
+            ) from self.error
+
+    def close(self) -> None:
+        """Stop the exact child, reap it, and confirm that the runner thread stopped."""
+        if self.closed:
+            return
+        try:
+            # A pidfd cannot signal a different process after PID reuse. The fixed
+            # fixture creates no descendants; its one child owns a separate session.
+            if self.process.returncode is None:
+                with suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
+                    self.forced_cleanup = True
+            self.process.wait(timeout=2)
+            self.reaped = self.process.returncode is not None
+            if self.thread is not None:
+                self.thread.join(timeout=2)
+                assert not self.thread.is_alive(), "runner thread survived independent cleanup"
+            assert self.reaped, "owned child was not reaped"
+        finally:
+            os.close(self.pidfd)
+            # Do not wait for a buffered-stream lock held by an unjoined thread.
+            # An unjoined thread already makes the cleanup qualification fail.
+            if self.thread is None or not self.thread.is_alive():
+                for stream in (self.process.stdout, self.process.stderr):
+                    if stream is not None:
+                        stream.close()
+            self.closed = True
+
+
+@contextmanager
+def _owned_eof_child(tmp_path: Path, mode: str = "hang") -> Iterator[_EofSupervisor]:
+    """Clean the direct child, including an incomplete startup."""
+    owner = _EofSupervisor(tmp_path, mode)
+    try:
+        yield owner
+    finally:
+        owner.close()
+
+
+@_LINUX_PIDFD
+def test_runner_supervisor_forced_cleanup_owns_new_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Qualify cleanup without relying on any runner timeout or termination code."""
+    with _owned_eof_child(tmp_path) as owner:
+        owner.run(monkeypatch, wait_only_stub=True, outer_timeout=0.25)
+    assert owner.outer_expired
+    assert owner.forced_cleanup
+    assert owner.reaped
+    assert owner.thread is not None and not owner.thread.is_alive()
+    assert owner.process.returncode == -signal.SIGKILL
+
+
+@_LINUX_PIDFD
+def test_runner_supervisor_rejects_incomplete_startup(tmp_path: Path) -> None:
+    """A missing receipt fails setup but leaves no unowned or unreaped child."""
+    with pytest.raises(_EofStartupError, match="startup receipt is missing"):
+        with _owned_eof_child(tmp_path, "missing-startup") as owner:
+            owner.wait_for_startup(timeout=0.25)
+    assert owner.forced_cleanup
+    assert owner.reaped
+    assert owner.thread is None
+    assert not (tmp_path / "release").exists()
+    assert owner.process.returncode == -signal.SIGKILL
+
+
+@_LINUX_PIDFD
+def test_bounded_runner_deadline_survives_output_eof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EOF must not remove the command deadline while the real child stays alive."""
+    with _owned_eof_child(tmp_path) as owner:
+        owner.run(monkeypatch)
+    assert owner.reaped
+    assert not owner.outer_expired, "public runner exceeded its deadline after output EOF"
+    assert not owner.forced_cleanup, "supervisor, not the runner, stopped the child"
+    assert owner.result.timed_out
+    assert owner.result.returncode != 0
+    assert owner.result.stdout == "output-marker\n"
+    assert owner.result.stderr == "error-marker\n"
+    # One second is harness scheduling tolerance, not another product allowance.
+    assert owner.elapsed <= 1.0 + 2.0 + 1.0
+
+
+@_LINUX_PIDFD
+@pytest.mark.parametrize("returncode", [0, 7], ids=["zero", "nonzero"])
+def test_bounded_runner_eof_preserves_timely_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int
+) -> None:
+    """A timely exit keeps separate output and the child's actual status."""
+    with _owned_eof_child(tmp_path, f"exit-{returncode}") as owner:
+        owner.run(monkeypatch)
+    assert owner.reaped
+    assert not owner.outer_expired
+    assert not owner.forced_cleanup
+    assert not owner.result.timed_out
+    assert owner.result.returncode == returncode
+    assert owner.result.stdout == "output-marker\n"
+    assert owner.result.stderr == "error-marker\n"
+
+
+_WINDOWS_NATIVE = pytest.mark.skipif(
+    sys.platform != "win32", reason="requires native Windows process semantics"
+)
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
+_WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_WINDOWS_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+_WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_WINDOWS_PROCESS_SET_QUOTA = 0x0100
+_WINDOWS_PROCESS_TERMINATE = 0x0001
+_WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
+_WINDOWS_TH32CS_SNAPTHREAD = 0x00000004
+_WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class _WindowsJobBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("per_process_user_time_limit", ctypes.c_int64),
+        ("per_job_user_time_limit", ctypes.c_int64),
+        ("limit_flags", ctypes.c_uint32),
+        ("minimum_working_set_size", ctypes.c_size_t),
+        ("maximum_working_set_size", ctypes.c_size_t),
+        ("active_process_limit", ctypes.c_uint32),
+        ("affinity", ctypes.c_size_t),
+        ("priority_class", ctypes.c_uint32),
+        ("scheduling_class", ctypes.c_uint32),
+    ]
+
+
+class _WindowsJobIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("read_operation_count", ctypes.c_uint64),
+        ("write_operation_count", ctypes.c_uint64),
+        ("other_operation_count", ctypes.c_uint64),
+        ("read_transfer_count", ctypes.c_uint64),
+        ("write_transfer_count", ctypes.c_uint64),
+        ("other_transfer_count", ctypes.c_uint64),
+    ]
+
+
+class _WindowsJobExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("basic_limit_information", _WindowsJobBasicLimitInformation),
+        ("io_info", _WindowsJobIoCounters),
+        ("process_memory_limit", ctypes.c_size_t),
+        ("job_memory_limit", ctypes.c_size_t),
+        ("peak_process_memory_used", ctypes.c_size_t),
+        ("peak_job_memory_used", ctypes.c_size_t),
+    ]
+
+
+class _WindowsJobBasicAccountingInformation(ctypes.Structure):
+    _fields_ = [
+        ("total_user_time", ctypes.c_int64),
+        ("total_kernel_time", ctypes.c_int64),
+        ("this_period_total_user_time", ctypes.c_int64),
+        ("total_page_fault_count", ctypes.c_uint32),
+        ("total_processes", ctypes.c_uint32),
+        ("active_processes", ctypes.c_uint32),
+        ("total_terminated_processes", ctypes.c_uint32),
+    ]
+
+
+class _WindowsThreadEntry32(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32),
+        ("usage_count", ctypes.c_uint32),
+        ("thread_id", ctypes.c_uint32),
+        ("owner_process_id", ctypes.c_uint32),
+        ("base_priority", ctypes.c_int32),
+        ("delta_priority", ctypes.c_int32),
+        ("flags", ctypes.c_uint32),
+    ]
+
+
+class _WindowsOuterJob:
+    """Own a suspended helper and all of its descendants independently."""
+
+    def __init__(self) -> None:
+        win_dll = cast(Any, vars(ctypes)["WinDLL"])
+        self._kernel32 = win_dll("kernel32", use_last_error=True)
+        pointer = ctypes.c_void_p
+        dword = ctypes.c_uint32
+        bool_type = ctypes.c_int32
+        self._configure_signatures(pointer, dword, bool_type)
+        self._handle = self._kernel32.CreateJobObjectW(None, None)
+        if not self._handle:
+            raise self._error("CreateJobObjectW")
+        limits = _WindowsJobExtendedLimitInformation()
+        limits.basic_limit_information.limit_flags = _WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self._kernel32.SetInformationJobObject(
+            self._handle,
+            _WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            error = self._error("SetInformationJobObject")
+            self.close()
+            raise error
+
+    def _configure_signatures(self, pointer: Any, dword: Any, bool_type: Any) -> None:
+        self._kernel32.CreateJobObjectW.argtypes = [pointer, ctypes.c_wchar_p]
+        self._kernel32.CreateJobObjectW.restype = pointer
+        self._kernel32.SetInformationJobObject.argtypes = [pointer, dword, pointer, dword]
+        self._kernel32.SetInformationJobObject.restype = bool_type
+        self._kernel32.OpenProcess.argtypes = [dword, bool_type, dword]
+        self._kernel32.OpenProcess.restype = pointer
+        self._kernel32.AssignProcessToJobObject.argtypes = [pointer, pointer]
+        self._kernel32.AssignProcessToJobObject.restype = bool_type
+        self._kernel32.TerminateJobObject.argtypes = [pointer, dword]
+        self._kernel32.TerminateJobObject.restype = bool_type
+        self._kernel32.QueryInformationJobObject.argtypes = [
+            pointer,
+            dword,
+            pointer,
+            dword,
+            pointer,
+        ]
+        self._kernel32.QueryInformationJobObject.restype = bool_type
+        self._kernel32.CreateToolhelp32Snapshot.argtypes = [dword, dword]
+        self._kernel32.CreateToolhelp32Snapshot.restype = pointer
+        self._kernel32.Thread32First.argtypes = [pointer, pointer]
+        self._kernel32.Thread32First.restype = bool_type
+        self._kernel32.Thread32Next.argtypes = [pointer, pointer]
+        self._kernel32.Thread32Next.restype = bool_type
+        self._kernel32.OpenThread.argtypes = [dword, bool_type, dword]
+        self._kernel32.OpenThread.restype = pointer
+        self._kernel32.ResumeThread.argtypes = [pointer]
+        self._kernel32.ResumeThread.restype = dword
+        self._kernel32.CloseHandle.argtypes = [pointer]
+        self._kernel32.CloseHandle.restype = bool_type
+
+    @staticmethod
+    def _error(operation: str) -> OSError:
+        get_last_error = cast(Any, vars(ctypes)["get_last_error"])
+        error = get_last_error()
+        return OSError(error, f"{operation} failed with Windows error {error}")
+
+    def assign(self, pid: int) -> None:
+        """Assign one exact suspended helper process to this Job Object."""
+        process_handle = self._kernel32.OpenProcess(
+            _WINDOWS_PROCESS_TERMINATE | _WINDOWS_PROCESS_SET_QUOTA,
+            False,
+            pid,
+        )
+        if not process_handle:
+            raise self._error("OpenProcess")
+        try:
+            if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
+                raise self._error("AssignProcessToJobObject")
+        finally:
+            self._kernel32.CloseHandle(process_handle)
+
+    def resume(self, pid: int) -> None:
+        """Resume the primary thread after Job ownership is established."""
+        snapshot = self._kernel32.CreateToolhelp32Snapshot(_WINDOWS_TH32CS_SNAPTHREAD, 0)
+        if not snapshot or snapshot == _WINDOWS_INVALID_HANDLE_VALUE:
+            raise self._error("CreateToolhelp32Snapshot")
+        try:
+            entry = _WindowsThreadEntry32()
+            entry.size = ctypes.sizeof(entry)
+            found = bool(self._kernel32.Thread32First(snapshot, ctypes.byref(entry)))
+            while found:
+                if entry.owner_process_id == pid:
+                    thread_handle = self._kernel32.OpenThread(
+                        _WINDOWS_THREAD_SUSPEND_RESUME,
+                        False,
+                        entry.thread_id,
+                    )
+                    if not thread_handle:
+                        raise self._error("OpenThread")
+                    try:
+                        if self._kernel32.ResumeThread(thread_handle) == 0xFFFFFFFF:
+                            raise self._error("ResumeThread")
+                    finally:
+                        self._kernel32.CloseHandle(thread_handle)
+                    return
+                found = bool(self._kernel32.Thread32Next(snapshot, ctypes.byref(entry)))
+        finally:
+            self._kernel32.CloseHandle(snapshot)
+        raise OSError(f"suspended process {pid} has no resumable thread")
+
+    def terminate(self) -> None:
+        """Terminate the helper and all descendants in this Job Object."""
+        if not self._kernel32.TerminateJobObject(self._handle, 1):
+            raise self._error("TerminateJobObject")
+
+    def active_processes(self) -> int:
+        """Return the number of active processes retained by this Job Object."""
+        info = _WindowsJobBasicAccountingInformation()
+        if not self._kernel32.QueryInformationJobObject(
+            self._handle,
+            _WINDOWS_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            None,
+        ):
+            raise self._error("QueryInformationJobObject")
+        return int(info.active_processes)
+
+    def close(self) -> None:
+        """Close the outer Job handle."""
+        if self._handle:
+            if not self._kernel32.CloseHandle(self._handle):
+                raise self._error("CloseHandle")
+            self._handle = None
+
+
+_WINDOWS_RUNNER_HELPER = """
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+child = Path(sys.argv[2])
+mode = sys.argv[3]
+pending = root / "helper-ready.pending"
+pending.write_text(
+    json.dumps({"pid": os.getpid(), "ppid": os.getppid()}), encoding="utf-8"
+)
+pending.replace(root / "helper-ready.json")
+from hephaestus.agents.pi_plugins import run_bounded_command
+
+child_env = {"PATH": os.defpath, "SYSTEMROOT": os.environ["SYSTEMROOT"]}
+try:
+    result = run_bounded_command(
+        (sys.executable, str(child), str(root), mode),
+        cwd=root,
+        env=child_env,
+        timeout=1.0,
+    )
+except BaseException as exc:
+    (root / "runner-error.json").write_text(
+        json.dumps({"type": type(exc).__name__}), encoding="utf-8"
+    )
+    raise
+(root / "runner-result.json").write_text(
+    json.dumps(
+        {
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "timed_out": result.timed_out,
+            "output_overflow": result.output_overflow,
+        }
+    ),
+    encoding="utf-8",
+)
+"""
+
+
+class _WindowsEofSupervisor:
+    """Supervise a real runner and child through an outer Job Object."""
+
+    def __init__(self, root: Path, mode: str) -> None:
+        self.root = root
+        self.child_path = root / "eof_child.py"
+        self.child_path.write_text(_EOF_CHILD, encoding="utf-8")
+        self.mode = mode
+        self.env = {
+            "PATH": os.defpath,
+            "PYTHONPATH": str(REPO_ROOT),
+            "SYSTEMROOT": os.environ["SYSTEMROOT"],
+        }
+        self.process: subprocess.Popen[bytes] | None = None
+        self.job: _WindowsOuterJob | None = None
+        self.result: Any = None
+        self.forced_cleanup = False
+        self.reaped = False
+        self.outer_expired = False
+        self.closed = False
+        self.elapsed = 0.0
+        self.active_processes_after_cleanup: int | None = None
+
+    def start(self) -> None:
+        """Assign the suspended helper before it can create the runner child."""
+        self.job = _WindowsOuterJob()
+        try:
+            process = subprocess.Popen(
+                (
+                    sys.executable,
+                    "-c",
+                    _WINDOWS_RUNNER_HELPER,
+                    str(self.root),
+                    str(self.child_path),
+                    self.mode,
+                ),
+                cwd=self.root,
+                env=self.env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_WINDOWS_CREATE_SUSPENDED,
+            )
+            self.process = process
+            try:
+                self.job.assign(process.pid)
+                self.job.resume(process.pid)
+            except BaseException:
+                process.kill()
+                process.wait(timeout=2)
+                raise
+        except BaseException:
+            if self.job is not None:
+                self.job.close()
+            self.closed = True
+            raise
+
+    def wait_for_helper_startup(self, timeout: float = 3.0) -> None:
+        """Confirm helper identity after its outer Job ownership exists."""
+        process = self.process
+        assert process is not None
+        deadline = time.monotonic() + timeout
+        while not (self.root / "helper-ready.json").exists():
+            if time.monotonic() >= deadline:
+                raise _EofStartupError("runner helper startup receipt is missing")
+            time.sleep(0.01)
+        receipt = json.loads((self.root / "helper-ready.json").read_text(encoding="utf-8"))
+        assert receipt == {"pid": process.pid, "ppid": os.getpid()}
+
+    def wait_for_child_startup(self, timeout: float = 3.0) -> None:
+        """Confirm child identity before allowing it to close output."""
+        process = self.process
+        assert process is not None
+        deadline = time.monotonic() + timeout
+        while not (self.root / "ready.json").exists():
+            if time.monotonic() >= deadline:
+                raise _EofStartupError("child startup receipt is missing")
+            time.sleep(0.01)
+        try:
+            receipt = json.loads((self.root / "ready.json").read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise _EofStartupError("child startup receipt is malformed") from exc
+        if receipt.get("ppid") != process.pid:
+            raise _EofStartupError("child startup receipt has the wrong helper parent")
+        pid = receipt.get("pid")
+        if not isinstance(pid, int):
+            raise _EofStartupError("child startup receipt has no process id")
+        assert pid != process.pid
+
+    def run_runner(self, *, release: bool = True, outer_timeout: float = 4.0) -> None:
+        """Run the real runner under a finite outer process deadline."""
+        self.start()
+        process = self.process
+        assert process is not None
+        self.wait_for_helper_startup()
+        self.wait_for_child_startup()
+        if not release:
+            try:
+                process.wait(timeout=outer_timeout)
+            except subprocess.TimeoutExpired:
+                self.outer_expired = True
+            return
+        (self.root / "release").touch()
+        started = time.monotonic()
+        try:
+            process.wait(timeout=outer_timeout)
+        except subprocess.TimeoutExpired:
+            self.outer_expired = True
+        self.elapsed = time.monotonic() - started
+        assert (self.root / "eof").exists(), "child did not close both output pipes"
+        if not self.outer_expired:
+            result_path = self.root / "runner-result.json"
+            assert result_path.exists(), "runner did not write a result"
+            self.result = SimpleNamespace(**json.loads(result_path.read_text(encoding="utf-8")))
+
+    def close(self) -> None:
+        """Terminate the known helper Job and confirm descendant cleanup."""
+        if self.closed:
+            return
+        job = self.job
+        process = self.process
+        if job is None and process is None:
+            self.closed = True
+            return
+        assert job is not None
+        assert process is not None
+        deadline = time.monotonic() + 2.0
+        try:
+            if process.poll() is None or job.active_processes() > 0:
+                job.terminate()
+                self.forced_cleanup = True
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            self.reaped = process.returncode is not None
+            while job.active_processes() > 0 and time.monotonic() < deadline:
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            self.active_processes_after_cleanup = job.active_processes()
+            assert self.reaped, "runner helper was not reaped"
+            assert self.active_processes_after_cleanup == 0, (
+                "outer Job retained a descendant after cleanup"
+            )
+        finally:
+            job.close()
+            self.closed = True
+
+
+def test_windows_supervisor_preserves_job_setup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Job setup error must survive the native test cleanup path."""
+    sentinel = RuntimeError("native Job setup failed")
+
+    def fail_job_setup() -> Any:
+        raise sentinel
+
+    monkeypatch.setenv("SYSTEMROOT", "test-system-root")
+    monkeypatch.setattr(sys.modules[__name__], "_WindowsOuterJob", fail_job_setup)
+    owner = _WindowsEofSupervisor(tmp_path, "hang")
+    with pytest.raises(RuntimeError) as caught:
+        try:
+            owner.start()
+        finally:
+            owner.close()
+    assert caught.value is sentinel
+
+
+@_WINDOWS_NATIVE
+def test_windows_supervisor_forced_cleanup_owns_child(tmp_path: Path) -> None:
+    """Qualify outer Job cleanup of a real runner and child."""
+    owner = _WindowsEofSupervisor(tmp_path, "hang")
+    try:
+        owner.run_runner(release=False, outer_timeout=0.25)
+    finally:
+        owner.close()
+    assert owner.outer_expired
+    assert owner.forced_cleanup
+    assert owner.reaped
+    assert owner.active_processes_after_cleanup == 0
+
+
+@_WINDOWS_NATIVE
+def test_windows_supervisor_rejects_incomplete_startup(tmp_path: Path) -> None:
+    """A missing child receipt still leaves a known helper Job to terminate."""
+    owner = _WindowsEofSupervisor(tmp_path, "missing-startup")
+    with pytest.raises(_EofStartupError, match="startup receipt is missing"):
+        try:
+            owner.start()
+            owner.wait_for_helper_startup()
+            owner.wait_for_child_startup(timeout=0.25)
+        finally:
+            owner.close()
+    assert owner.forced_cleanup
+    assert owner.reaped
+    assert owner.active_processes_after_cleanup == 0
+    assert not (tmp_path / "release").exists()
+
+
+@_WINDOWS_NATIVE
+def test_bounded_runner_windows_deadline_survives_output_eof(tmp_path: Path) -> None:
+    """EOF must not remove the Windows command deadline."""
+    owner = _WindowsEofSupervisor(tmp_path, "hang")
+    try:
+        owner.run_runner()
+    finally:
+        owner.close()
+    assert owner.reaped
+    assert not owner.outer_expired, "public runner exceeded its deadline after output EOF"
+    assert not owner.forced_cleanup, "supervisor, not the runner, stopped the child"
+    assert owner.result.timed_out
+    assert owner.result.returncode != 0
+    assert owner.result.stdout == "output-marker\n"
+    assert owner.result.stderr == "error-marker\n"
+    assert owner.active_processes_after_cleanup == 0
+
+
+@_WINDOWS_NATIVE
+@pytest.mark.parametrize("returncode", [0, 7], ids=["zero", "nonzero"])
+def test_bounded_runner_windows_eof_preserves_timely_exit(tmp_path: Path, returncode: int) -> None:
+    """A timely Windows exit keeps its status and separate output."""
+    owner = _WindowsEofSupervisor(tmp_path, f"exit-{returncode}")
+    try:
+        owner.run_runner()
+    finally:
+        owner.close()
+    assert owner.reaped
+    assert not owner.outer_expired
+    assert not owner.forced_cleanup
+    assert not owner.result.timed_out
+    assert owner.result.returncode == returncode
+    assert owner.result.stdout == "output-marker\n"
+    assert owner.result.stderr == "error-marker\n"
+    assert owner.active_processes_after_cleanup == 0
+
+
+def test_bounded_runner_cleanup_failure_preserves_specific_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unconfirmed exit raises OSError without fabricating a completed result."""
+    from hephaestus.agents import pi_plugins
+
+    failure = subprocess.TimeoutExpired("private-command", 2)
+    process = Mock(returncode=None, stdout=None, stderr=None)
+    process.wait.side_effect = failure
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(pi_plugins, "_terminate_process", Mock())
+
+    def expired_reader(
+        child: Any, _input: Any, _timeout: Any, _keep_open: Any, cleanup: Any
+    ) -> Any:
+        return pi_plugins._wait_for_process_exit(
+            child, 0, cleanup, None, timed_out=True, overflow=False
+        )
+
+    monkeypatch.setattr(pi_plugins, "_run_posix_process", expired_reader)
+    monkeypatch.setattr(pi_plugins, "os", SimpleNamespace(name="posix"))
+    with pytest.raises(OSError, match="process cleanup could not be confirmed") as caught:
+        pi_plugins.run_bounded_command(("private-command",), env={})
+    assert caught.value.__cause__ is failure
+    assert process.wait.call_count == 1
+    assert 0 <= process.wait.call_args.kwargs["timeout"] <= 2
+    assert "private-command" not in str(caught.value)
+
+
+@pytest.mark.parametrize("platform", ["posix", "windows"])
+@pytest.mark.parametrize("error_type", [ValueError, KeyboardInterrupt])
+def test_bounded_runner_cleanup_keeps_original_exception(
+    monkeypatch: pytest.MonkeyPatch, platform: str, error_type: type[BaseException]
+) -> None:
+    """Cleanup uncertainty cannot replace an earlier exception or its cause."""
+    from hephaestus.agents import pi_plugins
+
+    cause = LookupError("original cause")
+    original = error_type("original operation failed")
+    original.__cause__ = cause
+    process = Mock(returncode=None, stdout=None, stderr=None)
+    process.wait.side_effect = subprocess.TimeoutExpired("private-command", 2)
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(pi_plugins, "_terminate_process", Mock())
+    monkeypatch.setattr(pi_plugins, "os", SimpleNamespace(name=platform))
+    job = Mock()
+    monkeypatch.setattr(pi_plugins, "_WindowsJob", Mock(return_value=job))
+
+    def operation_failure(*_args: Any) -> Any:
+        raise original
+
+    reader = "_run_posix_process" if platform == "posix" else "_run_windows_process"
+    monkeypatch.setattr(pi_plugins, reader, operation_failure)
+    with pytest.raises(error_type) as caught:
+        pi_plugins.run_bounded_command(("private-command",), env={"PRIVATE": "secret-value"})
+    assert caught.value is original
+    assert caught.value.__cause__ is cause
+    assert original.__notes__ == [
+        "Process cleanup is unconfirmed; inspect retained process ownership."
+    ]
+    traceback = original.__traceback__
+    while traceback is not None and traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    assert traceback is not None
+    assert traceback.tb_frame.f_code.co_name == "operation_failure"
+    assert process.wait.call_count == 1
+    assert 0 <= process.wait.call_args.kwargs["timeout"] <= 2
+    if platform == "windows":
+        job.close.assert_called_once_with()
+
+
+def test_process_cleanup_shares_one_allowance_for_reap_and_readers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Termination, reaping, and both joins consume one aggregate budget."""
+    from hephaestus.agents import pi_plugins
+
+    now = [100.0]
+    timeouts: list[float] = []
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    process = Mock(returncode=-9, stdout=None, stderr=None)
+
+    def terminate(*_args: Any) -> None:
+        now[0] += 0.25
+
+    def reap(*, timeout: float) -> int:
+        timeouts.append(timeout)
+        now[0] += 1.0
+        return -9
+
+    def join(*, timeout: float) -> None:
+        timeouts.append(timeout)
+        now[0] += min(timeout, 0.5)
+
+    process.wait.side_effect = reap
+    threads = [threading.Thread(), threading.Thread()]
+    for thread in threads:
+        monkeypatch.setattr(thread, "join", join)
+        monkeypatch.setattr(thread, "is_alive", lambda: False)
+    monkeypatch.setattr(pi_plugins, "_terminate_process", terminate)
+    cleanup = pi_plugins._ProcessCleanup(threads=threads)
+    pi_plugins._complete_process_cleanup(process, cleanup, None, terminate=True)
+    assert timeouts == [1.75, 0.75, 0.25]
+    assert now[0] == 102.0
+    assert cleanup.remaining() == 0
+
+
+def test_process_cleanup_reports_unjoined_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reaped process is not complete cleanup while an output reader remains."""
+    from hephaestus.agents import pi_plugins
+
+    process = Mock(returncode=0)
+    thread = Mock()
+    thread.is_alive.return_value = True
+    monkeypatch.setattr(pi_plugins, "_terminate_process", Mock())
+    with pytest.raises(OSError, match="process cleanup could not be confirmed") as caught:
+        pi_plugins._complete_process_cleanup(
+            process, pi_plugins._ProcessCleanup(threads=[thread]), None, terminate=False
+        )
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    process.stdout.close.assert_not_called()
+    process.stderr.close.assert_not_called()
+    assert 0 <= thread.join.call_args.kwargs["timeout"] <= 2
+
+
+def test_process_cleanup_retains_group_error_after_direct_child_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reaped direct child cannot conceal a failed group termination."""
+    from hephaestus.agents import pi_plugins
+
+    failure = PermissionError("fixed group could not be stopped")
+    process = Mock(returncode=-9, stdout=None, stderr=None)
+    monkeypatch.setattr(pi_plugins, "_terminate_process", Mock(side_effect=failure))
+    with pytest.raises(OSError, match="process cleanup could not be confirmed") as caught:
+        pi_plugins._complete_process_cleanup(
+            process, pi_plugins._ProcessCleanup(), None, terminate=True
+        )
+    assert caught.value.__cause__ is failure
+    process.kill.assert_called_once_with()
+    assert process.wait.call_count == 1
+
+
+def test_process_cleanup_retains_windows_job_close_error() -> None:
+    """A failed Job Object close remains visible after the direct process exits."""
+    from hephaestus.agents import pi_plugins
+
+    failure = OSError("fixed Job Object close failed")
+    process = Mock(returncode=0, stdout=None, stderr=None)
+    job = Mock()
+    job.close.side_effect = failure
+    with pytest.raises(OSError, match="process cleanup could not be confirmed") as caught:
+        pi_plugins._complete_process_cleanup(
+            process, pi_plugins._ProcessCleanup(), job, terminate=False
+        )
+    assert caught.value.__cause__ is failure
+    job.close.assert_called_once_with()
+    assert process.wait.call_count == 1
+
+
+def test_windows_reader_eof_keeps_exit_deadline_with_controlled_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check Windows-path wait policy, without claiming native Windows execution."""
+    from hephaestus.agents import pi_plugins
+
+    process = Mock(returncode=None, stdin=None)
+    waits: list[float] = []
+
+    def wait(*, timeout: float) -> int:
+        waits.append(timeout)
+        if len(waits) == 1:
+            raise subprocess.TimeoutExpired("fixed-child", timeout)
+        process.returncode = 1
+        return 1
+
+    def read_pipe(name: str, _stream: Any, events: Any) -> None:
+        events.put((name, f"{name}-marker".encode()))
+        events.put((name, None))
+
+    process.wait.side_effect = wait
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(pi_plugins, "os", SimpleNamespace(name="windows"))
+    monkeypatch.setattr(pi_plugins, "_read_process_pipe", read_pipe)
+    job = Mock()
+    monkeypatch.setattr(pi_plugins, "_WindowsJob", Mock(return_value=job))
+    result = pi_plugins.run_bounded_command(("fixed-child",), env={}, timeout=1)
+    assert result.timed_out
+    assert result.returncode == 1
+    assert result.stdout == "stdout-marker"
+    assert result.stderr == "stderr-marker"
+    assert len(waits) == 2
+    assert 0 <= waits[0] <= 1
+    assert 0 <= waits[1] <= 2
+    job.terminate.assert_called_once_with()
+    job.close.assert_called_once_with()
 
 
 def test_bounded_runner_times_out_and_stops_output_overflow() -> None:
