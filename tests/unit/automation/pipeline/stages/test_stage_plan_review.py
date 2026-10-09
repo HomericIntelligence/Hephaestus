@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,9 +10,11 @@ from typing import Any
 
 import pytest
 
-from hephaestus.agents.execution_policy import SessionLifecycle
+from hephaestus.agents.execution_policy import AgentRole, SessionLifecycle
 from hephaestus.agents.model_selection import AgentModelSelection
+from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.agent_config import AGENT_PLANNER
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.plan_journal import publish_plan_revision
@@ -27,6 +30,7 @@ from hephaestus.automation.pipeline.stages.plan_review import (
     PlanReviewStage,
     build_amend_prompt,
 )
+from hephaestus.automation.pipeline.summary import RunStats, print_summary
 from hephaestus.automation.plan_review_session import PlanReviewSessionStore
 from hephaestus.automation.prompts._shared import get_untrusted_notice
 from hephaestus.automation.prompts.planning import get_plan_prompt
@@ -773,6 +777,83 @@ class TestPlanReviewStageStep:
         assert "review text (NOGO)" in second_job.prompt_kwargs["review_transcript"]
         assert "Plan v2 with tests" in second_job.prompt_kwargs["review_transcript"]
 
+    def test_lost_planner_amendment_preserves_reviewer_conversation(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """Planner loss must not reset review or review the unchanged plan."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[3250] = [render_current_plan("Plan v1")]
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        item = make_work_item(issue=3250, state="ENTER")
+        item.session_ids[AGENT_PLANNER] = "lost-planner"
+        stage = PlanReviewStage()
+
+        assert stage.on_enter(item, ctx) is None
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        item.state = transition.next_state
+        review = stage.step(item, ctx)
+        assert isinstance(review, JobRequest)
+        assert isinstance(review.job, AgentJob)
+        assert review.job.descr == "review"
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=_verdict("NOGO"), session_id="opaque-reviewer"),
+            ctx,
+        )
+        item.state = review.on_done_state
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        assert transition.next_state == "AMEND_WAIT"
+        item.state = transition.next_state
+        amendment = stage.step(item, ctx)
+        assert isinstance(amendment, JobRequest)
+        assert isinstance(amendment.job, AgentJob)
+        assert amendment.job.session_agent == AGENT_PLANNER
+        assert amendment.job.resume_session_id == "lost-planner"
+
+        cycle_id = item.payload["plan_review_cycle_id"]
+        record = store.load(cycle_id)
+        transcript = store.transcript(cycle_id)
+        round_count = item.payload["review_round"]
+        attempts = dict(item.attempts)
+        snapshot = journal_snapshot(github.issue_comments(3250))
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, error="planner session unavailable", session_lost=True),
+            ctx,
+        )
+        # The coordinator applies this state after the completion callback.
+        item.state = amendment.on_done_state
+
+        assert store.load(cycle_id) == record
+        assert store.transcript(cycle_id) == transcript
+        assert item.payload["plan_review_session_id"] == "opaque-reviewer"
+        assert item.payload["review_round"] == round_count
+        assert item.attempts == attempts
+
+        for _ in range(6):
+            next_action = stage.step(item, ctx)
+            assert store.load(cycle_id) == record
+            assert store.transcript(cycle_id) == transcript
+            assert item.payload["plan_review_cycle_id"] == cycle_id
+            assert item.payload["review_round"] == round_count
+            assert item.attempts == attempts
+            assert journal_snapshot(github.issue_comments(3250)) == snapshot
+            if isinstance(next_action, Continue):
+                item.state = next_action.next_state
+                continue
+            assert isinstance(next_action, JobRequest)
+            assert isinstance(next_action.job, AgentJob)
+            assert next_action.job.session_agent == AGENT_PLANNER
+            assert next_action.job.resume_session_id is None
+            assert next_action.job.execution_request is not None
+            assert next_action.job.execution_request.lifecycle is SessionLifecycle.START_NEW
+            break
+        else:
+            pytest.fail("Planner recovery did not produce a bounded fresh request")
+
     def test_nogo_failback_keeps_reviewer_session_for_replanned_revision(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path
     ) -> None:
@@ -1434,7 +1515,7 @@ class TestPlanReviewStageStep:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)  # narrow the job union
-        assert result.on_done_state == "REVIEW_WAIT"  # loop back to review
+        assert result.on_done_state == "AMEND_DONE"  # verify amendment before review
         assert result.job.descr == "amend"
         assert result.job.resume_session_id == "planner-session-id"
         assert result.job.prompt_builder is build_amend_prompt
@@ -2939,6 +3020,383 @@ class TestReviewFlowWithFakePool:
                 (21, (STATE_PLAN_GO,), (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN)),
             ),
         ]
+
+
+class TestPlannerAmendmentRecovery:
+    """Recover the planner without changing either review conversation."""
+
+    @staticmethod
+    def start(
+        stage: Any, ctx: Any, make_work_item: Any, issue: int, review: ReviewVerdict | None = None
+    ) -> Any:
+        """Drive a real NOGO into a failed planner amendment."""
+        ctx.github.comments[issue] = [render_current_plan("Plan v1")]
+        item = make_work_item(issue=issue, state="ENTER")
+        item.session_ids[AGENT_PLANNER] = f"planner-{issue}"
+        assert stage.on_enter(item, ctx) is None
+        item.state = "REVIEW_WAIT"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=review or _verdict("NOGO"), session_id=f"review-{issue}"),
+            ctx,
+        )
+        item.state = request.on_done_state
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        item.state = transition.next_state
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, session_lost=True), ctx)
+        item.state = request.on_done_state
+        return item
+
+    @staticmethod
+    def next_action(stage: Any, item: Any, ctx: Any) -> Any:
+        """Follow only bounded state transitions to an externally visible action."""
+        for _ in range(6):
+            action = stage.step(item, ctx)
+            if not isinstance(action, Continue):
+                return action
+            item.state = action.next_state
+        pytest.fail("Recovery did not produce an action")
+
+    @pytest.mark.parametrize("candidate", ["Plan v2 with tests", "Plan v1", ""])
+    def test_recovery_publication_preserves_review_identity(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+        candidate: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        stage = PlanReviewStage()
+        item = self.start(stage, ctx, make_work_item, 3250)
+        cycle = item.payload["plan_review_cycle_id"]
+        transcript = store.transcript(cycle)
+        attempts = dict(item.attempts)
+        request = self.next_action(stage, item, ctx)
+        assert isinstance(request, JobRequest)
+        assert request.job.resume_session_id is None
+        assert request.job.prompt_kwargs["prior_review"] == _verdict("NOGO").raw
+        assert "Plan v1" in request.job.prompt_kwargs["plan_history"]
+        stage.on_job_done(item, JobResult(ok=True, value=candidate), ctx)
+        item.state = request.on_done_state
+        action = self.next_action(stage, item, ctx)
+        assert item.payload["plan_review_cycle_id"] == cycle
+        assert store.load(cycle).session_id == "review-3250"
+        assert item.attempts == attempts
+        if candidate == "Plan v2 with tests":
+            assert isinstance(action, JobRequest)
+            assert action.job.resume_session_id == "review-3250"
+            assert action.job.prompt_kwargs["plan_revision"] == 2
+            assert "Plan v2 with tests" in store.transcript(cycle)
+            print_summary(
+                [item],
+                RunStats(
+                    exit_code=0,
+                    loops_run=1,
+                    agent_job_count=0,
+                    agent_job_time_s=0.0,
+                    wall_s=0.0,
+                ),
+                [],
+                json_out=True,
+            )
+            summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+            recovery = summary["planner_amendment_recovery"][0]
+            assert recovery["status"] == "recovered"
+            assert recovery["attempt"] == 1
+            assert recovery["plan_revision"] == 2
+        else:
+            assert isinstance(action, StageOutcome)
+            assert action.disposition is Disposition.BLOCKED
+            assert store.transcript(cycle) == transcript
+            assert not item.payload.get("planner_amendment_recovery")
+            assert isinstance(self.next_action(stage, item, ctx), StageOutcome)
+            assert item.payload["planner_amendment_attempts"] == 1
+
+    def test_two_issues_exhaust_independent_planner_recovery(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(
+            github=FakeStageGitHub(labels=[STATE_NEEDS_PLAN]), plan_review_sessions=store
+        )
+        stage = PlanReviewStage()
+        items = [self.start(stage, ctx, make_work_item, issue) for issue in (3250, 3251)]
+        records = [store.load(item.payload["plan_review_cycle_id"]) for item in items]
+        transcripts = [store.transcript(record.cycle_id) for record in records]
+        for attempt in range(2):
+            requests = [self.next_action(stage, item, ctx) for item in items]
+            for item, request in reversed(list(zip(items, requests, strict=True))):
+                assert isinstance(request, JobRequest)
+                assert request.job.session_agent == AGENT_PLANNER
+                assert request.job.resume_session_id is None
+                stage.on_job_done(
+                    item, JobResult(ok=False, session_lost=attempt == 0, error="failed"), ctx
+                )
+                item.state = request.on_done_state
+            for record, transcript in zip(records, transcripts, strict=True):
+                assert store.load(record.cycle_id) == record
+                assert store.transcript(record.cycle_id) == transcript
+        for item in items:
+            outcome = self.next_action(stage, item, ctx)
+            assert outcome == StageOutcome(
+                Disposition.FINISH_FAIL, "planner-amendment-recovery-exhausted"
+            )
+            assert item.payload["review_round"] == 1
+            assert item.attempts["plan_review_iter"] == 1
+
+    @pytest.mark.parametrize("blocked", [False, True])
+    def test_recovery_stops_on_changed_context_or_operator_block(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path, blocked: bool
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        stage = PlanReviewStage()
+        item = self.start(stage, ctx, make_work_item, 3250)
+        record = store.load(item.payload["plan_review_cycle_id"])
+        if blocked:
+            github.labels[3250] = {STATE_PLAN_BLOCKED}
+        else:
+            publish_plan_revision(3250, "External plan", github, require_change=True)
+        outcome = self.next_action(stage, item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is (Disposition.BLOCKED if blocked else Disposition.FINISH_FAIL)
+        assert store.load(record.cycle_id) == record
+
+    def test_recovery_accepts_canonicalized_review_whitespace(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        ctx = make_ctx(
+            github=FakeStageGitHub(labels=[STATE_NEEDS_PLAN]),
+            plan_review_sessions=PlanReviewSessionStore(lambda: tmp_path),
+        )
+        stage = PlanReviewStage()
+        review = ReviewVerdict(grade=None, verdict="NOGO", raw="  " + _verdict("NOGO").raw + "\n")
+        item = self.start(stage, ctx, make_work_item, 3250, review)
+        action = self.next_action(stage, item, ctx)
+        assert isinstance(action, JobRequest)
+        assert action.job.session_agent == AGENT_PLANNER
+        assert action.job.prompt_kwargs["prior_review"] == _verdict("NOGO").raw
+
+    def test_recovery_never_mixes_plan_and_review_snapshots(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        ctx = make_ctx(github=github, plan_review_sessions=PlanReviewSessionStore(lambda: tmp_path))
+        stage = PlanReviewStage()
+        item = self.start(stage, ctx, make_work_item, 3250)
+        original_read = github.issue_comments
+        reads = 0
+
+        def changing_comments(issue: int) -> Any:
+            nonlocal reads
+            reads += 1
+            if reads > 1:
+                github.comments[issue] = [
+                    render_current_plan("External revision", revision=2),
+                    render_current_review("External critique\n\nstate:plan-no-go", revision=2),
+                ]
+            return original_read(issue)
+
+        monkeypatch.setattr(github, "issue_comments", changing_comments)
+        action = self.next_action(stage, item, ctx)
+        if isinstance(action, JobRequest):
+            assert action.job.prompt_kwargs["prior_review"] == _verdict("NOGO").raw
+            assert "Plan v1" in action.job.prompt_kwargs["plan_history"]
+            assert "External revision" not in action.job.prompt_kwargs["plan_history"]
+        else:
+            assert isinstance(action, StageOutcome)
+            assert action.disposition in {Disposition.FINISH_FAIL, Disposition.BLOCKED}
+
+    def test_recovery_does_not_repeat_unconfirmed_label_transition(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        stage = PlanReviewStage()
+        item = self.start(stage, ctx, make_work_item, 3250)
+        request = self.next_action(stage, item, ctx)
+        assert isinstance(request, JobRequest)
+        cycle = item.payload["plan_review_cycle_id"]
+        transcript = store.transcript(cycle)
+        transitions: list[int] = []
+
+        def dropped_transition(issue: int, *, add: list[str], remove: list[str]) -> None:
+            transitions.append(issue)
+
+        monkeypatch.setattr(github, "edit_labels", dropped_transition)
+        stage.on_job_done(item, JobResult(ok=True, value="Recovered plan"), ctx)
+        item.state = request.on_done_state
+        assert self.next_action(stage, item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "planner-amendment-publication-unconfirmed"
+        )
+        assert transitions == [3250]
+        assert store.transcript(cycle) == transcript
+
+    def test_operator_block_during_recovery_identity_read_wins(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        stage = PlanReviewStage()
+        item = self.start(stage, ctx, make_work_item, 3250)
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        item.state = transition.next_state
+        original_json = github.gh_issue_json
+        reads = 0
+        mutations = list(github.mutation_log)
+
+        def blocking_labels(issue: int) -> dict[str, Any]:
+            nonlocal reads
+            reads += 1
+            if reads > 1:
+                github.labels[issue] = {STATE_PLAN_BLOCKED}
+            return original_json(issue)
+
+        monkeypatch.setattr(github, "gh_issue_json", blocking_labels)
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.BLOCKED
+        assert github.mutation_log == mutations
+        assert not item.payload.get("planner_amendment_attempts")
+
+    def test_unconfirmed_publication_is_not_retried(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        stage = PlanReviewStage()
+        item = self.start(stage, ctx, make_work_item, 3250)
+        request = self.next_action(stage, item, ctx)
+        assert isinstance(request, JobRequest)
+        writes: list[int] = []
+
+        def uncertain_write(*args: Any, **kwargs: Any) -> None:
+            writes.append(1)
+            raise RuntimeError("response lost")
+
+        monkeypatch.setattr(github, "upsert_issue_comment", uncertain_write)
+        stage.on_job_done(item, JobResult(ok=True, value="Plan v2"), ctx)
+        item.state = request.on_done_state
+        for _ in range(2):
+            outcome = self.next_action(stage, item, ctx)
+            assert outcome == StageOutcome(
+                Disposition.FINISH_FAIL, "planner-amendment-publication-unconfirmed"
+            )
+        assert writes == [1]
+
+    @pytest.mark.parametrize("blocked", [False, True])
+    def test_changed_context_after_submission_prevents_publication(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path, blocked: bool
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        stage = PlanReviewStage()
+        item = self.start(stage, ctx, make_work_item, 3250)
+        request = self.next_action(stage, item, ctx)
+        assert isinstance(request, JobRequest)
+        record = store.load(item.payload["plan_review_cycle_id"])
+        if blocked:
+            github.labels[3250] = {STATE_PLAN_BLOCKED}
+        else:
+            publish_plan_revision(3250, "New external plan", github, require_change=True)
+        snapshot = journal_snapshot(github.issue_comments(3250))
+        mutations = list(github.mutation_log)
+        stage.on_job_done(item, JobResult(ok=True, value="Recovered plan"), ctx)
+        item.state = request.on_done_state
+        outcome = self.next_action(stage, item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is (Disposition.BLOCKED if blocked else Disposition.FINISH_FAIL)
+        assert journal_snapshot(github.issue_comments(3250)) == snapshot
+        assert github.mutation_log == mutations
+        assert store.load(record.cycle_id) == record
+
+    def test_post_write_readback_failure_does_not_repeat_publication(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        stage = PlanReviewStage()
+        item = self.start(stage, ctx, make_work_item, 3250)
+        request = self.next_action(stage, item, ctx)
+        assert isinstance(request, JobRequest)
+        record = store.load(item.payload["plan_review_cycle_id"])
+        transcript = store.transcript(record.cycle_id)
+        original_write = github.upsert_plan_comment
+        original_read = github.issue_comments
+        writes: list[str] = []
+
+        def write_then_lose_reads(issue: int, body: str) -> None:
+            original_write(issue, body)
+            writes.append(body)
+
+        def read_comments(issue: int) -> Any:
+            if writes:
+                raise RuntimeError("readback unavailable after write")
+            return original_read(issue)
+
+        monkeypatch.setattr(github, "upsert_plan_comment", write_then_lose_reads)
+        monkeypatch.setattr(github, "issue_comments", read_comments)
+        stage.on_job_done(item, JobResult(ok=True, value="Recovered plan"), ctx)
+        item.state = request.on_done_state
+        for _ in range(2):
+            assert self.next_action(stage, item, ctx) == StageOutcome(
+                Disposition.FINISH_FAIL, "planner-amendment-publication-unconfirmed"
+            )
+        assert len(writes) == 1
+        assert journal_snapshot(original_read(3250)).current_plan == "Recovered plan"
+        assert store.load(record.cycle_id) == record
+        assert store.transcript(record.cycle_id) == transcript
+
+    def test_recovery_invalidates_only_planner_role_state(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        ctx = make_ctx(
+            github=FakeStageGitHub(labels=[STATE_NEEDS_PLAN]),
+            plan_review_sessions=PlanReviewSessionStore(lambda: tmp_path),
+        )
+        stage = PlanReviewStage()
+        item = self.start(stage, ctx, make_work_item, 3250)
+        planner = AGENT_PLANNER
+        planner_binding = AgentSessionBinding(
+            session_id="lost-planner",
+            canonical_cwd=str(tmp_path),
+            role=AgentRole.PLANNER,
+            model_fingerprint="a" * 64,
+        )
+        reviewer_binding = AgentSessionBinding(
+            session_id="reviewer",
+            canonical_cwd=str(tmp_path),
+            role=AgentRole.PLAN_REVIEWER,
+            model_fingerprint="b" * 64,
+        )
+        item.session_ids["other-role"] = "other-session"
+        item.session_bindings.update({planner: planner_binding, "other-role": reviewer_binding})
+        item.session_selections.update({planner: ("pi", "m"), "other-role": ("pi", "r")})
+        request = self.next_action(stage, item, ctx)
+        assert isinstance(request, JobRequest)
+        assert request.job.resume_session_id is None
+        assert request.job.resume_binding is None
+        assert planner not in item.session_ids
+        assert planner not in item.session_bindings
+        assert planner not in item.session_selections
+        assert item.session_ids["other-role"] == "other-session"
+        assert item.session_bindings["other-role"] == reviewer_binding
+        assert item.session_selections["other-role"] == ("pi", "r")
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude", "opencode"])

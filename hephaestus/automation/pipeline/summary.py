@@ -512,6 +512,15 @@ def print_summary(  # noqa: C901
                 publication_targets.get("could_not_publish", []),
             )
         cycle_id = item.payload.get("plan_review_cycle_id")
+        amendment_status = item.payload.get("planner_amendment_status")
+        if amendment_status:
+            logger.info(
+                "    planner-amendment issue=%s status=%s attempt=%s revision=%s",
+                item.issue,
+                amendment_status,
+                item.payload.get("planner_amendment_attempts", 0),
+                item.payload.get("plan_revision", 1),
+            )
         if cycle_id:
             logger.info(
                 "    plan-review cycle=%s session=%s round=%s revision=%s",
@@ -643,5 +652,16 @@ def print_summary(  # noqa: C901
             preserved_worktrees=[[number, path] for _, number, path in preserved],
             recovery_worktrees=[[number, path] for _, number, path in recovery_preserved],
             plan_review_sessions=review_sessions,
+            planner_amendment_recovery=[
+                {
+                    "repo": item.repo,
+                    "issue": item.issue,
+                    "status": item.payload["planner_amendment_status"],
+                    "attempt": item.payload.get("planner_amendment_attempts", 0),
+                    "plan_revision": item.payload.get("plan_revision", 1),
+                }
+                for item in items
+                if item.payload.get("planner_amendment_status")
+            ],
             review_publication=review_publication,
         )

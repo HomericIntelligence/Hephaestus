@@ -484,6 +484,32 @@ class TestPrintSummaryRows:
 class TestJsonEnvelope:
     """emit_json_status extension fields."""
 
+    def test_planner_recovery_is_separate_from_reviewer_identity(
+        self, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        item = _item(3250, StageName.PLAN_REVIEW, passed=False, reason="recovery exhausted")
+        item.payload.update(
+            plan_review_cycle_id="cycle",
+            plan_review_session_id="reviewer",
+            plan_revision=1,
+            planner_amendment_status="planner-amendment-recovery-exhausted",
+            planner_amendment_attempts=2,
+        )
+        with caplog.at_level("INFO"):
+            print_summary([item], _stats(), [], json_out=True)
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["planner_amendment_recovery"] == [
+            {
+                "repo": item.repo,
+                "issue": 3250,
+                "status": "planner-amendment-recovery-exhausted",
+                "attempt": 2,
+                "plan_revision": 1,
+            }
+        ]
+        assert envelope["plan_review_sessions"][0]["reviewer_session_id"] == "reviewer"
+        assert "planner-amendment" in caplog.text
+
     def test_json_envelope_includes_explicit_review_completion_reason(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
