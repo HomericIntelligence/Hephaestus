@@ -293,6 +293,12 @@ HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S = 7200
 NO_COMMIT_REPLY_WARNING = "[auto-msg] reply has no corresponding commit, review thoroughly"
 _TRUNCATED_REPLY_WARNING = "[auto-msg] reply truncated to fit review limit"
 
+# A failed remediation agent can leave a valid worktree diff but no structured
+# reply mapping. Keep one bounded retry for that mapping before failing closed.
+IMPLEMENTATION_REPLY_MAPPING_RETRY_CAP = 1
+_REMEDIATION_REPLY_MAPPING_RETRIES = "remediation_reply_mapping_retries"
+_REMEDIATION_REPLY_MAPPING_HEAD_SHA = "remediation_reply_mapping_head_sha"
+
 
 def _append_no_commit_reply_warning(reply: str) -> str:
     """Append the reviewer warning while preserving the reply-size contract."""
@@ -326,6 +332,19 @@ def _remediation_reply_head(
         if is_full_commit_sha(snapshot_head):
             snapshot_heads.add(snapshot_head)
     return (snapshot_heads.pop() if len(snapshot_heads) == 1 else None), False
+
+
+def _remediation_reply_mapping_pending(item: WorkItem) -> bool:
+    """Return whether the item has one valid pending mapping retry."""
+    retries = item.payload.get(_REMEDIATION_REPLY_MAPPING_RETRIES)
+    return (
+        item.payload.get("implementation_remediation") is True
+        and item.pr is not None
+        and isinstance(retries, int)
+        and not isinstance(retries, bool)
+        and 0 < retries <= IMPLEMENTATION_REPLY_MAPPING_RETRY_CAP
+        and is_full_commit_sha(item.payload.get(_REMEDIATION_REPLY_MAPPING_HEAD_SHA))
+    )
 
 
 def build_implementation_prompt(
@@ -957,13 +976,22 @@ class ImplementationStage(Stage):
                 Disposition.FINISH_FAIL,
                 athena_advise_failure_reason(item),
             )
-        entry_outcome = self._implementation_agent_turn_entry_outcome(item, ctx, issue)
-        if entry_outcome is not None:
-            return entry_outcome
+        mapping_retry_requested = _REMEDIATION_REPLY_MAPPING_RETRIES in item.payload
+        if mapping_retry_requested:
+            if not _remediation_reply_mapping_pending(item):
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+        else:
+            entry_outcome = self._implementation_agent_turn_entry_outcome(item, ctx, issue)
+            if entry_outcome is not None:
+                return entry_outcome
         # Clear stale results at submission so a failed later attempt can
         # never replay an earlier attempt's output downstream.
         item.payload.pop("implement_error", None)
         item.payload.pop("implement_summary", None)
+        if mapping_retry_requested:
+            # The previous mapping was invalid. The next address-review turn
+            # must provide a new validated mapping for the same pushed head.
+            item.payload.pop("remediation_output", None)
         if item.payload.get("implementation_remediation"):
             remediation_threads = item.payload.get("remediation_threads")
             if (
@@ -1470,10 +1498,11 @@ class ImplementationStage(Stage):
     ) -> None:
         """Store job results on the item payload (state is still the WAIT state).
 
-        The implement attempt is counted HERE, on job completion (success or
-        hard failure alike — doc: "agent_error -> RETRY (consumes the
-        implement budget)"). Interrupted results never reach this method, so
-        an interrupt can never burn budget.
+        The normal implement attempt is counted HERE, on job completion
+        (success or hard failure alike — doc: "agent_error -> RETRY (consumes
+        the implement budget)"). A mapping-only retry has its own bound and
+        does not consume the normal implement budget. Interrupted results
+        never reach this method, so an interrupt can never burn budget.
 
         Args:
             item: The work item to update.
@@ -1743,6 +1772,14 @@ class ImplementationStage(Stage):
             if is_full_commit_sha(receipt_head):
                 item.payload["_worktree_cleanup_head_sha"] = receipt_head
             pushed = receipt.get("pushed") is True if receipt else bool(result.value)
+            if (
+                not pushed
+                and is_full_commit_sha(receipt_head)
+                and receipt_head == item.payload.get(_REMEDIATION_REPLY_MAPPING_HEAD_SHA)
+            ):
+                # A mapping retry re-enters commit+push without another
+                # writer change. Treat the unchanged exact head as published.
+                pushed = True
             if not pushed:
                 item.payload["no_commits"] = True
                 # The worker's no-commit path conditionally released the
@@ -1757,6 +1794,7 @@ class ImplementationStage(Stage):
                 # A published branch has real commits and must not be
                 # released by terminal cleanup.
                 item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+                item.payload.pop("no_commits", None)
                 if item.payload.get("implementation_remediation") and is_full_commit_sha(
                     receipt_head
                 ):
@@ -1771,6 +1809,16 @@ class ImplementationStage(Stage):
             return
         error_text = (result.error or "").lower()
         if "no commits" in error_text:
+            if _REMEDIATION_REPLY_MAPPING_RETRIES in item.payload:
+                if _remediation_reply_mapping_pending(item):
+                    head_sha = item.payload.get(_REMEDIATION_REPLY_MAPPING_HEAD_SHA)
+                    ImplementationStage._post_remediation_replies_after_push(
+                        item,
+                        JobResult(ok=True, value={"pushed": False, "head_sha": head_sha}),
+                    )
+                else:
+                    item.payload["remediation_reply_error"] = True
+                return
             # Legacy _handle_runtime_error (:348): "no commits between
             # base and branch" maps to state:skip, not a hard failure.
             item.payload["no_commits"] = True
@@ -1804,21 +1852,24 @@ class ImplementationStage(Stage):
         if not is_full_commit_sha(head_sha):
             item.payload["remediation_reply_error"] = True
             return
+        if not pushed and head_sha == item.payload.get(_REMEDIATION_REPLY_MAPPING_HEAD_SHA):
+            # The mapping retry does not need a second commit. Keep the exact
+            # pushed head eligible for the validated reply handoff.
+            pushed = True
         replies = parse_addressed_replies(
             item.payload.get("remediation_output"),
             snapshots,
         )
         if replies is None:
             if pushed and item.pr is not None:
-                logger.warning(
-                    "implementation:%d: pushed remediation %s returned an invalid reply "
-                    "mapping; posting no replies and returning PR #%d for fresh review",
-                    item.issue,
-                    head_sha,
-                    item.pr,
-                )
-                item.payload.pop("implementation_remediation", None)
-                item.payload.pop("remediation_output", None)
+                if ImplementationStage._request_remediation_reply_mapping(item, head_sha):
+                    logger.warning(
+                        "implementation:%d: pushed remediation %s has no valid reply "
+                        "mapping; requesting one bounded retry before PR #%d review",
+                        item.issue,
+                        head_sha,
+                        item.pr,
+                    )
                 return
             item.payload["remediation_reply_error"] = True
             return
@@ -1855,22 +1906,47 @@ class ImplementationStage(Stage):
         }
         item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRIES, None)
         item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        item.payload.pop(_REMEDIATION_REPLY_MAPPING_RETRIES, None)
+        item.payload.pop(_REMEDIATION_REPLY_MAPPING_HEAD_SHA, None)
+
+    @staticmethod
+    def _request_remediation_reply_mapping(item: WorkItem, head_sha: str) -> bool:
+        """Retain a pushed remediation for one bounded mapping retry."""
+        retries = item.payload.get(_REMEDIATION_REPLY_MAPPING_RETRIES, 0)
+        if (
+            not is_full_commit_sha(head_sha)
+            or isinstance(retries, bool)
+            or not isinstance(retries, int)
+            or retries < 0
+            or retries >= IMPLEMENTATION_REPLY_MAPPING_RETRY_CAP
+        ):
+            item.payload["remediation_reply_error"] = True
+            return False
+        item.payload[_REMEDIATION_REPLY_MAPPING_RETRIES] = retries + 1
+        item.payload[_REMEDIATION_REPLY_MAPPING_HEAD_SHA] = head_sha
+        return True
 
     @staticmethod
     def _on_implement_done(item: WorkItem, result: JobResult) -> None:
-        """Count the implement attempt and record its outcome.
+        """Record the implement job outcome and update its budget.
 
-        The attempt is counted on completion, success or hard failure alike
-        (doc: "agent_error -> RETRY (consumes the implement budget)").
+        The normal attempt is counted on completion, success or hard failure
+        alike (doc: "agent_error -> RETRY (consumes the implement budget)").
+        A mapping-only retry uses its own bound.
 
         Args:
             item: The work item to update.
             result: The implement job result.
 
         """
-        item.attempts["implement"] = item.attempts.get("implement", 0) + 1
+        mapping_retry = _REMEDIATION_REPLY_MAPPING_RETRIES in item.payload
+        if not mapping_retry:
+            item.attempts["implement"] = item.attempts.get("implement", 0) + 1
         if not result.ok:
             logger.warning("implementation:%s: implement job failed: %s", item.issue, result.error)
+            if item.payload.get("implementation_remediation"):
+                # A prior turn's mapping cannot describe this failed turn.
+                item.payload.pop("remediation_output", None)
             item.payload["implement_error"] = True
             return
         item.payload.pop("post_review_rebase_required", None)
@@ -2475,6 +2551,21 @@ class ImplementationStage(Stage):
         if item.payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF) is not None:
             return Continue(next_state=REPLY_HANDOFF_WAIT)
 
+        if item.payload.pop("git_error", None):
+            # Push failed: transient git/network trouble — RETRY the stage
+            # without burning the implement budget, bounded by
+            # GIT_ERROR_RETRY_CAP (M5).
+            outcome = self._git_retry(item, "commit_push failed")
+            if outcome.disposition is Disposition.RETRY:
+                item.state = COMMIT_PUSH_WAIT
+            return outcome
+        if _REMEDIATION_REPLY_MAPPING_RETRIES in item.payload:
+            if not _remediation_reply_mapping_pending(item):
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+            # Do not send a pushed remediation to review until the writer has
+            # returned one validated mapping for every captured thread.
+            return Continue(next_state=IMPLEMENT_WAIT)
+
         if item.payload.get("no_commits"):
             # An item can retain a PR after an interrupted or re-entered
             # implementation attempt.  Do not add an issue-level skip label
@@ -2498,15 +2589,6 @@ class ImplementationStage(Stage):
                 "re-enter the loop.",
             )
             return StageOutcome(Disposition.SKIP, "no commits vs base")
-        if item.payload.pop("git_error", None):
-            # Push failed: transient git/network trouble — RETRY the stage
-            # without burning the implement budget, bounded by
-            # GIT_ERROR_RETRY_CAP (M5).
-            outcome = self._git_retry(item, "commit_push failed")
-            if outcome.disposition is Disposition.RETRY:
-                item.state = COMMIT_PUSH_WAIT
-            return outcome
-
         if item.pr is None:
             raw_title = item.payload.get("issue_title") or f"Implement issue #{item.issue}"
             title = normalize_strict_conventional_title(str(raw_title))

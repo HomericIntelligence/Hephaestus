@@ -3053,10 +3053,111 @@ class TestTestsAndFix:
 class TestCommitPushAndPrCreate:
     """COMMIT_PUSH_WAIT / PR_CREATE: durable journal entry + deferral order."""
 
-    def test_pushed_remediation_with_malformed_reply_mapping_returns_to_review(
+    def test_agent_tool_failure_preserves_pushed_remediation_until_reply_mapping(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A valid pushed head survives a malformed exact-thread reply mapping."""
+        """A failed writer with a pushed diff must request a reply mapping."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            pr_state={"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": [{"id": "thread-1", "path": "a.py", "line": 3}],
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+                "_reply_journal_recovery_complete": True,
+            }
+        )
+        item.attempts["implement"] = 1
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="agent_error: codex_tool_or_provider_failure: file_change status=failed",
+            ),
+            ctx,
+        )
+        assert "remediation_output" not in item.payload
+        assert item.attempts["implement"] == 2
+        item.state = "TEST_WAIT"
+
+        assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "agent_error")
+        assert stage.step(item, ctx) == Continue(next_state="COMMIT_PUSH_WAIT")
+
+        item.state = "COMMIT_PUSH_WAIT"
+        commit_push = stage.step(item, ctx)
+        assert isinstance(commit_push, JobRequest)
+        assert isinstance(commit_push.job, GitJob)
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            ctx,
+        )
+        item.state = "PR_CREATE"
+
+        assert stage.step(item, ctx) == Continue(next_state="IMPLEMENT_WAIT")
+        assert item.payload["implementation_remediation"] is True
+        assert item.payload["_post_remediation_review_head_sha"] == "b" * 40
+        assert not any(
+            name == "post_implementation_thread_replies" for name, _ in github.mutation_log
+        )
+
+        item.state = "IMPLEMENT_WAIT"
+        retry_job = stage.step(item, ctx)
+        assert isinstance(retry_job, JobRequest)
+        assert isinstance(retry_job.job, AgentJob)
+        assert "remediation_output" not in item.payload
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Fixed the missing guard."},
+                },
+            ),
+            ctx,
+        )
+        assert item.attempts["implement"] == 2
+        item.state = "TEST_WAIT"
+        assert stage.step(item, ctx) == Continue(next_state="COMMIT_PUSH_WAIT")
+
+        item.state = "COMMIT_PUSH_WAIT"
+        assert isinstance(stage.step(item, ctx), JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": False, "head_sha": "b" * 40}),
+            ctx,
+        )
+        assert "remediation_reply_mapping_retries" not in item.payload
+        assert "pending_implementation_reply_handoff" in item.payload
+
+        item.state = "PR_CREATE"
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
+            Disposition.ADVANCE, "PR #1001 ready for review"
+        )
+        assert ("post_implementation_thread_replies", (1001, ("thread-1",))) in (
+            github.mutation_log
+        )
+
+    def test_pushed_remediation_with_malformed_reply_mapping_requests_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A pushed head survives a malformed mapping for one retry."""
         stage = ImplementationStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -3089,17 +3190,17 @@ class TestCommitPushAndPrCreate:
         assert "remediation_reply_error" not in item.payload
         assert item.payload["_impl_source_revision"] == "b" * 40
         assert item.payload["_post_remediation_review_head_sha"] == "b" * 40
+        assert item.payload["remediation_reply_mapping_retries"] == 1
+        assert item.payload["remediation_reply_mapping_head_sha"] == "b" * 40
         assert "pending_implementation_reply_handoff" not in item.payload
-        assert "implementation_remediation" not in item.payload
-        assert "remediation_output" not in item.payload
+        assert item.payload["implementation_remediation"] is True
+        assert "remediation_output" in item.payload
         assert not any(
             name == "post_implementation_thread_replies" for name, _ in github.mutation_log
         )
 
         item.state = "PR_CREATE"
-        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
-            Disposition.ADVANCE, "PR #1001 ready for review"
-        )
+        assert stage.step(item, ctx) == Continue(next_state="IMPLEMENT_WAIT")
 
     def test_no_commit_remediation_with_malformed_reply_mapping_fails_closed(
         self, make_ctx: Any, make_work_item: Any
@@ -3136,6 +3237,53 @@ class TestCommitPushAndPrCreate:
 
         assert item.payload["remediation_reply_error"] is True
         assert "pending_implementation_reply_handoff" not in item.payload
+        assert not any(
+            name == "post_implementation_thread_replies" for name, _ in github.mutation_log
+        )
+
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_reply_failed"
+        )
+
+    def test_remediation_mapping_retry_is_bounded_for_unchanged_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A second invalid mapping fails without sending the head to review."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-l"],
+                    "replies": {"thread-l": "[Response] Fixed the missing guard."},
+                },
+                "remediation_reply_mapping_retries": 1,
+                "remediation_reply_mapping_head_sha": "b" * 40,
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": False, "head_sha": "b" * 40}),
+            ctx,
+        )
+
+        assert item.payload["remediation_reply_error"] is True
+        assert "no_commits" not in item.payload
+        assert item.payload["implementation_remediation"] is True
         assert not any(
             name == "post_implementation_thread_replies" for name, _ in github.mutation_log
         )
