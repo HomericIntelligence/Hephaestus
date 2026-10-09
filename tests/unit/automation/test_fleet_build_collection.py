@@ -21,6 +21,7 @@ import pytest
 from hephaestus.automation.fleet_build_collection import collect_build_result
 from hephaestus.automation.fleet_build_contract import encoded
 from hephaestus.automation.fleet_snapshot import SnapshotPolicy, export_snapshot
+from tests.fixtures.just_requirement import requires_just
 
 FIXTURE = Path(__file__).parents[2] / "fixtures" / "fleet_build"
 
@@ -181,6 +182,7 @@ def collect(fixture: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
+@requires_just
 def test_collects_actual_recipe_bytes_and_current_source(tmp_path: Path) -> None:
     """A verified result binds actual logs/artifact bytes and unchanged source."""
     fixture = collection_fixture(tmp_path)
@@ -195,6 +197,7 @@ def test_collects_actual_recipe_bytes_and_current_source(tmp_path: Path) -> None
     assert "collectionVerified" not in value
 
 
+@requires_just
 @pytest.mark.parametrize("name", ["receipt.json", "stdout.txt", "manifest.json", "test-output.txt"])
 def test_changed_referenced_bytes_cannot_be_collected(tmp_path: Path, name: str) -> None:
     """Identical metadata cannot conceal a changed receipt, log, manifest or artifact."""
@@ -204,6 +207,7 @@ def test_changed_referenced_bytes_cannot_be_collected(tmp_path: Path, name: str)
         collect(fixture)
 
 
+@requires_just
 @pytest.mark.parametrize("change", ["tracked", "untracked", "mode"])
 def test_changed_current_source_makes_valid_result_historical(tmp_path: Path, change: str) -> None:
     """A complete old result cannot become current-checkout success after edits."""
@@ -222,6 +226,7 @@ def test_changed_current_source_makes_valid_result_historical(tmp_path: Path, ch
     assert value["reference"] == fixture["reference"]
 
 
+@requires_just
 @pytest.mark.parametrize("shape", ["symlink", "hardlink", "public", "missing"])
 def test_collector_rejects_borrowed_or_incomplete_files(tmp_path: Path, shape: str) -> None:
     """A readable alias or incomplete output is not an independently owned artifact."""
@@ -244,6 +249,7 @@ def test_collector_rejects_borrowed_or_incomplete_files(tmp_path: Path, shape: s
         collect(fixture)
 
 
+@requires_just
 @pytest.mark.parametrize("change", ["attempt", "cleanup"])
 def test_different_expected_attempt_or_unproved_cleanup_is_rejected(
     tmp_path: Path,

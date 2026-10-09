@@ -22,7 +22,6 @@ when the sink emits its final outcome).
 from __future__ import annotations
 
 import logging
-import subprocess
 from pathlib import Path
 
 from hephaestus.agents.runtime import archive_and_prune_opencode_session
@@ -219,7 +218,7 @@ class FinishedStage(Stage):
                         "finished:%s: %s", item.issue or item.repo, message
                     ),
                 )
-            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            except (OSError, ValueError) as exc:
                 logger.warning(
                     "finished:%s: could not archive OpenCode session %s: %s",
                     item.issue or item.repo,

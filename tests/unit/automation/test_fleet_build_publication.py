@@ -25,6 +25,7 @@ from hephaestus.automation.fleet_build_executor import SlurmStepOwner
 from hephaestus.automation.fleet_build_publication import PrivateBuildPublisher
 from hephaestus.automation.fleet_build_supervisor import BuildSnapshot, BuildSupervisor
 from hephaestus.automation.fleet_snapshot import SnapshotPolicy, export_snapshot
+from tests.fixtures.just_requirement import requires_just
 from tests.unit.automation.test_fleet_build_executor import ProcessScheduler, inputs
 from tests.unit.automation.test_fleet_build_supervisor import FIXTURE, contract, records
 
@@ -309,6 +310,7 @@ def published_case(tmp_path: Path) -> Iterator[PublisherCase]:
         case.close()
 
 
+@requires_just
 def test_actual_owned_recipe_and_disposal_remain_a_positive_control(
     published_case: PublisherCase,
 ) -> None:
@@ -328,6 +330,7 @@ def test_actual_owned_recipe_and_disposal_remain_a_positive_control(
     assert all(child.poll() == 0 for child in case.scheduler.children.values())
 
 
+@requires_just
 def test_owner_retains_exact_observation_and_result_across_restart(
     published_case: PublisherCase,
 ) -> None:
@@ -356,6 +359,7 @@ def test_owner_retains_exact_observation_and_result_across_restart(
     assert len(case.scheduler.starts) == len(case.scheduler.releases) == 1
 
 
+@requires_just
 @pytest.mark.parametrize("observation", ["exact", "unknown"])
 def test_old_summary_requires_new_observation_without_execution(
     published_case: PublisherCase, observation: str
@@ -388,6 +392,7 @@ def test_old_summary_requires_new_observation_without_execution(
     assert len(case.scheduler.starts) == len(case.scheduler.releases) == 1
 
 
+@requires_just
 def test_actual_publisher_bundle_collects_current_then_historical(
     published_case: PublisherCase,
 ) -> None:
@@ -410,6 +415,7 @@ def test_actual_publisher_bundle_collects_current_then_historical(
     assert len(case.scheduler.starts) == len(case.scheduler.releases) == 1
 
 
+@requires_just
 def test_original_controller_snapshot_is_not_replaced_by_fresh_fixture(tmp_path: Path) -> None:
     """Retain exact original producer compatibility as a distinct historical case."""
     before = hashlib.sha256((FIXTURE / "controller.json").read_bytes()).hexdigest()
@@ -425,6 +431,7 @@ def test_original_controller_snapshot_is_not_replaced_by_fresh_fixture(tmp_path:
         case.close()
 
 
+@requires_just
 @pytest.mark.parametrize("changed", ["result", "manifest", "lease", "policy", "generation"])
 def test_publisher_refuses_changed_owner_or_admission_bytes(
     published_case: PublisherCase, changed: str
@@ -453,6 +460,7 @@ def test_publisher_refuses_changed_owner_or_admission_bytes(
     assert len(case.scheduler.starts) == len(case.scheduler.releases) == 1
 
 
+@requires_just
 def test_references_and_bundle_are_synchronized_before_fact(
     published_case: PublisherCase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -495,6 +503,7 @@ def test_references_and_bundle_are_synchronized_before_fact(
     assert len(observed) == len(case.client.facts) == 1
 
 
+@requires_just
 @pytest.mark.parametrize("failure", ["publisher", "controller"])
 def test_failed_publication_retries_same_bundle_without_another_process(
     published_case: PublisherCase, monkeypatch: pytest.MonkeyPatch, failure: str
@@ -535,6 +544,7 @@ def test_failed_publication_retries_same_bundle_without_another_process(
     )
 
 
+@requires_just
 @pytest.mark.parametrize("change", ["bytes", "symlink", "hardlink", "public"])
 def test_changed_bundle_refuses_terminal_retry(published_case: PublisherCase, change: str) -> None:
     """Re-read private bytes after a lost reply before resending the retained fact."""
@@ -563,6 +573,7 @@ def test_changed_bundle_refuses_terminal_retry(published_case: PublisherCase, ch
     assert len(case.client.facts) == len(case.scheduler.starts) == len(case.scheduler.releases) == 1
 
 
+@requires_just
 @pytest.mark.parametrize("change", ["step", "boolean", "missing"])
 def test_retained_cleanup_observation_cannot_change_identity(
     published_case: PublisherCase, change: str
@@ -595,6 +606,7 @@ def test_retained_cleanup_observation_cannot_change_identity(
     assert len(case.scheduler.starts) == len(case.scheduler.releases) == 1
 
 
+@requires_just
 def test_cancel_before_start_has_no_fabricated_step_receipt(published_case: PublisherCase) -> None:
     """Preserve the existing no-start fence and distinguish absent execution evidence."""
     case = published_case
@@ -647,6 +659,7 @@ def assert_completed_owner_is_private(case: PublisherCase) -> dict[str, Any]:
     return evidence
 
 
+@requires_just
 def test_cancel_after_run_replays_incomplete_fact_without_changing_owner_output(
     published_case: PublisherCase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -704,6 +717,7 @@ def assert_reconciled_cancellation(
     return fact
 
 
+@requires_just
 @pytest.mark.parametrize("reply", ["lost", "returned"])
 def test_cancel_during_publisher_uncertainty_preserves_history_and_delivers_stop(
     published_case: PublisherCase, monkeypatch: pytest.MonkeyPatch, reply: str
@@ -745,6 +759,7 @@ def test_cancel_during_publisher_uncertainty_preserves_history_and_delivers_stop
     assert assert_completed_owner_is_private(case) == evidence
 
 
+@requires_just
 @pytest.mark.parametrize("winner", ["cancel", "terminal", "cancel_stale_ack"])
 def test_cancel_during_controller_uncertainty_preserves_exact_fact(
     published_case: PublisherCase, winner: str
@@ -789,6 +804,7 @@ def test_cancel_during_controller_uncertainty_preserves_exact_fact(
     assert assert_completed_owner_is_private(case) == evidence
 
 
+@requires_just
 @pytest.mark.parametrize("change", ["identity", "body", "missing", "downgrade", "stop"])
 def test_cancelled_history_refuses_damaged_state_or_transition(
     published_case: PublisherCase, monkeypatch: pytest.MonkeyPatch, change: str
