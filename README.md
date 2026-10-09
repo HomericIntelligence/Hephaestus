@@ -49,9 +49,10 @@ and intentionally excludes `[dev]` (which carries test/lint tooling such as
 pytest, ruff, and mypy):
 
 - `pip install HomericIntelligence-Hephaestus[all]` — installs all runtime
-  extras: `automation`, `github`, `nats`, `toml`, `xml`, `schema`. Note that
-  `automation` is the product layer (`hephaestus.automation`) and pulls in
-  `pydantic`; see [ADR 0001](docs/adr/0001-automation-library-boundary.md).
+  extras: `automation`, `github`, `nats`, `toml`, `xml`, `schema`. The `github`
+  extra is an empty compatibility extra. `automation` is the product layer
+  (`hephaestus.automation`) and pulls in `pydantic`; see
+  [ADR 0001](docs/adr/0001-automation-library-boundary.md).
 - `uv sync` — installs the editable project plus its default development and
   automation dependency groups for contributors.
 - `uv sync --all-groups --all-extras --locked` — installs the complete locked

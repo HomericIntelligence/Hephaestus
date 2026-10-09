@@ -1,8 +1,8 @@
 """GitHub contribution statistics via the ``gh`` CLI.
 
-Fetches and displays issue, PR, and commit counts for a date range.  Uses
-``gh api`` subprocess calls instead of PyGithub so no token management is
-required beyond a working ``gh auth`` session.
+Fetches and displays issue, PR, and commit counts for a date range. Uses
+``gh api`` subprocess calls, so no token management is required beyond a
+working ``gh auth`` session.
 
 Usage::
 

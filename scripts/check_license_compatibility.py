@@ -4,7 +4,7 @@
 NOTICE holds the authoritative human-readable analysis. This script is the
 machine-enforced subset: every dependency the project DISTRIBUTES (base deps +
 runtime extras, NEVER `dev`) must carry a permissive license or be a
-NOTICE-justified non-vendored extra (pygithub/LGPL, defusedxml/PSF).
+NOTICE-justified non-vendored extra (defusedxml/PSF).
 
 Scope = distributed deps only, read from the installed package's Requires-Dist.
 Dev tooling (yamllint/bats are GPL, see NOTICE) is never examined.
@@ -51,7 +51,6 @@ PERMISSIVE: frozenset[str] = frozenset({"MIT", "BSD-2-Clause", "BSD-3-Clause", "
 # PERMISSIVE: NOTICE allows PSF only for defusedxml, so it must be rejected for
 # any other package (see test_psf_allowed_only_for_defusedxml).
 ALLOWED_EXTRA_COPYLEFT: dict[str, frozenset[str]] = {
-    "pygithub": frozenset({"LGPL-3.0", "LGPL-3.0-only", "LGPL-3.0-or-later", "LGPL"}),
     "defusedxml": frozenset({"PSF-2.0", "Python-2.0"}),
 }
 
