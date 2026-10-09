@@ -138,7 +138,7 @@ def running_command(config: Path) -> Iterator[dict[str, Any]]:
         if process.poll() is None:
             process.terminate()
         try:
-            _, error = process.communicate(timeout=3)
+            output, error = process.communicate(timeout=3)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate(timeout=3)
@@ -147,6 +147,9 @@ def running_command(config: Path) -> Iterator[dict[str, Any]]:
             assert process.returncode == 0, (
                 f"The service shutdown failed: exit {process.returncode}; {error.decode()}"
             )
+            assert [json.loads(line) for line in output.splitlines()] == [
+                {"status": "ok", "exit_code": 0}
+            ]
 
 
 def read_page(
@@ -161,6 +164,7 @@ def read_page(
 ) -> tuple[int, dict[str, Any]]:
     """Use verified local TLS and the exact Agamemnon backend request form."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_verify_locations(cafile=str(certificate))
     connection = http.client.HTTPSConnection(
         ready["host"], ready["port"], context=context, timeout=2
@@ -211,6 +215,7 @@ def test_installed_service_returns_authenticated_retained_log_pages(
 def trusted_socket(ready: dict[str, Any], certificate: Path) -> ssl.SSLSocket:
     """Connect to the test-owned listener with its explicit trust certificate."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_verify_locations(cafile=str(certificate))
     raw = socket.create_connection((ready["host"], ready["port"]), timeout=2)
     try:
@@ -331,6 +336,7 @@ def test_tls_requires_explicit_trust_and_ignores_ambient_key_log(
     monkeypatch.setenv("SSLKEYLOGFILE", str(key_log))
     with direct_service(config) as (_, ready):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         with socket.create_connection((ready["host"], ready["port"]), timeout=2) as raw:
             with pytest.raises(ssl.SSLCertVerificationError):
                 context.wrap_socket(raw, server_hostname=ready["host"])
@@ -423,7 +429,9 @@ def test_installed_command_rejects_nonprivate_input_without_readiness(
         check=False,
     )
     assert result.returncode == 1
-    assert result.stdout == b""
+    assert [json.loads(line) for line in result.stdout.splitlines()] == [
+        {"status": "error", "exit_code": 1}
+    ]
     assert result.stderr == b"The private build-log service failed.\n"
 
 
@@ -451,4 +459,8 @@ def test_shutdown_failure_has_fixed_diagnostic(
     assert fleet_build_artifact_server.main(["--config", str(tmp_path / "unused"), "--json"]) == 1
     output = capsys.readouterr()
     assert output.err == "The private build-log service failed.\n"
+    assert [json.loads(line) for line in output.out.splitlines()] == [
+        {"status": "ready", "host": "127.0.0.1", "port": 12345},
+        {"status": "error", "exit_code": 1},
+    ]
     assert "private fixture detail" not in output.out

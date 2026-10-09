@@ -200,6 +200,10 @@ time; log hashing avoids a full escaped copy of both streams.
    state migration is required. Startup and shutdown failures have nonzero
    outcomes; investigate the private inputs before retrying.
 
+With `--json`, a final status object follows shutdown. It contains `status`
+(`ok` or `error`) and `exit_code`. A startup failure emits only the error
+status object, without readiness or private input details.
+
 Snapshot and supervisor work remains with
 [issue 3231](https://github.com/HomericIntelligence/Hephaestus/issues/3231) and
 [issue 3232](https://github.com/HomericIntelligence/Hephaestus/issues/3232).
