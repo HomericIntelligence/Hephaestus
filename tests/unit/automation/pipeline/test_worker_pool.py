@@ -7531,6 +7531,167 @@ class TestGitOps:
         assert result.ok is True
         assert result.value == {"pushed": True, "head_sha": "b" * 40}
 
+    def test_commit_push_refreshes_writer_before_retry(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A non-fast-forward retry rebases local work onto the remote writer."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "refresh_writer_before_push": True,
+            },
+        )
+        remote_env = {"GIT_CONFIG_GLOBAL": os.devnull}
+        remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
+        revalidate_remote = MagicMock(return_value=(remote_env, remote_config))
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=True),
+            patch(
+                f"{_WP}._required_git_signing_env",
+                return_value={"GIT_CONFIG_GLOBAL": os.devnull},
+            ),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=revalidate_remote,
+            ),
+            patch(
+                "hephaestus.automation.git_utils.rebase_worktree_onto",
+                return_value=True,
+            ) as rebase,
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    MagicMock(stdout="c" * 40),
+                    MagicMock(stdout=""),
+                ],
+            ),
+            patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as push,
+            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        rebase.assert_called_once_with(
+            tmp_path,
+            base_branch="5-auto",
+            remote="origin",
+            timeout=60,
+            env={"GIT_CONFIG_GLOBAL": os.devnull},
+            fetch_env=remote_env,
+            fetch_config=remote_config,
+        )
+        push.assert_called_once_with(
+            "5-auto",
+            "c" * 40,
+            tmp_path,
+            timeout=60,
+            env=remote_env,
+            remote_config=remote_config,
+        )
+        assert result.ok is True
+        assert result.value == {"pushed": True, "head_sha": "b" * 40}
+
+    def test_commit_push_classifies_non_fast_forward_publication_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A rejected writer push gives the stage a typed retry signal."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=MagicMock(return_value=({}, ())),
+            ),
+            patch(
+                "hephaestus.automation.git_utils.push_branch",
+                side_effect=git_utils.NonFastForwardPushError("remote branch advanced"),
+            ),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {"failure_kind": "non_fast_forward"}
+
+    def test_commit_push_stops_when_refreshed_writer_lease_is_stale(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A remote move after refresh cannot be replaced by a forced push."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 5,
+                "worktree_path": tmp_path,
+                "branch": "5-auto",
+                "refresh_writer_before_push": True,
+            },
+        )
+        with (
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
+            patch("hephaestus.automation.git_utils.has_unpushed_commits", return_value=True),
+            patch(
+                f"{_WP}._required_git_signing_env",
+                return_value={"GIT_CONFIG_GLOBAL": os.devnull},
+            ),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=MagicMock(return_value=({}, ())),
+            ),
+            patch("hephaestus.automation.git_utils.rebase_worktree_onto", return_value=True),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[MagicMock(stdout="c" * 40), MagicMock(stdout="")],
+            ),
+            patch(
+                "hephaestus.automation.git_utils.push_branch_if_remote_matches",
+                side_effect=RuntimeError("stale info"),
+            ) as push,
+            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        push.assert_called_once_with(
+            "5-auto",
+            "c" * 40,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
+        assert result.ok is False
+        assert result.value == {"failure_kind": "writer_refresh_publication_failed"}
+
     def test_commit_push_does_not_publish_dirty_worktree_after_failed_commit(
         self,
         pool: WorkerPool,

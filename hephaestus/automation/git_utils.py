@@ -93,6 +93,10 @@ class SigningEnvironmentUnavailableError(RuntimeError):
     """A required controlled signing environment could not be obtained."""
 
 
+class NonFastForwardPushError(RuntimeError):
+    """A branch push was rejected because the remote branch advanced."""
+
+
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
     """Return a ``run`` kwargs fragment only when a timeout was provided."""
     return {} if timeout is None else {"timeout": timeout}
@@ -209,6 +213,10 @@ def push_branch(
         )
         logger.info("Pushed branch %s to origin", branch_name)
     except subprocess.CalledProcessError as e:
+        if _is_push_rejected_diverged(e):
+            raise NonFastForwardPushError(
+                f"Failed to push branch {branch_name}: remote branch advanced"
+            ) from e
         raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
 
 

@@ -344,6 +344,19 @@ class TestPushBranch:
         with pytest.raises(RuntimeError, match="Failed to push branch 123-auto-impl"):
             push_branch("123-auto-impl", tmp_path)
 
+    def test_non_fast_forward_push_has_a_retryable_failure_type(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A remote branch rejection retains its cause for the writer retry."""
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            stderr="! [rejected] (non-fast-forward)\n",
+        )
+
+        with pytest.raises(git_utils.NonFastForwardPushError):
+            push_branch("123-auto-impl", tmp_path)
+
     def test_push_branch_threads_timeout(self, git_utils_mocks: Any, tmp_path: Path) -> None:
         """push_branch bounds its git push with the caller's timeout."""
         push_branch("123-auto-impl", tmp_path, timeout=42)

@@ -4735,6 +4735,63 @@ class TestCommitPushAndPrCreate:
         assert retry_job.job.op == "commit_push"
         assert github.mutation_log == []
 
+    def test_non_fast_forward_retry_refreshes_writer_before_commit_push(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale writer retry requests a remote refresh before publication."""
+        stage = ImplementationStage()
+        ctx = make_ctx(github=FakeStageGitHub())
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.branch = "9-auto-impl"
+        item.worktree = "/tmp/wt"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"failure_kind": "non_fast_forward"},
+                error="commit push rejected as non-fast-forward",
+            ),
+            ctx,
+        )
+        item.state = "PR_CREATE"
+        retry = stage.step(item, ctx)
+
+        assert retry == StageOutcome(Disposition.RETRY, "commit_push failed")
+        retry_job = stage.step(item, ctx)
+
+        assert isinstance(retry_job, JobRequest)
+        assert isinstance(retry_job.job, GitJob)
+        assert retry_job.job.op == "commit_push"
+        assert retry_job.job.kwargs["refresh_writer_before_push"] is True
+
+    def test_remote_advance_after_writer_refresh_finishes_without_overwrite(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A second remote advance stops the retry instead of forcing a push."""
+        stage = ImplementationStage()
+        ctx = make_ctx(github=FakeStageGitHub())
+        item = make_work_item(issue=9, state="COMMIT_PUSH_WAIT")
+        item.payload["writer_refresh_inflight"] = True
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={"failure_kind": "non_fast_forward"},
+                error="commit push rejected after writer refresh",
+            ),
+            ctx,
+        )
+        item.state = "PR_CREATE"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "commit push rejected after writer refresh",
+        )
+
     def test_unknown_state_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """An unknown state finishes failed instead of looping silently."""
         stage = ImplementationStage()

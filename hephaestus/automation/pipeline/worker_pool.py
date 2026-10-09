@@ -4763,6 +4763,18 @@ class WorkerPool:
                 ok=False,
                 error="detached reviewer commit publication is unsupported",
             )
+        branch = str(job.kwargs.get("branch") or "")
+        worktree = Path(worktree_path)
+        refreshed_remote_sha: str | None = None
+        if job.kwargs.get("refresh_writer_before_push") is True:
+            refresh_result = self._refresh_writer_before_push(
+                job=job,
+                branch=branch,
+                worktree_path=worktree,
+            )
+            if isinstance(refresh_result, JobResult):
+                return refresh_result
+            refreshed_remote_sha = refresh_result
         # ``commit_if_changes`` returns False for a clean worktree.  An agent
         # is instructed to leave its edits uncommitted, but a defensive
         # recovery still recognizes a clean branch that is ahead of its
@@ -4786,12 +4798,11 @@ class WorkerPool:
         )
         if isinstance(changed, JobResult):
             return changed
-        branch = str(job.kwargs.get("branch") or "")
         if not changed:
             publish_state = self._commit_push_requires_publish(
                 job=job,
                 branch=branch,
-                worktree_path=Path(worktree_path),
+                worktree_path=worktree,
             )
             if isinstance(publish_state, JobResult):
                 return publish_state
@@ -4811,10 +4822,84 @@ class WorkerPool:
             )
             if status.stdout.strip():
                 return JobResult(ok=False, error="commit_push left uncommitted changes")
-        scope_retraction = self._verify_scope_retraction(job, Path(worktree_path))
+        scope_retraction = self._verify_scope_retraction(job, worktree)
         if scope_retraction is not None:
             return scope_retraction
-        return self._publish_commit_push(job, branch, Path(worktree_path))
+        return self._publish_commit_push(
+            job,
+            branch,
+            worktree,
+            writer_base_sha=refreshed_remote_sha,
+        )
+
+    def _refresh_writer_before_push(
+        self,
+        *,
+        job: GitJob,
+        branch: str,
+        worktree_path: Path,
+    ) -> str | JobResult:
+        """Rebase the bounded local writer change onto the current branch head."""
+        if not branch:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "writer_refresh_invalid"},
+                error="writer refresh requires a branch name",
+            )
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=worktree_path,
+            expected_repo=job.transport_repository,
+            timeout=job.timeout_s,
+        )
+        remote_env, remote_config = revalidate_remote()
+        signing_env = _required_git_signing_env(worktree_path, timeout=job.timeout_s)
+        try:
+            rebased = git_utils.rebase_worktree_onto(
+                worktree_path,
+                base_branch=branch,
+                remote="origin",
+                timeout=job.timeout_s,
+                env=signing_env,
+                fetch_env=remote_env,
+                fetch_config=remote_config,
+            )
+        except subprocess.CalledProcessError as exc:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "writer_refresh_failed"},
+                error=f"writer refresh failed: {exc}",
+            )
+        if not rebased:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "writer_refresh_conflict"},
+                error="writer refresh rebase conflicted; publication stopped",
+            )
+        try:
+            remote_head = git_utils.run(
+                [
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    f"refs/remotes/origin/{branch}",
+                ],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=job.timeout_s,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "writer_refresh_failed"},
+                error=f"writer refresh could not bind remote head: {exc}",
+            )
+        if not _is_full_commit_sha(remote_head):
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "writer_refresh_failed"},
+                error="writer refresh could not bind remote head",
+            )
+        return remote_head
 
     @staticmethod
     def _commit_if_changes_with_controlled_signing(
@@ -4908,12 +4993,23 @@ class WorkerPool:
             )
         return None
 
-    def _publish_commit_push(self, job: GitJob, branch: str, worktree_path: Path) -> JobResult:
+    def _publish_commit_push(
+        self,
+        job: GitJob,
+        branch: str,
+        worktree_path: Path,
+        *,
+        writer_base_sha: str | None = None,
+    ) -> JobResult:
         """Publish a newly created commit and return its exact immutable SHA."""
         branch = branch or "HEAD"
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
         if expected_remote_sha is not None and not _is_full_commit_sha(expected_remote_sha):
             return JobResult(ok=False, error="direct scope base pin invalid")
+        if writer_base_sha is not None:
+            if not _is_full_commit_sha(writer_base_sha) or expected_remote_sha is not None:
+                return JobResult(ok=False, error="writer refresh base pin invalid")
+            expected_remote_sha = writer_base_sha
         source_sha = self._read_publish_head(worktree_path, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
@@ -4922,22 +5018,37 @@ class WorkerPool:
             cwd=worktree_path, expected_repo=job.transport_repository, timeout=job.timeout_s
         )
         remote_env, remote_config = revalidate_remote()
-        if isinstance(expected_remote_sha, str):
-            git_utils.push_branch_if_remote_matches(
-                branch,
-                expected_remote_sha,
-                worktree_path,
-                timeout=job.timeout_s,
-                env=remote_env,
-                remote_config=remote_config,
+        try:
+            if isinstance(expected_remote_sha, str):
+                git_utils.push_branch_if_remote_matches(
+                    branch,
+                    expected_remote_sha,
+                    worktree_path,
+                    timeout=job.timeout_s,
+                    env=remote_env,
+                    remote_config=remote_config,
+                )
+            else:
+                git_utils.push_branch(
+                    branch,
+                    worktree_path,
+                    timeout=job.timeout_s,
+                    env=remote_env,
+                    remote_config=remote_config,
+                )
+        except git_utils.NonFastForwardPushError as exc:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "non_fast_forward"},
+                error=str(exc),
             )
-        else:
-            git_utils.push_branch(
-                branch,
-                worktree_path,
-                timeout=job.timeout_s,
-                env=remote_env,
-                remote_config=remote_config,
+        except RuntimeError as exc:
+            if writer_base_sha is None:
+                raise
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "writer_refresh_publication_failed"},
+                error=f"writer refresh publication failed: {exc}",
             )
         return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 

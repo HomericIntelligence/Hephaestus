@@ -238,6 +238,9 @@ _REPLY_JOURNAL_APPEND_RESULT = "_reply_journal_append_result"
 _REPLY_HANDOFF_RESULT = "_reply_handoff_result"
 _SYNC_RESTORED_WRITER_BEFORE_REBASE = "sync_restored_writer_before_rebase"
 _REBASE_HEAD_DRIFT = "rebase_head_drift"
+_REFRESH_WRITER_BEFORE_PUSH = "refresh_writer_before_push"
+_WRITER_REFRESH_INFLIGHT = "writer_refresh_inflight"
+_WRITER_REFRESH_FAILED = "writer_refresh_failed"
 _DIRTY_CONTENT_SNAPSHOT_KEYS = {
     "index_sha256",
     "worktree_sha256",
@@ -1411,6 +1414,9 @@ class ImplementationStage(Stage):
                 return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
             kwargs["scope_retraction_paths"] = scope_retraction_paths
             kwargs["scope_retraction_base_sha"] = base_sha
+        if item.payload.get(_REFRESH_WRITER_BEFORE_PUSH) is True:
+            kwargs[_REFRESH_WRITER_BEFORE_PUSH] = True
+            item.payload[_WRITER_REFRESH_INFLIGHT] = True
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",
@@ -1815,6 +1821,9 @@ class ImplementationStage(Stage):
     def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
         """Record commit+push success, no-commit skip, or git failure."""
         if result.ok:
+            item.payload.pop(_REFRESH_WRITER_BEFORE_PUSH, None)
+            item.payload.pop(_WRITER_REFRESH_INFLIGHT, None)
+            item.payload.pop(_WRITER_REFRESH_FAILED, None)
             receipt = result.value if isinstance(result.value, dict) else {}
             receipt_head = receipt.get("head_sha")
             if is_full_commit_sha(receipt_head):
@@ -1852,6 +1861,20 @@ class ImplementationStage(Stage):
             # base and branch" maps to state:skip, not a hard failure.
             item.payload["no_commits"] = True
             return
+        value = result.value if isinstance(result.value, dict) else {}
+        failure_kind = value.get("failure_kind")
+        if item.payload.pop(_WRITER_REFRESH_INFLIGHT, False) or failure_kind in {
+            "writer_refresh_conflict",
+            "writer_refresh_failed",
+            "writer_refresh_invalid",
+        }:
+            item.payload[_WRITER_REFRESH_FAILED] = redact_diagnostic_text(
+                result.error or "writer refresh failed; publication stopped"
+            )[:500]
+            item.payload.pop("git_error", None)
+            return
+        if failure_kind == "non_fast_forward":
+            item.payload[_REFRESH_WRITER_BEFORE_PUSH] = True
         logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
         item.payload["git_error"] = True
 
@@ -2598,6 +2621,9 @@ class ImplementationStage(Stage):
                 "re-enter the loop.",
             )
             return StageOutcome(Disposition.SKIP, "no commits vs base")
+        refresh_failure = item.payload.pop(_WRITER_REFRESH_FAILED, None)
+        if refresh_failure is not None:
+            return StageOutcome(Disposition.FINISH_FAIL, str(refresh_failure))
         if item.payload.pop("git_error", None):
             # Push failed: transient git/network trouble — RETRY the stage
             # without burning the implement budget, bounded by
