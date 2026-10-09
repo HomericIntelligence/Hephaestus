@@ -751,6 +751,28 @@ def test_main_applies_default_phase_timeout_when_flag_absent(
     assert config.phase_timeout_s == _default_phase_timeout_s()  # type: ignore[attr-defined]
 
 
+def test_main_wires_host_verification_image_to_pipeline_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The explicit Linux host image reaches the pipeline configuration."""
+    image = tmp_path / "hephaestus-ci.sqsh"
+    config = _capture_config(
+        [
+            "--repos",
+            "Repo",
+            "--host-verification-image",
+            str(image),
+            "--dry-run",
+            "--loops",
+            "1",
+            "--agent",
+            "claude",
+        ],
+        monkeypatch,
+    )
+    assert config.host_verification_image == image  # type: ignore[attr-defined]
+
+
 def test_main_disables_phase_timeout_when_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """``--phase-timeout 0`` explicitly disables the bound (None)."""
     config = _capture_config(

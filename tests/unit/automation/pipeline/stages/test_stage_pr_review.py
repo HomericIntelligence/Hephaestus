@@ -1982,33 +1982,23 @@ class TestPrReviewStageStep:
             "stdout_tail": result.stdout_tail,
         }
         assert stage_module._host_verification_receipt_matches(receipt, spec, expected_head)
+        assert stage_module._host_verification_receipt_matches(
+            {**receipt, "platform": "linux"}, spec, expected_head
+        )
         assert not stage_module._host_verification_receipt_matches(
             {**receipt, "ok": False}, spec, expected_head
         )
         assert not stage_module._host_verification_receipt_matches(receipt, spec, "c" * 40)
 
-        skipped = {
-            "argv": list(spec.argv),
+        unsupported = {
+            **receipt,
             "error": "unsupported_host_verification_boundary",
-            "failure_kind": "runner",
-            "head_sha": expected_head,
             "immutable_source": False,
             "ok": False,
             "platform": "linux",
-            "status": "skipped",
-            "stderr_tail": "",
-            "stdout_tail": "",
+            "status": "failed",
         }
-        assert stage_module._host_verification_receipt_matches(skipped, spec, expected_head)
-        assert not stage_module._host_verification_receipt_matches(
-            {**skipped, "platform": "darwin"}, spec, expected_head
-        )
-        assert not stage_module._host_verification_receipt_matches(
-            {**skipped, "status": "failed"}, spec, expected_head
-        )
-        assert not stage_module._host_verification_receipt_matches(
-            {**skipped, "platform": ""}, spec, expected_head
-        )
+        assert not stage_module._host_verification_receipt_matches(unsupported, spec, expected_head)
 
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
@@ -2393,10 +2383,10 @@ class TestPrReviewStageStep:
         assert item.payload["host_verification_failure"]["error"] == "timeout"
         assert "review_audit_failure" not in item.payload
 
-    def test_unsupported_host_boundary_is_explicitly_skipped(
+    def test_unsupported_host_boundary_fails_closed(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Only an attested unsupported platform may skip review checks."""
+        """An unsupported host cannot bypass review checks."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -2424,27 +2414,25 @@ class TestPrReviewStageStep:
                     "head_sha": "a" * 40,
                     "immutable_source": False,
                     "platform": "linux",
-                    "status": "skipped",
+                    "status": "failed",
                 },
             ),
             ctx,
         )
 
-        next_request = stage.step(item, ctx)
+        outcome = stage.step(item, ctx)
 
-        assert isinstance(next_request, JobRequest)
-        assert next_request.on_done_state == HOST_VERIFICATION_WAIT
+        assert outcome == StageOutcome(Disposition.FINISH_FAIL, "host_verification_failed")
         receipt = item.payload["host_verification_receipts"][0]
-        assert "bypassed" not in receipt
         assert receipt["error"] == "unsupported_host_verification_boundary"
         assert receipt["platform"] == "linux"
-        assert receipt["status"] == "skipped"
-        assert ("mark_pr_implementation_no_go", (1001,)) not in ctx.github.mutation_log
+        assert receipt["status"] == "failed"
+        assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
 
-    def test_unsupported_host_skip_with_mismatched_head_fails_closed(
+    def test_unsupported_host_result_with_mismatched_head_fails_closed(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A worker cannot normalize a forged skip onto the reviewed head."""
+        """A worker cannot normalize a result from another reviewed head."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -2472,7 +2460,7 @@ class TestPrReviewStageStep:
                     "head_sha": "b" * 40,
                     "immutable_source": False,
                     "platform": "linux",
-                    "status": "skipped",
+                    "status": "failed",
                 },
             ),
             ctx,

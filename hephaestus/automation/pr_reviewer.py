@@ -205,6 +205,7 @@ def main() -> int:
             json_out=args.json,
             scope=PipelineScope(_PR_REVIEWER_SCOPE_STAGES),
             gh_extra_path_root=args.gh_extra_path_root,
+            host_verification_image=args.host_verification_image,
         )
 
         rc = run_pipeline(config)

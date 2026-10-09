@@ -54,10 +54,8 @@ The host may have executed a fixed repository-owned validation plan before this
 read-only review. Do NOT run local format, lint, type, or test commands in this
 sandbox. If every receipt has `ok: true`, `status: passed`, and the current
 reviewed head matches each `head_sha`, treat them as independent local execution
-evidence. A receipt with `status: skipped`, the exact unsupported-platform
-reason, and a non-macOS `platform` is N/A for this host: it is not local
-execution evidence, but do not report it as a failed or missing receipt. For
-any other missing or failed receipt, do not claim the plan passed.
+evidence. A missing, failed, or unsupported host-verification receipt is an
+evidence gap. Do not claim the plan passed when a receipt is missing or failed.
 
 Evidence-provenance rule: validate whether the implementation reply supplies
 concrete, internally coherent evidence (for example, the exact command and

@@ -307,6 +307,9 @@ class PipelineConfig:
     issue_limit: int | None = None
     enable_learn: bool = True
     reset_plan_review_sessions: frozenset[int] = frozenset()
+    # A local immutable CI image is required by the Linux Pyxis/Enroot
+    # host-verification backend.
+    host_verification_image: Path | None = None
 
     @property
     def enable_advise(self) -> bool:

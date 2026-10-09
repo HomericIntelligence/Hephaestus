@@ -145,6 +145,7 @@ class TestWiring:
                 rebase_adr_validator: Any = None,
                 rebase_structural_test_argv: Any = None,
                 evidence_receipt_dir: Path | None = None,
+                host_verification_image: Path | None = None,
             ) -> None:
                 del rebase_adr_validator, rebase_structural_test_argv
                 created["size"] = size
@@ -154,6 +155,7 @@ class TestWiring:
                 created["github_job_runner"] = github_job_runner
                 created["athena_skill_executor"] = athena_skill_executor
                 created["evidence_receipt_dir"] = evidence_receipt_dir
+                created["host_verification_image"] = host_verification_image
 
         monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.WorkerPool", SpyPool)
         gh_root = tmp_path / "custom-gh"
@@ -174,6 +176,7 @@ class TestWiring:
         assert created["github_job_runner"] is not None
         assert created["athena_skill_executor"] is not None
         assert created["evidence_receipt_dir"] is None
+        assert created["host_verification_image"] is None
 
     def test_run_pipeline_wires_accessor_and_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

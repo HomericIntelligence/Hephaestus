@@ -689,6 +689,13 @@ def add_pipeline_runtime_args(
         parser.add_argument(f"--{flag}", default="", metavar="MODEL")
     parser.add_argument("--projects-dir", type=Path, default=None, metavar="PATH")
     parser.add_argument(
+        "--host-verification-image",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Local read-only Enroot image built from ci/Containerfile.",
+    )
+    parser.add_argument(
         "--rate-guard", action="store_true", dest="rate_guard_enabled", default=True
     )
     parser.add_argument("--no-rate-guard", action="store_false", dest="rate_guard_enabled")

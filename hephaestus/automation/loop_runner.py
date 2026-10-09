@@ -520,6 +520,13 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--host-verification-image",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Local read-only Enroot image built from ci/Containerfile.",
+    )
+    p.add_argument(
         "--phase-timeout",
         type=float,
         default=_default_phase_timeout_s(),
@@ -947,6 +954,7 @@ def _build_pipeline_config(
             cfg.projects_dir, repos, has_repo_source=repo_source_factory is not None
         ),
         evidence_receipt_dir=cfg.evidence_receipt_dir,
+        host_verification_image=getattr(args, "host_verification_image", None),
         projects_dir=cfg.projects_dir,
         repo_roots=cfg.repo_roots,
         json_out=args.json,

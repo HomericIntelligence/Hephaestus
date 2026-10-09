@@ -164,7 +164,6 @@ from .base import (
     write_skip_label,
 )
 from .pr_review_receipts import (
-    UNSUPPORTED_HOST_VERIFICATION_ERROR,
     _host_verification_failure_kind,
     _host_verification_receipt_matches,
     _host_verification_result_status,
@@ -809,7 +808,7 @@ __all__ = [
     'PUSH_WAIT', 'RECOVERY_REPLY_WAIT',
     'REVIEW_CHECKOUT_RETRY_CAP',
     'REVIEW_CHECKOUT_WAIT', 'REVIEW_ERROR_RETRY_CAP', 'REVIEW_WAIT', 'STATE_SKIP',
-    'UNSUPPORTED_HOST_VERIFICATION_ERROR', 'VALIDATE_WAIT',
+    'VALIDATE_WAIT',
     'VALID_SEVERITIES', '_COMMENT_VALIDATION_ONLY', '_HOST_VERIFICATION_PENDING',
     '_JSON_RESPONSE_BLOCK_RE', '_PENDING_IMPLEMENTATION_REPLY_HANDOFF',
     '_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES',

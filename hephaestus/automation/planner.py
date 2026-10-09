@@ -306,6 +306,7 @@ def main() -> int:
         ),
         evidence_receipt_dir=args.evidence_receipt_dir,
         gh_extra_path_root=args.gh_extra_path_root,
+        host_verification_image=args.host_verification_image,
     )
 
     rc = run_pipeline(config)

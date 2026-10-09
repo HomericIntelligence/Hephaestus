@@ -207,6 +207,22 @@ _TRUSTED_GIT_DISCOVERY_ROOTS = (
     Path("/usr/local/Cellar/git"),
     Path("/usr/bin"),
 )
+_TRUSTED_LINUX_CONTAINER_TOOLS = (Path("/usr/local/bin"), Path("/usr/bin"))
+_LINUX_CONTAINER_SOURCE = Path("/workspace")
+_LINUX_CONTAINER_SCRATCH = Path("/tmp")
+_LINUX_CONTAINER_GIT_METADATA = Path("/tmp/git-metadata")
+_LINUX_CONTAINER_PI_SMOKE_LOGS = _LINUX_CONTAINER_SOURCE / "pi-smoke-logs"
+_LINUX_CONTAINER_RUNTIME = Path("/opt/hephaestus-venv")
+_LINUX_CONTAINER_UV = Path("/usr/local/bin/uv")
+_LINUX_CONTAINER_GIT = Path("/usr/bin/git")
+_LINUX_PYXIS_REQUIRED_OPTIONS = (
+    "--container-image",
+    "--container-mounts",
+    "--container-readonly",
+    "--container-unshare",
+    "--container-workdir",
+    "--no-container-mount-home",
+)
 _HOST_RUNTIME_CACHE_DIRNAME = "hephaestus-host-validation-runtime"
 _HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v6-shell-launchers"
 _HOST_RUNTIME_MANIFEST_HEADER = "sealed-runtime-file-manifest-v1"
@@ -250,6 +266,19 @@ class _HostVerificationBoundaryError(RuntimeError):
     """Raised when a host verification cannot keep PR code contained."""
 
 
+@dataclass(frozen=True, slots=True)
+class _HostVerificationBackend:
+    """Describe the selected host-verification execution boundary."""
+
+    argv: tuple[str, ...]
+    executable: str
+    git_executable: str
+    runtime_environment: Path
+    image: Path | None = None
+    srun: str | None = None
+    container_scratch: Path | None = None
+
+
 class _RebaseSigningEnvironmentError(RuntimeError):
     """Raised when a policy rebase cannot obtain the validated signing bridge."""
 
@@ -271,6 +300,7 @@ def _host_verification_env(
     executable: str,
     runtime_environment: Path,
     git_executable: str | None = None,
+    container_scratch: Path | None = None,
 ) -> dict[str, str]:
     """Build the minimal disposable environment for host verification.
 
@@ -288,11 +318,15 @@ def _host_verification_env(
     cache = scratch / "cache"
     for directory in (home, temporary, cache):
         directory.mkdir(parents=True, exist_ok=True)
+        if container_scratch is not None:
+            directory.chmod(0o777)
+
+    environment_root = container_scratch or scratch
 
     return build_host_verification_env(
-        home=home,
-        temporary=temporary,
-        cache=cache,
+        home=environment_root / "home",
+        temporary=environment_root / "tmp",
+        cache=environment_root / "cache",
         runtime_environment=runtime_environment,
         executable=Path(executable),
         git_executable=Path(git_executable) if git_executable else None,
@@ -686,6 +720,146 @@ def _host_verification_command(
     )
 
 
+def _trusted_linux_container_tool(name: str) -> str | None:
+    """Return a fixed, non-writable Linux container tool path."""
+    for directory in _TRUSTED_LINUX_CONTAINER_TOOLS:
+        candidate = directory / name
+        try:
+            resolved = candidate.resolve(strict=True)
+            mode = resolved.stat().st_mode
+        except OSError:
+            continue
+        if (
+            not resolved.is_file()
+            or not os.access(resolved, os.X_OK)
+            or mode & 0o022
+            or not any(resolved.is_relative_to(root) for root in (Path("/usr"), Path("/opt")))
+        ):
+            continue
+        return str(resolved)
+    return None
+
+
+def _validated_linux_container_image(image: Path | None) -> Path:
+    """Validate the operator-supplied, local CI image for Pyxis."""
+    if image is None or not image.is_absolute() or image.is_symlink():
+        raise _HostVerificationBoundaryError("host_verification_linux_image_unconfigured")
+    try:
+        resolved = image.resolve(strict=True)
+        mode = resolved.stat().st_mode
+    except OSError as exc:
+        raise _HostVerificationBoundaryError("host_verification_linux_image_unavailable") from exc
+    if not resolved.is_file() or mode & 0o222:
+        raise _HostVerificationBoundaryError("host_verification_linux_image_unavailable")
+    return resolved
+
+
+def _linux_pyxis_available(srun: str, enroot: str) -> bool:
+    """Return whether the host exposes the required Pyxis and Enroot contract."""
+    environment = read_approved_parent_env()
+    try:
+        enroot_result = subprocess.run(
+            (enroot, "version"),
+            capture_output=True,
+            text=True,
+            timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+            check=False,
+            env=environment,
+        )
+        if enroot_result.returncode != 0:
+            return False
+        srun_help = subprocess.run(
+            (srun, "--help"),
+            capture_output=True,
+            text=True,
+            timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+            check=False,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    help_text = f"{srun_help.stdout}\n{srun_help.stderr}"
+    return srun_help.returncode == 0 and all(
+        option in help_text for option in _LINUX_PYXIS_REQUIRED_OPTIONS
+    )
+
+
+def _linux_host_verification_command(
+    *,
+    argv: tuple[str, ...],
+    image: Path,
+    source: Path,
+    scratch: Path,
+    git_metadata: Path,
+    pi_smoke_logs: Path,
+    srun: str,
+) -> tuple[str, ...]:
+    """Build a no-network Pyxis command with read-only source mounts."""
+    mounts = ",".join(
+        (
+            f"{source}:{_LINUX_CONTAINER_SOURCE}:ro+rprivate",
+            f"{scratch}:{_LINUX_CONTAINER_SCRATCH}:rw+rprivate",
+            f"{git_metadata}:{_LINUX_CONTAINER_GIT_METADATA}:ro+rprivate",
+            f"{pi_smoke_logs}:{_LINUX_CONTAINER_PI_SMOKE_LOGS}:rw+rprivate",
+        )
+    )
+    return (
+        srun,
+        "--ntasks=1",
+        "--nodes=1",
+        f"--container-image={image}",
+        "--container-readonly",
+        "--no-container-mount-home",
+        "--container-unshare=net",
+        f"--container-mounts={mounts}",
+        f"--container-workdir={_LINUX_CONTAINER_SOURCE}",
+        "--",
+        *argv,
+    )
+
+
+def _select_host_verification_backend(
+    job: BuildTestJob, image: Path | None
+) -> _HostVerificationBackend:
+    """Select and preflight the platform-specific host-verification boundary."""
+    if sys.platform == "linux":
+        validated_image = _validated_linux_container_image(image)
+        srun = _trusted_linux_container_tool("srun")
+        enroot = _trusted_linux_container_tool("enroot")
+        if srun is None or enroot is None or not _linux_pyxis_available(srun, enroot):
+            raise _HostVerificationBoundaryError("host_verification_pyxis_unavailable")
+        git_executable = _trusted_git_executable()
+        if git_executable is None:
+            raise _HostVerificationBoundaryError("host_verification_git_unavailable")
+        return _HostVerificationBackend(
+            argv=job.argv,
+            executable=str(_LINUX_CONTAINER_UV),
+            git_executable=git_executable,
+            runtime_environment=_LINUX_CONTAINER_RUNTIME,
+            image=validated_image,
+            srun=srun,
+            container_scratch=_LINUX_CONTAINER_SCRATCH,
+        )
+    if sys.platform == "darwin":
+        executable = (
+            _trusted_uv_executable()
+            if job.argv[0] == "uv"
+            else _trusted_executable(job.argv[0], path=os.defpath)
+        )
+        if executable is None:
+            raise _HostVerificationBoundaryError("host_verification_executable_unavailable")
+        git_executable = _trusted_git_executable()
+        if git_executable is None:
+            raise _HostVerificationBoundaryError("host_verification_git_unavailable")
+        return _HostVerificationBackend(
+            argv=(executable, *job.argv[1:]),
+            executable=executable,
+            git_executable=git_executable,
+            runtime_environment=_verifier_owned_runtime_environment(job.cwd),
+        )
+    raise _HostVerificationBoundaryError("unsupported_host_verification_boundary")
+
+
 def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
     """Return the valid blank HFS+ image creation argv for quota scratch."""
     return (
@@ -893,7 +1067,15 @@ def _bounded_git_archive(
 
 
 def _prepare_immutable_git_metadata(
-    checkout: Path, expected_head_sha: str, source: Path, root: Path, git_executable: str
+    checkout: Path,
+    expected_head_sha: str,
+    source: Path,
+    root: Path,
+    git_executable: str,
+    *,
+    container_source: Path | None = None,
+    container_metadata: Path | None = None,
+    git_file_permissions: int = 0o400,
 ) -> Path:
     """Attach a sealed Git snapshot so repository-aware tests remain valid.
 
@@ -901,7 +1083,7 @@ def _prepare_immutable_git_metadata(
     only Git's tracked inventory or commit graph, so prepare a separate local
     bare clone at the already-proven head and point the archive's ``.git``
     control file to it. Both source and metadata are read-only to PR code once
-    the macOS sandbox starts.
+    the selected execution boundary starts.
     """
     metadata = root / "metadata.git"
     env = _controlled_git_env()
@@ -926,7 +1108,9 @@ def _prepare_immutable_git_metadata(
         )
         if head.returncode != 0 or head.stdout.strip() != expected_head_sha:
             raise _HostVerificationBoundaryError("immutable_git_metadata_head_changed")
-        for key, value in (("core.bare", "false"), ("core.worktree", str(source.resolve()))):
+        worktree = container_source or source.resolve()
+        gitdir = container_metadata or metadata.resolve()
+        for key, value in (("core.bare", "false"), ("core.worktree", str(worktree))):
             configured = subprocess.run(
                 (git_executable, f"--git-dir={metadata}", "config", key, value),
                 env=env,
@@ -963,7 +1147,7 @@ def _prepare_immutable_git_metadata(
             )
             if configured_origin.returncode != 0:
                 raise _HostVerificationBoundaryError("immutable_git_metadata_setup_failed")
-        write_secure(source / ".git", f"gitdir: {metadata.resolve()}\n", permissions=0o400)
+        write_secure(source / ".git", f"gitdir: {gitdir}\n", permissions=git_file_permissions)
         # A bare clone has no index. Populate it while metadata is still
         # host-owned and writable so ``git ls-files`` remains a read-only
         # operation for repository-aware tests.
@@ -985,12 +1169,14 @@ def _prepare_immutable_git_metadata(
     return metadata
 
 
-def _prepare_host_output_aliases(source: Path, scratch: Path) -> None:
+def _prepare_host_output_aliases(
+    source: Path, scratch: Path, *, container_scratch: Path | None = None
+) -> None:
     """Route the generic ignored build output into bounded scratch.
 
-    Pi smoke tests deliberately reject symlinked artifact roots.  Their
-    ``pi-smoke-logs`` directory is instead a second quota-backed volume mounted
-    directly at that source path by :func:`_quota_backed_pi_smoke_logs`.
+    Pi smoke tests deliberately reject symlinked artifact roots. Their
+    ``pi-smoke-logs`` directory is mounted as a separate writable output path
+    by the selected execution boundary.
     """
     alias = source / "build"
     if alias.exists() or alias.is_symlink():
@@ -1001,15 +1187,116 @@ def _prepare_host_output_aliases(source: Path, scratch: Path) -> None:
     try:
         target = scratch / "build"
         target.mkdir()
-        alias.symlink_to(target, target_is_directory=True)
+        if container_scratch is not None:
+            target.chmod(0o777)
+        alias.symlink_to(
+            (container_scratch / "build") if container_scratch is not None else target,
+            target_is_directory=True,
+        )
         coverage_target = scratch / "coverage.xml"
         # Keep the source-tree alias non-dangling while pytest is still
         # running. Repository inventory tests may encounter it before the
         # coverage plugin writes its final report.
         coverage_target.touch(mode=0o600)
-        coverage_alias.symlink_to(coverage_target)
+        if container_scratch is None:
+            coverage_alias.symlink_to(coverage_target)
+        else:
+            coverage_target.chmod(0o666)
+            coverage_alias.symlink_to(container_scratch / "coverage.xml")
     except OSError as exc:
         raise _HostVerificationBoundaryError("host_verification_output_alias_failed") from exc
+
+
+def _run_host_verification_workspace(
+    job: BuildTestJob,
+    root: Path,
+    source: Path,
+    backend: _HostVerificationBackend,
+    shutdown: threading.Event,
+) -> JobResult:
+    """Run one fixed check with the selected source and output mounts."""
+    if backend.container_scratch is not None:
+        if backend.image is None or backend.srun is None:
+            raise _HostVerificationBoundaryError("host_verification_backend_incomplete")
+        scratch = root / "scratch"
+        scratch.mkdir(mode=0o777)
+        scratch.chmod(0o777)
+        pi_smoke_logs = source / "pi-smoke-logs"
+        pi_smoke_logs.mkdir()
+        pi_smoke_output = scratch / "pi-smoke-logs"
+        pi_smoke_output.mkdir(mode=0o777)
+        pi_smoke_output.chmod(0o777)
+        git_metadata = _prepare_immutable_git_metadata(
+            job.cwd,
+            job.expected_head_sha,
+            source,
+            root,
+            backend.git_executable,
+            container_source=_LINUX_CONTAINER_SOURCE,
+            container_metadata=_LINUX_CONTAINER_GIT_METADATA,
+            git_file_permissions=0o444,
+        )
+        _prepare_host_output_aliases(source, scratch, container_scratch=backend.container_scratch)
+        command = _linux_host_verification_command(
+            argv=backend.argv,
+            image=backend.image,
+            source=source,
+            scratch=scratch,
+            git_metadata=git_metadata,
+            pi_smoke_logs=pi_smoke_output,
+            srun=backend.srun,
+        )
+        environment = _host_verification_env(
+            scratch,
+            backend.executable,
+            backend.runtime_environment,
+            str(_LINUX_CONTAINER_GIT),
+            container_scratch=backend.container_scratch,
+        )
+        return _run_bounded_host_command(
+            command,
+            validation_argv=job.argv,
+            source=source,
+            scratch=scratch,
+            environment=environment,
+            timeout_s=job.timeout_s,
+            shutdown=shutdown,
+        )
+
+    git_metadata = _prepare_immutable_git_metadata(
+        job.cwd,
+        job.expected_head_sha,
+        source,
+        root,
+        backend.git_executable,
+    )
+    with ExitStack() as stack:
+        scratch = stack.enter_context(_quota_backed_scratch(root))
+        pi_smoke_logs = stack.enter_context(_quota_backed_pi_smoke_logs(root, source))
+        _prepare_host_output_aliases(source, scratch)
+        command = _host_verification_command(
+            argv=backend.argv,
+            source=source,
+            scratch=scratch,
+            runtime_environment=backend.runtime_environment,
+            git_metadata=git_metadata,
+            pi_smoke_logs=pi_smoke_logs,
+        )
+        environment = _host_verification_env(
+            scratch,
+            backend.executable,
+            backend.runtime_environment,
+            backend.git_executable,
+        )
+        return _run_bounded_host_command(
+            command,
+            validation_argv=job.argv,
+            source=source,
+            scratch=scratch,
+            environment=environment,
+            timeout_s=job.timeout_s,
+            shutdown=shutdown,
+        )
 
 
 def _scratch_usage_exceeds_limit(scratch: Path) -> bool:
@@ -1041,9 +1328,9 @@ def _tail_file(path: Path) -> str:
 def _confirmed_pytest_failure(returncode: int, stdout: str, stderr: str) -> bool:
     """Return whether the fixed pytest command, not its runner, failed.
 
-    ``sandbox-exec``/UV/bootstrap errors also surface as nonzero exits.  Only
-    pytest's normal test-failure exit code plus either supported terminal
-    summary format is safe to send to the implementation agent as a
+    Sandbox, Pyxis, Enroot, and UV bootstrap errors also surface as nonzero
+    exits. Only pytest's normal test-failure exit code plus either supported
+    terminal summary format is safe to send to the implementation agent as a
     code-remediation task.
     """
     transcript = f"{stdout}\n{stderr}"
@@ -1666,6 +1953,7 @@ class WorkerPool:
         rebase_adr_validator: Callable[[Path], JobResult | None] | None = None,
         rebase_structural_test_argv: tuple[str, ...] | None = None,
         evidence_receipt_dir: Path | None = None,
+        host_verification_image: Path | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -1691,6 +1979,8 @@ class WorkerPool:
                 the structural gate for repositories without a matching test.
             evidence_receipt_dir: Optional private directory for bounded typed
                 agent and Athena result receipts.
+            host_verification_image: Optional local, read-only Enroot image
+                built from the repository CI container contract.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -1710,6 +2000,7 @@ class WorkerPool:
         self._rebase_adr_validator = rebase_adr_validator
         self._rebase_structural_test_argv = rebase_structural_test_argv
         self._evidence_receipt_dir = evidence_receipt_dir
+        self._host_verification_image = host_verification_image
 
     @contextmanager
     def _repo_lock(self, repo: str) -> Iterator[None]:
@@ -2347,36 +2638,8 @@ class WorkerPool:
         if checkout_error is not None:
             return JobResult(ok=False, error=checkout_error)
 
-        # The reviewed isolation backend is currently macOS-only.  Record an
-        # explicit platform-bound skip before resolving tools, archiving the
-        # source, or executing any PR-controlled bytes.  A missing macOS
-        # primitive still fails closed below; this branch is not a fallback.
-        if sys.platform != "darwin":
-            return JobResult(
-                ok=False,
-                error="unsupported_host_verification_boundary",
-                value={
-                    "head_sha": job.expected_head_sha,
-                    "immutable_source": False,
-                    "failure_kind": "runner",
-                    "platform": sys.platform,
-                    "status": "skipped",
-                },
-            )
-
-        executable = (
-            _trusted_uv_executable()
-            if job.argv[0] == "uv"
-            else _trusted_executable(job.argv[0], path=os.defpath)
-        )
-        if executable is None:
-            return JobResult(ok=False, error="host_verification_executable_unavailable")
-        git_executable = _trusted_git_executable()
-        if git_executable is None:
-            return JobResult(ok=False, error="host_verification_git_unavailable")
-        argv = (executable, *job.argv[1:])
         try:
-            runtime_environment = _verifier_owned_runtime_environment(job.cwd)
+            backend = _select_host_verification_backend(job, self._host_verification_image)
         except _HostVerificationBoundaryError as exc:
             return JobResult(ok=False, error=str(exc))
 
@@ -2392,31 +2655,9 @@ class WorkerPool:
                     job.cwd, job.expected_head_sha, job.timeout_s
                 )
                 _extract_immutable_archive(archive, source)
-                git_metadata = _prepare_immutable_git_metadata(
-                    job.cwd, job.expected_head_sha, source, root, git_executable
+                result = _run_host_verification_workspace(
+                    job, root, source, backend, self._shutdown
                 )
-                with _quota_backed_scratch(root) as scratch:
-                    with _quota_backed_pi_smoke_logs(root, source) as pi_smoke_logs:
-                        _prepare_host_output_aliases(source, scratch)
-                        command = _host_verification_command(
-                            argv=argv,
-                            source=source,
-                            scratch=scratch,
-                            runtime_environment=runtime_environment,
-                            git_metadata=git_metadata,
-                            pi_smoke_logs=pi_smoke_logs,
-                        )
-                        result = _run_bounded_host_command(
-                            command,
-                            validation_argv=job.argv,
-                            source=source,
-                            scratch=scratch,
-                            environment=_host_verification_env(
-                                scratch, executable, runtime_environment, git_executable
-                            ),
-                            timeout_s=job.timeout_s,
-                            shutdown=self._shutdown,
-                        )
                 checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
                 if checkout_error is not None:
                     return JobResult(

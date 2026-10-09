@@ -133,6 +133,17 @@ def _prompt_dir_spec() -> ActionSpec:
     )
 
 
+def _host_verification_image_spec() -> ActionSpec:
+    """Return the explicit Linux host-verification image option spec."""
+    return _action_spec(
+        ("--host-verification-image",),
+        "host_verification_image",
+        "_StoreAction",
+        None,
+        help_text="Local read-only Enroot image built from ci/Containerfile.",
+    )
+
+
 def _verbose_spec(help_text: str) -> ActionSpec:
     """Return a -v/--verbose action spec."""
     return _action_spec(
@@ -280,6 +291,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "_StoreAction",
             None,
         ),
+        _host_verification_image_spec(),
         _store_true(
             "--force",
             "force",
@@ -388,6 +400,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "agent_timeout",
             "Agent subprocess timeout in seconds (default: 7200).",
         ),
+        _host_verification_image_spec(),
         _verbose_spec("Enable verbose logging"),
         _json_spec(),
         _version_spec(),
@@ -425,6 +438,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         ),
         _no_ui_spec(),
         _store_true("--no-advise", "no_advise", "Skip the advise step before loop review"),
+        _host_verification_image_spec(),
         _verbose_spec("Enable verbose logging"),
         _action_spec(
             ("--no-include-bot-prs",),
@@ -567,6 +581,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "follow_up_timeout",
             "Timeout for the follow-up-issue agent session (default: 7200).",
         ),
+        _host_verification_image_spec(),
         _no_ui_spec(),
         _verbose_spec("Enable verbose logging"),
         *_github_throttle_specs(),
@@ -853,6 +868,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
                 f"``{DEFAULT_PROJECTS_DIR}``."
             ),
         ),
+        _host_verification_image_spec(),
         _action_spec(
             ("--phase-timeout",),
             "phase_timeout",

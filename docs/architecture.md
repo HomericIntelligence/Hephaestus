@@ -1059,14 +1059,14 @@ later branch push does not invalidate that posted review; only the final
 `state:implementation-go` transition requires the reviewed head to still be
 the current open, unarmed PR head.
 
-For the registered host-verification plan, the reviewed execution boundary
-currently requires macOS `sandbox-exec` plus disposable, quota-backed disk
-images. Other platforms record an exact-head, platform-bound `skipped` receipt
-before resolving tools, archiving source, or executing PR code. That receipt is
-N/A rather than passing execution evidence, and it does not independently grant
-implementation authority; head-bound CI and the remaining review gates retain
-their separate authority. A Linux or Windows backend must be added as a
-separately reviewed isolation implementation; there is no unsandboxed fallback.
+For the registered host-verification plan, macOS uses `sandbox-exec` plus
+disposable, quota-backed disk images. Linux uses a local, read-only Enroot
+image made from `ci/Containerfile` and Pyxis through `srun`; operators provide
+the image with `--host-verification-image`. A missing or writable image fails
+closed. The Linux command unshares the network namespace, mounts the archived
+source and Git metadata read-only, and mounts only disposable output paths as
+writable. The backend also fails closed when Pyxis or Enroot is not available.
+Other platforms fail closed; there is no unsandboxed fallback.
 
 Every host-verification failure also upserts an automation-owned diagnostic on
 the pull request after the exact-head NOGO label is read back. The comment is

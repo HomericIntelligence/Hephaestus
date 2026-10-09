@@ -32,6 +32,7 @@ class _RecordingWorkerPool:
         rebase_adr_validator: Any = None,
         rebase_structural_test_argv: Any = None,
         evidence_receipt_dir: Path | None = None,
+        host_verification_image: Path | None = None,
     ) -> None:
         del lock_dir
         del rebase_adr_validator, rebase_structural_test_argv
@@ -42,6 +43,7 @@ class _RecordingWorkerPool:
         self.github_job_runner = github_job_runner
         self.athena_skill_executor = athena_skill_executor
         self.evidence_receipt_dir = evidence_receipt_dir
+        self.host_verification_image = host_verification_image
 
 
 def _config(
@@ -50,6 +52,7 @@ def _config(
     parallel_repos: int = 2,
     max_workers: int = 3,
     gh_extra_path_root: Path | None = None,
+    host_verification_image: Path | None = None,
 ) -> PipelineConfig:
     """Build a configuration whose global work capacity is easy to inspect."""
     return PipelineConfig(
@@ -59,6 +62,7 @@ def _config(
         max_workers=max_workers,
         projects_dir=tmp_path,
         gh_extra_path_root=gh_extra_path_root,
+        host_verification_image=host_verification_image,
     )
 
 
@@ -101,6 +105,21 @@ def test_coordinator_passes_extra_gh_root_to_worker_pool(
     coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
     assert coordinator.pool.gh_extra_path_root == tmp_path
+
+
+def test_coordinator_passes_host_verification_image_to_worker_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The explicit CI image reaches the Linux host-verification boundary."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_mod
+
+    monkeypatch.setattr(worker_pool_mod, "WorkerPool", _RecordingWorkerPool)
+    image = tmp_path / "hephaestus-ci.sqsh"
+    config = _config(tmp_path, host_verification_image=image)
+
+    coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
+
+    assert coordinator.pool.host_verification_image == image
 
 
 def test_admission_rejects_when_global_worker_capacity_is_live(tmp_path: Path) -> None:

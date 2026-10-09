@@ -61,6 +61,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _host_verification_command,
     _host_verification_env,
     _host_verification_profile,
+    _linux_pyxis_available,
     _prepare_host_output_aliases,
     _quota_backed_volume,
     _repo_lock_path,
@@ -1317,10 +1318,10 @@ class TestWorkerPoolSubmitComplete:
         }
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
 
-    def test_immutable_build_test_skips_unsupported_platform_before_execution(
+    def test_immutable_build_test_requires_linux_container_image(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """An unsupported host records a bound skip without executing PR code."""
+        """Linux host verification fails closed when its CI image is absent."""
         job = BuildTestJob(
             repo="test/repo",
             cwd=tmp_path,
@@ -1332,34 +1333,75 @@ class TestWorkerPoolSubmitComplete:
 
         archive = MagicMock(return_value=(b"", ""))
         with (
-            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
-            patch(f"{_WP}._trusted_executable", return_value=sys.executable),
-            patch(
-                f"{_WP}._verifier_owned_runtime_environment",
-                return_value=Path(sys.prefix),
-            ),
-            patch(f"{_WP}._bounded_git_archive", archive),
-            patch(f"{_WP}._extract_immutable_archive"),
-            patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata.git"),
-            patch(f"{_WP}._quota_backed_scratch", side_effect=nullcontext),
-            patch(
-                f"{_WP}._quota_backed_pi_smoke_logs",
-                side_effect=lambda root, source: nullcontext(source / "pi-smoke-logs"),
-            ),
             patch(f"{_WP}.sys.platform", "linux"),
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(f"{_WP}._bounded_git_archive", archive),
         ):
             result = pool._run_build_test(job)
 
         assert result.ok is False
-        assert result.error == "unsupported_host_verification_boundary"
-        assert result.value == {
-            "failure_kind": "runner",
-            "head_sha": "a" * 40,
-            "immutable_source": False,
-            "platform": "linux",
-            "status": "skipped",
-        }
+        assert result.error == "host_verification_linux_image_unconfigured"
+        assert result.value is None
         archive.assert_not_called()
+
+    def test_immutable_build_test_runs_linux_in_pinned_pyxis_image(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Linux verification mounts only immutable source and disposable output."""
+        image = tmp_path / "hephaestus-ci.sqsh"
+        image.write_bytes(b"squashfs fixture")
+        image.chmod(0o444)
+        pool._host_verification_image = image
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=("uv", "run", "pytest", "tests/unit"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+        )
+        bounded = MagicMock(return_value=JobResult(ok=True, value={"failure_kind": "none"}))
+
+        def trusted_tool(name: str) -> str:
+            return {"srun": "/usr/bin/srun", "enroot": "/usr/bin/enroot"}[name]
+
+        with (
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(f"{_WP}._trusted_linux_container_tool", side_effect=trusted_tool),
+            patch(f"{_WP}._linux_pyxis_available", return_value=True),
+            patch(f"{_WP}._trusted_git_executable", return_value="/usr/bin/git"),
+            patch(f"{_WP}._bounded_git_archive", return_value=(b"", "")),
+            patch(f"{_WP}._extract_immutable_archive"),
+            patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata.git"),
+            patch(f"{_WP}._run_bounded_host_command", bounded),
+            patch(f"{_WP}.sys.platform", "linux"),
+        ):
+            result = pool._run_build_test(job)
+
+        assert result.ok is True
+        assert result.value == {
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "failure_kind": "none",
+            "platform": "linux",
+            "status": "passed",
+        }
+        command = bounded.call_args.args[0]
+        assert command[0] == "/usr/bin/srun"
+        assert "--container-readonly" in command
+        assert "--no-container-mount-home" in command
+        assert "--container-unshare=net" in command
+        assert f"--container-image={image}" in command
+        mounts = next(value for value in command if value.startswith("--container-mounts="))
+        assert ":/workspace:ro+rprivate" in mounts
+        assert ":/tmp:rw+rprivate" in mounts
+        assert ":/tmp/git-metadata:ro+rprivate" in mounts
+        assert ":/workspace/pi-smoke-logs:rw+rprivate" in mounts
+        environment = bounded.call_args.kwargs["environment"]
+        assert environment["UV_OFFLINE"] == "1"
+        assert environment["UV_PROJECT_ENVIRONMENT"] == "/opt/hephaestus-venv"
+        assert environment["TMPDIR"] == "/tmp/tmp"
+        assert environment["PATH"].split(os.pathsep)[0] == "/usr/local/bin"
 
     def test_host_verification_profile_keeps_source_outside_writable_root(
         self, tmp_path: Path
@@ -1726,6 +1768,38 @@ class TestWorkerPoolSubmitComplete:
         ):
             assert Path(environment[key]).is_relative_to(scratch.resolve())
         assert environment["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+
+    @pytest.mark.parametrize(
+        ("help_text", "expected"),
+        [
+            ("--container-image --container-unshare", False),
+            (
+                "--container-image --container-mounts --container-readonly "
+                "--container-unshare --container-workdir --no-container-mount-home",
+                True,
+            ),
+        ],
+    )
+    def test_linux_pyxis_preflight_requires_the_full_boundary_contract(
+        self, help_text: str, expected: bool
+    ) -> None:
+        """Pyxis preflight rejects hosts without every required boundary option."""
+        with (
+            patch(f"{_WP}.read_approved_parent_env", return_value={"LANG": "C"}),
+            patch(
+                f"{_WP}.subprocess.run",
+                side_effect=(
+                    subprocess.CompletedProcess([], 0, stdout="Enroot 3.5.0", stderr=""),
+                    subprocess.CompletedProcess([], 0, stdout=help_text, stderr=""),
+                ),
+            ) as run,
+        ):
+            assert _linux_pyxis_available("/usr/bin/srun", "/usr/bin/enroot") is expected
+
+        assert [call.args[0] for call in run.call_args_list] == [
+            ("/usr/bin/enroot", "version"),
+            ("/usr/bin/srun", "--help"),
+        ]
 
     def test_host_output_aliases_keep_coverage_xml_in_scratch(self, tmp_path: Path) -> None:
         """The full coverage receipt cannot write into the immutable source tree."""
