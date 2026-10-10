@@ -198,6 +198,7 @@ def test_json_output_is_machine_readable(
     assert payload["findings"][0]["rule"] in {"dated-state", "snapshot-metric"}
 
 
+@pytest.mark.nightly
 def test_current_repository_satisfies_documentation_contract() -> None:
     """The checked-in normative documentation has no maintenance findings."""
     repo_root = Path(__file__).resolve().parents[3]

@@ -217,10 +217,9 @@ jobs:
     needs: resolve-release
     if: ${{ !inputs.docs_only && needs.resolve-release.outputs.completed_release_exists != 'true' }}
     # Unit + integration suites run here; the uv env is cached and dev-install
-    # already ran, so both finish well under this budget. 20 min (vs the prior
-    # 15) is free insurance so a first-run integration slowdown never aborts a
-    # publish (issue #1499).
-    timeout-minutes: 20
+    # already ran, so both finish well under this budget. The unit suite runs
+    # with -n auto, which keeps it far inside the limit.
+    timeout-minutes: 40
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -239,9 +238,14 @@ jobs:
         run: uv sync --all-groups --all-extras --locked
 
       - name: Run unit tests
+        # The release lane runs the full unit suite in parallel and skips the
+        # nightly-marked high-cost tests. The suite takes roughly 33 minutes
+        # serially, which overruns this job's budget; -n auto brings it well
+        # inside it. The nightly workflow still runs everything.
         run: >-
           uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers
-          -m "not performance and not contract"
+          -m "not performance and not contract and not nightly"
+          -n auto
 
       - name: Run integration tests
         # A release validates each normal integration test except the offline

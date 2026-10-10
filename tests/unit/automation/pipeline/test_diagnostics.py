@@ -1,5 +1,7 @@
 """Tests for centralized durable-diagnostic redaction."""
 
+import pytest
+
 from hephaestus.automation.pipeline.diagnostics import (
     bounded_pipeline_diagnostic,
     redact_diagnostic_text,
@@ -112,6 +114,7 @@ def test_bounded_diagnostic_is_idempotent_and_keeps_runtime_values() -> None:
     assert bounded_pipeline_diagnostic(result, limit=200) == result
 
 
+@pytest.mark.nightly
 def test_truncated_prefix_masks_terminating_payload_after_every_marker_suffix() -> None:
     """Each marker suffix masks a long first payload fragment through its terminator."""
     key_types = (
