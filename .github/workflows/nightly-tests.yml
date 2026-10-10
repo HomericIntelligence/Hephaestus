@@ -16,7 +16,7 @@ jobs:
   unit-coverage:
     name: Full unit coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -30,9 +30,13 @@ jobs:
       - name: Install locked project environment
         run: uv sync --all-groups --all-extras --locked
       - name: Run full unit coverage
+        # Nightly is the only lane that still runs the nightly-marked
+        # high-cost tests, so it must keep them. Run in parallel; the suite
+        # takes roughly 33 minutes serially.
         run: >
           uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers
           -m "not performance and not contract"
+          -n auto
           --cov=hephaestus --cov-report=term-missing --cov-report=xml
       - name: Check per-module coverage floors
         run: uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
