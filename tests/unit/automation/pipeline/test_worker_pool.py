@@ -22435,7 +22435,7 @@ class TestShutdownReapsSubprocess:
             "is_agent_authenticated",
             _REAL_IS_AGENT_AUTHENTICATED,
         )
-        monkeypatch.setattr(shutil, "which", lambda _name: sys.executable)
+        monkeypatch.setattr(shutil, "which", lambda _name, **_kwargs: sys.executable)
         job = _agent_job(agent="claude", cwd=tmp_path, timeout_s=10, auth_status_timeout=10)
 
         with patch(
