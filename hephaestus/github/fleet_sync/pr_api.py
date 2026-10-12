@@ -56,14 +56,15 @@ def _ci_state(checks: list[dict[str, Any]]) -> str:
         return "UNKNOWN"
     bad = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR", "failure", "error"}
     pending = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "pending"}
-    conclusions = {c.get("conclusion") or c.get("state", "PENDING") for c in checks}
-    if any(c is None for c in (c.get("conclusion") for c in checks)):
+    successful = {"SUCCESS", "NEUTRAL", "SKIPPED", "success"}
+    conclusions = {c.get("conclusion") for c in checks}
+    if None in conclusions:
         return "PENDING"
     if conclusions & bad:
         return "FAILURE"
     if conclusions & pending:
         return "PENDING"
-    return "SUCCESS"
+    return "SUCCESS" if conclusions <= successful else "UNKNOWN"
 
 
 def _fetch_pr_ci_state(
@@ -131,16 +132,14 @@ def list_prs(
 
         if mergeable == "CONFLICTING":
             status = PRStatus.CONFLICTED
-        elif merge_state == "BEHIND":
+        elif mergeable != "MERGEABLE":
             status = PRStatus.WAITING
         elif ci == "FAILURE" and merge_state == "CLEAN":
             status = PRStatus.FAILING
         elif merge_state == "CLEAN" and ci == "SUCCESS":
             status = PRStatus.READY
-        elif merge_state in ("BLOCKED", "DIRTY"):
-            status = PRStatus.CONFLICTED if mergeable == "CONFLICTING" else PRStatus.OUTDATED
         else:
-            status = PRStatus.OUTDATED
+            status = PRStatus.WAITING
 
         out.append(
             PRInfo(

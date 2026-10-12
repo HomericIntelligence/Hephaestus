@@ -38,7 +38,7 @@ class PRStatus(Enum):
     """Readiness classification for a pull request."""
 
     READY = auto()  # Checks pass and there are no conflicts. The queue owns merges.
-    WAITING = auto()  # The base branch advanced. Wait without a branch change.
+    WAITING = auto()  # Readiness is not confirmed. Wait without a branch change.
     OUTDATED = auto()  # Another state requires a rebase and a new signature.
     CONFLICTED = auto()  # Has merge conflicts -> agent resolution
     FAILING = auto()  # CI failing -> skip

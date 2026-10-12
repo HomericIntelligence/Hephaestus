@@ -162,7 +162,7 @@ def _process_pr(
         logger.info("  %s Skipping (the queue owns PR merges)", symbols.arrow)
         counts["skipped"] += 1
     elif pr.status == PRStatus.WAITING:
-        logger.info("  %s Waiting (the base branch advanced)", symbols.arrow)
+        logger.info("  %s Waiting (PR readiness is not confirmed)", symbols.arrow)
         counts["skipped"] += 1
     elif pr.status == PRStatus.OUTDATED:
         resign_values = _resign_args(args)
