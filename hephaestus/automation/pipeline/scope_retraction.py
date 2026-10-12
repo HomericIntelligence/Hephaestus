@@ -3,20 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
+from collections.abc import Mapping
 from pathlib import PurePosixPath
 from typing import Any, TypeGuard
 
 SCOPE_RETRACTION_MARKER_PREFIX = "<!-- hephaestus-scope-retraction-paths:"
-_SCOPE_ACTION_RE = re.compile(r"\b(?:drop|remove|split)\b", re.IGNORECASE)
-_SCOPE_BOUNDARY_RE = re.compile(r"\b(?:unrelated|out[\s-]*of[\s-]*scope)\b", re.IGNORECASE)
-
-
-def is_scope_retraction_finding(body: object) -> TypeGuard[str]:
-    """Return whether a finding explicitly requests removal for scope reasons."""
-    return bool(
-        isinstance(body, str) and _SCOPE_ACTION_RE.search(body) and _SCOPE_BOUNDARY_RE.search(body)
-    )
 
 
 def is_safe_scope_retraction_path(path: object) -> TypeGuard[str]:
@@ -54,16 +45,32 @@ def scope_retraction_marker(paths: tuple[str, ...]) -> str:
     return f"{SCOPE_RETRACTION_MARKER_PREFIX} {json.dumps(normalized)} -->"
 
 
-def scope_retraction_paths_from_body(body: object) -> tuple[str, ...] | None:
-    """Read a complete manifest from an explicit scope-retraction finding.
+def scope_retraction_paths_from_finding(
+    finding: Mapping[str, object],
+) -> tuple[str, ...] | None:
+    """Read anchored metadata before the host publishes a review thread.
 
-    ``()`` means the finding is ordinary remediation. ``None`` means the
-    finding requested a scope retraction but lacks a valid complete manifest,
-    which must stop publication rather than guess which files to preserve.
+    Return an empty tuple for an ordinary finding and None for invalid metadata.
+    Body text does not classify a finding.
     """
-    if not is_scope_retraction_finding(body):
+    if "scope_retraction_paths" not in finding:
         return ()
-    if not isinstance(body, str):
+    paths = normalize_scope_retraction_paths(finding["scope_retraction_paths"])
+    path = finding.get("path")
+    if paths is None or not is_safe_scope_retraction_path(path) or path not in paths:
+        return None
+    return paths
+
+
+def scope_retraction_paths_from_body(body: object) -> tuple[str, ...] | None:
+    """Read a complete manifest from one durable host marker.
+
+    Return an empty tuple when the marker is absent. Return None when a marker
+    is incomplete, repeated, malformed, or unsafe. Body words are not metadata.
+    """
+    if not isinstance(body, str) or SCOPE_RETRACTION_MARKER_PREFIX not in body:
+        return ()
+    if body.count(SCOPE_RETRACTION_MARKER_PREFIX) != 1:
         return None
     marker_payloads = [
         line.strip()[len(SCOPE_RETRACTION_MARKER_PREFIX) : -3].strip()

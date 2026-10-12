@@ -306,7 +306,11 @@ class PrReviewRecoveryMixin(_PrReviewHost):
             )
         audit = item.payload.get("review_audit")
         if isinstance(audit, ReviewAudit) and audit.scope_expansions:
-            return Continue(next_state=EVAL)
+            return _apply_review_receipt(
+                item,
+                receipt,
+                remediation_handoff=lambda: Continue(next_state=EVAL),
+            )
         if pending_finding_recovery:
             reviewed_head = item.payload.get("reviewed_pr_head_sha")
             if not is_full_commit_sha(reviewed_head) or (

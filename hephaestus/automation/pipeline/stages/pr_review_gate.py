@@ -1,6 +1,6 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
-from hephaestus.automation.review_audit import is_clean_go_review
+from hephaestus.automation.review_audit import REVIEW_AUDIT_INVALID_REASONS, is_clean_go_review
 
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
@@ -31,7 +31,10 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
             return scope_failure
 
         audit = payload.get("review_audit")
-        if payload.pop("review_audit_failure", False) or not isinstance(audit, ReviewAudit):
+        audit_failure = payload.pop("review_audit_failure", False)
+        if not isinstance(audit, ReviewAudit):
+            return self._handle_error_verdict(item, None)
+        if audit_failure and audit.valid:
             return self._handle_error_verdict(item, ReviewAudit(None, "", (), "", valid=False))
         if not audit.valid:
             return self._handle_error_verdict(item, audit)
@@ -245,6 +248,12 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
         reason = reason or (
             "no review audit found" if verdict is None else "review audit format failure"
         )
+        if (
+            isinstance(verdict, ReviewAudit)
+            and isinstance(verdict.invalid_reason, str)
+            and verdict.invalid_reason in REVIEW_AUDIT_INVALID_REASONS
+        ):
+            reason = f"review audit format failure: {verdict.invalid_reason}"
         retries = payload.get("review_error_retries", 0) + 1
         payload["review_error_retries"] = retries
         if retries > REVIEW_ERROR_RETRY_CAP:

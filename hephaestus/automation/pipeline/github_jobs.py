@@ -25,7 +25,7 @@ from hephaestus.automation.pipeline.repository_validation import (
 )
 from hephaestus.automation.pipeline.scope_retraction import (
     is_safe_scope_retraction_path,
-    scope_retraction_paths_from_body,
+    scope_retraction_paths_from_finding,
 )
 from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.scope_expansion_domain import (
@@ -585,8 +585,7 @@ class EnsureScopeExpansionChildrenRequest:
             raise ValueError("scope_expansions must contain scope-expansion records")
         retractions = _json_root(self.retraction_findings, list, "retraction_findings")
         if not isinstance(retractions, list) or any(
-            not isinstance(finding, dict)
-            or not scope_retraction_paths_from_body(finding.get("body"))
+            not isinstance(finding, dict) or not scope_retraction_paths_from_finding(finding)
             for finding in retractions
         ):
             raise ValueError("retraction_findings must contain scope retractions")

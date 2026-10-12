@@ -16,6 +16,7 @@ from ..github_jobs import (
     ScopeExpansionChildrenEnsured,
     ScopeExpansionDependenciesReconciled,
 )
+from ..scope_retraction import scope_retraction_paths_from_finding
 from .base import (
     Continue,
     Disposition,
@@ -316,7 +317,9 @@ class PrReviewScopeExpansionMixin:
         if not is_full_commit_sha(reviewed_head):
             raise ValueError("reviewed pull-request head is invalid")
         retractions = [
-            dict(finding) for finding in audit.findings if _scope_retraction_paths([finding])
+            dict(finding)
+            for finding in audit.findings
+            if scope_retraction_paths_from_finding(finding)
         ]
         return EnsureScopeExpansionChildrenRequest(
             issue_number=_issue_number(item),
