@@ -4952,6 +4952,7 @@ def _run_opencode_command(
 
 
 OPENCODE_PLAN_AGENT = "plan"
+OPENCODE_BUILD_AGENT = "build"
 
 
 def _opencode_base_cmd(
@@ -5273,11 +5274,16 @@ def _opencode2_sandbox_args(sandbox: str) -> list[str]:
     skills load only on explicit invocation, so review output also keeps its
     structured contract by default. ``danger-full-access`` has no distinct CLI
     surface and stays fail-closed (#773 precedent).
+
+    OpenCode V2 binds a session to the agent selected when the session was
+    created, so the write mode must name ``build`` on every command. Without
+    it, a session first created with ``--agent plan`` stays in Plan mode when
+    resumed for a write turn, and the turn is refused as ``no_edit``.
     """
     if sandbox == "read-only":
         return ["--agent", OPENCODE_PLAN_AGENT]
     if sandbox == "workspace-write":
-        return []
+        return ["--agent", OPENCODE_BUILD_AGENT]
     raise AgentExecutionError(
         text(
             "OpenCode 2 cannot enforce sandbox mode %(sandbox)r; select claude, codex, or pi "

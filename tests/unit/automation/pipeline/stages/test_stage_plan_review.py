@@ -2957,3 +2957,46 @@ def test_amendment_without_planner_session_starts_new(
     assert result.job.execution_request is not None
     assert result.job.execution_request.lifecycle is SessionLifecycle.START_NEW
     assert result.job.execution_request.operation.value == "plan"
+
+
+def test_planner_amendment_session_loss_is_not_a_reviewer_session_loss(
+    make_ctx: Any, make_work_item: Any, tmp_path: Path
+) -> None:
+    """A lost planner amendment must not reset the bound reviewer session.
+
+    The stage used to treat any `session_lost` result as a reviewer loss, so a
+    lost planner conversation in AMEND_WAIT marked the reviewer's cycle as
+    recovery-required, discarded its bound session, and re-reviewed the
+    unchanged plan on a new round.
+    """
+    github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+    github.comments[2766] = [render_current_plan("Plan v1")]
+    store = PlanReviewSessionStore(lambda: tmp_path)
+    ctx = make_ctx(github=github, plan_review_sessions=store)
+    item = make_work_item(issue=2766, state="ENTER")
+    stage = PlanReviewStage()
+    assert stage.on_enter(item, ctx) is None
+    cycle_id = item.payload["plan_review_cycle_id"]
+    store.bind_session(cycle_id, "opaque-reviewer")
+    item.state = "AMEND_WAIT"
+    before = store.load(cycle_id)
+    revision_before = item.payload.get("plan_revision")
+    fingerprint_before = item.payload.get("plan_fingerprint")
+
+    stage.on_job_done(
+        item,
+        JobResult(ok=False, error="planner-session-lost", session_lost=True),
+        ctx,
+    )
+    stage.step(item, ctx)
+
+    after = store.load(cycle_id)
+    # The reviewer session and its record survive the planner loss.
+    assert after.session_id == before.session_id
+    assert after.state == before.state
+    assert after.state != "recovery-required"
+    # No new round is charged and the unchanged plan is not re-reviewed.
+    assert item.payload.get("plan_revision") == revision_before
+    assert item.payload.get("plan_fingerprint") == fingerprint_before
+    assert item.payload["plan_review_cycle_id"] == cycle_id
+    assert "review_session_error" not in item.payload

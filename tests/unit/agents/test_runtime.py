@@ -4948,6 +4948,8 @@ def test_opencode2_base_cmd_omits_dir_and_passes_model_through(tmp_path: Path) -
         "run",
         "--format",
         "json",
+        "--agent",
+        "build",
     ]
     assert agent_runtime._opencode2_base_cmd(model="anthropic/claude-sonnet-4-5") == [
         "opencode",
@@ -4956,6 +4958,8 @@ def test_opencode2_base_cmd_omits_dir_and_passes_model_through(tmp_path: Path) -
         "json",
         "--model",
         "anthropic/claude-sonnet-4-5",
+        "--agent",
+        "build",
     ]
     assert agent_runtime._opencode2_base_cmd(session_id="ses_abc") == [
         "opencode",
@@ -4964,6 +4968,8 @@ def test_opencode2_base_cmd_omits_dir_and_passes_model_through(tmp_path: Path) -
         "json",
         "--session",
         "ses_abc",
+        "--agent",
+        "build",
     ]
 
     command = agent_runtime._opencode2_base_cmd(sandbox="read-only")
@@ -4980,6 +4986,8 @@ def test_opencode2_base_cmd_joins_a_nondefault_effort_with_hash() -> None:
         "json",
         "--model",
         "vendor/Model#high",
+        "--agent",
+        "build",
     ]
 
 
@@ -7451,3 +7459,26 @@ class TestArchiveAndPruneOpencodeSession:
             agent_runtime.archive_and_prune_opencode_session("ses_1", log=messages.append) is None
         )
         assert messages == ["opencode_archive_export_malformed"]
+
+
+def test_opencode2_workspace_write_selects_the_build_agent() -> None:
+    """A write turn names the build agent so a plan session can switch back.
+
+    OpenCode V2 binds a session to the agent chosen at creation. A session
+    started with `--agent plan` keeps that agent on resume, so a later write
+    turn would run in Plan mode and refuse paths outside the plan directory.
+    Naming the build agent on every write command restores the per-turn sandbox
+    contract the backend documents.
+    """
+    for kwargs in ({}, {"session_id": "ses_abc"}):
+        command = agent_runtime._opencode2_base_cmd(sandbox="workspace-write", **kwargs)
+        assert command[command.index("--agent") + 1] == "build"
+
+
+def test_opencode2_resume_after_a_read_only_session_requests_a_write_agent() -> None:
+    """Resuming a plan-created session must not inherit Plan mode."""
+    read_only = agent_runtime._opencode2_base_cmd(session_id="ses_abc", sandbox="read-only")
+    assert read_only[read_only.index("--agent") + 1] == "plan"
+
+    write = agent_runtime._opencode2_base_cmd(session_id="ses_abc", sandbox="workspace-write")
+    assert write[write.index("--agent") + 1] == "build"
