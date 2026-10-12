@@ -2,13 +2,17 @@
 
 The current plan and review supply the active journal. Exclusive ``state:*``
 labels control the pipeline state. Retired archives supply no current authority.
+
+A malformed issue comment is quarantined per item. The host warns about it and
+keeps the usable comments, so one bad comment does not stop a work item. A
+comment that can change pipeline state stays all-or-nothing.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableSequence, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -23,6 +27,7 @@ from hephaestus.automation.markdown_markers import (
     top_level_marker_occurrences as top_level_marker_occurrences,
 )
 from hephaestus.automation.protocol import (
+    HOMERIC_INTELLIGENCE_COMMENT_PREFIX,
     PLAN_CANONICAL_MARKER,
     PLAN_CANONICAL_MARKERS,
     PLAN_COMMENT_MARKER,
@@ -30,6 +35,7 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKERS,
     PLAN_REVIEW_PREFIX,
 )
+from hephaestus.automation.review_warnings import ReviewWarning, record_review_warning
 
 HISTORY_MARKER: Final[str] = "<!-- hephaestus-plan-history:revision={revision}:kind={kind} -->"
 HISTORY_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-history:"
@@ -59,6 +65,20 @@ PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
 MAX_CURRENT_REVISION_CONTEXT_CHARS: Final[int] = 12_000
 
 _TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+#: A comment that names any automation marker family can change the current
+#: plan, the current review, or a recovery claim. The host cannot quarantine
+#: such a comment, because a dropped artifact looks the same as no artifact.
+_STATE_BEARING_COMMENT_MARKERS: Final[tuple[str, ...]] = (
+    HOMERIC_INTELLIGENCE_COMMENT_PREFIX,
+    HISTORY_MARKER_PREFIX,
+    "<!-- hephaestus-recovered-requirements:",
+    "<!-- hephaestus-obsolete-explanation:",
+)
+_QUARANTINE_RECOVERY = (
+    "Delete or repair the malformed issue comment, then re-run the round so the "
+    "host reads the complete journal again."
+)
 
 
 class CommentJournalReadError(RuntimeError):
@@ -177,28 +197,107 @@ def _without_top_level_marker_line(text: str, marker: str | None) -> str:
     return "".join((*lines[:line_index], *lines[line_index + 1 :]))
 
 
+def _normalized_issue_comment(
+    raw: object,
+    *,
+    actor: str,
+) -> tuple[IssueComment | None, str]:
+    """Validate one raw REST comment payload and derive its ownership.
+
+    Args:
+        raw: One raw REST comment payload.
+        actor: Login of the authenticated GitHub session.
+
+    Returns:
+        The normalized comment, or None and a short failure reason.
+
+    """
+    if not isinstance(raw, Mapping):
+        return None, "was not an object"
+
+    body = raw.get("body")
+    author = raw.get("user") or raw.get("author")
+    login = author.get("login") if isinstance(author, Mapping) else None
+    if not isinstance(body, str):
+        return None, "body was not a string"
+    if not isinstance(login, str) or not login.strip():
+        return None, "author login was unavailable"
+
+    database_id: int | None = None
+    raw_database_id = raw.get("databaseId")
+    if raw_database_id is None:
+        raw_database_id = raw.get("id")
+    if raw_database_id is not None:
+        if (
+            not isinstance(raw_database_id, int)
+            or isinstance(raw_database_id, bool)
+            or raw_database_id <= 0
+        ):
+            return None, "database id was not correct"
+        database_id = raw_database_id
+
+    return (
+        IssueComment(
+            body=body,
+            author_login=login,
+            author_association=str(
+                raw.get("author_association") or raw.get("authorAssociation") or ""
+            ),
+            created_at=str(raw.get("created_at") or raw.get("createdAt") or ""),
+            updated_at=str(raw.get("updated_at") or raw.get("updatedAt") or ""),
+            viewer_did_author=login.casefold() == actor.casefold(),
+            database_id=database_id,
+            url=str(raw.get("html_url") or raw.get("url") or ""),
+        ),
+        "",
+    )
+
+
+def _comment_can_change_pipeline_state(raw: object) -> bool:
+    """Return whether a malformed comment can still be a pipeline artifact."""
+    if not isinstance(raw, Mapping):
+        return False
+    body = raw.get("body")
+    if not isinstance(body, str):
+        return False
+    return any(marker in body for marker in _STATE_BEARING_COMMENT_MARKERS)
+
+
 def normalize_issue_comments(
     comments: Sequence[object],
     *,
     viewer_login: str,
+    warnings: MutableSequence[ReviewWarning] | None = None,
 ) -> list[IssueComment]:
     """Validate REST comments and derive ownership from authenticated identity.
 
     A plan lookup may report ``ABSENT`` only after every comment in the
-    complete journal has been validated.  In particular, ownership is derived
+    complete journal has been read.  In particular, ownership is derived
     from the authenticated viewer login and the comment's author metadata;
     caller-provided ownership flags are intentionally ignored.
+
+    One malformed comment is quarantined. The host warns about it and returns
+    the usable remainder.
+
+    These checks stay all-or-nothing. Each one protects the durable state:
+
+    - An unavailable viewer login stays all-or-nothing because the host cannot
+      derive ownership for any comment without it.
+    - A malformed comment that names an automation marker family stays
+      all-or-nothing because a dropped plan, review, history, or recovery
+      comment is indistinguishable from a comment that was never written.
 
     Args:
         comments: Raw REST comment payloads in chronological order.
         viewer_login: Login returned by the authenticated GitHub session.
+        warnings: Collector that the caller reads, or None to log.
 
     Returns:
         Structured comments with derived ownership metadata.
 
     Raises:
-        CommentJournalReadError: If the viewer identity or any comment payload
-            is missing required fields or has an invalid shape.
+        CommentJournalReadError: If the viewer identity is missing, or if a
+            comment that can change pipeline state is malformed.
 
     """
     actor = viewer_login.strip()
@@ -209,43 +308,17 @@ def normalize_issue_comments(
 
     normalized: list[IssueComment] = []
     for index, raw in enumerate(comments):
-        if not isinstance(raw, Mapping):
-            raise CommentJournalReadError(f"comment {index} was not an object")
-
-        body = raw.get("body")
-        author = raw.get("user") or raw.get("author")
-        login = author.get("login") if isinstance(author, Mapping) else None
-        if not isinstance(body, str):
-            raise CommentJournalReadError(f"comment {index} body was not a string")
-        if not isinstance(login, str) or not login.strip():
-            raise CommentJournalReadError(f"comment {index} author login was unavailable")
-
-        database_id: int | None = None
-        raw_database_id = raw.get("databaseId")
-        if raw_database_id is None:
-            raw_database_id = raw.get("id")
-        if raw_database_id is not None:
-            if (
-                not isinstance(raw_database_id, int)
-                or isinstance(raw_database_id, bool)
-                or raw_database_id <= 0
-            ):
-                raise CommentJournalReadError(f"comment {index} database id was not correct")
-            database_id = raw_database_id
-
-        normalized.append(
-            IssueComment(
-                body=body,
-                author_login=login,
-                author_association=str(
-                    raw.get("author_association") or raw.get("authorAssociation") or ""
-                ),
-                created_at=str(raw.get("created_at") or raw.get("createdAt") or ""),
-                updated_at=str(raw.get("updated_at") or raw.get("updatedAt") or ""),
-                viewer_did_author=login.casefold() == actor.casefold(),
-                database_id=database_id,
-                url=str(raw.get("html_url") or raw.get("url") or ""),
-            )
+        comment, reason = _normalized_issue_comment(raw, actor=actor)
+        if comment is not None:
+            normalized.append(comment)
+            continue
+        if _comment_can_change_pipeline_state(raw):
+            raise CommentJournalReadError(f"comment {index} {reason}")
+        record_review_warning(
+            warnings,
+            "journal_comment_quarantined",
+            message=f"Issue comment {index} {reason}. The host skipped it.",
+            recovery=_QUARANTINE_RECOVERY,
         )
     return normalized
 
@@ -253,7 +326,12 @@ def normalize_issue_comments(
 def discover_plan_from_comments(
     comments: Sequence[IssueComment],
 ) -> PlanDiscoveryResult:
-    """Select the latest actor-owned plan from a validated complete journal."""
+    """Select the latest actor-owned plan from a validated complete journal.
+
+    The identity checks stay all-or-nothing. More than one comment or marker
+    alias that claims the same automation role means the host cannot tell which
+    artifact is current, so it must not select one.
+    """
     try:
         validate_planning_comment_identities(
             comments,
@@ -479,7 +557,12 @@ def plan_fingerprint(plan: str) -> str:
 
 
 def journal_snapshot(comments: Sequence[IssueComment]) -> JournalSnapshot:
-    """Read current canonical comments with explicit ownership metadata."""
+    """Read current canonical comments with explicit ownership metadata.
+
+    The ownership type check and the identity checks stay all-or-nothing. A
+    comment without verified ownership, or a comment that claims the same
+    automation role twice, leaves the host unable to name the current artifact.
+    """
     if any(not isinstance(comment, IssueComment) for comment in comments):
         raise TypeError("journal comments require explicit ownership metadata")
     validate_planning_comment_identities(

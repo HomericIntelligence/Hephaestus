@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import MutableSequence, Sequence
 from copy import deepcopy
 from hashlib import sha256
 from typing import Any, Literal
@@ -32,6 +32,7 @@ from hephaestus.automation.remediation_recovery import (
 )
 from hephaestus.automation.reply_limits import MAX_ADDRESS_REPLY_CHARS
 from hephaestus.automation.review_journal import IssueComment
+from hephaestus.automation.review_warnings import ReviewWarning, record_review_warning
 
 IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP = 2
 IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP = 2
@@ -62,6 +63,24 @@ _REMEDIATION_HANDOFF_JOURNAL_RE = re.compile(
     r"pr=(?P<pr>\d+):head=(?P<head>[0-9a-f]{40}(?:[0-9a-f]{24})?):"
     r"batch=(?P<batch>[0-9a-f]{32}):seq=(?P<sequence>0|[1-9]\d*) -->$"
 )
+_JOURNAL_ENTRY_RECOVERY = (
+    "Delete the malformed hidden reply journal comment, then re-run the review round "
+    "so the host writes a complete reply batch again."
+)
+
+
+def _quarantine_journal_entry(
+    warnings: MutableSequence[ReviewWarning] | None,
+    kind: str,
+    error: ValueError,
+) -> None:
+    """Report one malformed reply journal comment that the host skipped."""
+    record_review_warning(
+        warnings,
+        "reply_handoff_entry_quarantined",
+        message=f"One {kind} reply journal comment is invalid. The host skipped it: {error}",
+        recovery=_JOURNAL_ENTRY_RECOVERY,
+    )
 
 
 def pr_is_current_open_head(state: object, expected_head_sha: object) -> bool:
@@ -77,7 +96,11 @@ def pr_is_current_open_head(state: object, expected_head_sha: object) -> bool:
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Build one JSON object and reject each duplicate member name."""
+    """Build one JSON object and reject each duplicate member name.
+
+    A duplicate member stays all-or-nothing because the decoder would otherwise
+    keep the last value and silently change the recovery state it reads.
+    """
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
@@ -158,6 +181,9 @@ def _thread_snapshot_fingerprint(threads: object) -> str | None:
     the live head immediately before every mutation.  The recovery journal is
     instead bound to the complete sequence of existing source-comment ids and
     bodies, matching the adapter's per-thread concurrency guard.
+
+    The fingerprint stays all-or-nothing because a digest over a partial thread
+    set would match a journal record that the host can no longer trust.
     """
     if not isinstance(threads, list):
         return None
@@ -273,7 +299,13 @@ def _journal_handoff_from_comment(
     pr_number: int,
     threads: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Parse one actor-owned journal comment when it targets these source threads."""
+    """Parse one actor-owned journal comment when it targets these source threads.
+
+    The entry format, the armed flag, and the digest bindings stay
+    all-or-nothing because a partly read journal comment would recover a reply
+    batch for a head or a source snapshot that it does not prove. The caller
+    quarantines this comment instead of raising.
+    """
     marker, separator, payload = comment.body.lstrip().partition("\n")
     match = _HANDOFF_JOURNAL_RE.fullmatch(marker)
     if match is None or int(match.group("pr")) != pr_number:
@@ -320,6 +352,7 @@ def journaled_implementation_reply_handoff(
     *,
     pr_number: object,
     threads: object,
+    warnings: MutableSequence[ReviewWarning] | None = None,
 ) -> dict[str, Any] | None:
     """Recover the latest exact actor-owned reply batch for current source threads.
 
@@ -328,6 +361,23 @@ def journaled_implementation_reply_handoff(
     matches the live remediation snapshot read for this pass. The host adapter
     still validates the current open head and every source thread before any
     reply mutation occurs.
+
+    One malformed journal comment is quarantined. The host warns about it and
+    keeps the remaining records. The recovered batch stays read-only, so the
+    host adapter can only reconcile replies that GitHub already holds.
+
+    Args:
+        comments: Complete actor-owned issue comment journal.
+        pr_number: Pull request that owns the reply batch.
+        threads: Live source review threads for this pass.
+        warnings: Collector that the caller reads, or None to log.
+
+    Returns:
+        The latest usable armed handoff, or None when the journal has none.
+
+    Raises:
+        ValueError: If the caller identity or the live threads are unusable.
+
     """
     if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
         return None
@@ -335,17 +385,18 @@ def journaled_implementation_reply_handoff(
         return None
     recovered: dict[str, Any] | None = None
     for comment in comments:
-        if (
-            comment.viewer_did_author
-            and (
-                handoff := _journal_handoff_from_comment(
-                    comment,
-                    pr_number=pr_number,
-                    threads=threads,
-                )
+        if not comment.viewer_did_author:
+            continue
+        try:
+            handoff = _journal_handoff_from_comment(
+                comment,
+                pr_number=pr_number,
+                threads=threads,
             )
-            is not None
-        ):
+        except ValueError as error:
+            _quarantine_journal_entry(warnings, "implementation", error)
+            continue
+        if handoff is not None:
             recovered = handoff
     return recovered
 
@@ -635,7 +686,12 @@ def _progress_matches_live_threads(  # noqa: C901 - sealed fail-closed validatio
 
 
 def _canonical_comment_prefix(comments: list[object]) -> tuple[tuple[str, str, str], ...]:
-    """Return the ordered canonical fields from hydrated GitHub comments."""
+    """Return the ordered canonical fields from hydrated GitHub comments.
+
+    One malformed comment stays all-or-nothing because this projection is the
+    concurrency guard. Dropping a comment from one side only would hide a
+    change to the source conversation.
+    """
     canonical: list[tuple[str, str, str]] = []
     for comment in comments:
         if not isinstance(comment, dict):
@@ -661,7 +717,13 @@ def _recover_live_progress(  # noqa: C901 - crash-state reconciliation matrix
     progress: ImplementationReplyProgress | None,
     live_threads: list[dict[str, Any]],
 ) -> ImplementationReplyProgress | None:
-    """Recover exact batch replies that GitHub accepted before a process crash."""
+    """Recover exact batch replies that GitHub accepted before a process crash.
+
+    The reconciliation stays all-or-nothing because each receipt is durable
+    proof that GitHub holds one exact reply. A partial inference would record a
+    reply that the host cannot prove and would lose the monotonic progress
+    chain.
+    """
     if _progress_matches_live_threads(
         review_input,
         reply_result,
@@ -850,7 +912,12 @@ def _progress_is_monotonic(
 def _unchanged_head_batch_is_disjoint(
     comment: IssueComment, match: re.Match[str], threads: list[dict[str, Any]]
 ) -> bool:
-    """Exclude only a valid ordinary batch with no current thread IDs."""
+    """Exclude only a valid ordinary batch with no current thread IDs.
+
+    Every check stays all-or-nothing. The reply map, its progress receipts, and
+    the journal identity all feed one overlap decision, so a partly read map
+    could report a disjoint batch that is not disjoint.
+    """
     if (
         not threads
         or _thread_snapshot_fingerprint(threads) is None
@@ -937,7 +1004,13 @@ def _remediation_handoff_from_comment(
     current_remote_head: str,
     threads: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Parse and validate one actor-owned format-3 journal comment."""
+    """Parse and validate one actor-owned format-3 journal comment.
+
+    The format, the repository identity, and every digest binding stay
+    all-or-nothing because the recovered handoff authorizes one recovery commit
+    and one reply batch. The caller quarantines a malformed format-3 comment
+    instead of raising.
+    """
     marker, separator, encoded_payload = comment.body.lstrip().partition("\n")
     marker_match = _REMEDIATION_HANDOFF_JOURNAL_RE.fullmatch(marker)
     if marker_match is None:
@@ -1054,8 +1127,35 @@ def journaled_implementation_remediation_reply_handoff(  # noqa: C901
     branch: str,
     current_remote_head: str,
     threads: list[dict[str, Any]],
+    warnings: MutableSequence[ReviewWarning] | None = None,
 ) -> dict[str, Any] | None:
-    """Recover one format-3 remediation-only handoff."""
+    """Recover one format-3 remediation-only handoff.
+
+    One malformed format-3 journal comment is quarantined. The host warns about
+    it and keeps the remaining records. The successor chain check below stays
+    all-or-nothing, so a lost record in the middle of the chain still fails
+    closed. A format-2 journal comment is not quarantined, because its overlap
+    check is a cross-record guard.
+
+    Args:
+        comments: Complete actor-owned issue comment journal.
+        repository: Repository slug that owns the pull request.
+        issue_number: Issue that owns the pull request.
+        pr_number: Pull request that owns the reply batch.
+        branch: Source branch of the remediation commit.
+        current_remote_head: Exact current remote head of the branch.
+        threads: Live source review threads for this pass.
+        warnings: Collector that the caller reads, or None to log.
+
+    Returns:
+        The latest usable remediation handoff, or None when the journal has
+        none.
+
+    Raises:
+        ValueError: If the caller identity, the journal chain, or the live
+            threads are invalid.
+
+    """
     if (
         not isinstance(repository, str)
         or not repository
@@ -1082,15 +1182,30 @@ def journaled_implementation_remediation_reply_handoff(  # noqa: C901
             # commit. Only the journal for the current remote head is a
             # recovery candidate.
             continue
-        candidate = _remediation_handoff_from_comment(
-            comment,
-            repository=repository,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            branch=branch,
-            current_remote_head=current_remote_head,
-            threads=threads,
-        )
+        if marker_match is None:
+            candidate = _remediation_handoff_from_comment(
+                comment,
+                repository=repository,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch=branch,
+                current_remote_head=current_remote_head,
+                threads=threads,
+            )
+        else:
+            try:
+                candidate = _remediation_handoff_from_comment(
+                    comment,
+                    repository=repository,
+                    issue_number=issue_number,
+                    pr_number=pr_number,
+                    branch=branch,
+                    current_remote_head=current_remote_head,
+                    threads=threads,
+                )
+            except ValueError as error:
+                _quarantine_journal_entry(warnings, "remediation", error)
+                continue
         if candidate is not None:
             candidates.append(candidate)
     if not candidates:
