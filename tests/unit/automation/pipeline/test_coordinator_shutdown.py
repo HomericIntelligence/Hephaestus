@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import signal as signal_mod
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ from hephaestus.automation.state_labels import (
 )
 from tests.unit.automation.pipeline.conftest import (
     FakeWorkerPool,
+    claim_test_item,
     fake_worker_factories,
     script_source_passes,
 )
@@ -201,6 +203,91 @@ def _coordinator(
 
 class TestInterruptSemantics:
     """Shutdown mid-job: RESUMABLE, never FAILED; exit 130."""
+
+    def test_interrupted_planner_recovery_preserves_reviewer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The coordinator parks an interrupted amendment without its callback."""
+        from tests.unit.automation.pipeline.stages.conftest import _Paths
+
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        stage = PlanReviewStage()
+        coordinator.stages[StageName.PLAN_REVIEW] = stage
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=3250,
+            stage=StageName.PLAN_REVIEW,
+            state="ENTER",
+        )
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[3250] = [render_current_plan("Plan v1")]
+        ctx = replace(coordinator._ctx_for(item), github=github, paths=_Paths())
+        monkeypatch.setattr(coordinator, "_ctx_for", lambda completed_item: ctx)
+        item.payload["_synced_default_branch_sha"] = "a" * 40
+        assert stage.on_enter(item, ctx) is None
+        item.state = "REVIEW_WAIT"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ReviewVerdict(
+                    grade=None, verdict="NOGO", raw="Needs tests\n\nstate:plan-no-go"
+                ),
+                session_id="reviewer",
+            ),
+            ctx,
+        )
+        item.state = request.on_done_state
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        item.state = transition.next_state
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        stage.on_job_done(item, JobResult(ok=False, session_lost=True), ctx)
+        item.state = request.on_done_state
+        for _ in range(6):
+            request = stage.step(item, ctx)
+            if isinstance(request, JobRequest):
+                break
+            assert isinstance(request, Continue)
+            item.state = request.next_state
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.descr == "amend"
+        assert request.job.resume_session_id is None
+        store = ctx.plan_review_sessions
+        assert store is not None
+        assert store.root.is_relative_to(tmp_path)
+        record = store.load(item.payload["plan_review_cycle_id"])
+        transcript = store.transcript(record.cycle_id)
+        payload = dict(item.payload)
+        mutations = list(github.mutation_log)
+        pool = InterruptingPool(coordinator.shutdown)
+        coordinator.pool = pool
+        coordinator.completion_q = pool.completion_q
+        monkeypatch.setattr(
+            stage, "on_job_done", lambda *args: pytest.fail("Interrupted callback ran")
+        )
+        claim_test_item(coordinator, item)
+        handle = pool.submit(request.job, request.on_done_state)
+        coordinator.in_flight[handle] = item
+        coordinator.inflight_per_repo[item.repo] = 1
+        completed_handle, result = pool.completion_q.get_nowait()
+        assert completed_handle is handle
+        assert result.interrupted
+        coordinator._handle_completion(handle, result)
+
+        assert item.state == "AMEND_WAIT"
+        assert item.result is not None
+        assert item.result.reason == "resumable at plan_review"
+        assert item.payload == {**payload, "_summary_recorded": True, "entry_stage": "plan_review"}
+        assert store.load(record.cycle_id) == record
+        assert store.transcript(record.cycle_id) == transcript
+        assert pool.submitted == [handle]
+        assert github.mutation_log == mutations
 
     def test_shutdown_mid_job_parks_resumable_not_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

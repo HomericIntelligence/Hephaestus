@@ -93,6 +93,7 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     JournalSnapshot,
     current_plan_context,
+    extract_current_review,
     is_pending_review,
     journal_snapshot,
     parse_plan_review_state,
@@ -170,6 +171,8 @@ ENTER = "ENTER"
 REVIEW_WAIT = "REVIEW_WAIT"
 EVAL = "EVAL"
 AMEND_WAIT = "AMEND_WAIT"
+AMEND_DONE = "AMEND_DONE"
+PLANNER_RECOVERY_ATTEMPTS = 2
 
 #: Max CONSECUTIVE reviewer-infrastructure failures (ERROR verdicts or
 #: failed/valueless review jobs) tolerated before the item FINISH_FAILs.
@@ -180,6 +183,10 @@ REVIEW_ERROR_RETRY_CAP = 2
 _PLAN_SCOPE_INVALID = "plan_scope_invalid"
 _EXTERNAL_PLAN_BLOCK_REASON = "plan was blocked externally while review was in flight"
 _REVIEWED_PLAN_COMMENT_BODY = "reviewed_plan_comment_body"
+
+
+class _PlannerAmendmentBlockedError(RuntimeError):
+    """Preserve an operator block observed during recovery validation."""
 
 
 def _plan_scope_admission_failure(plan_text: str, ctx: StageContext) -> str | None:
@@ -564,16 +571,6 @@ def _record_amendment_value(item: WorkItem, plan_text: str, ctx: StageContext) -
     item.payload["plan_revision"] = publication.revision
     if publication.canonical_body:
         item.payload[_REVIEWED_PLAN_COMMENT_BODY] = publication.canonical_body
-    cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
-    if ctx.plan_review_sessions is not None and cycle_id:
-        ctx.plan_review_sessions.append_artifact(
-            cycle_id,
-            kind="amendment",
-            content=publication.plan,
-            round_index=int(item.payload.get("review_round") or 0),
-            plan_revision=publication.revision,
-            plan_fingerprint=plan_fingerprint(publication.plan),
-        )
     if publication.is_stuck:
         item.payload["no_progress_reason"] = publication.no_progress_reason
         raw_review = (
@@ -587,16 +584,127 @@ def _record_amendment_value(item: WorkItem, plan_text: str, ctx: StageContext) -
             revision=publication.revision,
         )
         return
+    if _operator_blocked_outcome(item, ctx) is not None:
+        if item.payload.get("planner_amendment_recovery"):
+            raise _PlannerAmendmentBlockedError("Operator blocked amendment publication")
+        return
+    if item.payload.get("planner_amendment_recovery"):
+        baseline = item.payload["planner_amendment_identity"]
+        snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
+        if (
+            publication.revision <= baseline[0]
+            or plan_fingerprint(publication.plan) == baseline[1]
+            or snapshot.current_plan_body != publication.canonical_body
+            or snapshot.revision != publication.revision
+        ):
+            raise RuntimeError("Recovered amendment publication was not confirmed")
     add, remove = enter_planning_transition()
     ctx.github.edit_labels(item.issue, add=add, remove=remove)
     item.payload["needs_plan_transition_pending"] = True
     item.payload.pop("no_progress_reason", None)
+    if item.payload.get("planner_amendment_recovery"):
+        labels = _require_issue_labels(item, ctx)
+        if STATE_PLAN_BLOCKED in labels:
+            raise _PlannerAmendmentBlockedError("Operator blocked amendment publication")
+        if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
+            raise RuntimeError("Recovered amendment label transition was not confirmed")
+        item.payload.pop("needs_plan_transition_pending", None)
+    cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+    if ctx.plan_review_sessions is not None and cycle_id:
+        ctx.plan_review_sessions.append_artifact(
+            cycle_id,
+            kind="amendment",
+            content=publication.plan,
+            round_index=int(item.payload.get("review_round") or 0),
+            plan_revision=publication.revision,
+            plan_fingerprint=plan_fingerprint(publication.plan),
+        )
+
+
+def _amendment_context(item: WorkItem, ctx: StageContext) -> tuple[tuple[int, str, str, str], str]:
+    """Bind identity and prompt context to one read-only canonical snapshot."""
+    assert item.issue is not None  # noqa: S101 - stage admission requires an issue
+    comments = ctx.github.issue_comments(item.issue)
+    snapshot = journal_snapshot(comments)
+    labels = _require_issue_labels(item, ctx)
+    if STATE_PLAN_BLOCKED in labels:
+        raise _PlannerAmendmentBlockedError("Operator blocked planner recovery")
+    if (
+        not snapshot.current_plan
+        or not snapshot.current_review
+        or snapshot.current_review_revision != snapshot.revision
+        or is_pending_review(snapshot.current_review, revision=snapshot.revision)
+        or not is_exclusive_plan_state(labels, STATE_PLAN_NO_GO)
+    ):
+        raise RuntimeError("Matching canonical NOGO plan and review are required")
+    identity = (
+        snapshot.revision,
+        plan_fingerprint(snapshot.current_plan),
+        snapshot.current_plan_body,
+        snapshot.current_review,
+    )
+    return identity, current_plan_context(comments)
+
+
+def _amendment_failure(item: WorkItem, reason: str) -> StageOutcome:
+    """Stop amendment recovery without a reviewer or publication retry."""
+    item.payload["planner_amendment_status"] = reason
+    logger.error("plan_review:%s: %s", item.issue, reason)
+    return StageOutcome(Disposition.FINISH_FAIL, reason)
+
+
+def _complete_amendment(item: WorkItem, result: JobResult, ctx: StageContext) -> None:
+    """Handle a planner result without changing the reviewer identity."""
+    if _operator_blocked_outcome(item, ctx) is not None:
+        return
+    recovering = bool(item.payload.get("planner_amendment_recovery"))
+    if result.session_lost or (recovering and not result.ok):
+        item.payload["planner_amendment_recovery"] = True
+        item.payload["planner_amendment_status"] = "requested"
+        logger.warning("plan_review:%s: planner-amendment-session-lost", item.issue)
+        return
+    if not result.ok or not isinstance(result.value, str):
+        item.payload["planner_amendment_failure"] = "planner-amendment-result-unavailable"
+        return
+    if recovering:
+        try:
+            identity, _history = _amendment_context(item, ctx)
+            if identity != item.payload.get("planner_amendment_identity"):
+                item.payload["planner_amendment_failure"] = "planner-amendment-context-changed"
+                return
+        except _PlannerAmendmentBlockedError:
+            item.payload["planner_amendment_blocked"] = True
+            return
+        except (RuntimeError, OSError, SubprocessError):
+            item.payload["planner_amendment_failure"] = "planner-amendment-context-unavailable"
+            return
+    try:
+        _record_amendment_value(item, result.value, ctx)
+    except _PlannerAmendmentBlockedError:
+        item.payload["planner_amendment_blocked"] = True
+        return
+    except (RuntimeError, OSError, SubprocessError):
+        item.payload["planner_amendment_candidate"] = result.value
+        item.payload["planner_amendment_failure"] = "planner-amendment-publication-unconfirmed"
+        logger.error(
+            "plan_review:%s: planner-amendment-publication-unconfirmed; "
+            "publication may have succeeded; reconcile canonical artifacts before resume",
+            item.issue,
+        )
+        return
+    item.payload.pop("planner_amendment_recovery", None)
+    if item.payload.get("no_progress_reason"):
+        item.payload["planner_amendment_status"] = "no-progress"
+    elif recovering:
+        item.payload["planner_amendment_status"] = "recovered"
 
 
 def _operator_blocked_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
     """Stop non-EVAL work when the operator latch appears between steps."""
     if item.state in {"ENTER", "EVAL"} or item.issue is None:
         return None
+    if item.payload.get("planner_amendment_blocked"):
+        return StageOutcome(Disposition.BLOCKED, "plan is blocked pending external intervention")
     live_labels = _require_issue_labels(item, ctx)
     if STATE_PLAN_BLOCKED not in live_labels:
         return None
@@ -827,6 +935,14 @@ class PlanReviewStage(Stage):
         if blocked_outcome is not None:
             return blocked_outcome
 
+        if item.state == AMEND_DONE:
+            failure = item.payload.get("planner_amendment_failure")
+            if failure:
+                return _amendment_failure(item, str(failure))
+            if item.payload.get("planner_amendment_recovery"):
+                return Continue(next_state=AMEND_WAIT)
+            return Continue(next_state=REVIEW_WAIT)
+
         if item.state == "ENTER":
             return Continue(next_state="REVIEW_WAIT")
 
@@ -980,6 +1096,49 @@ class PlanReviewStage(Stage):
             return self._publish_accepted_review(item, ctx)
 
         if item.state == "AMEND_WAIT":
+            recovering = bool(item.payload.get("planner_amendment_recovery"))
+            recovery_history = ""
+            if recovering:
+                attempt = int(item.payload.get("planner_amendment_attempts", 0))
+                if attempt >= PLANNER_RECOVERY_ATTEMPTS:
+                    return _amendment_failure(item, "planner-amendment-recovery-exhausted")
+                try:
+                    identity, recovery_history = _amendment_context(item, ctx)
+                    if identity != item.payload.get("planner_amendment_identity"):
+                        return _amendment_failure(item, "planner-amendment-context-changed")
+                except _PlannerAmendmentBlockedError:
+                    item.payload["planner_amendment_blocked"] = True
+                    return StageOutcome(
+                        Disposition.BLOCKED, "plan is blocked pending external intervention"
+                    )
+                except (RuntimeError, OSError, SubprocessError):
+                    return _amendment_failure(item, "planner-amendment-context-unavailable")
+                item.payload["prior_review"] = identity[3]
+                item.session_ids.pop(AGENT_PLANNER, None)
+                item.session_bindings.pop(AGENT_PLANNER, None)
+                item.session_selections.pop(AGENT_PLANNER, None)
+                item.payload["planner_amendment_attempts"] = attempt + 1
+                item.payload["planner_amendment_status"] = "fresh-attempt"
+                logger.info(
+                    "plan_review:%s: planner amendment recovery attempt=%s revision=%s",
+                    item.issue,
+                    attempt + 1,
+                    identity[0],
+                )
+            else:
+                item.payload.pop("planner_amendment_failure", None)
+                item.payload.pop("planner_amendment_identity", None)
+                item.payload.pop("planner_amendment_attempts", None)
+                # Existing direct callers can lack a journal. Bind the review
+                # identity already admitted by EVAL; recovery validates it live.
+                item.payload["planner_amendment_identity"] = (
+                    int(item.payload.get("plan_revision") or 1),
+                    plan_fingerprint(str(item.payload.get("plan_text") or "")),
+                    str(item.payload.get(_REVIEWED_PLAN_COMMENT_BODY) or ""),
+                    extract_current_review(
+                        _normalize_review_comment(str(item.payload.get("prior_review") or ""))
+                    ),
+                )
             logger.info("plan_review:%d: requesting amend job", item.issue)
             workspace = planning_source_workspace_binding(item, ctx)
             job = AgentJob(
@@ -1016,11 +1175,15 @@ class PlanReviewStage(Stage):
                     "issue_body": item.payload.get("issue_body", ""),
                     "advise_findings": item.payload.get("advise_findings", ""),
                     "prior_review": item.payload.get("prior_review", ""),
-                    "plan_history": _plan_history(ctx.github.issue_comments(item.issue)),
+                    "plan_history": (
+                        recovery_history
+                        if recovering
+                        else _plan_history(ctx.github.issue_comments(item.issue))
+                    ),
                 },
                 descr="amend",
             )
-            return JobRequest(job, on_done_state="REVIEW_WAIT")
+            return JobRequest(job, on_done_state=AMEND_DONE)
 
         logger.warning("plan_review:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
@@ -1421,7 +1584,10 @@ class PlanReviewStage(Stage):
             ctx: Stage context.
 
         """
-        if _checkpoint_review_identity(item, result, ctx):
+        if item.state == AMEND_WAIT:
+            _complete_amendment(item, result, ctx)
+            return
+        if item.state == REVIEW_WAIT and _checkpoint_review_identity(item, result, ctx):
             return
         if not result.ok:
             reason = _safe_agent_failure_reason(result.error)
@@ -1437,8 +1603,5 @@ class PlanReviewStage(Stage):
                 logger.warning("plan_review:%s: job failed: %s", item.issue, reason)
             return
 
-        if result.value is not None:
-            if item.state == "REVIEW_WAIT":
-                _record_review_value(item, result.value, ctx)
-            elif item.state == "AMEND_WAIT" and isinstance(result.value, str):
-                _record_amendment_value(item, result.value, ctx)
+        if result.value is not None and item.state == "REVIEW_WAIT":
+            _record_review_value(item, result.value, ctx)
