@@ -419,7 +419,8 @@ class TestPiCliSetup:
             for step in pi_job["steps"]
             if step.get("name") == "Run Pi conformance tests"
         )
-        assert "tests/unit/docs/test_pi_rollout_consistency.py" in command
+        assert "tests/integration/test_pi_plugin_package_smoke.py" in command
+        assert "tests/unit/agents/test_pi_plugins.py" in command
         assert '--override-ini="addopts="' in command
         assert "--require-pi-package-smoke" in command
         assert '-m "not nightly"' not in command

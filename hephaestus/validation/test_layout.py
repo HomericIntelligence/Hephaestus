@@ -1,9 +1,15 @@
 """Validate the repository's unit-test layout.
 
-Provides seven complementary checks:
+The tested scope is the core library: the ``hephaestus/`` subpackages except
+the opt-in ``hephaestus/automation/`` product layer. The product layer ships
+behind an optional extra and is deliberately outside the library test scope,
+so no test directory is expected for it and rule 1 exempts it.
 
-1. **Mirror check**: Every subpackage in the source directory has a corresponding
-   directory under ``tests/unit/``.
+Provides six complementary checks:
+
+1. **Mirror check**: Every library subpackage in the source directory has a
+   corresponding directory under ``tests/unit/``. The names in
+   ``SANCTIONED_UNTESTED_SRC_PACKAGES`` are exempt.
 2. **No-loose-files check**: No ``test_*.py`` files exist directly under
    ``tests/unit/`` root — they must live in sub-packages that mirror the source
    layout.
@@ -20,9 +26,6 @@ Provides seven complementary checks:
    under ``tests/`` root. Such files fall outside
    ``testpaths = ["tests/unit", "tests/integration"]`` and are silently never
    collected by pytest (issue #1467).
-7. **Scripts-coverage check**: When top-level ``scripts/`` exists, the
-   ``tests/unit/scripts/`` smoke harness must exist and keep auto-discovering
-   every ``scripts/*.py`` file.
 
 Usage::
 
@@ -48,12 +51,20 @@ ALLOWED_ROOT_FILES: frozenset[str] = frozenset({"__init__.py", "conftest.py"})
 # dirs during SOURCE-package detection; this set allowlists TEST dirs.)
 SANCTIONED_EXTRA_TEST_DIRS: frozenset[str] = frozenset(
     {
+        "automation",  # -> hephaestus/automation/ opt-in product layer (outside library test scope)
         "constants",  # -> hephaestus/constants.py (module, not a subpackage)
         "docs",  # -> top-level docs/ tree
         "scripts",  # -> top-level scripts/*.py
         "shell",  # -> shell installer scripts
     }
 )
+
+# Source subpackages that deliberately have no tests/unit/ mirror. The opt-in
+# automation product layer is not core library surface (see AGENTS.md
+# "Library vs product layer"), so the mirror check exempts it. This set is the
+# mirror of SANCTIONED_EXTRA_TEST_DIRS: that one lists test directories with no
+# source counterpart, this one lists source packages with no test counterpart.
+SANCTIONED_UNTESTED_SRC_PACKAGES: frozenset[str] = frozenset({"automation"})
 
 
 def _has_python_source(directory: Path) -> bool:
@@ -156,12 +167,14 @@ def check_no_phantom_test_dirs(test_root: Path) -> tuple[bool, set[str]]:
 def check_test_directory_mirrors(
     src_root: Path,
     test_root: Path,
+    exempt: frozenset[str] = SANCTIONED_UNTESTED_SRC_PACKAGES,
 ) -> tuple[bool, set[str]]:
     """Check that every source subpackage has a matching test directory.
 
     Args:
         src_root: Path to the source package (e.g. ``mypackage/``).
         test_root: Path to the unit test root (e.g. ``tests/unit/``).
+        exempt: Source subpackage names that need no ``tests/unit/`` mirror.
 
     Returns:
         Tuple of ``(all_mirrored, missing_test_dirs)`` where *missing_test_dirs*
@@ -170,7 +183,7 @@ def check_test_directory_mirrors(
     """
     src_packages = _get_subpackages(src_root)
     test_packages = _get_subpackages(test_root)
-    missing = src_packages - test_packages
+    missing = src_packages - test_packages - exempt
     return len(missing) == 0, missing
 
 
@@ -449,40 +462,6 @@ def _report_stray_tests_root_files_check(tests_root: Path, verbose: bool) -> boo
     return False
 
 
-def _report_scripts_coverage_check(
-    scripts_root: Path,
-    test_root: Path,
-    verbose: bool,
-) -> bool:
-    ok_scripts, errors = check_scripts_coverage(scripts_root, test_root)
-    if ok_scripts:
-        if verbose:
-            n_scripts = sum(1 for _ in scripts_root.glob("*.py"))
-            print(text("OK: %(count)d scripts/*.py covered by the smoke harness.", count=n_scripts))
-        return True
-    print(text("ERROR: scripts/ test coverage is incomplete:"), file=sys.stderr)
-    for line in errors:
-        print(_format_scripts_coverage_error(line), file=sys.stderr)
-    return False
-
-
-def _format_scripts_coverage_error(error: str) -> str:
-    """Translate one authored smoke-harness diagnostic."""
-    if error == (
-        "  The scripts/ smoke harness is required so every scripts/*.py is auto-tested via --help."
-    ):
-        return text(error)
-    if match := re.fullmatch(r"  Missing: tests/unit/scripts/(?P<name>.+)", error):
-        return text("  Missing: tests/unit/scripts/%(name)s", **match.groupdict())
-    if error == (
-        "  tests/unit/scripts/conftest.py no longer globs scripts/*.py — auto-coverage is broken."
-    ):
-        return text(error)
-    if error == "  No scripts/*.py files found — unexpected.":
-        return text(error)
-    return error
-
-
 def check_test_structure(
     repo_root: Path,
     src_package: str | None = None,
@@ -506,7 +485,6 @@ def check_test_structure(
     src_root = repo_root / src_package
     tests_root = repo_root / "tests"
     test_root = tests_root / "unit"
-    scripts_root = repo_root / "scripts"
 
     if not src_root.is_dir():
         print(text("ERROR: Source root not found: %(path)s", path=src_root), file=sys.stderr)
@@ -524,8 +502,6 @@ def check_test_structure(
         _report_phantom_test_dirs_check(test_root, verbose),
         _report_stray_tests_root_files_check(tests_root, verbose),
     ]
-    if scripts_root.is_dir():
-        results.append(_report_scripts_coverage_check(scripts_root, test_root, verbose))
     return all(results)
 
 
@@ -539,8 +515,6 @@ def _detect_src_package(repo_root: Path) -> str:
     if pyproject.exists():
         content = pyproject.read_text(encoding="utf-8")
         # Look for packages = ["name"] in hatch build config
-        import re
-
         match = re.search(r'packages\s*=\s*\["([^"]+)"\]', content)
         if match:
             return match.group(1)

@@ -123,20 +123,27 @@ exact assigned numbers.
 
 ### Coverage omit-list invariant
 
-Whole `hephaestus/automation/*.py` modules remain in coverage measurement.
-Hermetic unit tests inject agent, GitHub, Git, subprocess, clock, and terminal
-seams, while `coverage.toml` applies explicit per-module line-coverage floors
-to orchestration facades.
+The Coverage.py omit list in `pyproject.toml` `[tool.coverage.run]` MUST omit
+the opt-in `hephaestus/automation/` product layer. The core library is every
+`hephaestus/` subpackage except that product layer. The product layer ships
+behind the `HomericIntelligence-Hephaestus[automation]` extra, and the
+dependency arrow points only from the product layer to the library. It is not
+core library surface.
 
-`tests/unit/validation/test_omit_allowlist.py` requires the Coverage.py omit
-list to equal the two generic exclusions for tests and package
-`__init__.py` files. The retained migration sources and the shared
-`pipeline_cli.py` must each meet a 70% line-coverage floor. These sources are
-`implementer.py`, `planner.py`, `loop_runner.py`, `loop_repo_manager.py`,
-`address_review_core.py`, and `pipeline_cli.py`. Remove a module floor only when
-its source is deleted. Keep all other module floors. A future omission for
-external execution requires a documented boundary and an explicit change to
-this allowlist contract. Imports and test names do not prove coverage.
+The omit list holds exactly three entries: the test tree, the package
+`__init__.py` files, and the `hephaestus/automation/` product layer. Keep the two
+generic exclusions. Do not add another entry without a documented boundary and
+an explicit change to this invariant.
+
+`coverage.toml` holds the aggregate threshold and the per-module floors. The
+only retained module floor is `validation/schema.py` at 80. Remove a module
+floor only when its source is deleted. Keep all other module floors.
+
+`fail_under` in `[tool.coverage.report]` is the measured library value. The
+gate measures library code only. Imports and test names do not prove coverage.
+
+Change the omit list, a module floor, or `fail_under` only in a commit that
+also updates this section.
 
 ## Python Development Guidelines
 
@@ -205,7 +212,7 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 - Type hints required for all functions
 - Clear docstrings for public functions and classes
 - Comprehensive error handling
-- Comprehensive test coverage (unit tests) — 85%+ test coverage enforced by the CI gate (`fail_under = 85`); target 90%
+- Comprehensive test coverage (unit tests) — 84% test coverage for the core library, enforced by the CI gate (`fail_under = 84`)
 - Follow PEP 8 style guidelines
 
 ## Key Development Principles

@@ -7,10 +7,10 @@ pins ``inspect.getsourcelines(fn)[1]`` (or ``fn.__code__.co_firstlineno``) to a
 literal strands every open PR carrying the change. Assert symbol *presence* /
 that the function *resolves* instead.
 
-This is an executable invariant (alongside ``test_import_surface.py``,
-``test_automation_boundary.py``, ``test_omit_allowlist.py``): an AST walk over
-``tests/`` that flags the volatile-line-number patterns, plus synthetic-source
-self-tests so the guard can never pass vacuously.
+This is an executable invariant (alongside ``test_import_surface.py`` and
+``test_automation_boundary.py``): an AST walk over ``tests/`` that flags the
+volatile-line-number patterns, plus synthetic-source self-tests so the guard
+can never pass vacuously.
 """
 
 from __future__ import annotations
