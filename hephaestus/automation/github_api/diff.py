@@ -1,9 +1,12 @@
 """Compatibility exports and diagnostics for GitHub review diff validation."""
 
+from collections.abc import Sequence
 from typing import Any
 
 import hephaestus.automation.github_api as _api
 from hephaestus.automation.review_anchors import (
+    _ANCHOR_WARNING_CODES as _ANCHOR_WARNING_CODES,
+    _ANCHOR_WARNING_TEXT as _ANCHOR_WARNING_TEXT,
     _FINDING_REASONS as _FINDING_REASONS,
     _HUNK_HEADER_RE as _HUNK_HEADER_RE,
     MAX_REVIEW_FINDING_AGGREGATE_BYTES as MAX_REVIEW_FINDING_AGGREGATE_BYTES,
@@ -39,6 +42,10 @@ from hephaestus.automation.review_finding_history import (
     review_finding_collection_payload as review_finding_collection_payload,
     review_finding_compacted_outcomes_leave_batch_capacity as _leave_batch_capacity,
 )
+from hephaestus.automation.review_warnings import (
+    ReviewWarning as ReviewWarning,
+    make_review_warning,
+)
 
 __all__ = [
     "MAX_COMPACTED_REVIEW_FINDINGS",
@@ -62,6 +69,7 @@ __all__ = [
     "_review_finding_id",
     "_valid_review_positions",
     "_validate_finding_bounds",
+    "anchor_review_warnings",
     "compact_terminal_review_finding_collection",
     "empty_review_finding_compacted_outcomes",
     "normalize_review_finding_batch_records",
@@ -74,6 +82,27 @@ __all__ = [
 ]
 
 review_finding_compacted_outcomes_leave_batch_capacity = _leave_batch_capacity
+
+
+def anchor_review_warnings(
+    corrections: Sequence[ReviewAnchorCorrection],
+) -> tuple[ReviewWarning, ...]:
+    """Return one shared-contract warning for each demoted review finding.
+
+    Args:
+        corrections: Findings that the reviewed diff cannot place inline.
+
+    Returns:
+        One bounded warning per correction. Every warning carries a stable
+        code, a short message, and the recovery instruction for the reviewer.
+
+    """
+    warnings: list[ReviewWarning] = []
+    for correction in corrections:
+        code = _ANCHOR_WARNING_CODES[correction.reason]
+        message, recovery = _ANCHOR_WARNING_TEXT[code]
+        warnings.append(make_review_warning(code, message=message, recovery=recovery))
+    return tuple(warnings)
 
 
 def _validate_comments_to_diff(
@@ -90,13 +119,22 @@ def _validate_comments_to_diff(
         fail_open_empty=fail_open_empty,
         preserve_finding_ids=preserve_finding_ids,
     )
-    for correction in validation.corrections:
+    # One log line per demoted finding. The line uses the shared warning
+    # contract so the transport log and the visible review body agree.
+    for correction, warning in zip(
+        validation.corrections,
+        anchor_review_warnings(validation.corrections),
+        strict=True,
+    ):
         _api.logger.warning(
-            "Preserving review finding on %s:%s (%s) for anchor correction: %s",
+            "Preserving review finding %s on %s:%s (%s) for anchor correction %s: %s Recovery: %s",
+            correction.finding_id,
             correction.path,
-            correction.finding.get("line"),
+            correction.line,
             correction.side,
             correction.reason,
+            warning.message,
+            warning.recovery,
         )
     return validation
 
