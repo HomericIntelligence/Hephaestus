@@ -1,17 +1,22 @@
 """Bounded finding journals and review receipt transitions."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import cast
 
 from hephaestus.automation.review_anchors import (
     ReviewAnchorCorrection,
+    ReviewAnchorCorrectionReason,
 )
 from hephaestus.automation.review_finding_history import normalize_review_finding_batch_records
+from hephaestus.automation.review_warnings import (
+    AnchorCorrectionWarningReason,
+    ReviewWarning,
+    make_review_warning,
+)
 
 from ..github_jobs import PrReviewReconciled
 from .base import Continue, Disposition, StageOutcome, StepResult, WorkItem
 from .pr_review_threads import (
-    _ANCHOR_CORRECTION_RETRY,
     _COMMENT_VALIDATION_ONLY,
     BLOCKING_SEVERITIES,
     EVAL,
@@ -21,8 +26,120 @@ from .pr_review_threads import (
     logger,
 )
 
+#: Item payload key for the findings that the review body must show. Each entry
+#: carries the finding text, its anchor, the reason, and its warnings. The
+#: publication step renders this collection when it builds the visible review.
+REPORTED_FINDINGS_PAYLOAD_KEY = "review_reported_findings"
 
-def _finding_anchor(finding: dict[str, object]) -> dict[str, object]:
+#: Item payload key for the host warnings of one review round. Each entry is a
+#: plain warning dict so the payload stays JSON serializable.
+REVIEW_WARNINGS_PAYLOAD_KEY = "review_warnings"
+
+#: Reason recorded for an advisory finding. GitHub accepts no inline thread for
+#: a finding without a blocking severity, so the host shows it in the body.
+ADVISORY_REPORTED_REASON = "advisory"
+
+#: Warning code and recovery text for each anchor reason. Every warning states
+#: the action a reviewer must take to publish the finding inline later.
+_ANCHOR_WARNING_CODES: dict[ReviewAnchorCorrectionReason, AnchorCorrectionWarningReason] = {
+    "reviewed_diff_unavailable": "anchor_reviewed_diff_unavailable",
+    "path_not_in_diff": "anchor_path_not_in_diff",
+    "line_not_in_diff": "anchor_line_not_in_diff",
+    "unsupported_side": "anchor_unsupported_side",
+}
+_ANCHOR_RECOVERY: dict[ReviewAnchorCorrectionReason, str] = {
+    "reviewed_diff_unavailable": (
+        "Read the reviewed diff again and send the reviewed lines with the review."
+    ),
+    "path_not_in_diff": (
+        "Rebase the pull request so the reviewed diff contains this file. "
+        "Review again to publish this finding inline."
+    ),
+    "line_not_in_diff": (
+        "Rebase the pull request so the reviewed diff contains this line. "
+        "Review again to publish this finding inline."
+    ),
+    "unsupported_side": (
+        "Review this finding again and send side as RIGHT. The host publishes no other side inline."
+    ),
+}
+
+
+def _warning_payload(warning: ReviewWarning) -> dict[str, str]:
+    """Return one warning as a bounded plain dict."""
+    return {
+        "code": warning.code,
+        "message": warning.message,
+        "recovery": warning.recovery,
+    }
+
+
+def _unanchored_reported_finding(
+    correction: ReviewAnchorCorrection,
+) -> dict[str, object]:
+    """Build one visible reported record for a finding outside the diff."""
+    code = _ANCHOR_WARNING_CODES[correction.reason]
+    finding = dict(correction.finding)
+    return {
+        "finding": finding,
+        "finding_id": correction.finding_id,
+        "severity": str(finding.get("severity") or "").strip().lower(),
+        "path": correction.path,
+        "line": correction.line,
+        "side": correction.side,
+        "reason": correction.reason,
+        "warnings": [
+            _warning_payload(
+                make_review_warning(
+                    code,
+                    message=(
+                        f"The host cannot publish finding {correction.finding_id} "
+                        "inline because its anchor is not in the reviewed diff."
+                    ),
+                    recovery=_ANCHOR_RECOVERY[correction.reason],
+                )
+            )
+        ],
+    }
+
+
+def _advisory_reported_finding(finding: Mapping[str, object]) -> dict[str, object]:
+    """Build one visible reported record for an advisory finding."""
+    value = dict(finding)
+    return {
+        "finding": value,
+        "finding_id": str(value.get("finding_id") or ""),
+        "severity": str(value.get("severity") or "").strip().lower(),
+        "path": str(value.get("path") or "").strip(),
+        "line": value.get("line"),
+        "side": str(value.get("side") or "").strip(),
+        "reason": ADVISORY_REPORTED_REASON,
+        "warnings": [],
+    }
+
+
+def build_reported_findings(
+    advisory: Sequence[dict[str, object]],
+    corrections: Sequence[ReviewAnchorCorrection],
+) -> list[dict[str, object]]:
+    """Build every finding that the review body must show.
+
+    Args:
+        advisory: Findings that the reviewed diff accepts but that carry no
+            blocking severity.
+        corrections: Findings whose anchor is not in the reviewed diff.
+
+    Returns:
+        One reported record for each finding.
+
+    """
+    return [
+        *(_advisory_reported_finding(finding) for finding in advisory),
+        *(_unanchored_reported_finding(correction) for correction in corrections),
+    ]
+
+
+def _finding_anchor(finding: Mapping[str, object]) -> dict[str, object]:
     """Return the host-owned anchor fields for one review finding."""
     return {
         "path": str(finding.get("path") or "").strip(),
@@ -64,12 +181,24 @@ def _build_review_finding_records(
     *,
     source_head: str,
     initial_valid: list[dict[str, object]],
-    corrections: list[ReviewAnchorCorrection],
-    corrected_inline: list[dict[str, object]],
-    corrected_audit: list[dict[str, object]],
-    not_publishable: list[dict[str, object]],
+    unanchored: list[ReviewAnchorCorrection],
 ) -> list[dict[str, object]]:
-    """Build the complete journal for all findings in one review response."""
+    """Build the complete journal for all findings in one review response.
+
+    A blocking finding with an anchor in the reviewed diff publishes inline.
+    An advisory finding publishes on the review body surface. A finding whose
+    anchor is not in the reviewed diff records its anchor problem, so the
+    review body can show it with a warning.
+
+    Args:
+        source_head: The reviewed head that owns every finding.
+        initial_valid: Every finding whose anchor the reviewed diff accepts.
+        unanchored: Findings that the reviewed diff does not accept.
+
+    Returns:
+        One normalized journal record for every finding.
+
+    """
     records: list[dict[str, object]] = []
     for finding in initial_valid:
         blocking = str(finding.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
@@ -77,52 +206,26 @@ def _build_review_finding_records(
             _finding_record(
                 finding,
                 source_head=source_head,
-                status="published" if blocking else "not_publishable",
-                surface="inline" if blocking else "not_publishable",
+                status="published",
+                surface="inline" if blocking else "audit",
                 original_anchor=_finding_anchor(finding),
                 final_anchor=_finding_anchor(finding) if blocking else None,
-                reason=None if blocking else "audit_surface_unavailable",
+                reason=None,
             )
         )
-    outcomes: dict[str, tuple[str, str, dict[str, object], dict[str, object] | None]] = {}
-    for finding in corrected_inline:
-        outcomes[str(finding.get("finding_id") or "")] = (
-            "corrected",
-            "inline",
-            finding,
-            _finding_anchor(finding),
-        )
-    for finding in corrected_audit:
-        outcomes[str(finding.get("finding_id") or "")] = (
-            "corrected",
-            "audit",
-            finding,
-            None,
-        )
-    for finding in not_publishable:
-        outcomes[str(finding.get("finding_id") or "")] = (
-            "not_publishable",
-            "not_publishable",
-            finding,
-            None,
-        )
-    for correction in corrections:
-        outcome = outcomes.get(correction.finding_id)
-        if outcome is None:
-            raise ValueError("review finding correction outcome is incomplete")
-        status, surface, finding, final_anchor = outcome
+    for correction in unanchored:
         records.append(
             _finding_record(
-                finding,
+                dict(correction.finding),
                 source_head=source_head,
-                status=status,
-                surface=surface,
+                status="not_publishable",
+                surface="not_publishable",
                 original_anchor={
                     "path": correction.path,
                     "line": correction.line,
                     "side": correction.side,
                 },
-                final_anchor=final_anchor,
+                final_anchor=None,
                 reason=correction.reason,
             )
         )
@@ -137,7 +240,7 @@ def _review_receipt_lists(
         receipt.posted_receipts.thaw(),
         receipt.unresolved_threads.thaw(),
         receipt.remediation_threads.thaw(),
-        receipt.anchor_corrections.thaw(),
+        receipt.corrections.thaw(),
         receipt.unpublishable_findings.thaw(),
     )
     if not all(isinstance(value, list) for value in values):
@@ -167,6 +270,9 @@ def _apply_review_receipt(
         item.payload["review_audit_failure"] = True
         return Continue(next_state=EVAL)
     if corrections or unpublishable:
+        # The host runs no reviewer correction turn now. A receipt that still
+        # carries a typed correction or an unpublishable finding means the
+        # publication path did not agree with this stage.
         item.payload["review_audit_failure"] = True
         return Continue(next_state=EVAL)
     item.payload["review_threads"] = [dict(value) for value in raw_findings]
@@ -175,8 +281,6 @@ def _apply_review_receipt(
     item.payload["remediation_threads"] = [dict(value) for value in remediation]
     item.payload["remediation_thread_snapshots"] = [dict(value) for value in unresolved]
     item.payload["unresolved_threads_before_address"] = len(remediation)
-    item.payload.pop("review_anchor_corrections", None)
-    item.payload.pop(_ANCHOR_CORRECTION_RETRY, None)
     if item.payload.pop(_COMMENT_VALIDATION_ONLY, None):
         # Thread validation can resolve comments but cannot manufacture
         # the reviewer-owned decision required to authorize GO.
