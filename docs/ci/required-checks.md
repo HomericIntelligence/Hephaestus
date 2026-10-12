@@ -35,6 +35,14 @@ marked `APPROVED` review. The effective policy selects exact-head merge-queue
 admission when a ruleset requires it. A direct merge requires strict-update
 protection from a source that the current actor cannot bypass.
 
+## Hosted container builds
+
+Required jobs and scheduled security jobs build their CI images from the
+current checkout. They do not archive rootless Podman storage. Files in that
+store can be unreadable to the cache process even after a validator succeeds.
+The separate pre-commit and Mypy caches remain enabled. Failures from those
+caches remain visible; this change does not suppress them.
+
 ## Queue pre-PR source checks
 
 Developer pre-commit hooks and required PR lint run the shared fast pytest

@@ -6,9 +6,75 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize("workflow_name", ["_required.yml", "security.yml"])
+def test_workflows_do_not_archive_rootless_container_storage(workflow_name: str) -> None:
+    """Hosted jobs must not archive the rootless container store."""
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / workflow_name).read_text())
+    raw_store_caches = [
+        (job_name, step.get("name"))
+        for job_name, job in workflow["jobs"].items()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("actions/cache")
+        and ".local/share/containers/storage" in str(step.get("with", {}).get("path", ""))
+    ]
+    assert raw_store_caches == []
+
+
+@pytest.mark.parametrize(
+    ("workflow_name", "job_name"),
+    [
+        ("_required.yml", job)
+        for job in (
+            "lint",
+            "uv-lock-check",
+            "security-dependency-scan",
+            "security-sast-scan",
+            "security-workflow-scan",
+            "schema-validation",
+            "deps-version-sync",
+            "license-scan",
+        )
+    ]
+    + [("security.yml", job) for job in ("pip-audit", "sast", "workflow-scan", "license-scan")],
+)
+def test_container_jobs_build_current_source_before_validation(
+    workflow_name: str, job_name: str
+) -> None:
+    """Each affected job builds the current source before its container checks."""
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / workflow_name).read_text())
+    job = workflow["jobs"][job_name]
+    steps = job["steps"]
+    builds = [
+        index
+        for index, step in enumerate(steps)
+        if step.get("run") == "podman build -f ci/Containerfile -t hephaestus-ci:local ."
+    ]
+    validators = [index for index, step in enumerate(steps) if "podman run" in step.get("run", "")]
+    assert len(builds) == 1
+    assert validators
+    assert all(builds[0] < index for index in validators)
+    if workflow_name == "security.yml":
+        assert job["if"] == "github.event_name != 'pull_request'"
+
+
+def test_lint_retains_separate_tool_caches() -> None:
+    """Tool caches remain enabled without suppressed failures."""
+    for name, path in (
+        ("Cache pre-commit environments", "~/.cache/pre-commit"),
+        ("Cache mypy incremental cache", ".mypy_cache"),
+    ):
+        step = _workflow_step_definition("_required.yml", "lint", name)
+        assert str(step["uses"]).startswith("actions/cache@")
+        settings = step["with"]
+        assert isinstance(settings, dict)
+        assert settings["path"] == path
+        assert not step.get("continue-on-error", False)
 
 
 def _workflow_step_definition(

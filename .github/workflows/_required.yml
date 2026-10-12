@@ -160,14 +160,6 @@ jobs:
       # job (issue #1173) so that the WHOLE hook suite is a required status
       # check — previously pre-commit was advisory, which let an unformatted
       # file land on main via #959 and break pre-commit for every later PR.
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
-          restore-keys: |
-            podman-hephaestus-${{ runner.os }}-
-
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
@@ -220,14 +212,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
-          restore-keys: |
-            podman-hephaestus-${{ runner.os }}-
-
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
       - name: Check uv.lock is in sync with pyproject.toml (in container)
@@ -796,14 +780,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
-          restore-keys: |
-            podman-hephaestus-${{ runner.os }}-
-
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
@@ -874,14 +850,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
-          restore-keys: |
-            podman-hephaestus-${{ runner.os }}-
-
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
@@ -922,14 +890,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
-          restore-keys: |
-            podman-hephaestus-${{ runner.os }}-
 
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
@@ -977,14 +937,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
-          restore-keys: |
-            podman-hephaestus-${{ runner.os }}-
-
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
@@ -1023,14 +975,6 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
-
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
-          restore-keys: |
-            podman-hephaestus-${{ runner.os }}-
 
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
@@ -1074,14 +1018,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0  # hatch-vcs needs full history to compute the version
-
-      - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.local/share/containers/storage
-          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
-          restore-keys: |
-            podman-hephaestus-${{ runner.os }}-
 
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
