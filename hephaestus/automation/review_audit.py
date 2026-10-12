@@ -258,12 +258,25 @@ def parse_review_anchor_correction_response(
 
 
 def is_clean_go_review(audit: object | None) -> bool:
-    """Return whether one parsed audit can authorize implementation GO."""
+    """Return whether one parsed audit can authorize implementation GO.
+
+    A reported finding is not a warning. It is a defect that the reviewer found
+    and that the host could not publish as an inline anchor. The implementation
+    sign-off gate is the one blocking gate in this design, so it must not
+    authorize a GO while such a defect is unresolved. Any reported finding
+    therefore prevents a clean sign-off here.
+
+    This boundary does not skip the finding. The publication path still renders
+    the finding in the visible review body with a warning marker, the reviewer
+    can re-anchor it, and the work item routes through the normal non-GO review
+    path. The gate never raises and never fails open.
+    """
     return (
         isinstance(audit, ReviewAudit)
         and audit.valid
         and audit.verdict == "GO"
         and not audit.findings
+        and not audit.reported_findings
         and not audit.scope_expansions
     )
 
