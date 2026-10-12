@@ -1,4 +1,24 @@
-"""Immutable evidence for failed-remediation recovery."""
+"""Immutable evidence for failed-remediation recovery.
+
+Every check in this module stays all-or-nothing. The evidence here is not a
+readable history that the host can rebuild. It is the exact set of threads that
+must each receive one reply, the exact paths of one recovery commit, and the
+exact bytes that every later digest is computed from. A partly read result
+would look complete and would cause a wrong durable write, so the host raises
+instead of quarantining.
+
+The checks stay all-or-nothing for these reasons:
+
+- Byte and size limits map to the GitHub comment transport limit.
+- The format version and every digest binding identify one exact recovery
+  record, so a different version is a different record.
+- A duplicate thread, comment, or identity corrupts the recovery state because
+  the host loses track of which record it already holds.
+- The thread set and the reply map are exhaustive over each other, so dropping
+  one entry would leave one reviewer thread without a response.
+- The recovery commit path set defines the commit content, so dropping one path
+  would write a commit that the host never proved.
+"""
 
 from __future__ import annotations
 
@@ -107,6 +127,17 @@ def _absolute_canonical_path(value: str, name: str) -> Path:
 
 
 def _thread_ids(thread_snapshot_json: str) -> tuple[str, ...]:
+    """Return the exact ordered thread identities of one snapshot.
+
+    The snapshot stays all-or-nothing. The identity set is the exhaustive set
+    of threads that must each receive one reply, so a partly read snapshot
+    would leave one reviewer thread without a response.
+
+    Raises:
+        ValueError: If the snapshot is not a canonical non-empty list of unique
+            thread objects.
+
+    """
     try:
         threads = json.loads(thread_snapshot_json)
     except json.JSONDecodeError as error:
@@ -150,7 +181,18 @@ class RemediationReviewInput:
     thread_snapshot_json: str
 
     def __post_init__(self) -> None:
-        """Validate all identities, limits, paths, and nested digests."""
+        """Validate all identities, limits, paths, and nested digests.
+
+        This validation stays all-or-nothing. Every later digest is computed
+        from these exact bytes, and the changed-path tuple is the content of
+        the recovery commit. A partly valid record would produce a commit that
+        the host never proved and digests that no later read can reproduce.
+
+        Raises:
+            ValueError: If any identity, limit, path, or nested digest is
+                invalid.
+
+        """
         if self.format_version != REMEDIATION_REVIEW_INPUT_FORMAT:
             raise ValueError("format_version must identify remediation review input v3")
         if (
@@ -225,7 +267,17 @@ class RemediationReviewInput:
 
     @staticmethod
     def canonical_thread_snapshot(threads: object) -> str:
-        """Return canonical JSON for one thread snapshot."""
+        """Return canonical JSON for one thread snapshot.
+
+        The projection stays all-or-nothing. The host uses this exact thread
+        set as the exhaustive reply target and as the source conversation
+        fingerprint, so a partly projected snapshot would change both.
+
+        Raises:
+            ValueError: If any thread or comment is invalid, or if the snapshot
+                exceeds its transport limit.
+
+        """
         if not isinstance(threads, list) or not threads:
             raise ValueError("thread snapshot must be a non-empty list")
         projected: list[dict[str, object]] = []
@@ -378,7 +430,17 @@ class RemediationRecoveryReceipt:
     update_paths: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        """Validate the prepared commit, snapshot, and path identities."""
+        """Validate the prepared commit, snapshot, and path identities.
+
+        The receipt stays all-or-nothing because the host prepares one commit
+        from it. A partly valid receipt would stage a commit that the host
+        cannot prove.
+
+        Raises:
+            ValueError: If the review input, the digests, the expected remote
+                SHA, or the path order is invalid.
+
+        """
         try:
             review_input = RemediationReviewInput.from_canonical_bytes(
                 self.review_input_bytes.encode("utf-8")
@@ -470,7 +532,18 @@ class RemediationReplyResult:
     replies: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
-        """Validate the input digest and immutable exhaustive reply map."""
+        """Validate the input digest and immutable exhaustive reply map.
+
+        The reply map stays all-or-nothing. It is exhaustive over the thread
+        snapshot, so dropping one entry would silently leave one reviewer
+        thread without a response while the host still records the batch as
+        complete.
+
+        Raises:
+            ValueError: If the digest, any entry, the sorted order, or the byte
+                limit is invalid.
+
+        """
         if (
             not isinstance(self.review_input_sha256, str)
             or _SHA256_RE.fullmatch(self.review_input_sha256) is None

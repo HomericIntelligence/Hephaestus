@@ -1,27 +1,36 @@
-"""Shared warning contract for informational review finding validation.
+"""Shared warning contract for informational review validation.
 
-Review finding validation is informational. One malformed finding does not
-invalidate a review audit. The host keeps the valid findings, warns about each
-malformed finding, and carries the malformed content as bounded text.
+Review validation is informational. One malformed item does not invalidate the
+surrounding collection. The host keeps the usable items, quarantines the
+malformed ones, and reports each quarantine as bounded text.
 
 Every warning carries three parts:
 
 - a stable machine-readable code,
 - a short message that states the problem, and
-- a recovery instruction that states the action a reviewer must take.
+- a recovery instruction that states the action an operator must take.
 
 A warning without a recovery instruction does not meet this contract. The
 constructor refuses such a warning.
 
 The explicit reviewer verdict is not a warning. It stays required, because it
 is the implementation sign-off gate. This module never infers a verdict.
+
+A normalizer that quarantines an item calls :func:`record_review_warning`. It
+supplies a collector when the caller publishes warnings with its own result.
+Without a collector the module logger records the warning, so no call site
+loses it.
 """
 
 from __future__ import annotations
 
+import logging
 import re
+from collections.abc import MutableSequence
 from dataclasses import dataclass
 from typing import Literal
+
+_LOGGER = logging.getLogger(__name__)
 
 MAX_REVIEW_WARNING_CODE_CHARS = 64
 MAX_REVIEW_WARNING_MESSAGE_CHARS = 1_024
@@ -53,9 +62,17 @@ AnchorCorrectionWarningReason = Literal[
     "anchor_unsupported_side",
 ]
 
+DataHygieneWarningReason = Literal[
+    "journal_comment_quarantined",
+    "finding_identity_quarantined",
+    "finding_record_quarantined",
+    "reply_handoff_entry_quarantined",
+]
+
 ReviewWarningReason = Literal[
     MalformedReviewFindingReason,
     AnchorCorrectionWarningReason,
+    DataHygieneWarningReason,
 ]
 
 
@@ -142,3 +159,39 @@ def make_review_warning(
 
     """
     return ReviewWarning(code=reason, message=message, recovery=recovery)
+
+
+def record_review_warning(
+    sink: MutableSequence[ReviewWarning] | None,
+    reason: ReviewWarningReason,
+    *,
+    message: str,
+    recovery: str,
+) -> ReviewWarning:
+    """Record one quarantine warning where the caller can read it.
+
+    A quarantine warning must never disappear. The caller supplies ``sink`` to
+    publish the warning with its own result. Without a collector the module
+    logger records the warning.
+
+    Args:
+        sink: Collector that the caller reads, or None.
+        reason: Stable machine-readable slug for the warning.
+        message: Short description of the problem.
+        recovery: Human-readable recovery instruction.
+
+    Returns:
+        The bounded warning value.
+
+    Raises:
+        ValueError: If the reason is not a slug or the recovery text is empty.
+
+    """
+    warning = make_review_warning(reason, message=message, recovery=recovery)
+    if sink is None:
+        _LOGGER.warning(
+            "review_warning:%s: %s Recovery: %s", warning.code, warning.message, warning.recovery
+        )
+    else:
+        sink.append(warning)
+    return warning
