@@ -10,6 +10,7 @@ from hephaestus.automation.review_finding_history import (
     normalize_review_finding_collection,
     normalize_review_finding_compacted_outcomes,
 )
+from hephaestus.automation.review_warnings import make_review_warning
 
 from ..github_jobs import (
     FrozenJson,
@@ -28,11 +29,12 @@ from .base import (
     WorkItem,
     stage_timeout,
 )
-from .pr_review_findings import _apply_review_receipt
-from .pr_review_gate import PrReviewGate
+from .pr_review_findings import (
+    REVIEW_WARNINGS_PAYLOAD_KEY,
+    _apply_review_receipt,
+)
 from .pr_review_history import _pending_review_finding, _publication_head
 from .pr_review_threads import (
-    BLOCKING_SEVERITIES,
     ENTER,
     EVAL,
     GIT_JOB_TIMEOUT_S,
@@ -42,6 +44,7 @@ from .pr_review_threads import (
     REVIEW_WAIT,
     VALIDATE_WAIT,
     _PrReviewHost,
+    logger,
 )
 from .repo import is_full_commit_sha
 
@@ -50,6 +53,62 @@ _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
 _PENDING_FINDING_RECOVERY = "_pending_review_finding_recovery"
 _PENDING_FINDING_RECOVERY_DEADLINE = "_pending_review_finding_recovery_deadline_s"
+
+#: Payload key that records why the host dropped an unusable finding journal.
+FINDING_HISTORY_DEGRADED_KEY = "review_finding_history_degraded"
+
+_FINDING_HISTORY_RECOVERY = (
+    "Review the pull request again. The next review starts a new finding journal, "
+    "so the findings from the dropped journal appear again in the review body."
+)
+
+
+def quarantine_finding_history(item: WorkItem, reason: str) -> None:
+    """Drop an unusable finding journal and warn about the lost outcomes.
+
+    A journal that the host cannot read is not reviewer evidence. The host
+    keeps the valid review result, warns once, and starts a fresh review. No
+    review item ends because its saved finding journal is unusable.
+
+    Args:
+        item: The review work item that holds the unusable journal.
+        reason: The host reason that made the journal unusable.
+
+    """
+    logger.warning(
+        "pr_review:%s: dropping unusable finding journal (%s); starting a fresh review",
+        item.issue,
+        reason,
+    )
+    item.payload[FINDING_HISTORY_DEGRADED_KEY] = reason
+    item.payload["review_finding_records"] = []
+    item.payload["review_finding_compacted_outcomes"] = empty_review_finding_compacted_outcomes()
+    item.payload["carried_review_finding_records"] = []
+    item.payload["carried_review_finding_compacted_outcomes"] = (
+        empty_review_finding_compacted_outcomes()
+    )
+    item.payload.pop("review_finding_journal_head", None)
+    item.payload.pop(_PENDING_FINDING_RECOVERY, None)
+    item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+    item.payload.pop(_PENDING_FINDING_RECOVERY_DEADLINE, None)
+    warning = make_review_warning(
+        "finding_invalid",
+        message=(
+            f"The saved review finding journal is not usable: {reason}. "
+            "The host dropped it and kept the review result."
+        ),
+        recovery=_FINDING_HISTORY_RECOVERY,
+    )
+    carried = item.payload.get(REVIEW_WARNINGS_PAYLOAD_KEY)
+    warnings = list(carried) if isinstance(carried, list) else []
+    item.payload[REVIEW_WARNINGS_PAYLOAD_KEY] = [
+        *warnings,
+        {
+            "code": warning.code,
+            "message": warning.message,
+            "recovery": warning.recovery,
+        },
+    ]
 
 
 class PrReviewRecoveryMixin(_PrReviewHost):
@@ -73,10 +132,8 @@ class PrReviewRecoveryMixin(_PrReviewHost):
                 retained_finding_ids=[record["finding_id"] for record in records],
             )
         except ValueError:
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
-            )
+            quarantine_finding_history(item, "carried_records_invalid")
+            return None
         pending_records = [record for record in records if record["status"] == "pending"]
         if not pending_records:
             return None
@@ -87,10 +144,8 @@ class PrReviewRecoveryMixin(_PrReviewHost):
             )
         reviewed_head = str(item.payload.get("review_finding_journal_head") or "")
         if not is_full_commit_sha(reviewed_head):
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
-            )
+            quarantine_finding_history(item, "journal_head_invalid")
+            return None
         active_head = item.payload.get("reviewed_pr_head_sha")
         if is_full_commit_sha(active_head) and active_head != reviewed_head:
             terminal_records = [record for record in records if record["status"] != "pending"]
@@ -103,17 +158,13 @@ class PrReviewRecoveryMixin(_PrReviewHost):
             item.payload.pop(_PENDING_FINDING_RECOVERY_DEADLINE, None)
             return None
         if any(_publication_head(record) != reviewed_head for record in pending_records):
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
-            )
+            quarantine_finding_history(item, "pending_publication_head_mismatch")
+            return None
         try:
             findings = [_pending_review_finding(record) for record in pending_records]
         except ValueError:
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
-            )
+            quarantine_finding_history(item, "pending_publication_finding_invalid")
+            return None
         prior_request = item.payload.get(_PENDING_GITHUB_REQUEST)
         saved_deadline = item.payload.get(_PENDING_FINDING_RECOVERY_DEADLINE)
         deadline_s = (
@@ -290,20 +341,9 @@ class PrReviewRecoveryMixin(_PrReviewHost):
                 dict(record) for record in records if record["status"] == "not_publishable"
             ],
         }
-        if any(
-            record["status"] == "not_publishable" and record["severity"] in BLOCKING_SEVERITIES
-            for record in records
-        ) or any(identity[2] == "n" and identity[3] == "b" for identity in compacted["identities"]):
-            no_go_outcome = PrReviewGate._write_no_go(item, ctx)
-            if no_go_outcome is not None:
-                return no_go_outcome
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    "review_finding_not_publishable",
-                ),
-            )
+        # A finding that the reviewed diff does not anchor stays visible in the
+        # review body. It never ends the round on its own. The reviewer verdict
+        # and the open-thread readback govern the gate below.
         audit = item.payload.get("review_audit")
         if isinstance(audit, ReviewAudit) and audit.scope_expansions:
             return Continue(next_state=EVAL)

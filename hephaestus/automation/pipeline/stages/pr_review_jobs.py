@@ -14,16 +14,13 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.prompts.pr_review import (
     build_bounded_pr_review_analysis_prompt,
-    build_bounded_review_anchor_correction_prompt,
     build_bounded_review_validation_prompt,
 )
 from hephaestus.automation.review_anchors import (
-    ReviewAnchorCorrection as ReviewAnchorCorrection,
-    ReviewAnchorCorrectionReason,
     normalize_review_finding_records,
     validate_comments_to_diff as _validate_comments_to_diff,
 )
-from hephaestus.automation.review_audit import parse_review_anchor_correction_response
+from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.review_finding_history import (
     compact_terminal_review_finding_collection,
     empty_review_finding_compacted_outcomes,
@@ -41,7 +38,10 @@ from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
 from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_findings import (
+    REPORTED_FINDINGS_PAYLOAD_KEY as REPORTED_FINDINGS_PAYLOAD_KEY,
+    REVIEW_WARNINGS_PAYLOAD_KEY as REVIEW_WARNINGS_PAYLOAD_KEY,
     _build_review_finding_records as _build_review_finding_records,
+    build_reported_findings as build_reported_findings,
     empty_diff_outcome as empty_diff_outcome,
 )
 from .pr_review_gate import PrReviewGate
@@ -54,6 +54,7 @@ from .pr_review_recovery import (
     _PENDING_FINDING_RECOVERY as _PENDING_FINDING_RECOVERY,
     _PENDING_GITHUB_REQUEST as _PENDING_GITHUB_REQUEST,
     PrReviewRecoveryMixin,
+    quarantine_finding_history as quarantine_finding_history,
 )
 from .pr_review_repository_validation import PrReviewRepositoryValidationMixin
 from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
@@ -62,9 +63,6 @@ from .pr_review_threads import POST_APPLY
 from .pr_review_verification import (
     _repository_validation_prompt_json,
 )
-
-_ANCHOR_CORRECTION_JOB_PENDING = "review_anchor_correction_job_pending"
-_ANCHOR_CORRECTION_RESULT = "review_anchor_correction_result"
 
 
 class PrReviewJobs(
@@ -97,6 +95,8 @@ class PrReviewJobs(
             "host_capability_result",
             "host_capability_failure",
             "host_capability_verification",
+            REPORTED_FINDINGS_PAYLOAD_KEY,
+            REVIEW_WARNINGS_PAYLOAD_KEY,
         ):
             item.payload.pop(key, None)
         if item.pr is not None:
@@ -327,10 +327,8 @@ class PrReviewJobs(
         try:
             has_capacity = _review_finding_history_has_capacity(item)
         except ValueError:
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
-            )
+            quarantine_finding_history(item, "finding_history_capacity_invalid")
+            has_capacity = True
         if not has_capacity:
             return self._cleanup_review_worktree_then(
                 item,
@@ -390,11 +388,6 @@ class PrReviewJobs(
                 ),
                 "host_verification_bootstrap_json": item.payload.get(
                     "host_verification_bootstrap_json", ""
-                ),
-                "anchor_corrections_json": json.dumps(
-                    item.payload.get("review_anchor_corrections", []),
-                    ensure_ascii=False,
-                    sort_keys=True,
                 ),
                 "include_nitpicks": ctx.config.nitpick,
                 "review_context_kind": _review_context_kind(item),
@@ -495,12 +488,10 @@ class PrReviewJobs(
             # address leg — EVAL's missing-verdict ERROR path handles it
             # without burning a round.
             return Continue(next_state=EVAL)
-        if not item.payload.get(_COMMENT_VALIDATION_ONLY) and not item.payload.get(
-            "review_anchor_correction_complete"
-        ):
-            correction = self._prepare_anchor_correction(item, ctx)
-            if correction is not None:
-                return correction
+        if not item.payload.get(_COMMENT_VALIDATION_ONLY):
+            partition = self._partition_review_findings(item)
+            if partition is not None:
+                return partition
         reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
         try:
             live_threads = ctx.github.list_unresolved_review_threads(item.pr)
@@ -591,8 +582,22 @@ class PrReviewJobs(
         )
         return JobRequest(job, on_done_state=POST)
 
-    def _prepare_anchor_correction(self, item: WorkItem, ctx: StageContext) -> StepResult | None:
-        """Partition all findings and submit one correction job when necessary."""
+    def _partition_review_findings(self, item: WorkItem) -> StepResult | None:
+        """Split one review response into publishable and reported findings.
+
+        A finding whose anchor is not in the reviewed diff stays visible. The
+        host records the anchor problem in the finding journal and carries the
+        finding text with its warning in the item payload, so the review body
+        can show it. No extra reviewer turn follows.
+
+        Args:
+            item: The review work item that holds the parsed reviewer audit.
+
+        Returns:
+            A fresh evaluation step when the audit cannot be partitioned. It
+            returns None when the round can continue.
+
+        """
         audit = item.payload.get("review_audit")
         if not isinstance(audit, ReviewAudit) or not audit.valid:
             return None
@@ -611,165 +616,20 @@ class PrReviewJobs(
             if str(finding.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
         ]
         advisory = [finding for finding in valid if finding not in blocking]
+        unanchored = list(validation.corrections)
         item.payload["review_valid_findings"] = valid
         item.payload["review_threads"] = blocking
         item.payload["review_advisory_findings"] = advisory
-        if not validation.corrections:
-            try:
-                current_records = _build_review_finding_records(
-                    source_head=str(item.payload.get("reviewed_pr_head_sha") or ""),
-                    initial_valid=valid,
-                    corrections=[],
-                    corrected_inline=[],
-                    corrected_audit=[],
-                    not_publishable=[],
-                )
-                item.payload["review_finding_records"] = _carry_review_finding_records(
-                    item, current_records
-                )
-                item.payload["carried_review_finding_records"] = [
-                    dict(record) for record in item.payload["review_finding_records"]
-                ]
-                item.payload["carried_review_finding_compacted_outcomes"] = dict(
-                    item.payload["review_finding_compacted_outcomes"]
-                )
-            except ValueError:
-                item.payload["review_audit_failure"] = True
-                return Continue(next_state=EVAL)
-            item.payload["review_anchor_correction_complete"] = True
-            return None
-        records = [
-            {
-                "finding": dict(correction.finding),
-                "finding_id": correction.finding_id,
-                "path": correction.path,
-                "line": correction.line,
-                "side": correction.side,
-                "reason": correction.reason,
-            }
-            for correction in validation.corrections
+        item.payload[REPORTED_FINDINGS_PAYLOAD_KEY] = build_reported_findings(advisory, unanchored)
+        item.payload[REVIEW_WARNINGS_PAYLOAD_KEY] = [
+            {"code": warning.code, "message": warning.message, "recovery": warning.recovery}
+            for warning in validation.warnings
         ]
-        item.payload["review_anchor_corrections"] = records
-        workspace = source_workspace_binding(
-            item,
-            ctx,
-            SourceLane.REVIEW,
-            revision=str(item.payload.get("reviewed_pr_head_sha") or ""),
-        )
-        reviewer_agent = agent_provider(ctx, "reviewer")
-        item.payload[_ANCHOR_CORRECTION_JOB_PENDING] = True
-        return JobRequest(
-            AgentJob(
-                repo=item.repo,
-                issue=_issue_number(item),
-                agent=reviewer_agent,
-                model=stage_model(ctx, "reviewer", reviewer_model),
-                prompt_builder=build_bounded_review_anchor_correction_prompt,
-                cwd=workspace.cwd,
-                timeout_s=stage_timeout(ctx, "reviewer", pr_reviewer_claude_timeout),
-                workspace=workspace,
-                session_agent=AGENT_PR_REVIEWER,
-                resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
-                execution_request=ExecutionRequest(
-                    AgentRole.PR_REVIEWER,
-                    AgentOperation.REVIEW_VALIDATE,
-                    agent_session_lifecycle(item, AGENT_PR_REVIEWER),
-                ),
-                resume_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
-                sandbox="read-only",
-                allowed_tools="Read,Glob,Grep",
-                prompt_kwargs={
-                    "pr_number": item.pr,
-                    "issue_number": item.issue,
-                    "invalid_findings_json": json.dumps(
-                        records, ensure_ascii=False, sort_keys=True
-                    ),
-                    "diff_text": item.payload.get("pr_diff", ""),
-                    "review_context_kind": _review_context_kind(item),
-                },
-                descr="correct_review_anchors",
-            ),
-            on_done_state=ANCHOR_CORRECTION_WAIT,
-        )
-
-    def _anchor_correction_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Apply one correction response and never submit a second correction turn."""
-        del ctx
-        raw_records = item.payload.get("review_anchor_corrections")
-        if not isinstance(raw_records, list):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        corrections: list[ReviewAnchorCorrection] = []
-        try:
-            for record in raw_records:
-                if not isinstance(record, dict):
-                    raise ValueError("invalid correction record")
-                finding = record.get("finding")
-                if not isinstance(finding, dict):
-                    raise ValueError("invalid correction finding")
-                corrections.append(
-                    ReviewAnchorCorrection(
-                        finding=dict(finding),
-                        finding_id=str(record.get("finding_id") or ""),
-                        path=str(record.get("path") or ""),
-                        line=cast(int | None, record.get("line")),
-                        side=str(record.get("side") or ""),
-                        reason=cast(ReviewAnchorCorrectionReason, record.get("reason")),
-                    )
-                )
-        except (TypeError, ValueError):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        response = item.payload.pop(_ANCHOR_CORRECTION_RESULT, None)
-        parsed = (
-            parse_review_anchor_correction_response(response, tuple(corrections))
-            if response is not None
-            else None
-        )
-        initial_valid = [dict(value) for value in item.payload.get("review_valid_findings", [])]
-        valid = [
-            finding
-            for finding in initial_valid
-            if str(finding.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
-        ]
-        advisory: list[dict[str, object]] = [
-            finding for finding in initial_valid if finding not in valid
-        ]
-        not_publishable: list[dict[str, object]] = []
-        corrected: list[dict[str, object]] = []
-        if parsed is None:
-            not_publishable = [dict(correction.finding) for correction in corrections]
-        else:
-            corrected_validation = _validate_comments_to_diff(
-                [dict(finding) for finding in parsed.inline_findings],
-                str(item.payload.get("pr_diff") or ""),
-                preserve_finding_ids=True,
-            )
-            valid.extend(dict(finding) for finding in corrected_validation.valid)
-            invalid_ids = {correction.finding_id for correction in corrected_validation.corrections}
-            not_publishable.extend(
-                dict(finding)
-                for finding in parsed.inline_findings
-                if str(finding.get("finding_id") or "") in invalid_ids
-            )
-            # This review path has no durable non-inline publication surface.
-            # Keep an audit selection as a bounded, not-publishable finding
-            # until a supported surface exists.
-            not_publishable.extend(dict(finding) for finding in parsed.audit_findings)
-            not_publishable.extend(dict(finding) for finding in parsed.not_publishable_findings)
-            corrected = [dict(finding) for finding in corrected_validation.valid]
-        item.payload["review_threads"] = valid
-        item.payload["review_advisory_findings"] = advisory
-        item.payload["review_not_publishable_findings"] = not_publishable
-        item.payload["review_corrected_findings"] = corrected
         try:
             current_records = _build_review_finding_records(
                 source_head=str(item.payload.get("reviewed_pr_head_sha") or ""),
-                initial_valid=initial_valid,
-                corrections=corrections,
-                corrected_inline=corrected,
-                corrected_audit=[],
-                not_publishable=not_publishable,
+                initial_valid=valid,
+                unanchored=unanchored,
             )
             item.payload["review_finding_records"] = _carry_review_finding_records(
                 item, current_records
@@ -783,9 +643,7 @@ class PrReviewJobs(
         except ValueError:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        item.payload["review_anchor_correction_attempted"] = True
-        item.payload["review_anchor_correction_complete"] = True
-        return Continue(next_state=VALIDATE_WAIT)
+        return None
 
     def _host_verification_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Submit primary review only after its host verification passed."""
@@ -1052,9 +910,6 @@ class PrReviewJobs(
             return
         if item.payload.get(_PENDING_FINDING_RECOVERY):
             self._on_reconciliation_done(item, result)
-            return
-        if item.payload.pop(_ANCHOR_CORRECTION_JOB_PENDING, None):
-            item.payload[_ANCHOR_CORRECTION_RESULT] = result.value if result.ok else None
             return
         if item.state == POST:
             self._on_reconciliation_done(item, result)
