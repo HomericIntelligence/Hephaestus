@@ -152,6 +152,11 @@ GO_AUDIT_PUBLISH = "GO_AUDIT_PUBLISH"
 COMPACT_REVIEWER_WAIT = "COMPACT_REVIEWER_WAIT"
 CLEANUP_REVIEW_WORKTREE_WAIT = "CLEANUP_REVIEW_WORKTREE_WAIT"
 
+#: Legacy state of the removed anchor-correction review round (issue #3389).
+#: A durable item can still hold it after a restart. The stage routes it to a
+#: fresh review step instead of failing closed as an unknown state.
+LEGACY_ANCHOR_CORRECTION_WAIT = "ANCHOR_CORRECTION_WAIT"
+
 # Public audit publication is a receipt-backed external reconciliation, not a
 # review round. Three delayed attempts (1s, 2s, 4s) bound one coordinator run;
 # the durable receipt lets a later run resume without another reviewer call.
@@ -664,6 +669,7 @@ __all__ = [
     "HOST_VERIFICATION_TIMEOUT_S",
     "HOST_VERIFICATION_WAIT",
     "IMPLEMENTATION_GO_AUDIT_RETRY_CAP",
+    "LEGACY_ANCHOR_CORRECTION_WAIT",
     "POST",
     "REPOSITORY_VALIDATION_CI_WAIT",
     "REPOSITORY_VALIDATION_RUNTIME_WAIT",

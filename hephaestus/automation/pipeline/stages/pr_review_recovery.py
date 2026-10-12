@@ -10,7 +10,7 @@ from hephaestus.automation.review_finding_history import (
     normalize_review_finding_collection,
     normalize_review_finding_compacted_outcomes,
 )
-from hephaestus.automation.review_warnings import make_review_warning
+from hephaestus.automation.review_warnings import ReviewWarning, make_review_warning
 
 from ..github_jobs import (
     FrozenJson,
@@ -30,8 +30,8 @@ from .base import (
     stage_timeout,
 )
 from .pr_review_findings import (
-    REVIEW_WARNINGS_PAYLOAD_KEY,
     _apply_review_receipt,
+    carry_review_warnings,
 )
 from .pr_review_history import _pending_review_finding, _publication_head
 from .pr_review_threads import (
@@ -99,16 +99,9 @@ def quarantine_finding_history(item: WorkItem, reason: str) -> None:
         ),
         recovery=_FINDING_HISTORY_RECOVERY,
     )
-    carried = item.payload.get(REVIEW_WARNINGS_PAYLOAD_KEY)
-    warnings = list(carried) if isinstance(carried, list) else []
-    item.payload[REVIEW_WARNINGS_PAYLOAD_KEY] = [
-        *warnings,
-        {
-            "code": warning.code,
-            "message": warning.message,
-            "recovery": warning.recovery,
-        },
-    ]
+    # The carried warning list is bounded, so this quarantine warning cannot
+    # grow it without a limit.
+    carry_review_warnings(item, [warning])
 
 
 class PrReviewRecoveryMixin(_PrReviewHost):
@@ -118,6 +111,7 @@ class PrReviewRecoveryMixin(_PrReviewHost):
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult | None:
         """Reconcile an exact-head pending publication before a new review."""
+        quarantine_warnings: list[ReviewWarning] = []
         try:
             records = list(
                 normalize_review_finding_records(
@@ -130,10 +124,13 @@ class PrReviewRecoveryMixin(_PrReviewHost):
                     empty_review_finding_compacted_outcomes(),
                 ),
                 retained_finding_ids=[record["finding_id"] for record in records],
+                warnings=quarantine_warnings,
             )
         except ValueError:
+            carry_review_warnings(item, quarantine_warnings)
             quarantine_finding_history(item, "carried_records_invalid")
             return None
+        carry_review_warnings(item, quarantine_warnings)
         pending_records = [record for record in records if record["status"] == "pending"]
         if not pending_records:
             return None
@@ -319,14 +316,18 @@ class PrReviewRecoveryMixin(_PrReviewHost):
             if receipt.final_compacted_outcomes is not None
             else receipt.request.compacted_outcomes
         )
+        quarantine_warnings: list[ReviewWarning] = []
         try:
             records, compacted = normalize_review_finding_collection(
                 record_source.thaw(),
                 compacted_outcomes=None if compacted_source is None else compacted_source.thaw(),
+                warnings=quarantine_warnings,
             )
         except ValueError:
+            carry_review_warnings(item, quarantine_warnings)
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
+        carry_review_warnings(item, quarantine_warnings)
         item.payload["review_finding_records"] = [dict(record) for record in records]
         item.payload["review_finding_compacted_outcomes"] = compacted
         if pending_finding_recovery:

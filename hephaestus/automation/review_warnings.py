@@ -60,6 +60,7 @@ AnchorCorrectionWarningReason = Literal[
     "anchor_path_not_in_diff",
     "anchor_line_not_in_diff",
     "anchor_unsupported_side",
+    "anchor_demotion_budget_exhausted",
 ]
 
 DataHygieneWarningReason = Literal[

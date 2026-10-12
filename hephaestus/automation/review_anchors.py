@@ -546,11 +546,6 @@ class ReviewPublicationResult(list[dict[str, Any]]):
         return tuple(self)
 
     @property
-    def anchor_corrections(self) -> tuple[ReviewAnchorCorrection, ...]:
-        """Return findings that need a valid anchor selected by the reviewer."""
-        return self.corrections
-
-    @property
     def not_publishable(self) -> tuple[ReviewAnchorCorrection, ...]:
         """Return findings that the current review cannot publish inline."""
         return self.unpublishable

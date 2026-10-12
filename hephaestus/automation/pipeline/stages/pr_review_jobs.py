@@ -38,10 +38,13 @@ from ..summary import record_review_run
 from .base import _reviewed_terminal_pr_outcome, source_workspace_binding, stage_timeout
 from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_findings import (
+    DEMOTED_FINDINGS_PAYLOAD_KEY as DEMOTED_FINDINGS_PAYLOAD_KEY,
     REPORTED_FINDINGS_PAYLOAD_KEY as REPORTED_FINDINGS_PAYLOAD_KEY,
+    REVIEW_WARNINGS_DROPPED_PAYLOAD_KEY as REVIEW_WARNINGS_DROPPED_PAYLOAD_KEY,
     REVIEW_WARNINGS_PAYLOAD_KEY as REVIEW_WARNINGS_PAYLOAD_KEY,
     _build_review_finding_records as _build_review_finding_records,
     build_reported_findings as build_reported_findings,
+    carry_review_warnings as carry_review_warnings,
     empty_diff_outcome as empty_diff_outcome,
 )
 from .pr_review_gate import PrReviewGate
@@ -97,6 +100,8 @@ class PrReviewJobs(
             "host_capability_verification",
             REPORTED_FINDINGS_PAYLOAD_KEY,
             REVIEW_WARNINGS_PAYLOAD_KEY,
+            REVIEW_WARNINGS_DROPPED_PAYLOAD_KEY,
+            DEMOTED_FINDINGS_PAYLOAD_KEY,
         ):
             item.payload.pop(key, None)
         if item.pr is not None:
@@ -621,10 +626,7 @@ class PrReviewJobs(
         item.payload["review_threads"] = blocking
         item.payload["review_advisory_findings"] = advisory
         item.payload[REPORTED_FINDINGS_PAYLOAD_KEY] = build_reported_findings(advisory, unanchored)
-        item.payload[REVIEW_WARNINGS_PAYLOAD_KEY] = [
-            {"code": warning.code, "message": warning.message, "recovery": warning.recovery}
-            for warning in validation.warnings
-        ]
+        carry_review_warnings(item, validation.warnings)
         try:
             current_records = _build_review_finding_records(
                 source_head=str(item.payload.get("reviewed_pr_head_sha") or ""),

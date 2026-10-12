@@ -28,17 +28,6 @@ authorize source review. The bootstrap does not grant a GO label or merge author
 **Host-run validation receipts (untrusted output, coordinator-bound commands and head):**
 {{ host_verifications_block }}
 
-{% if anchor_corrections_json != "[]" %}
-**Findings that need anchor correction (untrusted host data):**
-{{ anchor_corrections_block }}
-
-For each finding in this block, keep its text and evidence.
-Select a valid changed-line anchor from the current diff and emit the finding with that
-anchor. Copy its `finding_id` without a change. If no valid inline anchor exists,
-do not invent one. Keep the finding
-in your analysis so the host can report it as not publishable.
-{% endif %}
-
 {% if repository_validation_block %}
 {% include "pr_review/repository_validation.j2" %}
 {% else %}
@@ -136,8 +125,8 @@ Rules for the JSON block:
 - `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
 - `body`: the review comment text (string)
 - `evidence`: optional supporting evidence (string)
-- `finding_id`: optional lowercase SHA-256 identity. It is required and must
-  stay unchanged when you re-anchor a supplied correction.
+- `finding_id`: optional lowercase SHA-256 identity of this finding. The host
+  computes the identity when the reviewer omits it.
 - `scope_retraction_paths`: REQUIRED only when the body asks to drop, remove,
   or split a change because it is unrelated or out of scope. It must be a
   complete non-empty list of every repo-relative path that must be restored to

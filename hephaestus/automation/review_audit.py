@@ -12,8 +12,13 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from html import escape
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal, cast
 
+from hephaestus.automation.pipeline.scope_retraction import (
+    SCOPE_RETRACTION_MARKER_PREFIX,
+    is_scope_retraction_finding,
+    normalize_scope_retraction_paths,
+)
 from hephaestus.automation.review_finding_history import (
     normalize_review_finding_collection,
     review_finding_collection_payload,
@@ -23,15 +28,6 @@ from hephaestus.automation.review_warnings import (
     ReviewWarning,
     bounded_review_text,
     make_review_warning,
-)
-
-if TYPE_CHECKING:
-    from hephaestus.automation.review_anchors import ReviewAnchorCorrection
-
-from hephaestus.automation.pipeline.scope_retraction import (
-    SCOPE_RETRACTION_MARKER_PREFIX,
-    is_scope_retraction_finding,
-    normalize_scope_retraction_paths,
 )
 from hephaestus.automation.scope_expansion_domain import (
     ScopeExpansion,
@@ -153,108 +149,6 @@ class ReviewAudit:
     scope_expansions: tuple[ScopeExpansion, ...] = ()
     warnings: tuple[ReviewWarning, ...] = ()
     reported_findings: tuple[dict[str, object], ...] = ()
-
-
-@dataclass(frozen=True)
-class ReviewAnchorCorrectionResponse:
-    """Host-owned findings after one typed anchor-correction response."""
-
-    inline_findings: tuple[dict[str, object], ...]
-    audit_findings: tuple[dict[str, object], ...]
-    not_publishable_findings: tuple[dict[str, object], ...]
-
-
-def _corrected_inline_finding(
-    value: Mapping[str, object], finding: dict[str, object]
-) -> dict[str, object] | None:
-    """Apply one valid inline anchor to host-owned finding content."""
-    if set(value) != {"finding_id", "surface", "path", "line", "side"}:
-        return None
-    path = value.get("path")
-    line = value.get("line")
-    if (
-        not isinstance(path, str)
-        or not path.strip()
-        or len(path) > 4_096
-        or isinstance(line, bool)
-        or not isinstance(line, int)
-        or line < 1
-        or value.get("side") != "RIGHT"
-    ):
-        return None
-    finding.update(path=path.strip(), line=line, side="RIGHT")
-    return finding
-
-
-def _correction_item(
-    value: object,
-    expected_by_id: Mapping[str, ReviewAnchorCorrection],
-    seen: set[str],
-) -> tuple[str, str, dict[str, object]] | None:
-    """Validate one response item and retain host-owned finding content."""
-    if not isinstance(value, Mapping):
-        return None
-    finding_id = value.get("finding_id")
-    surface = value.get("surface")
-    if (
-        not isinstance(finding_id, str)
-        or finding_id in seen
-        or finding_id not in expected_by_id
-        or surface not in {"inline", "audit", "not_publishable"}
-    ):
-        return None
-    finding = dict(expected_by_id[finding_id].finding)
-    if surface == "inline":
-        corrected_finding = _corrected_inline_finding(value, finding)
-        if corrected_finding is None:
-            return None
-        finding = corrected_finding
-    else:
-        if set(value) != {"finding_id", "surface"}:
-            return None
-        severity = str(finding.get("severity") or "").lower()
-        if surface == "audit" and severity not in {"minor", "nitpick"}:
-            return None
-    return finding_id, str(surface), finding
-
-
-def parse_review_anchor_correction_response(
-    response: str | Mapping[str, object],
-    expected: tuple[ReviewAnchorCorrection, ...],
-) -> ReviewAnchorCorrectionResponse | None:
-    """Apply one strict correction response without accepting finding-content changes."""
-    _source, payload = _response_payload(response)
-    if payload is None or set(payload) != {"corrections"}:
-        return None
-    values = payload.get("corrections")
-    if not isinstance(values, list) or len(values) != len(expected):
-        return None
-    expected_by_id = {correction.finding_id: correction for correction in expected}
-    if len(expected_by_id) != len(expected):
-        return None
-    seen: set[str] = set()
-    inline: list[dict[str, object]] = []
-    audit: list[dict[str, object]] = []
-    not_publishable: list[dict[str, object]] = []
-    for value in values:
-        item = _correction_item(value, expected_by_id, seen)
-        if item is None:
-            return None
-        finding_id, surface, finding = item
-        if surface == "inline":
-            inline.append(finding)
-        elif surface == "audit":
-            audit.append(finding)
-        else:
-            not_publishable.append(finding)
-        seen.add(finding_id)
-    if seen != set(expected_by_id):
-        return None
-    return ReviewAnchorCorrectionResponse(
-        inline_findings=tuple(inline),
-        audit_findings=tuple(audit),
-        not_publishable_findings=tuple(not_publishable),
-    )
 
 
 def is_clean_go_review(audit: object | None) -> bool:
