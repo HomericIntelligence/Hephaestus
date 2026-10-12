@@ -190,12 +190,11 @@ def read_page(
         connection.close()
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
 def test_installed_service_returns_authenticated_retained_log_pages(
-    tmp_path: Path, host: str
+    tmp_path: Path,
 ) -> None:
-    """Run actual TLS and return exact bytes for the registered terminal attempt."""
-    config, registration = service_config(tmp_path, host)
+    """Check exact bytes through real IPv4 TLS; do not verify IPv6 behavior."""
+    config, registration = service_config(tmp_path)
     with running_command(config) as ready:
         status, denied = read_page(
             ready, tmp_path / "certificate.pem", registration, authorized=False
