@@ -499,6 +499,18 @@ def _checkpoint_review_identity(item: WorkItem, result: JobResult, ctx: StageCon
             item.payload["review_session_error"] = "review-session-lost"
             return True
     if result.session_lost:
+        if item.state == AMEND_WAIT:
+            # The lost conversation is the planner amendment, not the reviewer.
+            # The reviewer session stays bound to this cycle so the stage can
+            # recover the amendment from durable plan and review artifacts
+            # instead of re-reviewing the unchanged plan on a new round.
+            item.payload["planner_amendment_session_error"] = "planner-amendment-session-lost"
+            logger.warning(
+                "plan_review:%s: planner amendment session lost; the reviewer session "
+                "remains bound to this cycle",
+                item.issue,
+            )
+            return True
         if store is not None and cycle_id:
             store.mark_recovery_required(cycle_id)
         item.payload["review_session_error"] = "review-session-lost"
