@@ -7528,6 +7528,11 @@ class WorkerPool:
                 return self._first_publication_rebase_handoff(job, manager, result)
             return result
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            logger.warning(
+                "first publication discovery failed for issue %s: %r",
+                identity.get("issue_number"),
+                error,
+            )
             return JobResult(
                 ok=False,
                 value={**identity, "failure_kind": "validation_runner"},
@@ -7830,6 +7835,12 @@ class WorkerPool:
         try:
             binding = self._review_validation_binding(job)
             if binding.reusable_root is None or binding.repository is None:
+                logger.warning(
+                    "review source identity incomplete for PR %s: reusable_root=%r repository=%r",
+                    getattr(getattr(job, "repository_validation_preparation", None), "pr_number", None),
+                    binding.reusable_root,
+                    binding.repository,
+                )
                 raise SourceWorkspaceError("The review source identity is incomplete.")
             manager = SourceWorkspaceManager(
                 binding.reusable_root, repository=binding.repository, base_dir=binding.cwd.parent
@@ -7849,6 +7860,11 @@ class WorkerPool:
                 deadline.remaining()
                 return JobResult(ok=True, value=RepositoryValidationSourceRead(request, plan))
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            logger.warning(
+                "repository validation source preparation failed for PR %s: %r",
+                getattr(request, "pr_number", None),
+                exc,
+            )
             return JobResult(
                 ok=False,
                 error="repository_validation_source_unavailable",
