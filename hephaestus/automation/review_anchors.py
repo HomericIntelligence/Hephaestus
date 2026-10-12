@@ -10,6 +10,13 @@ from dataclasses import dataclass
 from html import escape
 from typing import Any, Literal
 
+from hephaestus.automation.review_warnings import (
+    AnchorCorrectionWarningReason,
+    ReviewWarning,
+    bounded_review_text,
+    make_review_warning,
+)
+
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 ReviewAnchorCorrectionReason = Literal[
@@ -37,6 +44,38 @@ _FINDING_REASONS = frozenset(
         "audit_surface_unavailable",
     }
 )
+# Per-finding content bounds are informational. The host truncates the content
+# and warns. Each warning text states what the reviewer must send instead.
+_FINDING_FIELD_LIMITS: tuple[tuple[str, int, str], ...] = (
+    ("path", MAX_REVIEW_FINDING_PATH_CHARS, "path"),
+    ("body", MAX_REVIEW_FINDING_BODY_CHARS, "body"),
+    ("evidence", MAX_REVIEW_FINDING_EVIDENCE_CHARS, "evidence"),
+)
+_TRUNCATION_RECOVERY = "Send a shorter finding field so the host does not truncate the finding."
+_ANCHOR_WARNING_CODES: dict[ReviewAnchorCorrectionReason, AnchorCorrectionWarningReason] = {
+    "reviewed_diff_unavailable": "anchor_reviewed_diff_unavailable",
+    "path_not_in_diff": "anchor_path_not_in_diff",
+    "line_not_in_diff": "anchor_line_not_in_diff",
+    "unsupported_side": "anchor_unsupported_side",
+}
+_ANCHOR_WARNING_TEXT: dict[AnchorCorrectionWarningReason, tuple[str, str]] = {
+    "anchor_reviewed_diff_unavailable": (
+        "The reviewed diff was unavailable. The host moved the finding to the correction list.",
+        "Send the reviewed diff with the review so the host can check each anchor.",
+    ),
+    "anchor_path_not_in_diff": (
+        "The review finding path is not in the reviewed diff.",
+        "Send a path that the reviewed diff changes.",
+    ),
+    "anchor_line_not_in_diff": (
+        "The review finding line is not in the reviewed diff.",
+        "Send a line number that the reviewed diff adds or keeps on the RIGHT side.",
+    ),
+    "anchor_unsupported_side": (
+        "The review finding side is not RIGHT.",
+        "Send side as RIGHT. The host cannot publish the other sides inline.",
+    ),
+}
 
 
 def _full_sha(value: object) -> bool:
@@ -197,8 +236,45 @@ def normalize_review_finding_records(
     return tuple(normalized)
 
 
+def _bound_finding_content(finding: dict[str, Any]) -> tuple[ReviewWarning, ...]:
+    """Truncate oversized finding fields in place and warn for each field.
+
+    Per-finding content bounds are informational. The host keeps the finding and
+    reports one warning for each field that the host truncates.
+
+    Args:
+        finding: One candidate finding. The host updates it in place.
+
+    Returns:
+        One warning for each truncated field.
+
+    """
+    warnings: list[ReviewWarning] = []
+    for key, limit, label in _FINDING_FIELD_LIMITS:
+        value = finding.get(key)
+        if isinstance(value, str) and len(value) > limit:
+            finding[key] = bounded_review_text(value, limit)
+            warnings.append(
+                make_review_warning(
+                    "finding_content_truncated",
+                    message=f"The review finding {label} was truncated at {limit} characters.",
+                    recovery=_TRUNCATION_RECOVERY,
+                )
+            )
+    return tuple(warnings)
+
+
 def _validate_finding_bounds(finding: dict[str, Any]) -> None:
-    """Reject one finding that exceeds the review transport limits."""
+    """Reject one host-owned finding that exceeds the review transport limits.
+
+    The reviewer intake path truncates and warns. A correction record and a
+    durable journal record carry host-owned content that the host bounded
+    before, so these checks stay fail-closed.
+
+    Raises:
+        ValueError: If the path, body, or evidence exceeds its size limit.
+
+    """
     path = finding.get("path")
     body = finding.get("body")
     evidence = finding.get("evidence")
@@ -272,10 +348,18 @@ class ReviewAnchorCorrection:
 
 @dataclass(frozen=True)
 class ReviewCommentValidation:
-    """Separate valid review comments from findings that need correction."""
+    """Separate valid review comments from findings that need correction.
+
+    Attributes:
+        valid: Comments that GitHub accepts for the reviewed diff.
+        corrections: Findings that the host moved out of the valid set.
+        warnings: One warning for each bounded field and for each correction.
+
+    """
 
     valid: tuple[dict[str, Any], ...]
     corrections: tuple[ReviewAnchorCorrection, ...]
+    warnings: tuple[ReviewWarning, ...] = ()
 
 
 def _valid_review_positions(diff_text: str) -> dict[str, set[tuple[int, str]]]:
@@ -357,27 +441,38 @@ def validate_comments_to_diff(
             this compatibility mode.
 
     Returns:
-        Valid comments and typed correction records for invalid comments.
+        Valid comments, typed correction records for invalid comments, and one
+        warning for each bounded field and each correction.
+
+    Raises:
+        ValueError: If the finding count or the aggregate size exceeds the
+            GitHub transport limits.
 
     """
     if len(comments) > MAX_REVIEW_FINDINGS:
         raise ValueError("review finding count exceeds its limit")
+    # Per-finding content bounds are informational. Truncate first, then measure
+    # the aggregate, so a truncation can bring a collection under its cap.
+    warnings: list[ReviewWarning] = []
+    bounded: list[dict[str, Any]] = []
     for comment in comments:
-        _validate_finding_bounds(comment)
+        finding = dict(comment)
+        warnings.extend(_bound_finding_content(finding))
+        bounded.append(finding)
     aggregate_size = len(
         json.dumps(
-            comments, allow_nan=False, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            bounded, allow_nan=False, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
     )
     if aggregate_size > MAX_REVIEW_FINDING_AGGREGATE_BYTES:
         raise ValueError("review findings exceed their aggregate size limit")
     if not diff_text.strip() and fail_open_empty:
-        return ReviewCommentValidation(tuple(comments), ())
+        return ReviewCommentValidation(tuple(bounded), (), tuple(warnings))
 
     valid_positions = _valid_review_positions(diff_text)
     valid: list[dict[str, Any]] = []
     corrections: list[ReviewAnchorCorrection] = []
-    for comment in comments:
+    for comment in bounded:
         finding = dict(comment)
         supplied_id = finding.get("finding_id")
         if preserve_finding_ids:
@@ -418,7 +513,14 @@ def validate_comments_to_diff(
                 reason=reason,
             )
         )
-    return ReviewCommentValidation(tuple(valid), tuple(corrections))
+        # Every partition needs an explanation. A correction without a warning
+        # is a silent correction, so the host reports each one.
+        anchor_code = _ANCHOR_WARNING_CODES[reason]
+        anchor_message, anchor_recovery = _ANCHOR_WARNING_TEXT[anchor_code]
+        warnings.append(
+            make_review_warning(anchor_code, message=anchor_message, recovery=anchor_recovery)
+        )
+    return ReviewCommentValidation(tuple(valid), tuple(corrections), tuple(warnings))
 
 
 class ReviewPublicationResult(list[dict[str, Any]]):
