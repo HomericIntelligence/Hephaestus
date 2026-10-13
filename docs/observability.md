@@ -10,14 +10,13 @@ structured JSONL diagnostic events and serves a local `/metrics` + `/health` end
 job outcomes and stall state were not exported, and no document defined the
 metric catalog, alert ownership, or SLOs.
 
-The metric and alert names below are drift-guarded against the code by
-`tests/unit/docs/test_observability_doc.py`: every `hephaestus_*` metric emitted
-by `hephaestus/automation/pipeline/coordinator_runtime.py` or
+The metric and alert names below must stay in sync with the code by hand. Every
+`hephaestus_*` metric emitted by
+`hephaestus/automation/pipeline/coordinator_runtime.py` or
 `hephaestus/observability/metrics.py` and every alert rule defined in
-`hephaestus/observability/alerts.py` must appear here, so this catalog cannot
-silently fall out of sync with what the pipeline actually exposes. The same
-guard checks the documented finite domains and caps against the runtime policy
-constants.
+`hephaestus/observability/alerts.py` must appear here. The drift guard that once
+enforced this catalog was removed with the non-core-library test re-scope, so a
+reviewer must compare this catalog with those three modules when either changes.
 
 ## Enabling monitoring
 

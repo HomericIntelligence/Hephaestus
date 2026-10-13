@@ -44,8 +44,8 @@ A pull request that adds an entry under `mcpServers` must document:
 3. Runtime authentication without committed secrets.
 4. Startup, timeout, and unavailable-server behaviour.
 
-The pull request must also update this document and the posture assertions in
-`tests/unit/docs/test_mcp_config.py`.
+The pull request must also update this document. No executable guard enforces
+this posture, so a reviewer must confirm the change.
 
 A stdio server uses `command` plus `args`; an HTTP server uses `type: "http"`
 and `url`. Example entry:

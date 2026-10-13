@@ -1298,25 +1298,34 @@ later branch push does not invalidate that posted review; only the final
 the current open, unarmed PR head.
 
 The host validates each finding against the complete immutable diff before it
-selects a publication surface. It gives each finding a stable SHA-256 ID. If an
-anchor is not valid, the host sends one bounded correction request to the same
-reviewer session. The request uses `REVIEW_VALIDATE` with read-only
-`Read,Glob,Grep` tools. The reviewer can change only the anchor or the surface.
-The host keeps the finding body, evidence, severity, ID, and source scope. It
-validates a corrected inline anchor against the same diff. It then sends all
-valid blocking findings in one GitHub review request.
+selects a publication surface. It gives each finding a stable SHA-256 ID.
+Validation of one finding is informational. A finding with an anchor that the
+reviewed diff cannot place is not discarded and does not fail publication. The
+host demotes it from the inline surface and renders it in the visible review
+body. The body uses a warning marker and states the location, the finding ID, the
+finding text, and a recovery instruction. GitHub renders a review-level body as
+an unanchored general comment, so the feedback stays on the pull request. The
+host then sends all valid blocking findings in one GitHub review request. It
+never asks the reviewer for a second turn.
+
+A malformed finding is also reported, not skipped. The host keeps every other
+finding, emits one warning for the malformed item, and carries its content as
+bounded text. Every warning carries a stable machine-readable code, a short
+message, and a recovery instruction that states the operator action. The host
+never infers a verdict from warning text, and a missing or malformed reviewer
+verdict still invalidates the whole audit before any label write.
 
 Before that GitHub review request, the host writes one actor-owned finding
 journal for the exact reviewed head. This first write marks each inline
 finding as pending, not published. After GitHub confirms the review request,
 the host writes the published inline outcomes to the journal. The journal also records
-corrected and not-publishable outcomes, the original and final anchors, and the
+demoted and not-publishable outcomes, the original and final anchors, and the
 typed failure reason. Restart seeding keeps these bounded records for a new
 review. A final public GO audit includes the retained records. Only a confirmed
-public-audit readback permits deletion of the finding journal. A
-critical or major finding that has no publishable surface causes a verified
-`state:implementation-no-go` transition and the terminal
-`review_finding_not_publishable` result.
+public-audit readback permits deletion of the finding journal. A demoted or
+reported finding prevents a clean sign-off. It routes the item through the
+ordinary non-GO review path with a verified `state:implementation-no-go`
+transition. It never raises and it never fails open.
 
 For the registered host-verification plan, macOS uses `sandbox-exec` plus
 disposable, quota-backed disk images. Linux uses a local Pyxis/Enroot squashfs
@@ -1483,17 +1492,14 @@ stateDiagram-v2
     Checkout --> Review: clean source checkout matches snapshot head
     Checkout --> Failed: checkout or head drift; cleanup then a later loop gets a new snapshot
     Review --> Validate: review produced
-    Validate --> CorrectAnchor: one or more anchors are invalid
-    CorrectAnchor --> Validate: one bounded read-only correction
     Review --> Implementation: invalid output requires fresh implementation context
-    Validate --> Journal: all findings normalized
+    Validate --> Journal: valid findings partitioned; demoted and reported findings carried
     Journal --> Post: exact-head finding record has exact readback
     Journal --> Failed: finding record is not durable
-    Post --> Failed: blocking finding has no publishable surface; durable no-go
     Post --> Implementation: any open review thread, after durable no-go and checkout cleanup
     Post --> Evaluate: no open review thread
     Evaluate --> Implementation: a late open thread, after durable no-go and checkout cleanup
-    Evaluate --> Approve: verdict GO and no unresolved findings; cleanup then implementation-go durable
+    Evaluate --> Approve: verdict GO and no unresolved or reported findings; cleanup then implementation-go durable
     Approve --> MergeReady
     MergeReady --> [*]
     Implementation --> [*]
@@ -1505,13 +1511,23 @@ Architectural contract:
 - Every implementation review is posted to the pull request.
 - The initial review fetches and verifies one detached checkout of `H`, then
   validates all severities before it selects inline or audit publication. It
-  uses one bounded correction request for invalid anchors, then submits all
-  valid blocking inline findings in one GitHub review request. It neither rebases
-  nor pushes the PR branch, and its checkout is removed before it exits.
-- A correction response has exactly one result for each host finding ID. Only
-  `minor` and `nitpick` findings can use the audit surface. A missing, duplicate,
-  unknown, malformed, or still-invalid result becomes not publishable. The host
-  does not start a second correction request.
+  submits all valid blocking inline findings in one GitHub review request. It
+  neither rebases nor pushes the PR branch, and its checkout is removed before it
+  exits.
+- Validation of one finding is informational. The host keeps every usable
+  finding. A malformed finding becomes a warning plus bounded reported text. A
+  finding the reviewed diff cannot anchor inline becomes a demoted finding that
+  the review body shows with a warning marker and a recovery instruction. The
+  host starts no second reviewer turn for either case. Only `minor` and
+  `nitpick` findings use the audit surface.
+- The demoted-findings section and every per-finding field stay bounded. If the
+  section cannot hold every demoted finding, the host omits the later blocks and
+  states that it omitted them, so no demoted finding disappears silently.
+- A demoted or reported finding prevents a clean sign-off. The gate never raises
+  and never fails open.
+- A durable item that still holds the wait state of the removed anchor-repair
+  review round reroutes to a fresh review step. The host records a warning and
+  does not fail closed on a state it no longer owns.
 - The exact-head finding journal is durable before an inline review write. Its
   first state does not claim that an unconfirmed inline finding is published.
   A confirmed review write promotes that finding to the published state. The
@@ -2793,11 +2809,13 @@ Each collaborator owns an explicit responsibility:
 | [`pipeline_github.py`](../hephaestus/automation/pipeline_github.py) | `pipeline_github_contract.py`, `pipeline_github_transport.py`, `pipeline_github_queries.py`, `pipeline_github_reviews.py`, `pipeline_github_mutations.py` | static host contract; adapter construction; transport; reads; review evidence; non-review mutations |
 | [`pipeline/stages/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py) | `pr_review_threads.py`, `pr_review_verification.py`, `pr_review_diagnostics.py`, `pr_review_jobs.py`, `pr_review_gate.py` | public stage surface; thread parsing; host verification and diagnostics; jobs/worktrees; GO/NO-GO gate |
 
-The source budgets are executable in
-[`test_automation_hotspot_architecture.py`](../tests/unit/automation/test_automation_hotspot_architecture.py)
-and are strictly below the pre-decomposition hotspot sizes.
-Collaborators must not import their assembly module. Tests inject the
-transport command runner or patch the actual external boundary. Facade symbol
+The per-facade source budgets are no longer executable. The budget tests were
+removed with the non-core-library test re-scope. The `ruff-check-complexity`
+pre-commit hook still enforces the McCabe limit on every `hephaestus/` module,
+including the product layer. No check now enforces a facade line budget, so a
+reviewer must confirm that a facade stays within its budget by reading the
+collaborators. Collaborators must not import their assembly module. Tests inject
+the transport command runner or patch the actual external boundary. Facade symbol
 copies and runtime monkeypatch translators are removed.
 
 `pipeline_github_merge_policy.py` owns the immutable `EffectiveMergePolicy`
@@ -2823,8 +2841,11 @@ retains finding provenance and reserves space for the next review batch.
 `pr_review_recovery.py` reconciles pending publications and applies exact-request
 receipts before a new review. `coordinator_observability.py` records bounded
 finding outcome events without review text. These owners retain the existing
-identity, deadline, recovery, and source-size limits. The anchor correction job
-retains the `Read,Glob,Grep` tool scope and worker-owned I/O.
+identity, deadline, recovery, and source-size limits. The host now owns the
+worker-side review publication partition and the warning contract in
+[`review_warnings.py`](../hephaestus/automation/review_warnings.py). That module
+has no transport dependency and refuses a warning without a recovery
+instruction.
 
 ## 12. Interrupt semantics and exit codes
 

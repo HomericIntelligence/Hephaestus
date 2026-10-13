@@ -7,9 +7,10 @@ Each ADR is immutable once Accepted; supersede rather than edit.
 To add an ADR: take the next zero-padded number, copy the section skeleton from
 any existing ADR (`# ADR-NNNN: …`, `- Status:`, `- Date:`, `- Tracks:`,
 `## Context`, `## Decision`, `## Alternatives considered`, `## Consequences`),
-and add a row to the table below. The structural guard
-`tests/unit/docs/test_adr_records.py` keeps every ADR well-formed, contiguously
-numbered, and listed here.
+and add a row to the table below. The `check-doc-maintenance` pre-commit hook
+scans this index for unowned dated-state claims. No executable guard checks the
+numbering, the section skeleton, or the index entries, so a reviewer must
+confirm all three.
 
 | ADR | Title | Status |
 |-----|-------|--------|

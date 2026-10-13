@@ -61,7 +61,7 @@ See the [README](../README.md) for installation and development setup instructio
 - [NATS JetStream Configuration](nats.md) — TLS defaults, certificate file paths, local plaintext exceptions, and the at-most-once failed-message retention policy for `hephaestus.nats`
 - [Observability: metrics, alerts, and SLOs](observability.md) — Automation pipeline metric catalog, alert ownership, and SLOs
 - [Operations Runbooks](runbooks/index.md) — Operator recovery procedures for the automation pipeline (loop crash, corrupted worktree, queue merge stall, quota exhaustion)
-- [Performance Testing](performance-testing.md) — Bounded worker-pool load, capacity, latency, and sustained-concurrency testing
+- [Performance Testing](performance-testing.md) — Status of the removed bounded worker-pool load lane, the surviving `performance` marker, and how to reintroduce a lane
 - [Contract Testing](contract-testing.md) — Opt-in authenticated GitHub and agent end-to-end contract coverage
 - [Environment Variables](environment-variables.md) — Exact runtime registry,
   rationale, and deny-by-default enforcement policy

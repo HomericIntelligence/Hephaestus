@@ -88,10 +88,11 @@ It establishes the rejection path, not a complete per-check dependency map.
 It does not establish that any particular historical CI run is compatible
 with a later base.
 
-Before an executable reuse change, add focused failing tests in
-[receipt tests](../tests/unit/automation/pipeline/test_repository_validation.py)
-and [stage tests](../tests/unit/automation/pipeline/stages/test_pr_review_comet_validation.py).
-Cover an unchanged head with an unrelated base advance, a relevant input
-change, a changed head, missing compatibility proof, and unchanged original
-receipt identity. Keep tests for CI merge-parent and workflow provenance.
-Keep pending evidence requests and pending required merge checks closed.
+Before an executable reuse change, add focused failing tests for the receipt
+layer and for the review stage. Cover an unchanged head with an unrelated base
+advance, a relevant input change, a changed head, missing compatibility proof,
+and unchanged original receipt identity. Keep tests for CI merge-parent and
+workflow provenance. Keep pending evidence requests and pending required merge
+checks closed. The receipt and stage test modules that once held those cases
+were removed with the non-core-library test re-scope, so a reviewer must confirm
+that the new cases exist before a reuse change is accepted.

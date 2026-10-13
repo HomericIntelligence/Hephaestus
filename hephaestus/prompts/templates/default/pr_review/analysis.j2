@@ -113,7 +113,11 @@ and head checks to select the implementation state.
 Rules for the JSON block:
 - `comments`: array of inline comment objects. Each must have:
   - `path`: file path relative to repo root (string)
-  - `line`: line number in the file (integer, must be a changed line in the diff)
+  - `line`: line number in the file (integer). Prefer a changed line in the
+    diff. Never invent an anchor that you cannot justify from the reviewed diff.
+    If the reviewed diff cannot place this line, still report the finding. The
+    host keeps it and shows it in the review body with a warning and a recovery
+    instruction. Do not discard the finding for that reason.
   - `side`: always `"RIGHT"` for new code
 - `scope_expansions`: array of child-issue expansion objects. Each must have:
   - `title`: concise child-issue title
