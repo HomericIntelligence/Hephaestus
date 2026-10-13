@@ -22,11 +22,13 @@ from ..comment_identity import (
     is_planning_marker,
     select_unambiguous_comment,
     validate_planning_body_for_write,
-    validate_planning_comment_identities,
 )
 from ..models import IssueInfo, IssueState
 from ..protocol import comment_marker_aliases
-from ..review_journal import has_exact_leading_marker
+from ..recovery_comment_identity import (
+    marker_body_error,
+    validate_marker_identities,
+)
 
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
 MAX_ISSUE_JOURNAL_BODY_BYTES = 16 * 1024 * 1024
@@ -362,8 +364,9 @@ def gh_issue_upsert_comment(
         RuntimeError: If a create/update/delete call fails.
 
     """
-    if not has_exact_leading_marker(body, marker_prefix):
-        raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
+    body_error = marker_body_error(body, marker_prefix)
+    if body_error is not None:
+        raise ValueError(body_error)
     if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
         raise ValueError("new planning comments must use a shared HomericIntelligence marker")
     validate_planning_body_for_write(marker_prefix, body)
@@ -445,12 +448,13 @@ def _validate_shared_planning_identities(
     owned_of: Callable[[dict[str, Any]], bool],
 ) -> None:
     """Reject unsafe shared planning identities before a role mutation."""
-    if is_planning_marker(marker_prefix):
-        validate_planning_comment_identities(
-            comments,
-            body_of=lambda comment: str(comment.get("body", "")),
-            owned_of=owned_of,
-        )
+    validate_marker_identities(
+        comments,
+        marker=marker_prefix,
+        planning_marker=is_planning_marker(marker_prefix),
+        body_of=lambda comment: str(comment.get("body", "")),
+        owned_of=owned_of,
+    )
 
 
 def gh_issue_upsert_owned_comment(
@@ -468,8 +472,9 @@ def gh_issue_upsert_owned_comment(
     """
     if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
         raise ValueError("new planning comments must use a shared HomericIntelligence marker")
-    if not has_exact_leading_marker(body, marker_prefix):
-        raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
+    body_error = marker_body_error(body, marker_prefix)
+    if body_error is not None:
+        raise ValueError(body_error)
     validate_planning_body_for_write(marker_prefix, body)
     viewer_login = (_api.gh_current_login() or "").lower()
     if not viewer_login:

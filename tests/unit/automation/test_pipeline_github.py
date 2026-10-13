@@ -3158,6 +3158,56 @@ class TestMutatorMapping:
         post.assert_not_called()
         patch_comment.assert_not_called()
 
+    def test_upsert_accepts_a_versioned_recovery_provenance_body(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recovered-requirements body reaches the post, not a ValueError.
+
+        Regression: the recovery marker is versioned, so it never matched the
+        strict full-line check and the write died with an uncaught ValueError
+        that neither error handler caught.
+        """
+        from hephaestus.automation.requirements_recovery import (
+            RECOVERY_PROVENANCE_PREFIX,
+            render_recovered_requirements,
+        )
+
+        body = render_recovered_requirements(
+            source_body="original issue body",
+            requirements="recovered requirement text",
+            evidence_binding="a" * 64,
+        )
+        post = MagicMock()
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                side_effect=[[], [{"body": body, "databaseId": 200, "viewerDidAuthor": True}]]
+            ),
+        )
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, body)
+
+        post.assert_called_once()
+
+    def test_upsert_rejects_a_malformed_recovery_provenance_body(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A prefix-carrying recovery body that cannot parse is still refused."""
+        from hephaestus.automation.requirements_recovery import RECOVERY_PROVENANCE_PREFIX
+
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", MagicMock())
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(ValueError, match="recovered marker"):
+            adapter.upsert_issue_comment(
+                5, RECOVERY_PROVENANCE_PREFIX, f"{RECOVERY_PROVENANCE_PREFIX}broken -->\n\ntext"
+            )
+
+        post.assert_not_called()
+
     def test_upsert_rejects_cross_role_legacy_marker_without_mutation(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:

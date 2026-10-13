@@ -4,14 +4,17 @@ import subprocess
 from collections.abc import Callable
 
 from hephaestus.automation.comment_identity import (
-    has_marker_alias,
     is_current_planning_marker,
     is_planning_marker,
-    select_unambiguous_comment,
     validate_planning_body_for_write,
-    validate_planning_comment_identities,
 )
 from hephaestus.automation.protocol import comment_marker_aliases
+from hephaestus.automation.recovery_comment_identity import (
+    marker_body_error,
+    marker_matches_body,
+    select_marker_target,
+    validate_marker_identities,
+)
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
@@ -21,16 +24,18 @@ from .review_journal import has_exact_leading_marker
 def _validate_shared_planning_identities(
     comments: list[dict[str, Any]],
     *,
+    marker: str,
     planning_marker: bool,
     owned_of: Callable[[dict[str, Any]], bool],
 ) -> None:
     """Reject unsafe shared planning identities before an upsert mutation."""
-    if planning_marker:
-        validate_planning_comment_identities(
-            comments,
-            body_of=lambda comment: str(comment.get("body", "")),
-            owned_of=owned_of,
-        )
+    validate_marker_identities(
+        comments,
+        marker=marker,
+        planning_marker=planning_marker,
+        body_of=lambda comment: str(comment.get("body", "")),
+        owned_of=owned_of,
+    )
 
 
 class PipelineGitHubIssueComments(_PipelineGitHubHost):
@@ -97,23 +102,25 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             return [
                 comment
                 for comment in comments
-                if has_marker_alias(str(comment.get("body", "")), markers)
+                if marker_matches_body(str(comment.get("body", "")), marker, markers)
                 and self._comment_owned_by_viewer(comment)
             ]
 
-        if not has_exact_leading_marker(body, marker):
-            raise ValueError(f"canonical comment body must start with marker {marker!r}")
+        body_error = marker_body_error(body, marker)
+        if body_error is not None:
+            raise ValueError(body_error)
         validate_planning_body_for_write(marker, body)
         if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
             return
         comments = self._repo_issue_comments(issue_number)
         _validate_shared_planning_identities(
             comments,
+            marker=marker,
             planning_marker=planning_marker,
             owned_of=self._comment_owned_by_viewer,
         )
         owned = owned_matching(comments)
-        target = select_unambiguous_comment(
+        target = select_marker_target(
             owned,
             marker=marker,
             aliases=markers,
@@ -124,15 +131,17 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             comments = self._repo_issue_comments(issue_number)
             _validate_shared_planning_identities(
                 comments,
+                marker=marker,
                 planning_marker=planning_marker,
                 owned_of=self._comment_owned_by_viewer,
             )
             owned = owned_matching(comments)
-            target = select_unambiguous_comment(
+            target = select_marker_target(
                 owned,
                 marker=marker,
                 aliases=markers,
                 body_of=lambda comment: str(comment.get("body", "")),
+                owned_of=self._comment_owned_by_viewer,
             )
             if target is None:
                 raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
@@ -148,11 +157,12 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             comments = self._repo_issue_comments(issue_number)
             _validate_shared_planning_identities(
                 comments,
+                marker=marker,
                 planning_marker=planning_marker,
                 owned_of=self._comment_owned_by_viewer,
             )
             owned = owned_matching(comments)
-            target = select_unambiguous_comment(
+            target = select_marker_target(
                 owned,
                 marker=marker,
                 aliases=markers,
