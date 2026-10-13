@@ -2477,7 +2477,10 @@ class TestPrReviewStageStep:
         stage.step(item, ctx)
 
         receipt = item.payload["host_verification_receipts"][0]
+        assert receipt["head_sha"] == "b" * 40
         assert receipt["status"] == "failed"
+        specs = stage_module._host_verification_specs(item.payload["pr_diff"])
+        assert not stage_module._host_verification_receipt_matches(receipt, specs[0], "a" * 40)
         assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
 
     def test_host_failure_comment_error_preserves_no_go_and_fails_closed(

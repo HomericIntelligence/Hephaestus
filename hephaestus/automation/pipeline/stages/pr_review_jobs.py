@@ -1007,30 +1007,37 @@ class PrReviewJobs(_PrReviewHost):
             return
         spec = specs[len(receipts)]
         result_value = result.value if isinstance(result.value, dict) else {}
-        status = result_value.get("status")
-        if status not in {"passed", "failed", "skipped"}:
-            status = "passed" if result.ok else "failed"
+        reported_status = result_value.get("status")
         platform = result_value.get("platform")
         if not isinstance(platform, str) or not platform:
             platform = "darwin" if result.ok else ""
+        result_head = result_value.get("head_sha")
+        if not isinstance(result_head, str):
+            result_head = ""
         valid_skip = bool(
-            status == "skipped"
+            reported_status == "skipped"
             and result.ok is False
             and result.error == UNSUPPORTED_HOST_VERIFICATION_ERROR
-            and result_value.get("head_sha") == reviewed_head
+            and result_head == reviewed_head
             and result_value.get("immutable_source") is False
             and platform
             and platform != "darwin"
         )
-        if status == "skipped" and not valid_skip:
+        if valid_skip:
+            status = "skipped"
+        elif reported_status == "skipped":
             status = "failed"
+        elif reported_status in {"passed", "failed"}:
+            status = reported_status
+        else:
+            status = "passed" if result.ok else "failed"
         receipts.append(
             {
                 "argv": list(spec.argv),
-                "head_sha": reviewed_head,
+                "head_sha": result_head,
                 "immutable_source": bool(
                     isinstance(result.value, dict)
-                    and result.value.get("head_sha") == reviewed_head
+                    and result_head == reviewed_head
                     and result.value.get("immutable_source") is True
                 ),
                 "failure_kind": (
