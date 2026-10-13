@@ -7837,7 +7837,9 @@ class WorkerPool:
             if binding.reusable_root is None or binding.repository is None:
                 logger.warning(
                     "review source identity incomplete for PR %s: reusable_root=%r repository=%r",
-                    getattr(getattr(job, "repository_validation_preparation", None), "pr_number", None),
+                    getattr(
+                        getattr(job, "repository_validation_preparation", None), "pr_number", None
+                    ),
                     binding.reusable_root,
                     binding.repository,
                 )
