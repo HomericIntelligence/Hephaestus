@@ -28,6 +28,7 @@ from hephaestus.automation.requirements_recovery import (
     parse_recovery_provenance,
     parse_recovery_review,
     recovered_requirements_for_context,
+    recovered_requirements_json,
     render_recovered_requirements,
     select_recovery_comment,
     verified_finalized_plan,
@@ -334,6 +335,222 @@ def test_independent_review_parser_has_only_binary_verdicts() -> None:
         parse_recovery_review('{"verdict":"APPROVED","disposition":"OBSOLETE","reason":"x"}')
     with pytest.raises(ValueError, match="verdict"):
         parse_recovery_review('{"verdict":"BLOCKED","disposition":"OBSOLETE","reason":"x"}')
+
+
+def test_recovery_parser_rejects_empty_model_output_with_json_decode_cause() -> None:
+    """An empty planner response must fail closed and keep the decode cause.
+
+    The automation loop log recorded ``JSONDecodeError: Expecting value: line 1
+    column 1 (char 0)`` followed by ``recovery output must be one JSON object``
+    for issue 2315. The position proves that the value supplied to the parser
+    began with no JSON token at all.
+
+    The parser is not the layer at fault. Issue 3399 shows the agent supplied a
+    contract-valid answer and ``_parse_opencode_json_events`` discarded it when
+    the stream carried a trailing empty text event. These cases therefore
+    characterize what the contract does with whatever text reaches it. They do
+    not claim the model returned nothing.
+
+    The decode cause is asserted only when the parser supplies one. A future
+    hardening of ``_json_object`` may raise without chaining a decode error, and
+    that must not block the fix.
+    """
+    with pytest.raises(ValueError, match="one JSON object") as excinfo:
+        parse_recovered_requirements("")
+
+    cause = excinfo.value.__cause__
+    if cause is not None:
+        assert isinstance(cause, json.JSONDecodeError)
+        assert cause.pos == 0
+        assert cause.lineno == 1
+        assert cause.colno == 1
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("   \n\t  \r\n", id="whitespace-only"),
+        pytest.param("I could not determine the requirements for this issue.", id="prose"),
+        pytest.param("ERROR: upstream provider returned an error", id="provider-error-text"),
+        pytest.param('{"disposition":"REQUIREMENTS"', id="truncated-object"),
+        pytest.param("null", id="json-null"),
+        pytest.param('"a bare string"', id="json-string"),
+        pytest.param("42", id="json-number"),
+    ],
+)
+def test_recovery_parser_fails_closed_on_non_object_output(raw: str) -> None:
+    """Every non-object planner response must raise the one-object error.
+
+    These shapes carry no JSON object anywhere, so the outcome is stable. They
+    do not depend on how the parser searches for one.
+
+    Six shapes were removed from this list. Issue 3399 candidate fix 1 makes
+    them parse, so asserting that they fail would block the fix:
+
+    - an upper-case ```` ```JSON ```` fence
+    - a fenced block with trailing prose
+    - a prose preamble followed by an object
+    - a balanced object followed by trailing data
+    - a JSON array that contains an object
+    - two balanced objects in a row, in the review parser
+
+    ``trailing-data`` and ``array-not-object`` were confirmed against three
+    plausible readings of the fix. The first decodes the object at offset 0
+    under every reading that scans for a balanced object. The second fails
+    under a naive scan of every opening brace, which is the most natural way to
+    write that scan.
+
+    Add each removed shape as an accepted case in the same commit that lands
+    the fix. The issue lists the prose-preamble shape in its own coverage table,
+    so the fix must accept it.
+    """
+    with pytest.raises(ValueError, match="one JSON object"):
+        parse_recovered_requirements(raw)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        pytest.param(
+            {"disposition": "REQUIREMENTS", "requirements": None, "reason": "r", "evidence": "e"},
+            "requirements must be a string",
+            id="requirements-null",
+        ),
+        pytest.param(
+            {"disposition": "REQUIREMENTS", "requirements": ["r"], "reason": "r", "evidence": "e"},
+            "requirements must be a string",
+            id="requirements-list",
+        ),
+        pytest.param(
+            {"disposition": "REQUIREMENTS", "requirements": 7, "reason": "r", "evidence": "e"},
+            "requirements must be a string",
+            id="requirements-number",
+        ),
+        pytest.param(
+            {"disposition": "REQUIREMENTS", "requirements": "r", "reason": None, "evidence": "e"},
+            "reason must be a string",
+            id="reason-null",
+        ),
+        pytest.param(
+            {"disposition": "REQUIREMENTS", "requirements": "r", "reason": "   ", "evidence": "e"},
+            "reason must not be empty",
+            id="reason-whitespace-only",
+        ),
+        pytest.param(
+            {"disposition": "REQUIREMENTS", "requirements": "r", "reason": "r", "evidence": ""},
+            "evidence must not be empty",
+            id="evidence-empty",
+        ),
+        pytest.param(
+            {"disposition": "MAYBE", "requirements": "", "reason": "r", "evidence": "e"},
+            "invalid recovery disposition",
+            id="unknown-disposition",
+        ),
+        pytest.param(
+            {"disposition": None, "requirements": "", "reason": "r", "evidence": "e"},
+            "invalid recovery disposition",
+            id="null-disposition",
+        ),
+        pytest.param(
+            {"disposition": "REQUIREMENTS", "requirements": "r", "reason": "r"},
+            "fields do not match",
+            id="missing-evidence",
+        ),
+        pytest.param(
+            {
+                "disposition": "TRACKER",
+                "requirements": "not allowed",
+                "reason": "r",
+                "evidence": "e",
+            },
+            "must not contain requirements",
+            id="tracker-with-requirements",
+        ),
+        pytest.param(
+            {
+                "disposition": "OBSOLETE",
+                "requirements": "not allowed",
+                "reason": "r",
+                "evidence": "e",
+            },
+            "must not contain requirements",
+            id="obsolete-with-requirements",
+        ),
+    ],
+)
+def test_recovery_parser_fails_closed_on_field_contract_drift(
+    payload: dict[str, object], message: str
+) -> None:
+    """Every field-level contract violation must raise its own message."""
+    with pytest.raises(ValueError, match=message):
+        parse_recovered_requirements(json.dumps(payload))
+
+
+def test_recovery_parser_accepts_exactly_fenced_json() -> None:
+    """The lowercase JSON fence must be stripped before parsing.
+
+    A model that wraps its object in one lowercase ```` ```json ```` fence is
+    still conforming. The strip must stay exact so that the malformed shapes in
+    the other tests keep failing.
+    """
+    fenced = (
+        "```json\n"
+        '{"disposition":"REQUIREMENTS","requirements":"Keep the flag default.",'
+        '"reason":"The flag is documented as stable.","evidence":"The public API binds it."}\n'
+        "```"
+    )
+
+    result = parse_recovered_requirements(fenced)
+
+    assert result.disposition is RecoveryDisposition.REQUIREMENTS
+    assert result.requirements == "Keep the flag default."
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("No verdict.", id="prose"),
+        pytest.param(
+            '{"verdict":"GO","disposition":"MAYBE","reason":"x"}', id="unknown-disposition"
+        ),
+        pytest.param('{"verdict":"GO","disposition":"OBSOLETE","reason":""}', id="empty-reason"),
+    ],
+)
+def test_recovery_review_parser_fails_closed_on_malformed_output(raw: str) -> None:
+    """The independent reviewer must fail closed on the same malformed shapes.
+
+    The trailing-data case was removed. Issue 3399 candidate fix 1 reads that
+    shape as one balanced object followed by a second candidate, and at least
+    one reading of the issue accepts it. Add it back as an accepted case if the
+    landed fix accepts it.
+    """
+    with pytest.raises(ValueError):
+        parse_recovery_review(raw)
+
+
+def test_recovered_requirements_json_round_trips_through_the_parser() -> None:
+    """The deterministic reviewer payload must re-parse as a valid proposal.
+
+    The independent reviewer receives ``recovered_requirements_json`` output.
+    A drift between the serializer and the parser would fail every reviewed
+    proposal, so the two must stay bound.
+    """
+    proposal = parse_recovered_requirements(
+        json.dumps(
+            {
+                "disposition": "OBSOLETE",
+                "requirements": "",
+                "reason": "A merged replacement supersedes this request.",
+                "evidence": "The replacement commit closes the reported gap.",
+            }
+        )
+    )
+
+    reparsed = parse_recovered_requirements(recovered_requirements_json(proposal))
+
+    assert reparsed == proposal
 
 
 def test_provenance_round_trip_binds_all_three_digests() -> None:
