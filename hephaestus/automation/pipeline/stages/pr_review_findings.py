@@ -293,6 +293,27 @@ def _receipt_demotion(record: Mapping[str, object]) -> ReviewAnchorCorrection | 
         return None
 
 
+def _demotion_identity(demotion: ReviewAnchorCorrection) -> tuple[str, ...]:
+    """Return the identity that records of one demoted finding share.
+
+    The publication receipt states one demoted finding in both its correction
+    list and its unpublishable list. The host reads that receipt as one set, so
+    it needs one identity to recognize the same finding twice. The finding id
+    is the host-owned identity of the finding. The anchor is the fallback for a
+    record that states no finding id.
+
+    Args:
+        demotion: One typed anchor demotion.
+
+    Returns:
+        The identity of the finding that this demotion demoted.
+
+    """
+    if demotion.finding_id:
+        return ("finding_id", demotion.finding_id)
+    return ("anchor", demotion.path, str(demotion.line or ""), demotion.side)
+
+
 def carry_demoted_findings(
     item: WorkItem,
     records: Sequence[Mapping[str, object]],
@@ -303,6 +324,12 @@ def carry_demoted_findings(
     demoted finding under :data:`DEMOTED_FINDINGS_PAYLOAD_KEY` so it stays
     visible and auditable, and records one warning with a real recovery
     instruction for each. The item keeps its normal post-publication path.
+
+    The publication receipt states one demoted finding in both its correction
+    list and its unpublishable list. The host keeps the first record of each
+    finding and ignores later records of that same finding. It then reports the
+    finding and warns about it exactly once. A record that states a different
+    finding stays a separate demotion.
 
     Args:
         item: The review work item that holds the publication receipt.
@@ -315,10 +342,15 @@ def carry_demoted_findings(
 
     """
     demotions: list[ReviewAnchorCorrection] = []
+    identities: set[tuple[str, ...]] = set()
     for record in records:
         demotion = _receipt_demotion(record)
         if demotion is None:
             return False
+        identity = _demotion_identity(demotion)
+        if identity in identities:
+            continue
+        identities.add(identity)
         demotions.append(demotion)
     if not demotions:
         return True
