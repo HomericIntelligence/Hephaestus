@@ -6,11 +6,16 @@ from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.review_anchors import normalize_review_finding_records
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.review_finding_history import (
+    ReviewFindingCompactedOutcomes,
     empty_review_finding_compacted_outcomes,
     normalize_review_finding_collection,
     normalize_review_finding_compacted_outcomes,
 )
-from hephaestus.automation.review_warnings import ReviewWarning, make_review_warning
+from hephaestus.automation.review_warnings import (
+    PublicationGateWarningReason,
+    ReviewWarning,
+    make_review_warning,
+)
 
 from ..github_jobs import (
     FrozenJson,
@@ -33,6 +38,7 @@ from .pr_review_findings import (
     _apply_review_receipt,
     carry_review_warnings,
 )
+from .pr_review_gate import PrReviewGate
 from .pr_review_history import _pending_review_finding, _publication_head
 from .pr_review_threads import (
     ENTER,
@@ -61,6 +67,36 @@ _FINDING_HISTORY_RECOVERY = (
     "Review the pull request again. The next review starts a new finding journal, "
     "so the findings from the dropped journal appear again in the review body."
 )
+
+#: Warning code for a blocking finding that an earlier round compacted out of the
+#: retained records without publishing it. The code names the cross-round
+#: condition, because the current round can hold no finding record at all.
+_COMPACTED_BLOCKING_FINDING_UNPUBLISHED: PublicationGateWarningReason = (
+    "compacted_blocking_finding_unpublished"
+)
+
+#: Recovery text for that cross-round condition. The compacted history is
+#: durable, so a new review round alone does not clear it.
+_COMPACTED_BLOCKING_FINDING_RECOVERY = (
+    "Publish this finding inline. To do that, rebase the branch so the reviewed "
+    "diff contains the anchor of the finding. Then clear the hidden review finding "
+    "journal comment and remove the state:implementation-no-go label. Run the "
+    "review again."
+)
+
+
+def _compacted_blocking_unpublished(compacted: ReviewFindingCompactedOutcomes) -> bool:
+    """Return whether an earlier round compacted an unpublished blocking finding.
+
+    Args:
+        compacted: The cumulative outcome history of all earlier rounds.
+
+    Returns:
+        True when one compacted identity holds a not_publishable outcome of
+        blocking severity.
+
+    """
+    return any(identity[2] == "n" and identity[3] == "b" for identity in compacted["identities"])
 
 
 def quarantine_finding_history(item: WorkItem, reason: str) -> None:
@@ -342,6 +378,43 @@ class PrReviewRecoveryMixin(_PrReviewHost):
                 dict(record) for record in records if record["status"] == "not_publishable"
             ],
         }
+        # This round's own not_publishable record is not a gate. It stays
+        # visible in the review body, and the reviewer verdict governs the
+        # round. A compacted identity is a different fact. It is the cumulative
+        # record of a blocking finding that an EARLIER round never published.
+        # That fact outlives the records of the current round, so it still
+        # applies in a later round whose audit holds no finding. Without this
+        # check such a later round can reach GO while a blocking finding from an
+        # earlier round was never published.
+        if _compacted_blocking_unpublished(compacted):
+            carry_review_warnings(
+                item,
+                [
+                    make_review_warning(
+                        _COMPACTED_BLOCKING_FINDING_UNPUBLISHED,
+                        message=(
+                            "An earlier review round recorded a blocking finding that "
+                            "the host never published inline. The host wrote the "
+                            "state:implementation-no-go label and stopped this round."
+                        ),
+                        recovery=_COMPACTED_BLOCKING_FINDING_RECOVERY,
+                    )
+                ],
+            )
+            no_go_outcome = PrReviewGate._write_no_go(item, ctx)
+            if no_go_outcome is not None:
+                return no_go_outcome
+            # BLOCKED parks the pull request for an operator. It does not end
+            # the loop on a removed terminal reason, and it cannot reach the GO
+            # proof. The compacted history is durable, so the negative label
+            # stays until an operator clears it.
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(
+                    Disposition.BLOCKED,
+                    _COMPACTED_BLOCKING_FINDING_UNPUBLISHED,
+                ),
+            )
         # A finding that the reviewed diff does not anchor stays visible in the
         # review body. It never ends the round on its own. The reviewer verdict
         # and the open-thread readback govern the gate below.

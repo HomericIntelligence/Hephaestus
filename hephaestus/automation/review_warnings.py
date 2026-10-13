@@ -70,10 +70,13 @@ DataHygieneWarningReason = Literal[
     "reply_handoff_entry_quarantined",
 ]
 
+PublicationGateWarningReason = Literal["compacted_blocking_finding_unpublished"]
+
 ReviewWarningReason = Literal[
     MalformedReviewFindingReason,
     AnchorCorrectionWarningReason,
     DataHygieneWarningReason,
+    PublicationGateWarningReason,
 ]
 
 
