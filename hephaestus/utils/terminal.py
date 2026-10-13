@@ -71,7 +71,7 @@ def install_sigtstp_only() -> None:
     unlike :func:`install_signal_handlers`, this does not touch SIGINT/SIGTERM,
     so a single blocking call still dies immediately on the first Ctrl+C.
 
-    No-ops on platforms without ``SIGTSTP`` (e.g. Windows).
+    Ignore signal registration errors outside the main thread.
     """
 
     def _sigtstp_handler(signum: int, frame: object) -> None:
@@ -80,9 +80,8 @@ def install_sigtstp_only() -> None:
         os.kill(os.getpid(), signal.SIGSTOP)
         signal.signal(signal.SIGTSTP, _sigtstp_handler)
 
-    if hasattr(signal, "SIGTSTP"):
-        with contextlib.suppress(ValueError):
-            signal.signal(signal.SIGTSTP, _sigtstp_handler)
+    with contextlib.suppress(ValueError):
+        signal.signal(signal.SIGTSTP, _sigtstp_handler)
 
 
 def install_signal_handlers(shutdown_fn: Callable[[], None]) -> None:

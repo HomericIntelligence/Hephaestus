@@ -160,10 +160,10 @@ ignored generated output such as `.git/`, `.venv/`, `.pytest_cache/`, and
 
 This project uses [uv](https://uv.sh) for environment management, which automatically handles dependencies and creates isolated environments.
 
-> **Platform note:** uv supports this project's Python 3.13 development
-> environment on Linux, macOS, and Windows. The required GitHub Actions jobs
-> currently run on Linux; POSIX-specific tests are marked to skip on native
-> Windows. See [CONTRIBUTING.md#platform-support](CONTRIBUTING.md#platform-support).
+> **Platform support:** Hephaestus supports Linux and macOS with Python 3.13.
+> Windows is unsupported. Required GitHub Actions jobs currently run on Linux.
+> Feature-specific host requirements still apply. See
+> [CONTRIBUTING.md#platform-support](CONTRIBUTING.md#platform-support).
 
 ### Prerequisites
 
@@ -236,9 +236,10 @@ print(size_str)  # Output: 1.0 MB
 ### Installing in Another Project
 
 Hephaestus is published to PyPI as `homericintelligence-hephaestus`.
-The wheel is pure-Python and installs on Linux, macOS, and Windows
-(see `requires-python` in [`pyproject.toml`](pyproject.toml)). This is
-the supported install path for non-Linux platforms.
+The pure-Python wheel supports Linux and macOS
+(see `requires-python` in [`pyproject.toml`](pyproject.toml)).
+Windows is unsupported. Successful installation on another platform does not
+establish platform support.
 
 **Using pip:**
 

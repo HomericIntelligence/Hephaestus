@@ -155,14 +155,11 @@ class TestInstallSigtstpOnly:
             # (initial install + SIG_DFL + re-arm inside the handler).
             assert captured[signal_module.SIGTSTP] is not None
 
-    def test_noop_when_sigtstp_unavailable(self) -> None:
-        """Does not raise or call signal.signal when SIGTSTP is unavailable."""
-        with (
-            patch("signal.signal") as mock_signal,
-            patch("hephaestus.utils.terminal.hasattr", return_value=False, create=True),
-        ):
+    def test_registration_outside_main_thread_does_not_raise(self) -> None:
+        """A signal registration error must not interrupt the caller."""
+        with patch("signal.signal", side_effect=ValueError("not the main thread")) as mock_signal:
             install_sigtstp_only()
-            mock_signal.assert_not_called()
+            mock_signal.assert_called_once()
 
 
 class TestTerminalGuard:

@@ -9,7 +9,6 @@ planning review, and terminal completion.
 from __future__ import annotations
 
 import logging
-import os
 import queue
 import threading
 from collections.abc import Callable, Iterator
@@ -175,7 +174,6 @@ class TestOnEnterAndCloneStates:
         assert isinstance(ready, Continue)
         assert ready.next_state == "WAVE_ADMIT"
 
-    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     def test_stage_sync_keeps_full_repository_identity_through_worker(
         self,
         repo_item: WorkItem,

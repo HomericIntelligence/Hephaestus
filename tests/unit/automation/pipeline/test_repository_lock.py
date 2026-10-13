@@ -74,7 +74,6 @@ def _sidecar(repository: str = "owner/repo") -> dict[str, object]:
 class TestRepositoryOperationLock:
     """Verify the three-layer repository lock contract."""
 
-    @pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
     @pytest.mark.parametrize("change", ["remove", "replace"])
     def test_existing_parent_lock_does_not_create_through_a_changed_path(
         self, tmp_path: Path, change: str

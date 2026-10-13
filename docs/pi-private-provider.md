@@ -70,9 +70,9 @@ creation and ownership verification for the run directory. It loads both
 `.heph-project-denylist` and `.heph-private-denylist` from its
 working-directory ancestry and the checkout ancestry, fails closed if a found
 policy file cannot be read, and redacts matching values from displayed log
-paths. On Windows or a POSIX platform without a verifiable ACL mechanism, it
-fails closed before invoking Pi; do not work around that guard by redirecting
-output to a shared path.
+paths. Windows is unsupported. If a supported host has no verifiable ACL
+mechanism, the wrapper stops before it starts Pi. Do not bypass this check
+with output redirection to a shared path.
 
 For Slurm, pass both private paths explicitly:
 

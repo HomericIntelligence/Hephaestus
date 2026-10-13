@@ -63,12 +63,13 @@ def _child(
     validation: str,
     *,
     readers: tuple[str, ...] = (),
+    sensitivity: str = "public",
 ) -> EnvVarSpec:
     return EnvVarSpec(
         name=name,
         purpose=purpose,
         owner="config.child_environments",
-        sensitivity="public",
+        sensitivity=sensitivity,
         validation=validation,
         direction="parent-read, child-forward, child-write" if readers else "child-write",
         qualified_readers=readers,
@@ -156,7 +157,7 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
     ),
     _parent(
         "TMP",
-        "Windows temporary directory",
+        "Temporary directory for child tools",
         sensitivity="private",
         validation="path",
         writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER, _PI_WRITER),
@@ -164,32 +165,32 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
     ),
     _parent(
         "TEMP",
-        "Windows temporary directory",
+        "Temporary directory for child tools",
         sensitivity="private",
         validation="path",
         writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER, _PI_WRITER),
         readers=(_PARENT_READER, _NESTED_READER),
     ),
-    _parent(
+    _child(
         "USERPROFILE",
-        "Windows home directory",
+        "Private alternate home for isolated child tools",
+        _CODEX_IMPLEMENTATION_WRITER,
+        "path",
         sensitivity="private",
-        validation="path",
-        writers=(_CODEX_IMPLEMENTATION_WRITER,),
     ),
-    _parent(
+    _child(
         "APPDATA",
-        "Windows application configuration",
+        "Private alternate configuration for isolated child tools",
+        _CODEX_IMPLEMENTATION_WRITER,
+        "path",
         sensitivity="private",
-        validation="path",
-        writers=(_CODEX_IMPLEMENTATION_WRITER,),
     ),
-    _parent(
+    _child(
         "LOCALAPPDATA",
-        "Windows application cache",
+        "Private alternate cache for isolated child tools",
+        _CODEX_IMPLEMENTATION_WRITER,
+        "path",
         sensitivity="private",
-        validation="path",
-        writers=(_CODEX_IMPLEMENTATION_WRITER,),
     ),
     _parent(
         "XDG_CONFIG_HOME",
@@ -213,12 +214,6 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         validation="path",
         writers=(_CODEX_IMPLEMENTATION_WRITER,),
     ),
-    _parent("SYSTEMROOT", "Windows system root", validation="path"),
-    _parent("SystemRoot", "Windows system root alias", validation="path"),
-    _parent("WINDIR", "Windows system directory", validation="path"),
-    _parent("ComSpec", "Windows command processor", validation="path"),
-    _parent("COMSPEC", "Windows command processor alias", validation="path"),
-    _parent("PATHEXT", "Windows executable suffixes"),
     _workflow("CI", "CI runtime detection", "scripts.check_license_compatibility.main"),
     _workflow(
         "GITHUB_ACTIONS",

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -25,10 +24,6 @@ _GIT_COMMAND_CONFIG_ENV_KEYS = ("GIT_CONFIG_PARAMETERS",)
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.requires_posix,
-    pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="Real file-to-symlink Git type changes require POSIX symlink semantics",
-    ),
 ]
 
 

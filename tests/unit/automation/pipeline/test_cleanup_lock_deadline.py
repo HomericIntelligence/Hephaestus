@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import threading
 import time
@@ -26,7 +25,6 @@ from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.test_source_worktree import _repository
 
 
-@pytest.mark.skipif(os.name == "nt", reason="native descriptor locks require POSIX")
 @pytest.mark.parametrize("receipt_present", [True, False])
 def test_source_cleanup_reuses_admitted_common_lock(
     tmp_path: Path,

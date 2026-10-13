@@ -60,9 +60,7 @@ ALLOWED_EXTRA_COPYLEFT: dict[str, frozenset[str]] = {
 # (the authoritative human-readable analysis). Keep in sync with NOTICE — the
 # test suite cross-checks both keys and values against NOTICE and against real
 # installed metadata when the dep is actually installable.
-STATIC_FALLBACK_LICENSES: dict[str, list[str]] = {
-    "tzdata": ["Apache-2.0"],  # platform_system == 'Windows'; NOTICE:28
-}
+STATIC_FALLBACK_LICENSES: dict[str, list[str]] = {}
 
 TROVE_TO_SPDX: dict[str, str] = {
     "MIT License": "MIT",
@@ -94,12 +92,11 @@ LICENSE_ALIASES: dict[str, str] = {
 }
 
 # Marker matrix: any-satisfiable => the dep is distributed somewhere, so its
-# license must be checked. Spans Python floor..current AND platforms, so a
-# platform-gated dep (e.g. tzdata on Windows) is NOT silently dropped on Linux CI.
+# license must be checked. The matrix includes supported Python and OS versions.
+# A macOS-only dependency must not be omitted on Linux CI.
 _PY = ("3.13",)
 _PLAT = (
     {"sys_platform": "linux", "platform_system": "Linux"},
-    {"sys_platform": "win32", "platform_system": "Windows"},
     {"sys_platform": "darwin", "platform_system": "Darwin"},
 )
 

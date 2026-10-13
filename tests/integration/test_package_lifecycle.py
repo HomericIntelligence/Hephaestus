@@ -64,9 +64,7 @@ def _new_clean_environment(root: Path, uv: str) -> Path:
 
 def _venv_python(venv_dir: Path) -> Path:
     """Return the Python executable in a virtual environment."""
-    binary_dir = "Scripts" if sys.platform == "win32" else "bin"
-    executable = "python.exe" if sys.platform == "win32" else "python"
-    return venv_dir / binary_dir / executable
+    return venv_dir / "bin" / "python"
 
 
 def _run_env(venv_dir: Path) -> dict[str, str]:
@@ -149,11 +147,11 @@ def _assert_installed_version(venv_dir: Path, expected: str) -> None:
 
 def _run_representative_entry_points(venv_dir: Path) -> None:
     """Run representative installed base-layer scripts from outside the checkout."""
-    binary_dir = venv_dir / ("Scripts" if sys.platform == "win32" else "bin")
+    binary_dir = venv_dir / "bin"
     for command in REPRESENTATIVE_ENTRY_POINTS:
         result = subprocess.run(
             [
-                str(binary_dir / (f"{command}.exe" if sys.platform == "win32" else command)),
+                str(binary_dir / command),
                 "--help",
             ],
             cwd=venv_dir.parent / "run",
@@ -168,11 +166,8 @@ def _run_representative_entry_points(venv_dir: Path) -> None:
 
 
 def _console_script_launchers(venv_dir: Path, command: str) -> tuple[Path, ...]:
-    """Return all launcher paths generated for one console script on this platform."""
-    binary_dir = venv_dir / ("Scripts" if sys.platform == "win32" else "bin")
-    if sys.platform == "win32":
-        return (binary_dir / f"{command}.exe", binary_dir / f"{command}-script.py")
-    return (binary_dir / command,)
+    """Return the console-script launcher path on Linux and macOS."""
+    return (venv_dir / "bin" / command,)
 
 
 def _assert_console_scripts_installed(venv_dir: Path) -> None:

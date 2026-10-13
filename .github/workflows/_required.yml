@@ -1,6 +1,5 @@
-# Platform scope: Linux-only. macOS/Windows CI is out of scope and
-# tracked in #539. Published wheels remain pure-Python importable elsewhere.
-# When #539 lands, expand the matrix to include macOS and Windows runners.
+# Required CI runs on Linux. The product supports Linux and macOS.
+# Windows is unsupported. Wheel installation does not establish platform support.
 name: Required Checks
 
 on:

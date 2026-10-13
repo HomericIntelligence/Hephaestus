@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import ctypes
 import hashlib
-import io
 import os
-import queue as queue_mod
 import re
 import selectors
 import shutil
@@ -18,7 +15,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeGuard, cast
+from typing import TypeGuard, cast
 
 import hephaestus.automation.git_utils as git_utils
 from hephaestus.config.child_environments import build_git_child_env
@@ -55,178 +52,19 @@ class _DirtySnapshotEvidence:
     changed_paths: tuple[str, ...] = ()
 
 
-def _subprocess_pipe_selector_supported() -> bool:
-    """Return whether the platform selector supports subprocess pipes."""
-    return os.name != "nt"
-
-
-def _trusted_windows_taskkill() -> str:
-    """Return the absolute Windows system ``taskkill`` executable."""
-    system_directory = ctypes.create_unicode_buffer(32_768)
-    ctypes_any = cast(Any, ctypes)
-    kernel32 = ctypes_any.WinDLL("kernel32", use_last_error=True)
-    length = kernel32.GetSystemDirectoryW(system_directory, len(system_directory))
-    if length <= 0 or length >= len(system_directory):
-        raise RuntimeError("Windows system directory is unavailable")
-    taskkill = (Path(system_directory.value) / "taskkill.exe").resolve(strict=True)
-    if not taskkill.is_absolute():  # pragma: no cover - resolve guarantees this
-        raise RuntimeError("Windows task termination capability is unavailable")
-    return str(taskkill)
-
-
 def _terminate_bounded_process_tree(
     process: subprocess.Popen[bytes],
     *,
     process_group: bool,
 ) -> None:
     """Stop a bounded-output child and descendants that hold its pipes."""
-    if process_group and os.name == "posix":
+    if process_group:
         with suppress(PermissionError, ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-    elif process_group and os.name == "nt":  # pragma: no cover - Windows only
-        with suppress(OSError, RuntimeError, subprocess.TimeoutExpired):
-            subprocess.run(
-                [_trusted_windows_taskkill(), "/PID", str(process.pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=build_git_child_env(),
-                timeout=5,
-                check=False,
-            )
     with suppress(OSError):
         process.kill()
     with suppress(OSError, subprocess.TimeoutExpired):
         process.wait(timeout=5)
-
-
-def _read_bounded_git_output_with_threads(  # noqa: C901
-    process: subprocess.Popen[bytes],
-    argv: tuple[str, ...],
-    *,
-    timeout: int | float,
-    max_bytes: int,
-    retain_text: bool,
-    process_group: bool = False,
-    shutdown: threading.Event | None = None,
-) -> _BoundedGitOutput:
-    """Read both child pipes with bounded reader threads."""
-    if process.stdout is None or process.stderr is None:  # pragma: no cover
-        raise RuntimeError("Git output pipes are unavailable")
-    streams = (process.stdout, process.stderr)
-    events: queue_mod.Queue[tuple[str, bytes | BaseException | None]] = queue_mod.Queue(maxsize=16)
-    stop = threading.Event()
-
-    def put_event(name: str, value: bytes | BaseException | None) -> None:
-        while not stop.is_set():
-            try:
-                events.put((name, value), timeout=0.05)
-                return
-            except queue_mod.Full:
-                continue
-
-    def read_pipe(name: str, stream: io.BufferedReader) -> None:
-        try:
-            while not stop.is_set():
-                try:
-                    chunk = os.read(stream.fileno(), 64 * 1024)
-                except BlockingIOError:
-                    stop.wait(0.01)
-                    continue
-                if not chunk:
-                    break
-                put_event(name, chunk)
-        except BaseException as exc:
-            put_event(name, exc)
-        finally:
-            put_event(name, None)
-
-    readers: tuple[threading.Thread, ...] = ()
-    started_readers: list[threading.Thread] = []
-    digest = hashlib.sha256()
-    output = bytearray()
-    stderr_output = bytearray()
-    stderr_max_bytes = max(max_bytes, _GIT_STDERR_CAPTURE_MIN_BYTES)
-    byte_count = 0
-    ended: set[str] = set()
-    deadline = time.monotonic() + timeout
-    process_completed = False
-    try:
-        for stream in streams:
-            os.set_blocking(stream.fileno(), False)
-        readers = (
-            threading.Thread(
-                target=read_pipe,
-                args=("stdout", process.stdout),
-                name=f"hephaestus-git-pipe-{process.pid}-stdout",
-                daemon=True,
-            ),
-            threading.Thread(
-                target=read_pipe,
-                args=("stderr", process.stderr),
-                name=f"hephaestus-git-pipe-{process.pid}-stderr",
-                daemon=True,
-            ),
-        )
-        for reader in readers:
-            reader.start()
-            started_readers.append(reader)
-        while len(ended) != len(readers):
-            if shutdown is not None and shutdown.is_set():
-                raise InterruptedError("Git capture cancelled")
-            remaining = cast(
-                float, git_utils.remaining_operation_timeout(deadline - time.monotonic())
-            )
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired(argv, timeout)
-            try:
-                name, chunk = events.get(timeout=min(remaining, 0.1))
-            except queue_mod.Empty:
-                continue
-            if chunk is None:
-                ended.add(name)
-                continue
-            if isinstance(chunk, BaseException):
-                raise RuntimeError(f"Git {name} pipe read failed") from chunk
-            if name == "stderr":
-                stderr_output.extend(chunk)
-                if len(stderr_output) > stderr_max_bytes:
-                    raise _GitInspectionResourceLimitError("Git stderr limit exceeded")
-                continue
-            byte_count += len(chunk)
-            if byte_count > max_bytes:
-                raise _GitInspectionResourceLimitError("Git output limit exceeded")
-            digest.update(chunk)
-            if retain_text:
-                output.extend(chunk)
-        remaining = cast(float, git_utils.remaining_operation_timeout(deadline - time.monotonic()))
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(argv, timeout)
-        returncode = _wait_for_capture_child(process, argv, deadline, timeout, shutdown)
-        process_completed = True
-    finally:
-        stop.set()
-        if not process_completed:
-            _terminate_bounded_process_tree(process, process_group=process_group)
-        for reader in started_readers:
-            reader.join(timeout=1.0)
-        for reader, stream in zip(readers, (process.stdout, process.stderr), strict=True):
-            if reader not in started_readers or not reader.is_alive():
-                with suppress(OSError):
-                    stream.close()
-        if not readers:
-            for stream in streams:
-                with suppress(OSError):
-                    stream.close()
-    text = output.decode("utf-8", errors="surrogateescape") if retain_text else ""
-    if returncode != 0:
-        raise subprocess.CalledProcessError(
-            returncode,
-            argv,
-            output=text,
-            stderr=bounded_git_diagnostic(stderr_output, limit=_TAIL),
-        )
-    return _BoundedGitOutput(text=text, sha256=digest.hexdigest(), byte_count=byte_count)
 
 
 def _wait_for_capture_child(
@@ -264,12 +102,6 @@ def _run_bounded_git_output(  # noqa: C901
     timeout = cast(float, git_utils.remaining_operation_timeout(timeout))
     if shutdown is not None and shutdown.is_set():
         raise InterruptedError("Git capture cancelled before start")
-    thread_backend = not _subprocess_pipe_selector_supported()
-    process_options: dict[str, object] = {}
-    if os.name == "posix":
-        process_options["start_new_session"] = True
-    elif os.name == "nt":  # pragma: no cover - Windows only
-        process_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(
         argv,
         cwd=str(cwd),
@@ -277,21 +109,11 @@ def _run_bounded_git_output(  # noqa: C901
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        **cast(Any, process_options),
+        start_new_session=True,
     )
     if process.stdout is None or process.stderr is None:  # pragma: no cover
         _terminate_bounded_process_tree(process, process_group=True)
         raise RuntimeError("Git output pipes are unavailable")
-    if thread_backend:
-        return _read_bounded_git_output_with_threads(
-            process,
-            argv,
-            timeout=timeout,
-            max_bytes=max_bytes,
-            retain_text=retain_text,
-            process_group=True,
-            shutdown=shutdown,
-        )
     selector: selectors.BaseSelector | None = None
     digest = hashlib.sha256()
     output = bytearray()

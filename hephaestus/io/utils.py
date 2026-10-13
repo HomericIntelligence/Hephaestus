@@ -95,8 +95,8 @@ def safe_write(
     """Write content to a file atomically, with an optional backup.
 
     The content is first written to a temporary file in the same directory and
-    then moved into place with :func:`os.replace`, which is atomic on POSIX and
-    Windows. An interrupted write (process kill, OOM, disk-full) therefore never
+    then moved into place with :func:`os.replace`, which is atomic on Linux and
+    macOS. An interrupted write (process kill, OOM, disk-full) therefore never
     leaves a partially written file at ``filepath`` — the target either still
     holds its previous contents or does not exist.
 
@@ -152,7 +152,7 @@ def write_secure(
     The content is written to a temporary file in the same directory —
     ``chmod``-ed to ``permissions`` before any content is written so it is never
     world-readable — then moved into place with :func:`os.replace`, which is
-    atomic on POSIX and Windows. An interrupted write therefore never leaves a
+    atomic on Linux and macOS. An interrupted write therefore never leaves a
     partial or wrongly-permissioned file at ``filepath``.
 
     Args:

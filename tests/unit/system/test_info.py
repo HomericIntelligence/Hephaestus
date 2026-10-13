@@ -2,6 +2,9 @@
 """Tests for system information utilities."""
 
 import sys
+from unittest.mock import patch
+
+import pytest
 
 from hephaestus.cli.localization import using_localizer
 from hephaestus.system.info import (
@@ -60,6 +63,16 @@ class TestGetOsInfo:
         info = get_os_info()
         assert isinstance(info, str)
         assert len(info) > 0
+
+    @pytest.mark.parametrize("system", ["Windows", "FreeBSD"])
+    def test_unsupported_platform_uses_generic_report(self, system: str) -> None:
+        """Unsupported hosts do not use platform-specific release discovery."""
+        with (
+            patch("hephaestus.system.info.platform.system", return_value=system),
+            patch("hephaestus.system.info.platform.release") as release,
+        ):
+            assert get_os_info() == f"{system} (unknown)"
+        release.assert_not_called()
 
 
 class TestGetPythonInfo:

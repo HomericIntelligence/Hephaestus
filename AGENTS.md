@@ -17,6 +17,11 @@ all other repositories.
 **Purpose**: Centralize and maintain Python utilities, helper functions, and
 common abstractions used throughout the HomericIntelligence suite.
 
+Hephaestus supports Linux and macOS, subject to each feature's host requirements.
+Windows is unsupported for development and execution. Do not add Windows
+compatibility paths or Windows CI jobs. Keep input-validation and isolation
+checks that use Windows-style values on supported hosts.
+
 **Role in Ecosystem**:
 
 - Odyssey → Training and capability development

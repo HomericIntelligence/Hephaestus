@@ -1,4 +1,4 @@
-"""Regression tests for the Windows-only tzdata requirement (issue #2149)."""
+"""Verify supported-platform metadata and the removal of Windows dependencies."""
 
 from __future__ import annotations
 
@@ -6,32 +6,24 @@ import tomllib
 from pathlib import Path
 
 from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
 
 _PYPROJECT = Path(__file__).resolve().parents[3] / "pyproject.toml"
 
 
-def _tzdata_requirement() -> Requirement:
-    """Return the sole tzdata requirement from project dependencies."""
+def test_base_dependencies_do_not_include_windows_timezone_fallback() -> None:
+    """Supported installations do not declare the Windows timezone fallback."""
     project = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]
     requirements = [Requirement(spec) for spec in project["dependencies"]]
-    matches = [requirement for requirement in requirements if requirement.name == "tzdata"]
-    assert len(matches) == 1, f"expected one tzdata dependency, found {matches}"
-    return matches[0]
+    assert all(requirement.name != "tzdata" for requirement in requirements)
 
 
-def test_tzdata_uses_supported_2026_range() -> None:
-    """Tzdata must stay within the supported 2026 release series."""
-    requirement = _tzdata_requirement()
-
-    assert requirement.specifier == SpecifierSet(">=2026.2,<2027")
-
-
-def test_tzdata_remains_windows_only() -> None:
-    """POSIX installations must not acquire the Windows timezone-data fallback."""
-    marker = _tzdata_requirement().marker
-
-    assert marker is not None
-    assert marker.evaluate({"platform_system": "Windows"})
-    assert not marker.evaluate({"platform_system": "Linux"})
-    assert not marker.evaluate({"platform_system": "Darwin"})
+def test_platform_classifiers_declare_only_linux_and_macos() -> None:
+    """Package metadata declares the supported operating systems explicitly."""
+    project = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]
+    platforms = {
+        value for value in project["classifiers"] if value.startswith("Operating System ::")
+    }
+    assert platforms == {
+        "Operating System :: POSIX :: Linux",
+        "Operating System :: MacOS :: MacOS X",
+    }

@@ -153,9 +153,20 @@ class TestDistributedScope:
     def test_runtime_extras_excludes_dev(self):
         assert "dev" not in RUNTIME_EXTRAS
 
-    def test_platform_gated_dep_included(self):
-        # tzdata is gated platform_system == 'Windows'; must still be in scope.
-        assert "tzdata" in self._dist_or_skip()
+    def test_scope_includes_supported_platforms_without_windows(self) -> None:
+        """License scope includes macOS dependencies but excludes Windows-only ones."""
+        metadata = _FixtureMeta(
+            {
+                "Requires-Dist": [
+                    "shared-dependency>=1",
+                    "macos-dependency>=1; sys_platform == 'darwin'",
+                    "windows-dependency>=1; sys_platform == 'win32'",
+                ]
+            }
+        )
+        with patch("check_license_compatibility.md.metadata", return_value=metadata):
+            requirements = distributed_requirements(None)
+        assert {name for name, _ in requirements} == {"shared-dependency", "macos-dependency"}
 
     def test_clean_distributed_tree_passes_when_all_installed(self):
         # If the package or an extra (e.g. nats-py) is missing locally, scan()
@@ -234,15 +245,18 @@ class TestStaticFallback:
       authoritative human-readable analysis per the script's own docstring).
     """
 
-    def test_tzdata_fallback_classifies_as_compatible(self):
-        # tzdata: platform_system == 'Windows' marker; installable_now=False on Linux.
-        with patch(
-            "check_license_compatibility.distributed_requirements",
-            return_value=[("tzdata", False)],
+    def test_supported_platform_fallback_classifies_as_compatible(self) -> None:
+        """A supported-platform dependency can use an explicit license fallback."""
+        with (
+            patch(
+                "check_license_compatibility.distributed_requirements",
+                return_value=[("macos-dependency", False)],
+            ),
+            patch.dict(STATIC_FALLBACK_LICENSES, {"macos-dependency": ["Apache-2.0"]}),
         ):
             with patch(
                 "check_license_compatibility.md.metadata",
-                side_effect=md.PackageNotFoundError("tzdata"),
+                side_effect=md.PackageNotFoundError("macos-dependency"),
             ):
                 assert scan(None) == []
 
@@ -250,11 +264,11 @@ class TestStaticFallback:
         # A future marker-excluded dep with no static fallback must exit(2).
         with patch(
             "check_license_compatibility.distributed_requirements",
-            return_value=[("future-windows-only-dep", False)],
+            return_value=[("future-macos-only-dep", False)],
         ):
             with patch(
                 "check_license_compatibility.md.metadata",
-                side_effect=md.PackageNotFoundError("future-windows-only-dep"),
+                side_effect=md.PackageNotFoundError("future-macos-only-dep"),
             ):
                 with pytest.raises(SystemExit) as exc:
                     scan(None)
@@ -277,7 +291,7 @@ class TestStaticFallback:
 
     @pytest.mark.parametrize("pkg", list(STATIC_FALLBACK_LICENSES))
     def test_static_values_match_installed_metadata(self, pkg: str) -> None:
-        # Staleness mitigation: when the dependency is installed (e.g. tzdata on Windows),
+        # When a supported-platform dependency is installed,
         # the static value must match real importlib.metadata.
         # On Python 3.13/Linux these deps are absent — skip, not fail.
         try:
