@@ -6334,7 +6334,7 @@ class WorkerPool:
         if job.immutable_source:
             if not _is_full_commit_sha(job.expected_head_sha):
                 return JobResult(ok=False, error="immutable_source_requires_full_head_sha")
-            if job.capability_target is not None:
+            if job.capability_target is not None and self._quota_backend_configured():
                 capability = self._run_host_capability(
                     HostCapabilityJob(
                         job.capability_target.repository,
@@ -6511,6 +6511,8 @@ class WorkerPool:
             InterruptedError,
         ):
             return gap("local_source_unavailable", "repository_validation_source_unavailable")
+        if sys.platform == "linux" and not self._pyxis_sandbox_configured():
+            return gap("local_execution_unavailable", "host_verification_pyxis_runtime_unavailable")
         try:
             result = self._run_immutable_build_test(job, repository_runtime=runtime)
         except InterruptedError:
@@ -6722,10 +6724,44 @@ class WorkerPool:
         except OSError as exc:
             return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
 
+    def _quota_backend_configured(self) -> bool:
+        """Report whether an isolation backend was explicitly configured.
+
+        Host verification proceeds without a quota capability receipt only
+        when no backend exists at all. A configured rear-end stays fail
+        closed on every probe failure.
+        """
+        capabilities = self._host_capabilities
+        return capabilities is not None and capabilities.quota_backend is not None
+
+    def _pyxis_sandbox_configured(self) -> bool:
+        """Report whether the strict Pyxis sandbox inputs are all configured.
+
+        The rule is the Linux rule that select_quota_backend applies:
+        the pinned image digest, the trust authority, and the writable
+        quota root are all present.
+        """
+        return bool(
+            self._host_verification_pyxis_sha256
+            and self._host_verification_pyxis_authority is not None
+            and self._host_verification_pyxis_quota_root is not None
+        )
+
+    def _require_pyxis_quota_root(self) -> Path:
+        """Return the writable quota root or reject the run."""
+        quota_root = self._host_verification_pyxis_quota_root
+        if quota_root is None:
+            raise ValueError("Pyxis writable quota root is missing")
+        return quota_root
+
     def _run_linux_immutable_build_test(
         self, job: BuildTestJob, *, repository_runtime: AdmittedRuntime | None = None
     ) -> JobResult:
-        """Run one fixed check in the local, read-only Pyxis CI image."""
+        """Run one fixed check in the Pyxis boundary, or directly when unconfigured."""
+        if not self._pyxis_sandbox_configured():
+            return self._run_linux_direct_immutable_build_test(
+                job, repository_runtime=repository_runtime
+            )
         if not _pyxis_runtime_available(shutdown=self._shutdown):
             return JobResult(
                 ok=False,
@@ -6746,10 +6782,8 @@ class WorkerPool:
                 expected_sha256=self._host_verification_pyxis_sha256,
                 provenance=self._host_verification_pyxis_authority,
             )
-            if self._host_verification_pyxis_quota_root is None:
-                raise ValueError("Pyxis writable quota root is missing")
             quota_value = _validate_pyxis_quota_root(
-                self._host_verification_pyxis_quota_root,
+                self._require_pyxis_quota_root(),
                 retain_binding=True,
             )
         except (OSError, ValueError):
@@ -6906,6 +6940,92 @@ class WorkerPool:
                         "status": "passed" if result.ok else "failed",
                     },
                 )
+        except _HostVerificationBoundaryError as exc:
+            return JobResult(ok=False, error=str(exc))
+        except subprocess.TimeoutExpired as exc:
+            return JobResult(
+                ok=False,
+                error="timeout",
+                stdout_tail=bounded_pipeline_diagnostic(exc.stdout, limit=_TAIL),
+                stderr_tail=bounded_pipeline_diagnostic(exc.stderr, limit=_TAIL),
+            )
+        except OSError as exc:
+            return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
+
+    def _run_linux_direct_immutable_build_test(
+        self, job: BuildTestJob, *, repository_runtime: AdmittedRuntime | None = None
+    ) -> JobResult:
+        """Run the fixed immutable check directly when no backend is configured.
+
+        The Pyxis container boundary is optional. When its strict inputs
+        (the pinned image digest, the trust authority, and the writable
+        quota root) are not all configured, the fixed check still executes
+        from a disposable archive
+        of the proven commit with a scrubbed environment (no inherited
+        credentials), bounded wall time, and a bounded writable scratch.
+        Unlike the sandboxed paths, this path does not deny network access
+        or host file access: candidate code runs with the operator's reach,
+        which the operator accepts by not configuring a backend. A
+        configured rear-end keeps the strict Pyxis path.
+        """
+        executable = _repository_validation_executable(job, repository_runtime)
+        if executable is None:
+            return JobResult(ok=False, error="host_verification_executable_unavailable")
+        git_executable = _trusted_git_executable()
+        if git_executable is None:
+            return JobResult(ok=False, error="host_verification_git_unavailable")
+        try:
+            runtime_environment = _repository_validation_host_environment(
+                job.cwd, repository_runtime
+            )
+        except _HostVerificationBoundaryError as exc:
+            return JobResult(ok=False, error=str(exc))
+        try:
+            with tempfile.TemporaryDirectory(prefix="hephaestus-host-verification-") as temp_dir:
+                root = Path(temp_dir)
+                source = root / "source"
+                source.mkdir(mode=0o700)
+                archive, _archive_stderr = _bounded_git_archive(
+                    job.cwd, job.expected_head_sha, job.timeout_s
+                )
+                _extract_immutable_archive(archive, source)
+                _prepare_immutable_git_metadata(
+                    job.cwd, job.expected_head_sha, source, root, git_executable
+                )
+                scratch = root / "scratch"
+                scratch.mkdir(mode=0o700)
+                pi_smoke_logs = root / "pi-smoke-logs"
+                pi_smoke_logs.mkdir(mode=0o700)
+                (source / "pi-smoke-logs").mkdir()
+                _prepare_host_output_aliases(source, scratch, repository_runtime=repository_runtime)
+                _seal_host_runtime(source)
+                environment = _host_verification_env(
+                    scratch, executable, runtime_environment, git_executable
+                )
+                environment = _repository_validation_environment(
+                    environment, source, repository_runtime
+                )
+                validation_argv = _repository_validation_argv(job.argv, repository_runtime)
+                command = (executable, *validation_argv[1:])
+                result = _run_bounded_host_command(
+                    _linux_resource_limited_command(command, timeout_s=job.timeout_s),
+                    validation_argv=job.argv,
+                    source=source,
+                    scratch=scratch,
+                    additional_writable_paths=(pi_smoke_logs,),
+                    environment=environment,
+                    timeout_s=job.timeout_s,
+                    shutdown=self._shutdown,
+                )
+            checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
+            if checkout_error is not None:
+                return JobResult(
+                    ok=False,
+                    error=checkout_error,
+                    stdout_tail=result.stdout_tail,
+                    stderr_tail=result.stderr_tail,
+                )
+            return _immutable_host_result(job, result)
         except _HostVerificationBoundaryError as exc:
             return JobResult(ok=False, error=str(exc))
         except subprocess.TimeoutExpired as exc:
@@ -10518,7 +10638,13 @@ class WorkerPool:
     def _rebase_structural_receipts(
         self, job: GitJob, workspace: WorkspaceBinding, source_sha: str
     ) -> JobResult | None:
-        """Bind required capability and execution evidence to the resulting source."""
+        """Bind capability and execution evidence to the resulting source.
+
+        The capability receipt is required only when a quota backend was
+        configured. Without any backend, the rebase proceeds with the
+        operator-direct boundary and carries no capability receipt. A
+        configured rear-end stays fail closed on every probe failure.
+        """
         policy = self._select_rebase_policy(job.repo)
         if policy is None:
             return None
@@ -10557,23 +10683,22 @@ class WorkerPool:
             deadline.remaining()
             capabilities = self._host_capabilities
             backend = None if capabilities is None else capabilities.quota_backend
-            if backend is None:
-                backend = UnavailableQuotaBackend()
-            target = CapabilityReceiptTarget(
-                request,
-                request.repository_root,
-                request.repository_root.stat().st_dev,
-                capabilities.execution_boundary_id if capabilities is not None else "unavailable",
-                source_sha,
-                backend=backend.backend_id,
-            )
-            receipt = backend.preflight(target, deadline=deadline)
-            if type(receipt) is not HostCapabilityReceipt or receipt.target != target:
-                receipt = None
-                raise ValueError("The rebase capability receipt target changed.")
-            replace(receipt)
-            verified_receipt = receipt
-            deadline.remaining()
+            if capabilities is not None and backend is not None:
+                target = CapabilityReceiptTarget(
+                    request,
+                    request.repository_root,
+                    request.repository_root.stat().st_dev,
+                    capabilities.execution_boundary_id,
+                    source_sha,
+                    backend=backend.backend_id,
+                )
+                receipt = backend.preflight(target, deadline=deadline)
+                if type(receipt) is not HostCapabilityReceipt or receipt.target != target:
+                    receipt = None
+                    raise ValueError("The rebase capability receipt target changed.")
+                replace(receipt)
+                verified_receipt = receipt
+                deadline.remaining()
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             return JobResult(
                 ok=False,
@@ -10584,7 +10709,7 @@ class WorkerPool:
                 error=redact_diagnostic_text(str(error))[:_ERR_MAX],
                 interrupted=isinstance(error, InterruptedError),
             )
-        if not receipt.available:
+        if receipt is not None and not receipt.available:
             return JobResult(
                 ok=False,
                 value={"failure_kind": "validation_runner", "capability_receipt": receipt},

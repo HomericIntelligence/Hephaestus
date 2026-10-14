@@ -1,4 +1,8 @@
-"""Keep durable failure evidence when no quota provider is configured."""
+"""Pin the missing-quota contract for both reviewer lanes.
+
+The PR-review lane keeps durable failure evidence; the unconfigured rebase
+lane proceeds directly.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ from hephaestus.automation.pipeline.host_capabilities import (
     HostCapabilityReceipt,
     WorkerCapabilities,
 )
+from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import HostCapabilityJob
 from hephaestus.automation.pipeline.rebase_adr_policy import HEPHAESTUS_ADR_REBASE_POLICY
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
@@ -74,9 +79,15 @@ def test_missing_quota_provider_retains_failure_evidence(
             host_capabilities=WorkerCapabilities(None, "missing-provider-boundary"),
             rebase_policy_selector=lambda repo: HEPHAESTUS_ADR_REBASE_POLICY,
         )
-        execution = Mock(side_effect=AssertionError("Missing quota cannot start execution."))
-        monkeypatch.setattr(pool, "_run_immutable_build_test", execution)
-        monkeypatch.setattr(pool, "_run_rebase_structural_validation", execution)
+        if phase == "pr_review":
+            execution = Mock(side_effect=AssertionError("Missing quota cannot start execution."))
+            monkeypatch.setattr(pool, "_run_immutable_build_test", execution)
+            monkeypatch.setattr(pool, "_run_rebase_structural_validation", execution)
+        else:
+            execution = Mock(
+                return_value=JobResult(ok=True, value={"head_sha": head, "immutable_source": True})
+            )
+            monkeypatch.setattr(pool, "_run_rebase_structural_validation", execution)
         if storage_fails:
             monkeypatch.setattr(
                 "hephaestus.automation.host_capabilities._write_receipt",
@@ -88,6 +99,30 @@ def test_missing_quota_provider_retains_failure_evidence(
             )
             assert isinstance(result.value, HostCapabilityRead)
             receipt = result.value.receipt
+            assert not result.ok
+            assert isinstance(receipt, HostCapabilityReceipt)
+            assert not receipt.available
+            assert (receipt.token, receipt.failed_step) == (QUOTA_UNAVAILABLE_TOKEN, "backend")
+            assert receipt.target.request == target
+            assert receipt.target.source_head_sha == head
+            assert receipt.cleanup_state == "not_started"
+            execution.assert_not_called()
+            path = (
+                root / DEFAULT_STATE_DIR / "host-capability-receipts" / f"{receipt.receipt_id}.json"
+            )
+            if storage_fails:
+                assert receipt.persistence_error == "Controlled receipt storage failure."
+                assert receipt.persistence_exception_type == "OSError"
+                assert not path.exists()
+            else:
+                assert path.is_file(), "Missing-provider failure must have a durable receipt."
+                stored = json.loads(path.read_bytes())
+                receipt_json = json.dumps(asdict(receipt), default=str)
+                target_json = json.dumps(asdict(receipt.target), default=str)
+                assert stored["receipt"] == json.loads(receipt_json)
+                assert stored["target"] == json.loads(target_json)
+                assert not receipt.persistence_error
+                assert path.stat().st_mode & 0o777 == 0o600
         else:
             job = GitJob(
                 target.repository,
@@ -99,28 +134,12 @@ def test_missing_quota_provider_retains_failure_evidence(
             with git_utils.operation_deadline(time.monotonic() + 60):
                 structural_result = pool._rebase_structural_receipts(job, binding, head)
             assert structural_result is not None
-            result = structural_result
-            receipt = result.value["capability_receipt"]
-        assert not result.ok
-        assert isinstance(receipt, HostCapabilityReceipt)
-        assert not receipt.available
-        assert (receipt.token, receipt.failed_step) == (QUOTA_UNAVAILABLE_TOKEN, "backend")
-        assert receipt.target.request == target
-        assert receipt.target.source_head_sha == head
-        assert receipt.cleanup_state == "not_started"
-        execution.assert_not_called()
-        path = root / DEFAULT_STATE_DIR / "host-capability-receipts" / f"{receipt.receipt_id}.json"
-        if storage_fails:
-            assert receipt.persistence_error == "Controlled receipt storage failure."
-            assert receipt.persistence_exception_type == "OSError"
-            assert not path.exists()
-        else:
-            assert path.is_file(), "Missing-provider failure must have a durable receipt."
-            stored = json.loads(path.read_bytes())
-            assert stored["receipt"] == json.loads(json.dumps(asdict(receipt), default=str))
-            assert stored["target"] == json.loads(json.dumps(asdict(receipt.target), default=str))
-            assert not receipt.persistence_error
-            assert path.stat().st_mode & 0o777 == 0o600
+            assert structural_result.ok
+            assert structural_result.value["capability_receipt"] is None
+            assert structural_result.value["structural_execution_receipt"] is execution.return_value
+            execution.assert_called_once_with(
+                binding.cwd, timeout=60, policy=HEPHAESTUS_ADR_REBASE_POLICY
+            )
         assert manager._require_receipt(42, lane).revision == head
     finally:
         if pool is not None:

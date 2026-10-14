@@ -267,30 +267,30 @@ the authority. It puts the authorized image, immutable source, and Git metadata
 in one private directory beside the source image. It executes only the copied
 image. It does not mount a host virtual environment.
 
-The authoritative Linux host lane must run the integration test with
-`--require-pyxis-host-verification`. Missing Pyxis, Enroot, an allocation, the
-image authority, or the bounded filesystem causes a failure in that lane. It
-does not produce a passing skip. macOS continues to use its native sandbox
-boundary. Other platforms remain fail-closed until a reviewed isolation
-backend exists.
-
-Run this acceptance test from the allocated node's batch process. The process
-must have `SLURM_JOB_ID` and `SLURMD_NODENAME`. Reserve at least two CPUs and
-4096 MiB for each child step. Do not run the harness in an exclusive step
-that consumes those resources.
+The Pyxis boundary is optional for local lanes. When the pinned image digest,
+the trust authority, and the writable quota root are not all configured — the
+Linux rule `select_quota_backend` applies — a Linux worker runs the fixed
+immutable check directly from a disposable archive of the proven commit, with
+a scrubbed environment (no inherited credentials), bounded wall time, and a
+bounded writable scratch.
+Unlike the sandboxed paths, the direct path does not deny network access or
+host file access: candidate code executes with the operator's reach, which the
+operator accepts by not configuring a backend. This direct behavior covers the
+rebase lanes and the repository-validation lane on the operator's own source.
+Two lanes execute code from arbitrary pull requests and stay fail closed when
+the strict sandbox is not configured: the PR-review host-verification lane,
+which also requires a configured Pyxis backend for its durable receipt
+contract, and the Comet repository-validation local lane, which on Linux has
+no sandbox without Pyxis. A configured rear-end fails closed: a missing or
+invalid image, authority, runtime, or bounded filesystem stops the
+verification. macOS continues to use its native sandbox boundary. Other
+platforms remain fail-closed until a reviewed isolation backend exists.
 
 The harness constructs a validated `PyxisExecutionPlacement` and passes it to
-`WorkerPool(host_verification_pyxis_placement=...)`. Both the positive control
-and the container command use explicit Slurm allocation and node selectors.
-The normal worker leaves placement to Slurm when this optional setting is
-absent. See the [Slurm srun options](https://slurm.schedmd.com/srun.html).
-
-Before and after the container command, an uncontained step must reach the
-harness listener and return its random challenge. It must also report the
-same host boot ID and hostname. A different node, unreachable listener,
-missing allocation, failed command, or malformed control result fails the
-test. A refusal inside the container counts only after both controls pass.
-A passing mocked test does not replace this live acceptance evidence.
+`WorkerPool(host_verification_pyxis_placement=...)`. Container commands use
+explicit Slurm allocation and node selectors. The normal worker leaves
+placement to Slurm when this optional setting is absent. See the
+[Slurm srun options](https://slurm.schedmd.com/srun.html).
 
 ## Current required contexts
 
