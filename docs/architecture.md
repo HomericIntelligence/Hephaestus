@@ -1353,7 +1353,8 @@ filesystem. The completed PR #3006 bootstrap is retired. There is no
 target-specific grant, comment selector, or skip-to-pass path. Generic host receipts remain in
 [`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
 
-For `LLM360/comet`, the coordinator first binds the detached source workspace.
+For a repository with an installed validation profile, the coordinator first
+binds the detached source workspace.
 A closed `prepare_repository_validation` Git job then builds the exact
 source-profile plan on a worker. The worker holds the repository locks and
 the current review-lane lease. This read operation does not receive writer
@@ -1362,21 +1363,15 @@ identities, head, workspace, generation, and nonce. No bootstrap grant is
 necessary. The plan
 keeps applicable checks separate from the checks eligible for ordinary PR CI
 or offline local execution. Unknown or mixed control versions fail admission.
-See [ADR-0054](adr/0054-comet-review-validation.md) for profile and receipt rules.
 
-The admitted profiles are `comet-5232ef5-v1`, `comet-d19d3dd-v1`,
-`comet-fe5a67d-v1`, and `comet-7c2772e-v1`. Each profile keeps its complete
-control inventory and selection policy. The `comet-fe5a67d-v1` profile binds
-the public-root test controls and adds `scripts/build_public_access_application.py`
-to the control-deployment policy. Its deployment contract remains a nightly
-check. Profile admission does not prove that a validation command passed.
-
-The `comet-7c2772e-v1` profile includes the affected-test selector, shard data,
-and quarantine manifest. Full test evidence requires a proved legacy route.
-The scope-classifier job must succeed. All 32 PR test shards must supply the
-required source and execution steps. A subset or successful no-op cannot
-supply full-test evidence. The pinned quarantine exceptions remain part of
-the profile; skipped tests are not reported as passed tests.
+Hephaestus owns this mechanism and ships no profile. An installed distribution
+registers one factory per repository in the
+`hephaestus.repository_validation_profiles` entry-point group. The registry and
+the profile contract are in
+[`repository_validation_profiles.py`](../hephaestus/automation/pipeline/repository_validation_profiles.py).
+A profile binds its repository identity, control inventory, fixed command
+selection, pull-request workflow, and sealed runtime layout. Profile admission
+does not prove that a validation command passed.
 
 The submitted GitHub job collects two agreeing CI observations. The retained
 PR identity, reviewed head, target base, immutable merge parents, control bytes,
@@ -1408,7 +1403,7 @@ Pure coverage and prompt summaries are in
 The effectful runtime adapter is outside the pure pipeline, in
 [`repository_validation_runtime.py`](../hephaestus/automation/repository_validation_runtime.py).
 
-Local Comet execution uses the existing isolation backend and a separately
+Local execution uses the existing isolation backend and a separately
 admitted sealed runtime at the fixed host capability path. Unlike the host's
 working virtual environment, this runtime is explicitly bound and read-only.
 The reviewed source precedes installed packages for the main and nested Python
@@ -1474,7 +1469,7 @@ stateDiagram-v2
     ThreadGate --> Checkout: explicit operator broad review; preserve inherited threads
     Checkout --> Review: broad audit entry and clean snapshot matches H
     Checkout --> Validate: comment-validation entry and clean snapshot matches H
-    Checkout --> SourcePreparation: Comet bound checkout manifest
+    Checkout --> SourcePreparation: bound checkout manifest
     SourcePreparation --> RepositoryValidation: worker admits exact source plan
     RepositoryValidation --> RuntimePreparation: uncovered eligible local check
     RuntimePreparation --> RepositoryValidation: worker admits runtime; separate check execution
@@ -2521,12 +2516,8 @@ and raw tool output keep their original content.
 It includes local private-denylist policy. It uses native check flags or detects
 changes to the private copy, and restores the input before each subsequent
 hook. Missing prepared tools and unknown execution contracts fail verification.
-Policy hooks accept only three reviewed root selector pairs: the default with
-no exclusions, the external Comet fixture exclusion for `current/`, `fe5a67d/`,
-and `historical/controls/`, and that same exclusion with `7c2772e/` added.
-Each fixture directory is under `tests/fixtures/comet-review-validation/`.
-The adapter keeps pre-commit's file selection and preserves external fixture
-bytes. Other root selector changes fail preparation before hooks run.
+Policy hooks accept only the default root selector pair with no exclusions.
+Any other root selector change fails preparation before hooks run.
 It does not install hook dependencies or request the queue's native fallback.
 The CI builder prepares hooks with the same pinned Node/npm prefix copied into
 the runtime. This keeps the Markdown hook's system Node environment consistent

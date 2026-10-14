@@ -24,7 +24,7 @@ block a PR because it uses another branch naming format.
 | 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
 | 8 | `uv run mypy hephaestus/ scripts/ tests/` returns `Success: no issues found in N source files` | CI job `lint` |
 | 9 | Fast test suite passes: `just test` | CI job `lint` through the pre-commit hook |
-| 10 | Core-library coverage gate satisfied: `--cov-fail-under=84` (configured in `pyproject.toml [tool.coverage.report].fail_under`). The gate measures the core library only. The opt-in `hephaestus/automation/` product layer is not measured. | Nightly CI job `unit-coverage` |
+| 10 | Coverage gate satisfied: `--cov-fail-under=85` (configured in `pyproject.toml [tool.coverage.report].fail_under`) | Nightly CI job `unit-coverage` |
 | 11 | No new warnings introduced (pytest, deprecation, ruff) | PR reviewer |
 | 12 | Full integration tests pass | Nightly CI job `functional-tests` |
 | 13 | Shell tests pass: `just test-shell` | Nightly CI job `shell-tests` |
@@ -123,7 +123,7 @@ In addition to the universal checklist:
 | # | Requirement | Enforced by |
 |---|-------------|-------------|
 | F1 | Public functions have Google-style docstrings | Convention (PR reviewer) |
-| F2 | New `main()` entry points have at least smoke tests (one happy-path, one error-path) | Coverage gate (rejects untested core-library code if it drops total under 84%) |
+| F2 | New `main()` entry points have at least smoke tests (one happy-path, one error-path) | Coverage gate (rejects untested code if it drops total under 85%) |
 | F3 | New CLI scripts use `add_json_arg(parser)` and emit `emit_json_status(...)` on exit | CI integration test `TestCLIJsonFlag` in `tests/integration/test_cli_entry_points.py` |
 | F4 | New CLI scripts appear in `pyproject.toml [project.scripts]` AND in the CLI table of `README.md` | CI gate via `hephaestus.scripts_lib.check_cli_table_sync` |
 | F5 | If the work touches deprecated APIs, update `COMPATIBILITY.md` | PR reviewer |

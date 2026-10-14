@@ -87,6 +87,7 @@ Hephaestus/
 ├── tests/                      # Unit and integration tests
 │   ├── unit/                   # Unit tests (mirror hephaestus/ subpackages; SANCTIONED_EXTRA_TEST_DIRS names the extra directories that have no source counterpart)
 │   ├── integration/            # Integration tests
+│   ├── performance/            # Load and regression benchmarks
 │   ├── fixtures/               # Versioned test fixtures
 │   └── shell/                  # Shell installer and justfile tests (bats)
 ├── docs/                       # Documentation
@@ -125,28 +126,34 @@ exact assigned numbers.
 
 ### Coverage omit-list invariant
 
-The Coverage.py omit list in `pyproject.toml` `[tool.coverage.run]` MUST omit
-the opt-in `hephaestus/automation/` product layer. The core library is every
-`hephaestus/` subpackage except that product layer. The product layer ships
-behind the `HomericIntelligence-Hephaestus[automation]` extra, and the
-dependency arrow points only from the product layer to the library. It is not
-core library surface.
+The Coverage.py gate measures the whole `hephaestus/` package. That includes the
+opt-in `hephaestus/automation/` product layer. The product layer ships behind
+the `HomericIntelligence-Hephaestus[automation]` extra, and the dependency
+arrow points only from the product layer to the library. The extra controls
+imports. It does not remove the layer from measurement.
 
-The omit list holds exactly three entries: the test tree, the package
-`__init__.py` files, and the `hephaestus/automation/` product layer. Keep the two
-generic exclusions. Do not add another entry without a documented boundary and
-an explicit change to this invariant.
+The omit list holds exactly two entries: the test tree and the package
+`__init__.py` files. Keep both generic exclusions. Do not add another entry
+without a documented boundary and an explicit change to this invariant.
+`tests/unit/validation/test_omit_allowlist.py` enforces exact membership, so a
+whole `hephaestus/automation/*.py` module must stay measured.
 
 `coverage.toml` holds the aggregate threshold and the per-module floors. The
-only retained module floor is `validation/schema.py` at 80. Remove a module
-floor only when its source is deleted. Keep all other module floors.
+retained floors are `validation/schema.py`, `automation/models.py`,
+`automation/dependency_resolver.py`, and the line-coverage floors for
+`automation/implementer.py`, `automation/planner.py`,
+`automation/loop_runner.py`, `automation/loop_repo_manager.py`,
+`automation/address_review_core.py`, and `automation/pipeline_cli.py`. Remove a
+module floor only when its source is deleted. Keep all other module floors.
 
-`fail_under` in `[tool.coverage.report]` is the measured library value. The
-gate measures library code only. Imports and test names do not prove coverage.
+`fail_under` in `[tool.coverage.report]` is 85. The gate measures the whole
+package. Hermetic unit tests inject the agent, GitHub, Git, subprocess, clock,
+and terminal seams, so live boundaries are exercised without a live transport.
+Imports and test names do not prove coverage.
 
-Omitting the product layer does not relax a safety boundary. The following rules
-still apply to every module inside the omitted product layer, and a change to any
-of them needs the same source review as a library change.
+Measuring the product layer does not relax a safety boundary. The following
+rules apply to every module in that layer, and a change to any of them needs
+the same source review as a library change.
 
 - **Prompt fencing stays.** Every untrusted GitHub value still passes through
   `fence_untrusted()` in `hephaestus/prompts/fencing.py` with a fresh nonce, and
@@ -231,7 +238,7 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 - Type hints required for all functions
 - Clear docstrings for public functions and classes
 - Comprehensive error handling
-- Comprehensive test coverage (unit tests) — 84% test coverage for the core library, enforced by the CI gate (`fail_under = 84`)
+- Comprehensive test coverage (unit tests) — 85% test coverage for the whole `hephaestus/` package, enforced by the CI gate (`fail_under = 85`)
 - Follow PEP 8 style guidelines
 
 ## Key Development Principles
@@ -659,8 +666,6 @@ pre-commit run --all-files
 - `tests/unit/` - Unit test suite. It mirrors the hephaestus/ subpackages.
   `SANCTIONED_EXTRA_TEST_DIRS` in `hephaestus/validation/test_layout.py` names
   the extra test directories that have no source counterpart.
-  `SANCTIONED_UNTESTED_SRC_PACKAGES` names the source packages that have no
-  test mirror.
 - `tests/integration/` - Integration tests (package importability, smoke tests)
 - `scripts/` - Automation and maintenance tools
 - `docs/` - Documentation and guides

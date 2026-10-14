@@ -29,8 +29,7 @@ Required CI and current branch protection still apply to the merge candidate.
 A pending required check cannot authorize a merge. This decision changes no
 production action, validation runtime, isolation control, or merge policy.
 
-The automation loop retains ADR-0048. The related Comet evidence audit is
-recorded in [the audit report](../workflow-evidence-audit.md).
+The automation loop retains ADR-0048.
 
 ## Alternatives considered
 

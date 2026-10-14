@@ -1,9 +1,13 @@
 """Bounded compacted finding history without transport dependencies.
 
-Data hygiene in this module is per item. One malformed compacted identity or
-one malformed retained record is quarantined, and the host reports a warning
-that names its recovery action. The usable remainder keeps the work item
-alive.
+Data hygiene in this module is per item. One corrupt compacted identity or one
+corrupt retained record is quarantined, and the host reports a warning that
+names its recovery action. The usable remainder keeps the work item alive.
+
+A size failure is not corrupt data. A record that exceeds a transport size
+limit raises :class:`ReviewFindingSizeError`. The host then compacts that
+record into a bounded identity. The host never drops a proven record because
+the record is too large.
 
 The checks that stay all-or-nothing protect the durable state and the GitHub
 comment transport. Each retained check states its one-line reason in the
@@ -14,12 +18,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import MutableSequence
+from collections.abc import Mapping, MutableSequence, Sequence
 from html import escape
 from typing import TypedDict
 
 from .review_anchors import (
     MAX_REVIEW_FINDING_PUBLIC_SECTION_CHARS,
+    ReviewFindingSizeError,
     _full_sha,
     normalize_review_finding_records,
 )
@@ -85,15 +90,88 @@ def _quarantine_identity(warnings: MutableSequence[ReviewWarning] | None, index:
     )
 
 
+def _size_tolerant_records(
+    records: object,
+    warnings: MutableSequence[ReviewWarning] | None,
+) -> tuple[dict[str, object], ...]:
+    """Return every structurally valid record, including oversized ones.
+
+    The compaction intake calls this when the collection is only too large. The
+    host must see each oversized record so the compaction loop can replace its
+    content with a bounded identity. A record that is only too large is kept in
+    full. A record whose values are corrupt is quarantined.
+
+    Args:
+        records: Candidate retained finding records.
+        warnings: Collector that the caller reads, or None to log.
+
+    Returns:
+        The valid records, with each oversized record kept in full.
+
+    Raises:
+        ValueError: If the records are not a list, or if a value is invalid
+            beside its size.
+
+    """
+    if not isinstance(records, (list, tuple)):
+        raise ValueError("review finding record count is invalid")
+    kept: list[dict[str, object]] = []
+    quarantined: list[int] = []
+    for index, record in enumerate(records):
+        try:
+            kept.extend(normalize_review_finding_records([record]))
+        except ReviewFindingSizeError:
+            # Keep the record in full. The compaction loop removes its content.
+            kept.append(_oversized_record_without_size(record))
+        except ValueError:
+            quarantined.append(index)
+    for index in quarantined:
+        record_review_warning(
+            warnings,
+            "finding_record_quarantined",
+            message=f"Retained review finding record {index} is invalid. The host skipped it.",
+            recovery=_RECORD_RECOVERY,
+        )
+    return tuple(kept)
+
+
+def _oversized_record_without_size(record: object) -> dict[str, object]:
+    """Return one record that only exceeds a size limit, with its full content.
+
+    The compaction loop replaces this content with a bounded identity. The host
+    must keep the original values here so that replacement stays exact.
+
+    Args:
+        record: One candidate retained finding record.
+
+    Returns:
+        The record with its values normalized and its content unchanged.
+
+    Raises:
+        ValueError: If the record shape or its values are invalid.
+
+    """
+    if not isinstance(record, dict):
+        raise ValueError("review finding record shape is invalid")
+    # Read the record without the size decision. The compaction loop replaces
+    # this content with a bounded identity, so the host must keep it in full.
+    return normalize_review_finding_records([record], enforce_size=False)[0]
+
+
 def _usable_finding_records(
     records: object,
     warnings: MutableSequence[ReviewWarning] | None,
 ) -> tuple[dict[str, object], ...] | None:
     """Return the usable records of one collection, or None for a whole failure.
 
-    The host validates each record on its own. A record that cannot be read is
-    quarantined. The host then validates the survivors as one collection, so a
-    duplicate finding identity or an aggregate limit still fails closed.
+    The host validates each record on its own. A record whose values are
+    corrupt is quarantined. The host then validates the survivors as one
+    collection, so a duplicate finding identity still fails closed.
+
+    A record that only exceeds a size limit is not corrupt. This function
+    raises :class:`ReviewFindingSizeError` for that case so the compaction loop
+    can reduce the collection to a bounded identity. The host never drops a
+    record because the record is too large.
 
     Args:
         records: Candidate retained finding records.
@@ -101,6 +179,9 @@ def _usable_finding_records(
 
     Returns:
         The usable records, or None when the failure was not per item.
+
+    Raises:
+        ReviewFindingSizeError: If one record exceeds a size limit.
 
     """
     if not isinstance(records, (list, tuple)):
@@ -110,6 +191,10 @@ def _usable_finding_records(
     for index, record in enumerate(records):
         try:
             usable.extend(normalize_review_finding_records([record]))
+        except ReviewFindingSizeError:
+            # A record that is too large is not corrupt. The host compacts it
+            # into a bounded identity. It must never quarantine that record.
+            raise
         except ValueError:
             quarantined.append(index)
     if not quarantined:
@@ -150,7 +235,7 @@ def normalize_review_finding_batch_records(
         separators=(",", ":"),
     ).encode("utf-8")
     if len(encoded) > MAX_REVIEW_FINDING_BATCH_BYTES:
-        raise ValueError("review finding batch exceeds its aggregate size limit")
+        raise ReviewFindingSizeError("review finding batch exceeds its aggregate size limit")
     visible_lines = ["## Retained review findings"]
     visible_lines.extend(
         "- "
@@ -165,7 +250,7 @@ def normalize_review_finding_batch_records(
         + encoded_payload_chars
     )
     if public_section_chars > MAX_REVIEW_FINDING_BATCH_PUBLIC_SECTION_CHARS:
-        raise ValueError("review finding batch exceeds its public rendering limit")
+        raise ReviewFindingSizeError("review finding batch exceeds its public rendering limit")
     return normalized
 
 
@@ -268,11 +353,14 @@ def normalize_review_finding_collection(
     *,
     compacted_outcomes: object = None,
     warnings: MutableSequence[ReviewWarning] | None = None,
+    enforce_size: bool = True,
 ) -> tuple[tuple[dict[str, object], ...], ReviewFindingCompactedOutcomes]:
     """Normalize one versioned or legacy cumulative finding history.
 
-    One malformed retained record is quarantined. The host warns about it and
-    keeps the usable records.
+    One corrupt retained record is quarantined. The host warns about it and
+    keeps the usable records. A record that only exceeds a size limit is not
+    corrupt. This function raises :class:`ReviewFindingSizeError` for that
+    case, so the compaction loop can reduce the collection.
 
     These checks stay all-or-nothing. Each one protects the durable state:
 
@@ -289,13 +377,20 @@ def normalize_review_finding_collection(
         findings: Candidate cumulative finding history.
         compacted_outcomes: Compacted outcomes for a separate legacy list.
         warnings: Collector that the caller reads, or None to log.
+        enforce_size: The compaction intake passes False. That read must accept
+            a collection that is only too large, so the compaction loop can
+            reduce it. Every other check stays in force. The loop then calls
+            this function again with the default value, so the final size
+            decision is always made here.
 
     Returns:
         The usable retained records and their compacted outcomes.
 
     Raises:
-        ValueError: If the envelope, the format version, the compacted state, or
-            an aggregate size limit is invalid.
+        ValueError: If the envelope, the format version, or the compacted state
+            is invalid.
+        ReviewFindingSizeError: If one record or the collection exceeds a size
+            limit, and ``enforce_size`` is True.
 
     """
     collection_format: int | None = None
@@ -315,6 +410,12 @@ def normalize_review_finding_collection(
         findings = findings.get("findings")
     try:
         records = normalize_review_finding_records(findings)
+    except ReviewFindingSizeError:
+        # A size failure is not corrupt data. The caller compacts the
+        # collection. The host must not quarantine the oversized record.
+        if enforce_size:
+            raise
+        records = _size_tolerant_records(findings, warnings)
     except ValueError:
         usable = _usable_finding_records(findings, warnings)
         if usable is None:
@@ -331,22 +432,48 @@ def normalize_review_finding_collection(
     # Envelope expansion must not make a previously valid read fail. All new
     # writes call review_finding_collection_payload, which validates format 1
     # or format 2 after it adds the envelope.
-    if legacy_list:
+    # The compaction intake also stops here. The loop in
+    # compact_terminal_review_finding_collection re-reads each reduced
+    # collection with the strict default, so the final size decision is always
+    # made there.
+    if legacy_list or not enforce_size:
         return records, compacted
     payload: dict[str, object] = {
         "format": 2 if any("publication_head" in record for record in records) else 1,
         "findings": records,
         "compacted_outcomes": compacted,
     }
+    encoded_bytes = _collection_encoded_bytes(payload)
+    if len(encoded_bytes) > MAX_REVIEW_FINDING_COLLECTION_BYTES:
+        raise ReviewFindingSizeError("review finding collection exceeds its aggregate size limit")
+    if _public_section_chars(records, compacted, encoded_bytes) > (
+        MAX_REVIEW_FINDING_PUBLIC_SECTION_CHARS
+    ):
+        raise ReviewFindingSizeError("review finding collection exceeds its public rendering limit")
+    return records, compacted
+
+
+def _collection_encoded_bytes(payload: Mapping[str, object]) -> bytes:
+    """Return the encoded bytes of one durable collection payload."""
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
-    encoded_bytes = encoded.encode("utf-8")
-    if len(encoded_bytes) > MAX_REVIEW_FINDING_COLLECTION_BYTES:
-        raise ValueError("review finding collection exceeds its aggregate size limit")
+    return encoded.encode("utf-8")
+
+
+def _public_section_chars(
+    records: Sequence[Mapping[str, object]],
+    compacted: ReviewFindingCompactedOutcomes,
+    encoded_bytes: bytes,
+) -> int:
+    """Return the characters that one collection adds to a public comment.
+
+    This value maps to the GitHub comment transport limit. The host renders the
+    visible finding list and the encoded records in one comment.
+    """
     counts = compacted["counts"]
     visible_lines = ["## Retained review findings"]
     if compacted["identities"]:
@@ -362,14 +489,11 @@ def normalize_review_finding_collection(
         for record in records
     )
     encoded_payload_chars = ((len(encoded_bytes) + 2) // 3) * 4
-    public_section_chars = (
+    return (
         len("\n\n" + "\n".join(visible_lines) + "\n\n")
         + len("<!-- hephaestus-review-finding-records: -->")
         + encoded_payload_chars
     )
-    if public_section_chars > MAX_REVIEW_FINDING_PUBLIC_SECTION_CHARS:
-        raise ValueError("review finding collection exceeds its public rendering limit")
-    return records, compacted
 
 
 def review_finding_compacted_outcomes_leave_batch_capacity(value: object) -> bool:
@@ -450,7 +574,7 @@ def compact_terminal_review_finding_collection(
     )
     if not isinstance(findings, dict):
         records, _legacy_compacted = normalize_review_finding_collection(
-            findings, warnings=warnings
+            findings, warnings=warnings, enforce_size=False
         )
         compacted = normalize_review_finding_compacted_outcomes(
             raw_compacted,
@@ -458,10 +582,14 @@ def compact_terminal_review_finding_collection(
             warnings=warnings,
         )
     else:
+        # The intake accepts a collection that is only too large. The loop
+        # below re-reads each reduced collection with the strict default, so
+        # the final size decision is always made there.
         records, compacted = normalize_review_finding_collection(
             findings,
             compacted_outcomes=compacted_outcomes,
             warnings=warnings,
+            enforce_size=False,
         )
     retained = [dict(record) for record in records]
     if proven_outcomes is not None:

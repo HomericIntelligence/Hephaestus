@@ -1,0 +1,1333 @@
+{
+  "admission": {
+    "command": {
+      "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+      "generation": 1,
+      "idempotencyKey": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+      "operation": "start",
+      "payload": {
+        "attempt": 1,
+        "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "parent": {
+          "agentId": "parent-agent",
+          "claim": {
+            "agentId": "parent-agent",
+            "generation": 1,
+            "schema": "hi/fleet/claim/v1",
+            "targetId": "parent-session",
+            "targetKind": "sessions",
+            "workerId": "laptop-worker",
+            "workspace": "/work/parent-source"
+          },
+          "executionId": "parent-execution",
+          "generation": 1,
+          "sessionId": "parent-session",
+          "targetId": "parent-session",
+          "targetKind": "sessions",
+          "taskId": "real-parent-task"
+        },
+        "policy": {
+          "allocation": {
+            "authorityId": "supervisor-1",
+            "generation": 1,
+            "id": "tool-allocation-1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "platform": "linux/aarch64",
+            "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "resources": {
+              "cpus": 18,
+              "diskBytes": 68719476736,
+              "gpus": 0,
+              "memoryBytes": 77309411328
+            },
+            "supervision": {
+              "cpus": 2,
+              "memoryBytes": 8589934592
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "workerId": "tool-worker-1"
+          },
+          "recipe": {
+            "argv": [
+              "just",
+              "test-unit"
+            ],
+            "id": "hephaestus-test-unit-v1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+            "parameters": {},
+            "platform": "linux/aarch64",
+            "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+            "repository": "HomericIntelligence/Hephaestus",
+            "resources": {
+              "artifactBytes": 1048576,
+              "cpus": 2,
+              "diskBytes": 4294967296,
+              "gpus": 0,
+              "memoryBytes": 2147483648,
+              "outputBytes": 65536,
+              "snapshotBytes": 16777216,
+              "snapshotMembers": 1000,
+              "wallSeconds": 120
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "workspace": {
+            "id": "hephaestus-source",
+            "parentWorkspace": "/work/parent-source",
+            "repository": "HomericIntelligence/Hephaestus",
+            "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+          }
+        },
+        "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+        "requiresRunGrant": true,
+        "schema": "hi/fleet/build-command/v1",
+        "snapshot": {
+          "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+          "bytes": 91,
+          "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+          "members": 2,
+          "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+          "reference": "snapshot-interop-1"
+        },
+        "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1"
+      },
+      "schema": "hi/fleet/v1",
+      "targetId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+      "targetKind": "build-jobs",
+      "workerId": "tool-worker-1"
+    },
+    "record": {
+      "build": {
+        "allocation": {
+          "authorityId": "supervisor-1",
+          "generation": 1,
+          "id": "tool-allocation-1",
+          "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "platform": "linux/aarch64",
+          "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "resources": {
+            "cpus": 18,
+            "diskBytes": 68719476736,
+            "gpus": 0,
+            "memoryBytes": 77309411328
+          },
+          "supervision": {
+            "cpus": 2,
+            "memoryBytes": 8589934592
+          },
+          "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "workerId": "tool-worker-1"
+        },
+        "attempt": 1,
+        "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "policy": {
+          "allocation": {
+            "authorityId": "supervisor-1",
+            "generation": 1,
+            "id": "tool-allocation-1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "platform": "linux/aarch64",
+            "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "resources": {
+              "cpus": 18,
+              "diskBytes": 68719476736,
+              "gpus": 0,
+              "memoryBytes": 77309411328
+            },
+            "supervision": {
+              "cpus": 2,
+              "memoryBytes": 8589934592
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "workerId": "tool-worker-1"
+          },
+          "recipe": {
+            "argv": [
+              "just",
+              "test-unit"
+            ],
+            "id": "hephaestus-test-unit-v1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+            "parameters": {},
+            "platform": "linux/aarch64",
+            "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+            "repository": "HomericIntelligence/Hephaestus",
+            "resources": {
+              "artifactBytes": 1048576,
+              "cpus": 2,
+              "diskBytes": 4294967296,
+              "gpus": 0,
+              "memoryBytes": 2147483648,
+              "outputBytes": 65536,
+              "snapshotBytes": 16777216,
+              "snapshotMembers": 1000,
+              "wallSeconds": 120
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "workspace": {
+            "id": "hephaestus-source",
+            "parentWorkspace": "/work/parent-source",
+            "repository": "HomericIntelligence/Hephaestus",
+            "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+          }
+        },
+        "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+        "request": {
+          "idempotencyKey": "build-request-1",
+          "parameters": {},
+          "parent": {
+            "executionId": "parent-execution",
+            "generation": 1,
+            "sessionId": "parent-session",
+            "targetId": "parent-session",
+            "targetKind": "sessions"
+          },
+          "recipeId": "hephaestus-test-unit-v1",
+          "schema": "hi/fleet/build-submit/v1",
+          "snapshot": {
+            "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+            "bytes": 91,
+            "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+            "members": 2,
+            "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+            "reference": "snapshot-interop-1"
+          },
+          "workspaceId": "hephaestus-source"
+        },
+        "reservation": "reserved",
+        "schema": "hi/fleet/build/v1",
+        "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1"
+      },
+      "claimStatus": "unclaimed",
+      "collectionVerified": false,
+      "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+      "createdAt": "2026-09-13T10:40:05Z",
+      "generation": 1,
+      "id": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+      "kind": "build-jobs",
+      "parent": {
+        "agentId": "parent-agent",
+        "claim": {
+          "agentId": "parent-agent",
+          "generation": 1,
+          "schema": "hi/fleet/claim/v1",
+          "targetId": "parent-session",
+          "targetKind": "sessions",
+          "workerId": "laptop-worker",
+          "workspace": "/work/parent-source"
+        },
+        "executionId": "parent-execution",
+        "generation": 1,
+        "sessionId": "parent-session",
+        "targetId": "parent-session",
+        "targetKind": "sessions",
+        "taskId": "real-parent-task"
+      },
+      "schema": "hi/fleet/v1",
+      "status": "admitted",
+      "updatedAt": "2026-09-13T10:40:05Z"
+    }
+  },
+  "cancelRequest": {
+    "attempt": 1,
+    "commandId": "build-stop-1",
+    "generation": 1,
+    "idempotencyKey": "build-stop-key-1",
+    "schema": "hi/fleet/build-cancel/v1"
+  },
+  "cancelResponse": {
+    "command": {
+      "commandId": "build-stop-1",
+      "generation": 1,
+      "idempotencyKey": "build-stop-key-1",
+      "operation": "cancel",
+      "payload": {
+        "attempt": 1,
+        "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "parent": {
+          "agentId": "parent-agent",
+          "claim": {
+            "agentId": "parent-agent",
+            "generation": 1,
+            "schema": "hi/fleet/claim/v1",
+            "targetId": "parent-session",
+            "targetKind": "sessions",
+            "workerId": "laptop-worker",
+            "workspace": "/work/parent-source"
+          },
+          "executionId": "parent-execution",
+          "generation": 1,
+          "sessionId": "parent-session",
+          "targetId": "parent-session",
+          "targetKind": "sessions",
+          "taskId": "real-parent-task"
+        },
+        "policy": {
+          "allocation": {
+            "authorityId": "supervisor-1",
+            "generation": 1,
+            "id": "tool-allocation-1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "platform": "linux/aarch64",
+            "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "resources": {
+              "cpus": 18,
+              "diskBytes": 68719476736,
+              "gpus": 0,
+              "memoryBytes": 77309411328
+            },
+            "supervision": {
+              "cpus": 2,
+              "memoryBytes": 8589934592
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "workerId": "tool-worker-1"
+          },
+          "recipe": {
+            "argv": [
+              "just",
+              "test-unit"
+            ],
+            "id": "hephaestus-test-unit-v1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+            "parameters": {},
+            "platform": "linux/aarch64",
+            "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+            "repository": "HomericIntelligence/Hephaestus",
+            "resources": {
+              "artifactBytes": 1048576,
+              "cpus": 2,
+              "diskBytes": 4294967296,
+              "gpus": 0,
+              "memoryBytes": 2147483648,
+              "outputBytes": 65536,
+              "snapshotBytes": 16777216,
+              "snapshotMembers": 1000,
+              "wallSeconds": 120
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "workspace": {
+            "id": "hephaestus-source",
+            "parentWorkspace": "/work/parent-source",
+            "repository": "HomericIntelligence/Hephaestus",
+            "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+          }
+        },
+        "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+        "requiresRunGrant": true,
+        "schema": "hi/fleet/build-command/v1",
+        "snapshot": {
+          "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+          "bytes": 91,
+          "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+          "members": 2,
+          "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+          "reference": "snapshot-interop-1"
+        },
+        "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1",
+        "stopStartCommandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start"
+      },
+      "schema": "hi/fleet/v1",
+      "targetId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+      "targetKind": "build-jobs",
+      "workerId": "tool-worker-1"
+    },
+    "record": {
+      "build": {
+        "allocation": {
+          "authorityId": "supervisor-1",
+          "generation": 1,
+          "id": "tool-allocation-1",
+          "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "platform": "linux/aarch64",
+          "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "resources": {
+            "cpus": 18,
+            "diskBytes": 68719476736,
+            "gpus": 0,
+            "memoryBytes": 77309411328
+          },
+          "supervision": {
+            "cpus": 2,
+            "memoryBytes": 8589934592
+          },
+          "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "workerId": "tool-worker-1"
+        },
+        "attempt": 1,
+        "cancellation": {
+          "attempt": 1,
+          "commandId": "build-stop-1",
+          "generation": 1,
+          "idempotencyKey": "build-stop-key-1",
+          "schema": "hi/fleet/build-cancel/v1"
+        },
+        "grant": {
+          "authorizedAt": "2026-09-13T10:40:05Z",
+          "claim": {
+            "allocationId": "tool-allocation-1",
+            "attempt": 1,
+            "claimId": "supervisor-claim-1",
+            "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+            "generation": 1,
+            "schema": "hi/fleet/build-claim/v1",
+            "workerId": "tool-worker-1"
+          },
+          "grantId": "60abcc8ed7b3e5218e5616006b46eb47de36cab78b1415598b663865c4bcdbaf",
+          "schema": "hi/fleet/build-grant/v1"
+        },
+        "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "policy": {
+          "allocation": {
+            "authorityId": "supervisor-1",
+            "generation": 1,
+            "id": "tool-allocation-1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "platform": "linux/aarch64",
+            "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "resources": {
+              "cpus": 18,
+              "diskBytes": 68719476736,
+              "gpus": 0,
+              "memoryBytes": 77309411328
+            },
+            "supervision": {
+              "cpus": 2,
+              "memoryBytes": 8589934592
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "workerId": "tool-worker-1"
+          },
+          "recipe": {
+            "argv": [
+              "just",
+              "test-unit"
+            ],
+            "id": "hephaestus-test-unit-v1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+            "parameters": {},
+            "platform": "linux/aarch64",
+            "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+            "repository": "HomericIntelligence/Hephaestus",
+            "resources": {
+              "artifactBytes": 1048576,
+              "cpus": 2,
+              "diskBytes": 4294967296,
+              "gpus": 0,
+              "memoryBytes": 2147483648,
+              "outputBytes": 65536,
+              "snapshotBytes": 16777216,
+              "snapshotMembers": 1000,
+              "wallSeconds": 120
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "workspace": {
+            "id": "hephaestus-source",
+            "parentWorkspace": "/work/parent-source",
+            "repository": "HomericIntelligence/Hephaestus",
+            "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+          }
+        },
+        "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+        "request": {
+          "idempotencyKey": "build-request-1",
+          "parameters": {},
+          "parent": {
+            "executionId": "parent-execution",
+            "generation": 1,
+            "sessionId": "parent-session",
+            "targetId": "parent-session",
+            "targetKind": "sessions"
+          },
+          "recipeId": "hephaestus-test-unit-v1",
+          "schema": "hi/fleet/build-submit/v1",
+          "snapshot": {
+            "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+            "bytes": 91,
+            "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+            "members": 2,
+            "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+            "reference": "snapshot-interop-1"
+          },
+          "workspaceId": "hephaestus-source"
+        },
+        "reservation": "reserved",
+        "schema": "hi/fleet/build/v1",
+        "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1"
+      },
+      "claimStatus": "unclaimed",
+      "collectionVerified": false,
+      "commandId": "build-stop-1",
+      "createdAt": "2026-09-13T10:40:05Z",
+      "generation": 1,
+      "id": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+      "kind": "build-jobs",
+      "parent": {
+        "agentId": "parent-agent",
+        "claim": {
+          "agentId": "parent-agent",
+          "generation": 1,
+          "schema": "hi/fleet/claim/v1",
+          "targetId": "parent-session",
+          "targetKind": "sessions",
+          "workerId": "laptop-worker",
+          "workspace": "/work/parent-source"
+        },
+        "executionId": "parent-execution",
+        "generation": 1,
+        "sessionId": "parent-session",
+        "targetId": "parent-session",
+        "targetKind": "sessions",
+        "taskId": "real-parent-task"
+      },
+      "schema": "hi/fleet/v1",
+      "status": "cancelling",
+      "updatedAt": "2026-09-13T10:40:05Z"
+    }
+  },
+  "claimRequest": {
+    "allocationId": "tool-allocation-1",
+    "attempt": 1,
+    "claimId": "supervisor-claim-1",
+    "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+    "generation": 1,
+    "schema": "hi/fleet/build-claim/v1",
+    "workerId": "tool-worker-1"
+  },
+  "commands": [
+    {
+      "command": {
+        "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+        "generation": 1,
+        "idempotencyKey": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+        "operation": "start",
+        "payload": {
+          "attempt": 1,
+          "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "parent": {
+            "agentId": "parent-agent",
+            "claim": {
+              "agentId": "parent-agent",
+              "generation": 1,
+              "schema": "hi/fleet/claim/v1",
+              "targetId": "parent-session",
+              "targetKind": "sessions",
+              "workerId": "laptop-worker",
+              "workspace": "/work/parent-source"
+            },
+            "executionId": "parent-execution",
+            "generation": 1,
+            "sessionId": "parent-session",
+            "targetId": "parent-session",
+            "targetKind": "sessions",
+            "taskId": "real-parent-task"
+          },
+          "policy": {
+            "allocation": {
+              "authorityId": "supervisor-1",
+              "generation": 1,
+              "id": "tool-allocation-1",
+              "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "platform": "linux/aarch64",
+              "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+              "resources": {
+                "cpus": 18,
+                "diskBytes": 68719476736,
+                "gpus": 0,
+                "memoryBytes": 77309411328
+              },
+              "supervision": {
+                "cpus": 2,
+                "memoryBytes": 8589934592
+              },
+              "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+              "workerId": "tool-worker-1"
+            },
+            "recipe": {
+              "argv": [
+                "just",
+                "test-unit"
+              ],
+              "id": "hephaestus-test-unit-v1",
+              "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+              "parameters": {},
+              "platform": "linux/aarch64",
+              "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+              "repository": "HomericIntelligence/Hephaestus",
+              "resources": {
+                "artifactBytes": 1048576,
+                "cpus": 2,
+                "diskBytes": 4294967296,
+                "gpus": 0,
+                "memoryBytes": 2147483648,
+                "outputBytes": 65536,
+                "snapshotBytes": 16777216,
+                "snapshotMembers": 1000,
+                "wallSeconds": 120
+              },
+              "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+            },
+            "workspace": {
+              "id": "hephaestus-source",
+              "parentWorkspace": "/work/parent-source",
+              "repository": "HomericIntelligence/Hephaestus",
+              "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+            }
+          },
+          "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+          "requiresRunGrant": true,
+          "schema": "hi/fleet/build-command/v1",
+          "snapshot": {
+            "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+            "bytes": 91,
+            "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+            "members": 2,
+            "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+            "reference": "snapshot-interop-1"
+          },
+          "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1"
+        },
+        "schema": "hi/fleet/v1",
+        "targetId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+        "targetKind": "build-jobs",
+        "workerId": "tool-worker-1"
+      },
+      "subject": "hi.fleet.control.tool-worker-1"
+    },
+    {
+      "command": {
+        "commandId": "build-stop-1",
+        "generation": 1,
+        "idempotencyKey": "build-stop-key-1",
+        "operation": "cancel",
+        "payload": {
+          "attempt": 1,
+          "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "parent": {
+            "agentId": "parent-agent",
+            "claim": {
+              "agentId": "parent-agent",
+              "generation": 1,
+              "schema": "hi/fleet/claim/v1",
+              "targetId": "parent-session",
+              "targetKind": "sessions",
+              "workerId": "laptop-worker",
+              "workspace": "/work/parent-source"
+            },
+            "executionId": "parent-execution",
+            "generation": 1,
+            "sessionId": "parent-session",
+            "targetId": "parent-session",
+            "targetKind": "sessions",
+            "taskId": "real-parent-task"
+          },
+          "policy": {
+            "allocation": {
+              "authorityId": "supervisor-1",
+              "generation": 1,
+              "id": "tool-allocation-1",
+              "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "platform": "linux/aarch64",
+              "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+              "resources": {
+                "cpus": 18,
+                "diskBytes": 68719476736,
+                "gpus": 0,
+                "memoryBytes": 77309411328
+              },
+              "supervision": {
+                "cpus": 2,
+                "memoryBytes": 8589934592
+              },
+              "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+              "workerId": "tool-worker-1"
+            },
+            "recipe": {
+              "argv": [
+                "just",
+                "test-unit"
+              ],
+              "id": "hephaestus-test-unit-v1",
+              "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+              "parameters": {},
+              "platform": "linux/aarch64",
+              "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+              "repository": "HomericIntelligence/Hephaestus",
+              "resources": {
+                "artifactBytes": 1048576,
+                "cpus": 2,
+                "diskBytes": 4294967296,
+                "gpus": 0,
+                "memoryBytes": 2147483648,
+                "outputBytes": 65536,
+                "snapshotBytes": 16777216,
+                "snapshotMembers": 1000,
+                "wallSeconds": 120
+              },
+              "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+            },
+            "workspace": {
+              "id": "hephaestus-source",
+              "parentWorkspace": "/work/parent-source",
+              "repository": "HomericIntelligence/Hephaestus",
+              "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+            }
+          },
+          "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+          "requiresRunGrant": true,
+          "schema": "hi/fleet/build-command/v1",
+          "snapshot": {
+            "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+            "bytes": 91,
+            "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+            "members": 2,
+            "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+            "reference": "snapshot-interop-1"
+          },
+          "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1",
+          "stopStartCommandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start"
+        },
+        "schema": "hi/fleet/v1",
+        "targetId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+        "targetKind": "build-jobs",
+        "workerId": "tool-worker-1"
+      },
+      "subject": "hi.fleet.control.tool-worker-1"
+    }
+  ],
+  "digestInputs": {
+    "grant": "{\"buildId\":\"build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189\",\"claim\":{\"allocationId\":\"tool-allocation-1\",\"attempt\":1,\"claimId\":\"supervisor-claim-1\",\"commandId\":\"build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start\",\"generation\":1,\"schema\":\"hi/fleet/build-claim/v1\",\"workerId\":\"tool-worker-1\"}}",
+    "parameters": "{}",
+    "policy": "{\"allocation\":{\"authorityId\":\"supervisor-1\",\"generation\":1,\"id\":\"tool-allocation-1\",\"imageDigest\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"platform\":\"linux/aarch64\",\"qualificationReceiptDigest\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"resources\":{\"cpus\":18,\"diskBytes\":68719476736,\"gpus\":0,\"memoryBytes\":77309411328},\"supervision\":{\"cpus\":2,\"memoryBytes\":8589934592},\"toolchainDigest\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"workerId\":\"tool-worker-1\"},\"recipe\":{\"argv\":[\"just\",\"test-unit\"],\"id\":\"hephaestus-test-unit-v1\",\"imageDigest\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"lockDigest\":\"96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27\",\"parameters\":{},\"platform\":\"linux/aarch64\",\"recipeDigest\":\"4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611\",\"repository\":\"HomericIntelligence/Hephaestus\",\"resources\":{\"artifactBytes\":1048576,\"cpus\":2,\"diskBytes\":4294967296,\"gpus\":0,\"memoryBytes\":2147483648,\"outputBytes\":65536,\"snapshotBytes\":16777216,\"snapshotMembers\":1000,\"wallSeconds\":120},\"toolchainDigest\":\"1111111111111111111111111111111111111111111111111111111111111111\"},\"workspace\":{\"id\":\"hephaestus-source\",\"parentWorkspace\":\"/work/parent-source\",\"repository\":\"HomericIntelligence/Hephaestus\",\"snapshotPolicyDigest\":\"112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434\"}}"
+  },
+  "fixture": "synthetic-controller-boundaries",
+  "grantResponse": {
+    "command": {
+      "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+      "generation": 1,
+      "idempotencyKey": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+      "operation": "start",
+      "payload": {
+        "attempt": 1,
+        "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "parent": {
+          "agentId": "parent-agent",
+          "claim": {
+            "agentId": "parent-agent",
+            "generation": 1,
+            "schema": "hi/fleet/claim/v1",
+            "targetId": "parent-session",
+            "targetKind": "sessions",
+            "workerId": "laptop-worker",
+            "workspace": "/work/parent-source"
+          },
+          "executionId": "parent-execution",
+          "generation": 1,
+          "sessionId": "parent-session",
+          "targetId": "parent-session",
+          "targetKind": "sessions",
+          "taskId": "real-parent-task"
+        },
+        "policy": {
+          "allocation": {
+            "authorityId": "supervisor-1",
+            "generation": 1,
+            "id": "tool-allocation-1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "platform": "linux/aarch64",
+            "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "resources": {
+              "cpus": 18,
+              "diskBytes": 68719476736,
+              "gpus": 0,
+              "memoryBytes": 77309411328
+            },
+            "supervision": {
+              "cpus": 2,
+              "memoryBytes": 8589934592
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "workerId": "tool-worker-1"
+          },
+          "recipe": {
+            "argv": [
+              "just",
+              "test-unit"
+            ],
+            "id": "hephaestus-test-unit-v1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+            "parameters": {},
+            "platform": "linux/aarch64",
+            "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+            "repository": "HomericIntelligence/Hephaestus",
+            "resources": {
+              "artifactBytes": 1048576,
+              "cpus": 2,
+              "diskBytes": 4294967296,
+              "gpus": 0,
+              "memoryBytes": 2147483648,
+              "outputBytes": 65536,
+              "snapshotBytes": 16777216,
+              "snapshotMembers": 1000,
+              "wallSeconds": 120
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "workspace": {
+            "id": "hephaestus-source",
+            "parentWorkspace": "/work/parent-source",
+            "repository": "HomericIntelligence/Hephaestus",
+            "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+          }
+        },
+        "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+        "requiresRunGrant": true,
+        "schema": "hi/fleet/build-command/v1",
+        "snapshot": {
+          "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+          "bytes": 91,
+          "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+          "members": 2,
+          "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+          "reference": "snapshot-interop-1"
+        },
+        "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1"
+      },
+      "schema": "hi/fleet/v1",
+      "targetId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+      "targetKind": "build-jobs",
+      "workerId": "tool-worker-1"
+    },
+    "grant": {
+      "authorizedAt": "2026-09-13T10:40:05Z",
+      "claim": {
+        "allocationId": "tool-allocation-1",
+        "attempt": 1,
+        "claimId": "supervisor-claim-1",
+        "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+        "generation": 1,
+        "schema": "hi/fleet/build-claim/v1",
+        "workerId": "tool-worker-1"
+      },
+      "grantId": "60abcc8ed7b3e5218e5616006b46eb47de36cab78b1415598b663865c4bcdbaf",
+      "schema": "hi/fleet/build-grant/v1"
+    }
+  },
+  "persistedGrantDocument": {
+    "commands": [
+      {
+        "command": {
+          "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+          "generation": 1,
+          "idempotencyKey": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+          "operation": "start",
+          "payload": {
+            "attempt": 1,
+            "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "parent": {
+              "agentId": "parent-agent",
+              "claim": {
+                "agentId": "parent-agent",
+                "generation": 1,
+                "schema": "hi/fleet/claim/v1",
+                "targetId": "parent-session",
+                "targetKind": "sessions",
+                "workerId": "laptop-worker",
+                "workspace": "/work/parent-source"
+              },
+              "executionId": "parent-execution",
+              "generation": 1,
+              "sessionId": "parent-session",
+              "targetId": "parent-session",
+              "targetKind": "sessions",
+              "taskId": "real-parent-task"
+            },
+            "policy": {
+              "allocation": {
+                "authorityId": "supervisor-1",
+                "generation": 1,
+                "id": "tool-allocation-1",
+                "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "platform": "linux/aarch64",
+                "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+                "resources": {
+                  "cpus": 18,
+                  "diskBytes": 68719476736,
+                  "gpus": 0,
+                  "memoryBytes": 77309411328
+                },
+                "supervision": {
+                  "cpus": 2,
+                  "memoryBytes": 8589934592
+                },
+                "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+                "workerId": "tool-worker-1"
+              },
+              "recipe": {
+                "argv": [
+                  "just",
+                  "test-unit"
+                ],
+                "id": "hephaestus-test-unit-v1",
+                "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+                "parameters": {},
+                "platform": "linux/aarch64",
+                "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+                "repository": "HomericIntelligence/Hephaestus",
+                "resources": {
+                  "artifactBytes": 1048576,
+                  "cpus": 2,
+                  "diskBytes": 4294967296,
+                  "gpus": 0,
+                  "memoryBytes": 2147483648,
+                  "outputBytes": 65536,
+                  "snapshotBytes": 16777216,
+                  "snapshotMembers": 1000,
+                  "wallSeconds": 120
+                },
+                "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+              },
+              "workspace": {
+                "id": "hephaestus-source",
+                "parentWorkspace": "/work/parent-source",
+                "repository": "HomericIntelligence/Hephaestus",
+                "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+              }
+            },
+            "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+            "requiresRunGrant": true,
+            "schema": "hi/fleet/build-command/v1",
+            "snapshot": {
+              "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+              "bytes": 91,
+              "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+              "members": 2,
+              "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+              "reference": "snapshot-interop-1"
+            },
+            "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1"
+          },
+          "schema": "hi/fleet/v1",
+          "targetId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+          "targetKind": "build-jobs",
+          "workerId": "tool-worker-1"
+        },
+        "facts": [],
+        "status": "pending"
+      }
+    ],
+    "events": [
+      {
+        "at": "2026-09-13T10:40:05Z",
+        "buildTransition": {
+          "reservation": "reserved",
+          "status": "admitted"
+        },
+        "event": "build.admitted",
+        "kind": "build-jobs",
+        "seq": 6,
+        "targetId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189"
+      },
+      {
+        "at": "2026-09-13T10:40:05Z",
+        "buildTransition": {
+          "reservation": "reserved",
+          "status": "authorized"
+        },
+        "event": "build.run_authorized",
+        "kind": "build-jobs",
+        "seq": 7,
+        "targetId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189"
+      }
+    ],
+    "kind": "build-jobs",
+    "record": {
+      "build": {
+        "allocation": {
+          "authorityId": "supervisor-1",
+          "generation": 1,
+          "id": "tool-allocation-1",
+          "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "platform": "linux/aarch64",
+          "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "resources": {
+            "cpus": 18,
+            "diskBytes": 68719476736,
+            "gpus": 0,
+            "memoryBytes": 77309411328
+          },
+          "supervision": {
+            "cpus": 2,
+            "memoryBytes": 8589934592
+          },
+          "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "workerId": "tool-worker-1"
+        },
+        "attempt": 1,
+        "grant": {
+          "authorizedAt": "2026-09-13T10:40:05Z",
+          "claim": {
+            "allocationId": "tool-allocation-1",
+            "attempt": 1,
+            "claimId": "supervisor-claim-1",
+            "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+            "generation": 1,
+            "schema": "hi/fleet/build-claim/v1",
+            "workerId": "tool-worker-1"
+          },
+          "grantId": "60abcc8ed7b3e5218e5616006b46eb47de36cab78b1415598b663865c4bcdbaf",
+          "schema": "hi/fleet/build-grant/v1"
+        },
+        "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "policy": {
+          "allocation": {
+            "authorityId": "supervisor-1",
+            "generation": 1,
+            "id": "tool-allocation-1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "platform": "linux/aarch64",
+            "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "resources": {
+              "cpus": 18,
+              "diskBytes": 68719476736,
+              "gpus": 0,
+              "memoryBytes": 77309411328
+            },
+            "supervision": {
+              "cpus": 2,
+              "memoryBytes": 8589934592
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "workerId": "tool-worker-1"
+          },
+          "recipe": {
+            "argv": [
+              "just",
+              "test-unit"
+            ],
+            "id": "hephaestus-test-unit-v1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+            "parameters": {},
+            "platform": "linux/aarch64",
+            "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+            "repository": "HomericIntelligence/Hephaestus",
+            "resources": {
+              "artifactBytes": 1048576,
+              "cpus": 2,
+              "diskBytes": 4294967296,
+              "gpus": 0,
+              "memoryBytes": 2147483648,
+              "outputBytes": 65536,
+              "snapshotBytes": 16777216,
+              "snapshotMembers": 1000,
+              "wallSeconds": 120
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "workspace": {
+            "id": "hephaestus-source",
+            "parentWorkspace": "/work/parent-source",
+            "repository": "HomericIntelligence/Hephaestus",
+            "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+          }
+        },
+        "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+        "request": {
+          "idempotencyKey": "build-request-1",
+          "parameters": {},
+          "parent": {
+            "executionId": "parent-execution",
+            "generation": 1,
+            "sessionId": "parent-session",
+            "targetId": "parent-session",
+            "targetKind": "sessions"
+          },
+          "recipeId": "hephaestus-test-unit-v1",
+          "schema": "hi/fleet/build-submit/v1",
+          "snapshot": {
+            "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+            "bytes": 91,
+            "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+            "members": 2,
+            "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+            "reference": "snapshot-interop-1"
+          },
+          "workspaceId": "hephaestus-source"
+        },
+        "reservation": "reserved",
+        "schema": "hi/fleet/build/v1",
+        "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1"
+      },
+      "claimStatus": "unclaimed",
+      "collectionVerified": false,
+      "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+      "createdAt": "2026-09-13T10:40:05Z",
+      "generation": 1,
+      "id": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+      "kind": "build-jobs",
+      "parent": {
+        "agentId": "parent-agent",
+        "claim": {
+          "agentId": "parent-agent",
+          "generation": 1,
+          "schema": "hi/fleet/claim/v1",
+          "targetId": "parent-session",
+          "targetKind": "sessions",
+          "workerId": "laptop-worker",
+          "workspace": "/work/parent-source"
+        },
+        "executionId": "parent-execution",
+        "generation": 1,
+        "sessionId": "parent-session",
+        "targetId": "parent-session",
+        "targetKind": "sessions",
+        "taskId": "real-parent-task"
+      },
+      "schema": "hi/fleet/v1",
+      "status": "authorized",
+      "updatedAt": "2026-09-13T10:40:05Z"
+    },
+    "schema": "hi/fleet/v1"
+  },
+  "schema": "hi/fleet/build-contract/v1",
+  "sourceFiles": {
+    "justfile": "test-unit:\n  @printf 'fixture build\\n'\n",
+    "uv.lock": "version = 1\nrevision = 3\nrequires-python = \">=3.13\"\n"
+  },
+  "submission": {
+    "idempotencyKey": "build-request-1",
+    "parameters": {},
+    "parent": {
+      "executionId": "parent-execution",
+      "generation": 1,
+      "sessionId": "parent-session",
+      "targetId": "parent-session",
+      "targetKind": "sessions"
+    },
+    "recipeId": "hephaestus-test-unit-v1",
+    "schema": "hi/fleet/build-submit/v1",
+    "snapshot": {
+      "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+      "bytes": 91,
+      "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+      "members": 2,
+      "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+      "reference": "snapshot-interop-1"
+    },
+    "workspaceId": "hephaestus-source"
+  },
+  "terminalFact": {
+    "allocationId": "tool-allocation-1",
+    "artifacts": null,
+    "attempt": 1,
+    "cleanup": "confirmed_empty",
+    "commandId": "build-stop-1",
+    "eventId": "terminal-1",
+    "exitCode": null,
+    "generation": 1,
+    "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "logs": null,
+    "outcome": "cancelled",
+    "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "platform": "linux/aarch64",
+    "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+    "receipt": null,
+    "schema": "hi/fleet/build-fact/v1",
+    "snapshotDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+    "startFenced": true,
+    "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "workerId": "tool-worker-1"
+  },
+  "terminalResponse": {
+    "eventId": "terminal-1",
+    "record": {
+      "build": {
+        "allocation": {
+          "authorityId": "supervisor-1",
+          "generation": 1,
+          "id": "tool-allocation-1",
+          "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "platform": "linux/aarch64",
+          "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+          "resources": {
+            "cpus": 18,
+            "diskBytes": 68719476736,
+            "gpus": 0,
+            "memoryBytes": 77309411328
+          },
+          "supervision": {
+            "cpus": 2,
+            "memoryBytes": 8589934592
+          },
+          "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "workerId": "tool-worker-1"
+        },
+        "attempt": 1,
+        "cancellation": {
+          "attempt": 1,
+          "commandId": "build-stop-1",
+          "generation": 1,
+          "idempotencyKey": "build-stop-key-1",
+          "schema": "hi/fleet/build-cancel/v1"
+        },
+        "evidenceState": "incomplete",
+        "grant": {
+          "authorizedAt": "2026-09-13T10:40:05Z",
+          "claim": {
+            "allocationId": "tool-allocation-1",
+            "attempt": 1,
+            "claimId": "supervisor-claim-1",
+            "commandId": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-start",
+            "generation": 1,
+            "schema": "hi/fleet/build-claim/v1",
+            "workerId": "tool-worker-1"
+          },
+          "grantId": "60abcc8ed7b3e5218e5616006b46eb47de36cab78b1415598b663865c4bcdbaf",
+          "schema": "hi/fleet/build-grant/v1"
+        },
+        "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "policy": {
+          "allocation": {
+            "authorityId": "supervisor-1",
+            "generation": 1,
+            "id": "tool-allocation-1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "platform": "linux/aarch64",
+            "qualificationReceiptDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "resources": {
+              "cpus": 18,
+              "diskBytes": 68719476736,
+              "gpus": 0,
+              "memoryBytes": 77309411328
+            },
+            "supervision": {
+              "cpus": 2,
+              "memoryBytes": 8589934592
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "workerId": "tool-worker-1"
+          },
+          "recipe": {
+            "argv": [
+              "just",
+              "test-unit"
+            ],
+            "id": "hephaestus-test-unit-v1",
+            "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "lockDigest": "96599229fba386c9268987794da072036c3f16443f7b828004fc56c8d9b00b27",
+            "parameters": {},
+            "platform": "linux/aarch64",
+            "recipeDigest": "4bf01456f923a0387eb9c5b4edb8a81faf8310a088ede8f43fea95e337ccc611",
+            "repository": "HomericIntelligence/Hephaestus",
+            "resources": {
+              "artifactBytes": 1048576,
+              "cpus": 2,
+              "diskBytes": 4294967296,
+              "gpus": 0,
+              "memoryBytes": 2147483648,
+              "outputBytes": 65536,
+              "snapshotBytes": 16777216,
+              "snapshotMembers": 1000,
+              "wallSeconds": 120
+            },
+            "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "workspace": {
+            "id": "hephaestus-source",
+            "parentWorkspace": "/work/parent-source",
+            "repository": "HomericIntelligence/Hephaestus",
+            "snapshotPolicyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434"
+          }
+        },
+        "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+        "request": {
+          "idempotencyKey": "build-request-1",
+          "parameters": {},
+          "parent": {
+            "executionId": "parent-execution",
+            "generation": 1,
+            "sessionId": "parent-session",
+            "targetId": "parent-session",
+            "targetKind": "sessions"
+          },
+          "recipeId": "hephaestus-test-unit-v1",
+          "schema": "hi/fleet/build-submit/v1",
+          "snapshot": {
+            "baseCommit": "bb6566042635539f36f62c2c521ce0d6d28f9c42",
+            "bytes": 91,
+            "manifestDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+            "members": 2,
+            "policyDigest": "112214116cc11538ae089e29797a4b769a9b2a69c4b130193c30a5aa3f458434",
+            "reference": "snapshot-interop-1"
+          },
+          "workspaceId": "hephaestus-source"
+        },
+        "reservation": "released",
+        "schema": "hi/fleet/build/v1",
+        "snapshotWorkspace": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189-attempt-1",
+        "terminal": {
+          "allocationId": "tool-allocation-1",
+          "artifacts": null,
+          "attempt": 1,
+          "cleanup": "confirmed_empty",
+          "commandId": "build-stop-1",
+          "eventId": "terminal-1",
+          "exitCode": null,
+          "generation": 1,
+          "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "logs": null,
+          "outcome": "cancelled",
+          "parametersDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "platform": "linux/aarch64",
+          "policyDigest": "48a06a5985d7c244ae0ddbfc866b5474680cf37e114d07e431ee7fb941bb09ed",
+          "receipt": null,
+          "schema": "hi/fleet/build-fact/v1",
+          "snapshotDigest": "c7a335c3ba3d5e724413879073b1b8d62125e23d1559a31790467998a3898565",
+          "startFenced": true,
+          "toolchainDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "workerId": "tool-worker-1"
+        }
+      },
+      "claimStatus": "unclaimed",
+      "collectionVerified": false,
+      "commandId": "build-stop-1",
+      "createdAt": "2026-09-13T10:40:05Z",
+      "generation": 1,
+      "id": "build-311e9723b2a693dbc7a1875a3514896242c6a7bc34716c8d9cccf420772c4189",
+      "kind": "build-jobs",
+      "parent": {
+        "agentId": "parent-agent",
+        "claim": {
+          "agentId": "parent-agent",
+          "generation": 1,
+          "schema": "hi/fleet/claim/v1",
+          "targetId": "parent-session",
+          "targetKind": "sessions",
+          "workerId": "laptop-worker",
+          "workspace": "/work/parent-source"
+        },
+        "executionId": "parent-execution",
+        "generation": 1,
+        "sessionId": "parent-session",
+        "targetId": "parent-session",
+        "targetKind": "sessions",
+        "taskId": "real-parent-task"
+      },
+      "schema": "hi/fleet/v1",
+      "status": "cancelled",
+      "updatedAt": "2026-09-13T10:40:05Z"
+    }
+  }
+}

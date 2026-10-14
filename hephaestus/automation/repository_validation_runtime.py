@@ -1,7 +1,11 @@
-"""Admit the bounded manifest of an optional sealed Comet runtime.
+"""Admit the bounded manifest of an optional sealed repository-validation runtime.
 
 A valid manifest does not prove that its files exist or that execution is safe.
 The runtime adapter must verify those conditions before each local check.
+
+The sealed layout, its manifest header, and its required programs belong to
+the installed repository profile. This module owns the manifest schema, the
+inventory limits, and every filesystem admission check.
 """
 
 from __future__ import annotations
@@ -25,31 +29,23 @@ from hephaestus.automation.pipeline.repository_validation import (
     RepositoryValidationExecution,
     validate_repository_validation_execution,
 )
-from hephaestus.automation.pipeline_github_review_validation import (
-    comet_local_check_ids,
-    comet_profile_digest,
-    comet_validation_checks,
+from hephaestus.automation.pipeline.repository_validation_profiles import (
+    RepositoryValidationProfile,
+    local_validation_check_ids,
+    plan_validation_checks,
+    plan_validation_profile,
 )
 
-_CAPABILITY_PATH = Path("build/hephaestus-review-validation/comet")
+CAPABILITY_ROOT = Path("build/hephaestus-review-validation")
+MANIFEST_SCHEMA = "hephaestus-repository-validation-runtime-v1"
 
 MANIFEST_BYTES_MAX = 16_777_216
 RUNTIME_FILES_MAX = 50_000
 RUNTIME_FILE_BYTES_MAX = 1_073_741_824
 RUNTIME_TOTAL_BYTES_MAX = 8_589_934_592
 RUNTIME_PATH_BYTES_MAX = 4096
-_REQUIRED_EXECUTABLES = frozenset(
-    f"bin/{name}" for name in ("uv", "python", "ruff", "ty", "mkdocs")
-)
-_HEADER = {
-    "schema": "hephaestus-comet-review-runtime-v1",
-    "profile": "comet",
-    "repository": "llm360/comet",
-    "python_version": "3.12",
-    "uv_version": "0.12.7",
-}
 _MANIFEST_FIELDS = frozenset(
-    (*_HEADER, "pyproject_sha256", "uv_lock_sha256", "entries", "tree_sha256")
+    ("schema", "pyproject_sha256", "uv_lock_sha256", "entries", "tree_sha256")
 )
 _ENTRY_FIELDS = frozenset(("path", "size", "mode", "sha256"))
 
@@ -122,7 +118,9 @@ def _runtime_path(path: object) -> bool:
     return True
 
 
-def _runtime_entries(value: object) -> tuple[RuntimeFile, ...]:
+def _runtime_entries(
+    value: object, required_executables: frozenset[str]
+) -> tuple[RuntimeFile, ...]:
     _require(type(value) is list, "The runtime inventory must be an array.")
     value = cast(list[Any], value)
     _require(0 < len(value) <= RUNTIME_FILES_MAX, "The runtime file count is invalid.")
@@ -148,17 +146,28 @@ def _runtime_entries(value: object) -> tuple[RuntimeFile, ...]:
         _require(_sha256(digest), "The runtime file digest is invalid.")
         total += size
         _require(total <= RUNTIME_TOTAL_BYTES_MAX, "The runtime size exceeds its limit.")
-        if path in _REQUIRED_EXECUTABLES:
+        if path in required_executables:
             _require(mode == 0o555, "A required runtime program is not executable.")
             executables.add(path)
         entries.append(RuntimeFile(path, size, mode, digest))
         previous = path
-    _require(executables == _REQUIRED_EXECUTABLES, "A required runtime program is missing.")
+    _require(executables == required_executables, "A required runtime program is missing.")
     return tuple(entries)
 
 
+def _manifest_header(profile: RepositoryValidationProfile) -> dict[str, str]:
+    """Return the complete manifest header owned by one installed profile."""
+    header = {"schema": MANIFEST_SCHEMA, **dict(profile.runtime_header)}
+    _require("schema" not in profile.runtime_header, "The runtime header cannot set the schema.")
+    return header
+
+
 def parse_runtime_manifest(
-    raw: bytes, *, pyproject_sha256: str, uv_lock_sha256: str
+    raw: bytes,
+    *,
+    profile: RepositoryValidationProfile,
+    pyproject_sha256: str,
+    uv_lock_sha256: str,
 ) -> RuntimeManifest:
     """Validate canonical UTF-8 JSON against the bound project and lock digests.
 
@@ -173,16 +182,18 @@ def parse_runtime_manifest(
         _sha256(pyproject_sha256) and _sha256(uv_lock_sha256),
         "The required dependency digests are invalid.",
     )
+    header = _manifest_header(profile)
     try:
         data = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_json_object, parse_constant=_json_constant
         )
         _require(
-            type(data) is dict and data.keys() == _MANIFEST_FIELDS,
+            type(data) is dict
+            and data.keys() == {*_MANIFEST_FIELDS, *(key for key in header if key != "schema")},
             "The runtime manifest fields are invalid.",
         )
         _require(
-            all(data[key] == value for key, value in _HEADER.items()),
+            all(data[key] == value for key, value in header.items()),
             "The runtime manifest profile is invalid.",
         )
         _require(
@@ -190,7 +201,7 @@ def parse_runtime_manifest(
             and data["uv_lock_sha256"] == uv_lock_sha256,
             "The runtime dependencies do not match the review.",
         )
-        entries = _runtime_entries(data["entries"])
+        entries = _runtime_entries(data["entries"], profile.runtime_executables)
         tree_digest = data["tree_sha256"]
         _require(
             _sha256(tree_digest)
@@ -429,6 +440,7 @@ def _check_runtime_files(
 def admit_runtime(
     trusted_root: Path,
     *,
+    profile: RepositoryValidationProfile,
     pyproject_sha256: str,
     uv_lock_sha256: str,
     timeout_s: float = 120.0,
@@ -436,8 +448,9 @@ def admit_runtime(
 ) -> AdmittedRuntime:
     """Verify the fixed capability without installation or subprocess execution.
 
-    The caller supplies the host-owned Hephaestus root and bound source digests.
-    The worker must still enforce source identity and execution isolation.
+    The caller supplies the host-owned Hephaestus root, the installed profile,
+    and the bound source digests. The worker must still enforce source identity
+    and execution isolation.
     """
     _require(
         type(timeout_s) in {int, float} and math.isfinite(timeout_s) and timeout_s > 0,
@@ -460,7 +473,7 @@ def admit_runtime(
         isinstance(trusted_root, Path) and trusted_root.is_absolute(),
         "The trusted runtime root must be absolute.",
     )
-    parent = trusted_root / _CAPABILITY_PATH
+    parent = trusted_root / CAPABILITY_ROOT / profile.runtime_slug
     root = parent / uv_lock_sha256
     uid = os.geteuid()
     try:
@@ -481,7 +494,10 @@ def admit_runtime(
             retain_bytes=True,
         )
         manifest = parse_runtime_manifest(
-            raw, pyproject_sha256=pyproject_sha256, uv_lock_sha256=uv_lock_sha256
+            raw,
+            profile=profile,
+            pyproject_sha256=pyproject_sha256,
+            uv_lock_sha256=uv_lock_sha256,
         )
         check_deadline()
         _require(
@@ -515,24 +531,26 @@ def admit_execution_runtime(
     """
     check = validate_repository_validation_execution(execution)
     plan = execution.plan
+    profile = plan_validation_profile(plan)
     _require(
-        plan.profile_digest == comet_profile_digest(plan.profile_id)
-        and plan.checks == comet_validation_checks(plan.profile_id, plan.changes),
-        "The execution does not match the admitted Comet profile.",
+        plan.checks == plan_validation_checks(plan),
+        "The execution does not match the admitted profile.",
     )
     _require(
-        check.check_id in comet_local_check_ids(plan.checks),
+        check.check_id in local_validation_check_ids(profile, plan.checks),
         "The selected check is not available for local execution.",
     )
     sources = {path: digest for path, _, digest in check.source_digests}
     _require(
         isinstance(trusted_root, Path)
         and trusted_root.is_absolute()
-        and execution.runtime_root == trusted_root / _CAPABILITY_PATH / sources["uv.lock"],
+        and execution.runtime_root
+        == trusted_root / CAPABILITY_ROOT / profile.runtime_slug / sources["uv.lock"],
         "The execution runtime is outside the fixed host capability.",
     )
     runtime = admit_runtime(
         trusted_root,
+        profile=profile,
         pyproject_sha256=sources["pyproject.toml"],
         uv_lock_sha256=sources["uv.lock"],
         timeout_s=timeout_s,

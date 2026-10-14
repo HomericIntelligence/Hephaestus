@@ -1,0 +1,629 @@
+"""Pipeline summary tests: rows, aggregates, preserved footer, JSON envelope (#1817).
+
+Pins the exact :func:`format_preserved_worktrees` line sequence. The legacy
+implementer summary printer that used to delegate to this helper was deleted
+when ``hephaestus-implement-issues`` became a thin pipeline wrapper (#1821); the
+pipeline summary is now the sole consumer.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+
+import pytest
+
+from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.summary import (
+    RunStats,
+    TerminalSummary,
+    _item_row,
+    _summary_header,
+    format_direct_review_recovery_worktrees,
+    format_preserved_worktrees,
+    print_summary,
+    record_review_run,
+    record_summary_action,
+)
+from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+from hephaestus.cli.localization import using_localizer
+from hephaestus.logging.formatters import JsonFormatter, _LocalizedFormatter
+
+
+def _stats(**overrides: object) -> RunStats:
+    defaults: dict[str, object] = {
+        "exit_code": 0,
+        "loops_run": 1,
+        "agent_job_count": 3,
+        "agent_job_time_s": 12.5,
+        "wall_s": 40.0,
+    }
+    defaults.update(overrides)
+    return RunStats(**defaults)  # type: ignore[arg-type]
+
+
+class TestRunStats:
+    """Derived run-stat fields."""
+
+    def test_interrupted_is_derived_from_exit_code(self) -> None:
+        assert _stats(exit_code=130).interrupted is True
+        assert _stats(exit_code=1).interrupted is False
+
+
+def _item(
+    issue: int,
+    stage: StageName,
+    *,
+    passed: bool | None = None,
+    reason: str = "",
+    pr: int | None = None,
+) -> WorkItem:
+    item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=issue, pr=pr, stage=stage)
+    item.payload["entry_stage"] = "planning"
+    if passed is not None:
+        item.result = ItemResult(passed=passed, reason=reason, final_stage=stage)
+    return item
+
+
+class TestFormatPreservedWorktrees:
+    """Exact legacy line sequence, shared by both printers."""
+
+    def test_empty_list_yields_no_lines(self) -> None:
+        assert format_preserved_worktrees([], "script.py") == []
+
+    def test_detached_recovery_guidance_is_inspection_only(self) -> None:
+        """Receipt-backed recoveries must never inherit force-remove commands."""
+        lines = format_direct_review_recovery_worktrees([("repo-a", 101, "/wt/review-101")])
+
+        assert "Detached-review recovery worktrees" in lines[0]
+        assert "/wt/review-101" in lines[1]
+        assert all("git worktree remove" not in line and "--issues" not in line for line in lines)
+
+    def test_line_sequence_matches_legacy(self) -> None:
+        preserved = [("repo-a", 101, "/wt/issue-101"), ("repo-b", 202, "/wt/issue-202")]
+
+        lines = format_preserved_worktrees(preserved, "impl.py")
+
+        assert lines == [
+            "\nPreserved worktrees (retained for recovery or debugging):",
+            "  #101: /wt/issue-101",
+            "  #202: /wt/issue-202",
+            "\nRerun these issues after inspecting/cleaning the worktrees:",
+            "  impl.py --issues 101,202",
+            "To discard them instead:",
+            "  git worktree remove --force /wt/issue-101",
+            "  git worktree remove --force /wt/issue-202",
+        ]
+
+    def test_guidance_uses_stable_localized_templates(self) -> None:
+        """Translate guidance labels and keep paths and issue numbers unchanged."""
+        catalog = {
+            "\nPreserved worktrees (retained for recovery or debugging):": (
+                "\nArbres de travail conservés :"
+            ),
+            "  #%(number)d: %(path)s": "  dossier %(number)d : %(path)s",
+            "To discard them instead:": "Pour les supprimer :",
+        }
+
+        with using_localizer(catalog):
+            lines = format_preserved_worktrees([("repo-a", 101, "/wt/issue-101")], "impl.py")
+
+        assert lines[0] == "\nArbres de travail conservés :"
+        assert lines[1] == "  dossier 101 : /wt/issue-101"
+        assert "Pour les supprimer :" in lines
+
+    def test_rerun_hint_actually_parses_with_the_loop_cli(self) -> None:
+        """The emitted rerun command must be valid input to the loop parser (#2281).
+
+        A byte-identical pin previously froze a command the CLI rejects
+        (space-joined ``--issues`` + a nonexistent ``--resume``). Assert the
+        real argparser accepts the emitted flags and recovers the numbers.
+        """
+        from hephaestus.automation.pipeline_cli import parse_args
+
+        preserved = [("repo-a", 101, "/wt/issue-101"), ("repo-b", 202, "/wt/issue-202")]
+        rerun_line = next(
+            line for line in format_preserved_worktrees(preserved, "loop") if "--issues" in line
+        )
+        # Everything after the script token is the argv the operator would run.
+        argv = rerun_line.split()[1:]
+        parsed = parse_args(argv)
+        assert parsed.issues == [101, 202]
+
+
+class TestPrintSummaryRows:
+    """Per-item rows and aggregates."""
+
+    def test_table_header_and_disposition_use_active_catalog(self) -> None:
+        """Translate display labels and keep item values unchanged."""
+        item = _item(7, StageName.FINISHED, passed=True)
+        with using_localizer({"repo": "dépôt", "PASS": "RÉUSSI"}):
+            header = _summary_header()
+            row = _item_row(item)
+
+        assert "dépôt" in header
+        assert "RÉUSSI" in row
+        assert "repo-a" in row
+
+    def test_summary_records_stay_raw_for_json_handlers(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Localize plain rendering without changing the shared log record."""
+        item = _item(7, StageName.FINISHED, passed=True)
+        catalog = {"repo": "dépôt", "PASS": "RÉUSSI"}
+
+        with using_localizer(catalog):
+            formatter = _LocalizedFormatter("%(message)s")
+            with caplog.at_level(logging.INFO):
+                print_summary([item], _stats(), [], json_out=False)
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert all("dépôt" not in message and "RÉUSSI" not in message for message in messages)
+        assert any("dépôt" in formatter.format(record) for record in caplog.records)
+        assert any("RÉUSSI" in formatter.format(record) for record in caplog.records)
+        machine_records = [json.loads(JsonFormatter().format(record)) for record in caplog.records]
+        assert all(
+            "dépôt" not in json.dumps(record) and "RÉUSSI" not in json.dumps(record)
+            for record in machine_records
+        )
+
+    def test_repository_busy_reason_remains_visible(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The summary preserves a terminal repository contention cause."""
+        item = _item(
+            2901,
+            StageName.FINISHED,
+            passed=False,
+            reason=(
+                "repository_busy: repository=repo-a operation=clone "
+                "elapsed=600.000s cause=lock_timeout"
+            ),
+        )
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(exit_code=1), [], json_out=False)
+
+        assert "FAIL:repository_busy:" in caplog.text
+        assert "clone exhausted" not in caplog.text
+
+    def test_review_run_record_overwrites_previous_head(self) -> None:
+        item = _item(7, StageName.PR_REVIEW, passed=False, reason="review failed")
+        record_review_run(item, reason="explicit-review", head_sha="a" * 40)
+        record_review_run(item, reason="explicit-review", head_sha="b" * 40)
+
+        assert item.payload["_pr_review_run"] == {
+            "reason": "explicit-review",
+            "head_sha": "b" * 40,
+        }
+
+    @pytest.mark.parametrize(
+        ("reason", "head_sha"),
+        [
+            ("other", "a" * 40),
+            ("explicit-review", "A" * 40),
+            ("explicit-review", "a" * 39),
+        ],
+    )
+    def test_review_run_record_rejects_unbounded_values(self, reason: str, head_sha: str) -> None:
+        """The summary accepts one reason and one strict head shape."""
+        with pytest.raises(ValueError):
+            record_review_run(
+                _item(7, StageName.PR_REVIEW, passed=False, reason="review failed"),
+                reason=reason,
+                head_sha=head_sha,
+            )
+
+    def test_explicit_review_completion_reason_is_bounded(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        item = _item(7, StageName.PR_REVIEW, passed=False, reason="review failed")
+        record_review_run(item, reason="explicit-review", head_sha="a" * 40)
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "review-run reason=explicit-review head=" + "a" * 40 in caplog.text
+        assert "review-run reasons: {'explicit-review': 1}" in caplog.text
+
+    def test_malformed_review_run_record_is_ignored(self, caplog: pytest.LogCaptureFixture) -> None:
+        item = _item(7, StageName.PR_REVIEW, passed=False, reason="review failed")
+        item.payload["_pr_review_run"] = {
+            "reason": "untrusted",
+            "head_sha": "arbitrary diagnostic text",
+        }
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "review-run" not in caplog.text
+
+    def test_all_disposition_rows(self, caplog: pytest.LogCaptureFixture) -> None:
+        """PASS / FAIL:reason / SKIP / BLOCKED / RESUMABLE rows all render."""
+        items = [
+            _item(1, StageName.FINISHED, passed=True, reason="merged", pr=11),
+            _item(2, StageName.FINISHED, passed=False, reason="tests failed"),
+            _item(3, StageName.FINISHED, passed=False, reason="skip: state:skip"),
+            _item(4, StageName.FINISHED, passed=False, reason="blocked: open review threads"),
+            _item(5, StageName.PR_REVIEW, passed=False, reason="resumable at pr_review"),
+        ]
+
+        with caplog.at_level(logging.INFO):
+            print_summary(items, _stats(), [], json_out=False)
+
+        text = caplog.text
+        assert "PASS" in text
+        assert "FAIL:tests failed" in text
+        assert "SKIP" in text
+        assert "BLOCKED" in text
+        assert "RESUMABLE at pr_review" in text
+        assert "#1" in text and "!11" in text
+
+    def test_aggregates_and_stats(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Disposition counts, per-stage throughput, agent time, loops, wall."""
+        items = [
+            _item(1, StageName.FINISHED, passed=True, reason="ok"),
+            _item(2, StageName.FINISHED, passed=True, reason="ok"),
+            _item(3, StageName.FINISHED, passed=False, reason="boom"),
+        ]
+
+        with caplog.at_level(logging.INFO):
+            print_summary(
+                items,
+                _stats(
+                    loops_run=2,
+                    agent_job_count=5,
+                    wall_s=99.5,
+                    auxiliary_job_count=2,
+                    auxiliary_job_time_s=3.5,
+                    auxiliary_job_failure_count=1,
+                ),
+                [],
+                json_out=False,
+            )
+
+        text = caplog.text
+        assert "'pass': 2" in text
+        assert "'fail': 1" in text
+        assert "agent jobs: 5" in text
+        assert "auxiliary jobs: 2 (3.5s total, 1 failed)" in text
+        assert "loops: 2" in text
+        assert "wall: 99.5s" in text
+
+    def test_planning_actions_are_bounded_aggregate_counts(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        item = _item(7, StageName.FINISHED, passed=True, reason="ok")
+        record_summary_action(item, "requirements-recovered")
+        record_summary_action(item, "requirements-recovered")
+        record_summary_action(item, "obsolete-skipped")
+        aggregate = TerminalSummary()
+        aggregate.record(item)
+
+        with caplog.at_level(logging.INFO):
+            print_summary(
+                [item],
+                _stats(),
+                [],
+                json_out=False,
+                terminal_summary=aggregate,
+            )
+
+        assert "planning-actions:" in caplog.text
+        assert "'requirements-recovered': 1" in caplog.text
+        assert "'obsolete-skipped': 1" in caplog.text
+
+    def test_finding_outcomes_are_run_wide_aggregate_counts(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The terminal aggregate keeps each finding outcome after item eviction."""
+        item = _item(9, StageName.FINISHED, passed=False, reason="review failed")
+        item.payload["review_finding_records"] = [
+            {"finding_id": "a" * 64, "status": "published"},
+            {"finding_id": "b" * 64, "status": "corrected"},
+            {"finding_id": "c" * 64, "status": "not_publishable"},
+        ]
+        aggregate = TerminalSummary()
+        aggregate.record(item)
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False, terminal_summary=aggregate)
+
+        assert aggregate.review_finding_outcomes == {
+            "corrected": 1,
+            "not_publishable": 1,
+            "published": 1,
+        }
+        assert "review-finding outcomes:" in caplog.text
+
+    def test_finding_outcomes_include_compacted_identity_counts(self) -> None:
+        """Terminal totals include bounded outcomes whose full records were compacted."""
+        item = _item(9, StageName.FINISHED, passed=False, reason="review failed")
+        item.payload["review_finding_records"] = [
+            {"finding_id": "a" * 64, "status": "corrected"},
+        ]
+        item.payload["review_finding_compacted_outcomes"] = {
+            "counts": {"corrected": 0, "not_publishable": 1, "published": 1},
+            "identities": [
+                ["b" * 64, "9" * 40, "n", "b"],
+                ["c" * 64, "8" * 40, "p", "a"],
+            ],
+        }
+        aggregate = TerminalSummary()
+
+        aggregate.record(item)
+
+        assert aggregate.review_finding_outcomes == {
+            "corrected": 1,
+            "not_publishable": 1,
+            "published": 1,
+        }
+
+    def test_summary_uses_latest_logical_item_for_aggregates(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A later PASS for the same issue/PR supersedes an earlier failed attempt."""
+        failed = _item(2009, StageName.FINISHED, passed=False, reason="git_error", pr=2010)
+        passed = _item(2009, StageName.FINISHED, passed=True, reason="merged", pr=2010)
+
+        with caplog.at_level(logging.INFO):
+            print_summary([failed, passed], _stats(), [], json_out=False)
+
+        text = caplog.text
+        assert "items: 1" in text
+        assert "'pass': 1" in text
+        assert "'fail'" not in text
+        assert "FAIL:git_error" not in text
+
+    def test_summary_supersedes_direct_pr_items_with_issue_context(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A direct PR seed with hydrated issue context uses one logical key."""
+        failed = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=2009,
+            pr=2010,
+            stage=StageName.FINISHED,
+            result=ItemResult(passed=False, reason="git_error", final_stage=StageName.FINISHED),
+        )
+        passed = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=2009,
+            pr=2010,
+            stage=StageName.FINISHED,
+            result=ItemResult(passed=True, reason="merged", final_stage=StageName.FINISHED),
+        )
+
+        with caplog.at_level(logging.INFO):
+            print_summary([failed, passed], _stats(), [], json_out=False)
+
+        text = caplog.text
+        assert "items: 1" in text
+        assert "'pass': 1" in text
+        assert "FAIL:git_error" not in text
+
+    def test_nonzero_attempts_render(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Only non-zero attempt counters appear in the row."""
+        item = _item(6, StageName.FINISHED, passed=True, reason="ok")
+        item.attempts["plan"] = 2
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "plan=2" in caplog.text
+        assert "ci_fix=" not in caplog.text
+
+    def test_item_without_result_renders_pending(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A never-finished item (no result) renders PENDING, never crashes."""
+        with caplog.at_level(logging.INFO):
+            print_summary([_item(9, StageName.PLANNING)], _stats(), [], json_out=False)
+
+        assert "PENDING" in caplog.text
+
+    def test_review_publication_summary_identifies_each_outcome(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Review publication rows identify each outcome without review text."""
+        item = _item(10, StageName.PR_REVIEW)
+        item.payload["review_publication_summary"] = {
+            "published": [
+                {
+                    "finding_id": "a" * 64,
+                    "body": "private published body",
+                    "original_anchor": {"path": "a.py", "line": 11, "side": "RIGHT"},
+                    "final_anchor": {"path": "a.py", "line": 11, "side": "RIGHT"},
+                    "reason": None,
+                }
+            ],
+            "corrected": [
+                {
+                    "finding_id": "b" * 64,
+                    "body": "private corrected body",
+                    "original_anchor": {"path": "b.py", "line": 99, "side": "RIGHT"},
+                    "final_anchor": {"path": "b.py", "line": 22, "side": "RIGHT"},
+                    "reason": "line_not_in_diff",
+                },
+                {
+                    "finding_id": "d" * 64,
+                    "body": "private audit body",
+                    "original_anchor": {"path": "d.py", "line": 44, "side": "RIGHT"},
+                    "final_anchor": None,
+                    "reason": "line_not_in_diff",
+                },
+            ],
+            "could_not_publish": [
+                {
+                    "finding_id": "c" * 64,
+                    "body": "private unavailable body",
+                    "original_anchor": {"path": "c.py", "line": 33, "side": "RIGHT"},
+                    "final_anchor": None,
+                    "reason": "line_not_in_diff",
+                }
+            ],
+        }
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "review-publication" in caplog.text
+        assert f"{'a' * 64} original=a.py:11:RIGHT final=a.py:11:RIGHT" in caplog.text
+        assert f"{'b' * 64} original=b.py:99:RIGHT final=b.py:22:RIGHT" in caplog.text
+        assert f"{'d' * 64} original=d.py:44:RIGHT final=-" in caplog.text
+        assert f"{'c' * 64} original=c.py:33:RIGHT final=-" in caplog.text
+        assert "private" not in caplog.text
+
+    def test_preserved_footer_present(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The preserved-worktree footer prints via the shared helper."""
+        with caplog.at_level(logging.INFO):
+            print_summary([], _stats(exit_code=1), [("repo-a", 9, "/wt/9")], json_out=False)
+
+        assert "Preserved worktrees (retained for recovery or debugging):" in caplog.text
+        assert "git worktree remove --force /wt/9" in caplog.text
+
+
+class TestJsonEnvelope:
+    """emit_json_status extension fields."""
+
+    def test_json_envelope_includes_explicit_review_completion_reason(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        item = _item(8, StageName.PR_REVIEW, passed=False, reason="review failed")
+        record_review_run(item, reason="explicit-review", head_sha="b" * 40)
+
+        print_summary([item], _stats(), [], json_out=True)
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["review_run_reasons"] == {"explicit-review": 1}
+
+    def test_json_envelope_fields(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """The envelope carries dispositions, loops, resumable, preserved."""
+        items = [
+            _item(1, StageName.FINISHED, passed=True, reason="ok"),
+            _item(2, StageName.PR_REVIEW, passed=False, reason="resumable at pr_review"),
+        ]
+
+        print_summary(
+            items,
+            _stats(
+                exit_code=130,
+                loops_run=3,
+                auxiliary_job_count=2,
+                auxiliary_job_time_s=3.5,
+                auxiliary_job_failure_count=1,
+            ),
+            [("repo-a", 2, "/wt/2")],
+            json_out=True,
+        )
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["exit_code"] == 130
+        assert envelope["status"] == "error"
+        assert envelope["message"] == "pipeline interrupted"
+        assert envelope["dispositions"] == {"pass": 1, "resumable": 1}
+        assert envelope["loops_run"] == 3
+        assert envelope["auxiliary_jobs"] == 2
+        assert envelope["auxiliary_job_time_s"] == 3.5
+        assert envelope["auxiliary_job_failures"] == 1
+        assert envelope["resumable"] == ["repo-a#2@pr_review"]
+        assert envelope["preserved_worktrees"] == [[2, "/wt/2"]]
+        assert envelope["recovery_worktrees"] == []
+
+    def test_json_envelope_includes_planning_action_counts(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        item = _item(8, StageName.FINISHED, passed=True, reason="ok")
+        record_summary_action(item, "tracker-skipped")
+
+        print_summary([item], _stats(), [], json_out=True)
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["planning_actions"] == {"tracker-skipped": 1}
+
+    def test_json_envelope_includes_review_publication_outcomes(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        item = _item(10, StageName.PR_REVIEW, pr=1010)
+        item.payload["review_publication_summary"] = {
+            "published": [
+                {
+                    "finding_id": "a" * 64,
+                    "body": "private published body",
+                    "original_anchor": {"path": "a.py", "line": 11, "side": "RIGHT"},
+                    "final_anchor": {"path": "a.py", "line": 11, "side": "RIGHT"},
+                    "reason": None,
+                }
+            ],
+            "corrected": [],
+            "could_not_publish": [
+                {
+                    "finding_id": "b" * 64,
+                    "body": "private unavailable body",
+                    "original_anchor": {"path": "b.py", "line": 22, "side": "RIGHT"},
+                    "final_anchor": None,
+                    "reason": "line_not_in_diff",
+                }
+            ],
+        }
+
+        print_summary([item], _stats(), [], json_out=True)
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["review_publication"] == [
+            {
+                "repo": "repo-a",
+                "issue": 10,
+                "pr": 1010,
+                "published": [f"{'a' * 64} original=a.py:11:RIGHT final=a.py:11:RIGHT"],
+                "could_not_publish": [
+                    f"{'b' * 64} original=b.py:22:RIGHT final=- [line_not_in_diff]"
+                ],
+            }
+        ]
+        assert "private" not in json.dumps(envelope)
+
+    def test_json_envelope_includes_cumulative_finding_outcomes(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Machine output includes the run-wide finding counters."""
+        item = _item(11, StageName.FINISHED, passed=True, reason="ok")
+        item.payload["review_finding_records"] = [
+            {"finding_id": "a" * 64, "status": "corrected"},
+        ]
+        aggregate = TerminalSummary()
+        aggregate.record(item)
+
+        print_summary([item], _stats(), [], json_out=True, terminal_summary=aggregate)
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["review_finding_outcomes"] == {"corrected": 1}
+
+    @pytest.mark.parametrize(
+        ("exit_code", "expected_message"),
+        [
+            (0, "pipeline complete"),
+            (1, "pipeline failed"),
+        ],
+    )
+    def test_json_envelope_message_tracks_exit_code(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        exit_code: int,
+        expected_message: str,
+    ) -> None:
+        """The envelope message derives from exit_code."""
+        print_summary(
+            [],
+            _stats(exit_code=exit_code),
+            [],
+            json_out=True,
+        )
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["exit_code"] == exit_code
+        assert envelope["message"] == expected_message
+
+    def test_no_envelope_without_json_out(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """json_out=False never writes the JSON envelope to stdout."""
+        print_summary([], _stats(), [], json_out=False)
+
+        assert capsys.readouterr().out == ""

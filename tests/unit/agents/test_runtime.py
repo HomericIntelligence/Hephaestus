@@ -5006,16 +5006,17 @@ def test_opencode2_base_cmd_rejects_an_effort_without_a_model() -> None:
 
 def test_opencode2_failure_diagnostic_parses_the_v2_error_shape() -> None:
     """Observed v2.0.24 provider failures emit error.type plus error.message."""
+    message = "Model unavailable: ledger/no-such-model"
     text = (
         '{"type":"error","timestamp":1791325683202,"sessionID":"ses_eecab",'
-        '"error":{"type":"provider.no-route","message":"Model unavailable: comet/no-such-model"}}\n'
+        f'"error":{{"type":"provider.no-route","message":"{message}"}}}}\n'
     )
 
     diagnostic = agent_runtime._opencode2_failure_diagnostic(text, None)
 
     assert diagnostic is not None
     assert "opencode2_fatal_error_event: provider.no-route" in diagnostic
-    assert "Model unavailable: comet/no-such-model" in diagnostic
+    assert "Model unavailable: ledger/no-such-model" in diagnostic
 
 
 def test_opencode2_failure_diagnostic_ignores_other_output() -> None:
@@ -5096,11 +5097,11 @@ def test_resume_opencode2_session_uses_the_session_flag(tmp_path: Path) -> None:
             "prompt",
             cwd=tmp_path,
             timeout=30,
-            model="comet/kimi-k3",
+            model="ledger/kimi-k3",
         )
 
     assert captured_cmd[captured_cmd.index("--session") + 1] == "ses_v2"
-    assert captured_cmd[captured_cmd.index("--model") + 1] == "comet/kimi-k3"
+    assert captured_cmd[captured_cmd.index("--model") + 1] == "ledger/kimi-k3"
     assert "--dir" not in captured_cmd
 
 

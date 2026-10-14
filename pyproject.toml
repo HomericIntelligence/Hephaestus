@@ -204,14 +204,6 @@ only-include = [
 line-length = 100
 target-version = "py313"
 exclude = ["hephaestus/_version.py"]
-# Keep exact upstream bytes in source-admission fixtures.
-force-exclude = true
-extend-exclude = [
-    "tests/fixtures/comet-review-validation/current",
-    "tests/fixtures/comet-review-validation/fe5a67d",
-    "tests/fixtures/comet-review-validation/7c2772e",
-    "tests/fixtures/comet-review-validation/historical/controls",
-]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "D", "UP", "S101", "S102", "S105", "S106", "B", "SIM", "C4", "C901", "ANN204", "RUF"]
@@ -262,8 +254,6 @@ markers = [
 ]
 
 [tool.mypy]
-# Source fixtures execute in their own Comet environment.
-exclude = ["^tests/fixtures/comet-review-validation/"]
 python_version = "3.13"
 warn_unused_configs = true
 ignore_missing_imports = true
@@ -301,18 +291,16 @@ check_untyped_defs = false
 [tool.coverage.run]
 branch = true
 source = ["hephaestus"]
-# Measurement scope is the core library only. The opt-in
-# hephaestus/automation product layer is excluded because the dependency arrow
-# points automation -> library and the product layer is not library surface.
-# See AGENTS.md "Coverage omit-list invariant".
+# Exact membership is enforced by
+# tests/unit/validation/test_omit_allowlist.py. Whole automation modules must
+# remain measured; live boundaries are exercised through hermetic substitutes.
 omit = [
     "*/tests/*",
     "*/__init__.py",
-    "*/hephaestus/automation/*",
 ]
 
 [tool.coverage.report]
-fail_under = 84
+fail_under = 85
 precision = 2
 show_missing = true
 skip_covered = false

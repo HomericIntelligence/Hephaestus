@@ -90,10 +90,9 @@ python3 scripts/backup_state.py verify ~/.hephaestus-backups/hephaestus-state-<t
 then recomputes every authorized member's declared size and digest, prints
 per-member `PASS`/`FAIL`, and returns `0` only for an intact archive. Structural,
 metadata, size, and digest failures return `1`; verification never mutates the
-repo. The same backup → destroy → restore round-trip and tamper checks that once
-ran in CI were removed with the non-core-library test re-scope. Run that cycle
-manually after any change to `scripts/backup_state.py`, because the restore
-procedure is no longer continuously tested.
+repo. The same backup → destroy → restore round-trip and tamper checks run in CI
+via `tests/unit/scripts/test_backup_state.py`, so the restore procedure is
+continuously tested, not merely documented.
 
 ## What is never backed up
 

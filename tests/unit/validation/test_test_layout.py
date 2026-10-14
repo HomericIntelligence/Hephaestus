@@ -4,7 +4,6 @@ from pathlib import Path
 
 from hephaestus.validation.test_layout import (
     SANCTIONED_EXTRA_TEST_DIRS,
-    SANCTIONED_UNTESTED_SRC_PACKAGES,
     _detect_src_package,
     _get_subpackages,
     check_no_ghost_packages,
@@ -64,43 +63,6 @@ class TestCheckTestDirectoryMirrors:
         mirrored, missing = check_test_directory_mirrors(src, tests)
         assert mirrored is False
         assert missing == {"config"}
-
-    def test_exempt_source_package_needs_no_mirror(self, tmp_path: Path) -> None:
-        """A sanctioned untested source package passes with no test directory."""
-        src = tmp_path / "mypackage"
-        tests = tmp_path / "tests" / "unit"
-        _make_package(src, "utils")
-        _make_package(src, "automation")
-        _make_test_dir(tests, "utils")
-
-        mirrored, missing = check_test_directory_mirrors(src, tests, frozenset({"automation"}))
-
-        assert mirrored is True
-        assert missing == set()
-
-    def test_exemption_does_not_hide_other_missing_packages(self, tmp_path: Path) -> None:
-        """Exempting one package must not suppress a genuinely missing one."""
-        src = tmp_path / "mypackage"
-        tests = tmp_path / "tests" / "unit"
-        _make_package(src, "utils")
-        _make_package(src, "automation")
-        _make_package(src, "config")
-        _make_test_dir(tests, "utils")
-
-        mirrored, missing = check_test_directory_mirrors(src, tests, frozenset({"automation"}))
-
-        assert mirrored is False
-        assert missing == {"config"}
-
-    def test_shipped_repo_mirrors_every_library_subpackage(self) -> None:
-        """The real checkout exempts only the automation product layer."""
-        repo_root = Path(__file__).resolve().parents[3]
-
-        assert frozenset({"automation"}) == SANCTIONED_UNTESTED_SRC_PACKAGES
-        mirrored, missing = check_test_directory_mirrors(
-            repo_root / "hephaestus", repo_root / "tests" / "unit"
-        )
-        assert mirrored is True, f"unmirrored library subpackages: {missing}"
 
     def test_empty_source(self, tmp_path: Path) -> None:
         """Empty source package passes."""
@@ -267,9 +229,7 @@ class TestCheckNoUnsanctionedTestDirs:
 
     def test_real_repo_extras_are_sanctioned(self) -> None:
         """The real tests/unit/ extras are all in the shipped allowlist."""
-        assert {"automation", "constants", "docs", "scripts", "shell"} <= (
-            SANCTIONED_EXTRA_TEST_DIRS
-        )
+        assert {"constants", "docs", "scripts", "shell"} <= SANCTIONED_EXTRA_TEST_DIRS
 
 
 class TestCheckNoGhostPackages:
@@ -621,33 +581,53 @@ class TestMain:
         assert main() == 1
 
 
-class TestScriptsCoverageNotWiredIntoLayoutGate:
-    """check_test_structure no longer requires a tests/unit/scripts harness."""
+class TestScriptsCoverageWiredIntoEntryPoint:
+    """check_test_structure runs the scripts-coverage check."""
 
-    def test_scripts_dir_does_not_fail_the_layout_gate(self, tmp_path: Path) -> None:
-        """A top-level scripts/ directory must not demand a unit-test harness."""
+    def test_failing_scripts_coverage_fails_overall(self, tmp_path: Path, capsys) -> None:
         src = tmp_path / "mypkg"
         _make_package(src, "utils")
-        _make_test_dir(tmp_path / "tests" / "unit", "utils")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        _make_test_dir(test_root, "utils")
         scripts_root = tmp_path / "scripts"
         scripts_root.mkdir()
         (scripts_root / "foo.py").write_text("# script\n", encoding="utf-8")
 
-        assert check_test_structure(tmp_path, src_package="mypkg") is True
+        passed = check_test_structure(tmp_path, src_package="mypkg")
 
-    def test_absent_scripts_dir_still_passes(self, tmp_path: Path) -> None:
-        """A checkout with no top-level scripts/ directory also passes."""
+        assert passed is False
+        assert "scripts/ smoke harness is required" in capsys.readouterr().err
+
+    def test_absent_scripts_dir_is_skipped(self, tmp_path: Path) -> None:
         src = tmp_path / "mypkg"
         _make_package(src, "utils")
-        _make_test_dir(tmp_path / "tests" / "unit", "utils")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        _make_test_dir(test_root, "utils")
 
         assert check_test_structure(tmp_path, src_package="mypkg") is True
 
-    def test_shipped_repo_passes_the_layout_gate(self) -> None:
-        """The real checkout satisfies every retained rule."""
-        repo_root = Path(__file__).resolve().parents[3]
+    def test_scripts_coverage_details_use_stable_templates(self, tmp_path: Path, capsys) -> None:
+        """Translate authored detail lines and keep their file names."""
+        from hephaestus.cli.localization import using_localizer
 
-        assert check_test_structure(repo_root, src_package="hephaestus") is True
+        src = tmp_path / "mypkg"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        _make_test_dir(tmp_path / "tests" / "unit", "utils")
+        scripts_root = tmp_path / "scripts"
+        scripts_root.mkdir()
+        (scripts_root / "foo.py").write_text("# script\n", encoding="utf-8")
+        source = (
+            "  The scripts/ smoke harness is required so every scripts/*.py is "
+            "auto-tested via --help."
+        )
+
+        with using_localizer({source: "  Le banc d'essai scripts/ est requis."}):
+            assert check_test_structure(tmp_path, src_package="mypkg") is False
+
+        assert "Le banc d'essai scripts/ est requis." in capsys.readouterr().err
 
 
 class TestCheckScriptsCoverage:

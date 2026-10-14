@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from html import escape
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from hephaestus.automation.review_warnings import (
     AnchorCorrectionWarningReason,
@@ -85,7 +85,18 @@ def _full_sha(value: object) -> bool:
     )
 
 
-def _normalize_finding_anchor(value: object, *, final: bool) -> dict[str, object] | None:
+class ReviewFindingSizeError(ValueError):
+    """Report that one finding record exceeds a transport size limit.
+
+    This is a size failure, not a corrupt record. A size failure must reach the
+    caller so the compaction loop can reduce the collection to a bounded
+    identity. A caller must never quarantine a record because it is too large.
+    """
+
+
+def _normalize_finding_anchor(
+    value: object, *, final: bool, enforce_size: bool = True
+) -> dict[str, object] | None:
     """Normalize one original or final finding anchor."""
     if value is None and final:
         return None
@@ -94,10 +105,11 @@ def _normalize_finding_anchor(value: object, *, final: bool) -> dict[str, object
     path = value.get("path")
     line = value.get("line")
     side = value.get("side")
+    if enforce_size and isinstance(path, str) and len(path) > MAX_REVIEW_FINDING_PATH_CHARS:
+        raise ReviewFindingSizeError("review finding record path exceeds its size limit")
     if (
         not isinstance(path, str)
         or not path.strip()
-        or len(path) > MAX_REVIEW_FINDING_PATH_CHARS
         or not isinstance(side, str)
         or not side.strip()
         or (final and side != "RIGHT")
@@ -109,10 +121,104 @@ def _normalize_finding_anchor(value: object, *, final: bool) -> dict[str, object
     return {"path": path.strip(), "line": line, "side": side.strip()}
 
 
+def _check_record_values(record: Mapping[str, object], ids: set[str]) -> str:
+    """Check every value of one retained finding record.
+
+    The size limits are not checked here. :func:`_check_record_field_sizes`
+    owns them, so a size failure and a corrupt value stay separate.
+
+    Args:
+        record: One retained finding record with a valid shape.
+        ids: Finding identities the host already accepted.
+
+    Returns:
+        The validated finding identity of this record.
+
+    Raises:
+        ValueError: If any value is invalid, or if the identity is a duplicate.
+
+    """
+    finding_id = record.get("finding_id")
+    source_head = record.get("source_head")
+    publication_head = record.get("publication_head")
+    severity = record.get("severity")
+    body = record.get("body")
+    evidence = record.get("evidence")
+    scope_retraction_paths = record.get("scope_retraction_paths")
+    status = record.get("status")
+    surface = record.get("surface")
+    reason = record.get("reason")
+    if (
+        not isinstance(finding_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None
+        or finding_id in ids
+        or not _full_sha(source_head)
+        or (publication_head is not None and not _full_sha(publication_head))
+        or severity not in {"critical", "major", "minor", "nitpick"}
+        or not isinstance(body, str)
+        or not body.strip()
+        or (evidence is not None and (not isinstance(evidence, str) or not evidence.strip()))
+        or (
+            scope_retraction_paths is not None
+            and (
+                not isinstance(scope_retraction_paths, (list, tuple))
+                or not scope_retraction_paths
+                or any(
+                    not isinstance(path, str)
+                    or not path.strip()
+                    or any(ord(character) < 32 or ord(character) == 127 for character in path)
+                    for path in scope_retraction_paths
+                )
+            )
+        )
+        or status not in {"pending", "published", "corrected", "not_publishable"}
+        or surface not in {"inline", "audit", "not_publishable"}
+        or (reason is not None and reason not in _FINDING_REASONS)
+        or (status in {"corrected", "not_publishable"} and reason is None)
+        or (surface == "audit" and severity not in {"minor", "nitpick"})
+        or (status == "not_publishable") != (surface == "not_publishable")
+        or (status == "pending" and surface != "inline")
+    ):
+        raise ValueError("review finding record value is invalid")
+    return finding_id
+
+
+def _check_record_field_sizes(record: Mapping[str, object]) -> None:
+    """Raise when one record field exceeds its own size limit.
+
+    A size failure is not corrupt data. The host compacts the record into a
+    bounded identity. The host never drops a record because it is too large.
+
+    Raises:
+        ReviewFindingSizeError: If one bounded field is too large.
+
+    """
+    for field, limit, _label in _FINDING_FIELD_LIMITS:
+        field_value = record.get(field)
+        if isinstance(field_value, str) and len(field_value) > limit:
+            raise ReviewFindingSizeError(f"review finding record {field} exceeds its size limit")
+
+
 def normalize_review_finding_records(
     records: object,
+    *,
+    enforce_size: bool = True,
 ) -> tuple[dict[str, object], ...]:
-    """Validate and normalize one bounded finding-journal collection."""
+    """Validate and normalize one bounded finding-journal collection.
+
+    Args:
+        records: Candidate retained finding records.
+        enforce_size: The compaction intake passes False so it can read a
+            collection that is only too large. Every other check stays in
+            force. The compaction loop then reads the reduced collection with
+            the default value, so the final size decision is always made there.
+
+    Raises:
+        ValueError: If a record is invalid, or if the collection exceeds a size
+            limit and ``enforce_size`` is True.
+        ReviewFindingSizeError: If the collection exceeds a size limit.
+
+    """
     if not isinstance(records, (list, tuple)) or len(records) > MAX_REVIEW_FINDINGS:
         raise ValueError("review finding record count is invalid")
     normalized: list[dict[str, object]] = []
@@ -130,69 +236,34 @@ def normalize_review_finding_records(
     }
     optional = {"evidence", "publication_head", "scope_retraction_paths"}
     for record in records:
+        if isinstance(record, dict) and enforce_size:
+            _check_record_field_sizes(record)
         if (
             not isinstance(record, dict)
             or not required.issubset(record)
             or set(record) - (required | optional)
         ):
             raise ValueError("review finding record shape is invalid")
-        finding_id = record.get("finding_id")
+        finding_id = _check_record_values(record, ids)
         source_head = record.get("source_head")
         publication_head = record.get("publication_head")
         severity = record.get("severity")
-        body = record.get("body")
+        body = cast("str", record.get("body"))
         evidence = record.get("evidence")
         scope_retraction_paths = record.get("scope_retraction_paths")
         status = record.get("status")
         surface = record.get("surface")
         reason = record.get("reason")
-        if (
-            not isinstance(finding_id, str)
-            or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None
-            or finding_id in ids
-            or not _full_sha(source_head)
-            or (publication_head is not None and not _full_sha(publication_head))
-            or severity not in {"critical", "major", "minor", "nitpick"}
-            or not isinstance(body, str)
-            or not body.strip()
-            or len(body) > MAX_REVIEW_FINDING_BODY_CHARS
-            or (
-                evidence is not None
-                and (
-                    not isinstance(evidence, str)
-                    or not evidence.strip()
-                    or len(evidence) > MAX_REVIEW_FINDING_EVIDENCE_CHARS
-                )
-            )
-            or (
-                scope_retraction_paths is not None
-                and (
-                    not isinstance(scope_retraction_paths, (list, tuple))
-                    or not scope_retraction_paths
-                    or any(
-                        not isinstance(path, str)
-                        or not path.strip()
-                        or len(path) > MAX_REVIEW_FINDING_PATH_CHARS
-                        or any(ord(character) < 32 or ord(character) == 127 for character in path)
-                        for path in scope_retraction_paths
-                    )
-                )
-            )
-            or status not in {"pending", "published", "corrected", "not_publishable"}
-            or surface not in {"inline", "audit", "not_publishable"}
-            or (reason is not None and reason not in _FINDING_REASONS)
-            or (status in {"corrected", "not_publishable"} and reason is None)
-            or (surface == "audit" and severity not in {"minor", "nitpick"})
-            or (status == "not_publishable") != (surface == "not_publishable")
-            or (status == "pending" and surface != "inline")
-        ):
-            raise ValueError("review finding record value is invalid")
-        original_anchor = _normalize_finding_anchor(record.get("original_anchor"), final=False)
-        final_anchor = _normalize_finding_anchor(record.get("final_anchor"), final=True)
-        if surface == "inline" and final_anchor is None:
-            raise ValueError("review finding record inline anchor is invalid")
-        if surface != "inline" and final_anchor is not None:
-            raise ValueError("review finding record non-inline anchor is invalid")
+        original_anchor = _normalize_finding_anchor(
+            record.get("original_anchor"), final=False, enforce_size=enforce_size
+        )
+        final_anchor = _normalize_finding_anchor(
+            record.get("final_anchor"), final=True, enforce_size=enforce_size
+        )
+        if (surface == "inline") != (final_anchor is not None):
+            # Only an inline finding keeps a final anchor. A finding on the
+            # audit or not-publishable surface has no inline position.
+            raise ValueError("review finding record final anchor does not match its surface")
         value: dict[str, object] = {
             "finding_id": finding_id,
             "source_head": source_head,
@@ -214,10 +285,14 @@ def normalize_review_finding_records(
             )
         normalized.append(value)
         ids.add(finding_id)
+    if not enforce_size:
+        # The compaction intake only needs a readable record set. The loop
+        # re-reads the reduced collection with the default value.
+        return tuple(normalized)
     encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     encoded_bytes = encoded.encode("utf-8")
     if len(encoded_bytes) > MAX_REVIEW_FINDING_AGGREGATE_BYTES:
-        raise ValueError("review finding records exceed their aggregate size limit")
+        raise ReviewFindingSizeError("review finding records exceed their aggregate size limit")
     visible_lines = ["## Retained review findings"]
     visible_lines.extend(
         "- "
@@ -232,7 +307,7 @@ def normalize_review_finding_records(
         + encoded_payload_chars
     )
     if public_section_chars > MAX_REVIEW_FINDING_PUBLIC_SECTION_CHARS:
-        raise ValueError("review finding records exceed their public rendering limit")
+        raise ReviewFindingSizeError("review finding records exceed their public rendering limit")
     return tuple(normalized)
 
 

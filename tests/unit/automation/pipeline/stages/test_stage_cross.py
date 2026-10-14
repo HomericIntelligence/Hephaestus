@@ -1,0 +1,668 @@
+"""Cross-stage composition: the agent_error ping-pong terminates (M1).
+
+The failure mode being pinned: pr_review FAIL_BACK(agent_error) routes to
+implementation, whose GATE sees the existing PR and ADVANCEs straight back
+to pr_review. Without the M1 bound no budget ever moves, so the cycle spins
+forever. The bound: pr_review flags its agent_error fail-backs
+(``payload["agent_error_failback"]``), and the implementation GATE consumes
+the ``implement`` budget when it re-adopts the PR on such a re-entry;
+exhaustion terminates with ``agent_error_exhausted``. No labels are ever
+written along the dead cycle.
+"""
+
+from __future__ import annotations
+
+from collections import deque
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.pipeline.coordinator import Coordinator
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+from hephaestus.automation.pipeline.github_jobs import (
+    GitHubJob,
+    ReconcileScopeExpansionDependenciesRequest,
+)
+from hephaestus.automation.pipeline.jobs import GitJob, JobResult
+from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageName
+from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
+from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
+from hephaestus.automation.pipeline.stages.planning import PlanningStage
+from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
+from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.review_journal import (
+    IssueComment,
+    render_current_plan,
+    render_pending_review,
+)
+from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
+from hephaestus.automation.state_labels import STATE_NEEDS_PLAN, STATE_PLAN_GO
+from tests.unit.automation.pipeline.conftest import (
+    FakeWorkerPool,
+    claim_test_item,
+    fake_worker_factories,
+)
+from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+# Sanity anchors: the reasons this composition exercises are ROUTES rows.
+assert ROUTES[StageName.PR_REVIEW].fail_routes["agent_error"] == StageName.IMPLEMENTATION
+assert ROUTES[StageName.IMPLEMENTATION].next == StageName.PR_REVIEW
+assert ROUTES[StageName.MERGE_WAIT].fail_routes["merge_conflicting"] == StageName.IMPLEMENTATION
+
+_LABEL_MUTATIONS = {
+    "gh_issue_add_labels",
+    "gh_issue_remove_labels",
+    "mark_pr_implementation_go",
+    "mark_pr_implementation_no_go",
+    "arm_auto_merge",
+}
+
+
+@pytest.mark.parametrize(
+    ("replacement_plan", "replacement_revision"),
+    [
+        ("## Files to Modify\n- `tests/unit/two.py`", 1),
+        ("## Exact file scope and ownership\n- `tests/unit/one.py`", 2),
+        (None, None),
+    ],
+)
+def test_changed_restart_plan_cannot_reuse_stale_plan_go(
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    replacement_plan: str | None,
+    replacement_revision: int | None,
+) -> None:
+    """Plan drift returns to planning without authority to advance."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+    original_plan = "## Exact file scope and ownership\n- `tests/unit/one.py`"
+    github.comments[1] = [
+        render_current_plan(original_plan, revision=1),
+        render_pending_review(revision=1),
+    ]
+    original_comments = github.issue_comments(1)
+    replacement_comments = (
+        [
+            IssueComment(
+                body=body,
+                author_login="hephaestus[bot]",
+                viewer_did_author=True,
+            )
+            for body in (
+                render_current_plan(replacement_plan, revision=replacement_revision),
+                render_pending_review(revision=replacement_revision),
+            )
+        ]
+        if replacement_plan is not None and replacement_revision is not None
+        else []
+    )
+    reads = iter([original_comments, replacement_comments])
+
+    def sequenced_comments(_issue_number: int) -> list[IssueComment]:
+        return next(reads, replacement_comments)
+
+    monkeypatch.setattr(github, "issue_comments", sequenced_comments)
+    ctx = make_ctx(github=github, config_overrides={"agent": "codex", "no_advise": False})
+    item = make_work_item(issue=1, stage=StageName.PLAN_REVIEW, state="ENTER")
+    original_attempts = dict(item.attempts)
+
+    stage = PlanReviewStage()
+    assert stage.on_enter(item, ctx) is None
+    assert item.state == "EVAL"
+    assert github.mutation_log == []
+    assert item.payload["plan_text"] == original_plan
+    assert item.payload["plan_revision"] == 1
+    review_outcome = stage.step(item, ctx)
+
+    reason = "plan_changed" if replacement_plan is not None else "plan_missing"
+    assert review_outcome == StageOutcome(Disposition.FAIL_BACK, reason)
+    assert ROUTES[StageName.PLAN_REVIEW].fail_routes["*"] is StageName.PLANNING
+    assert github.labels[1] == {STATE_NEEDS_PLAN}
+    assert [entry[0] for entry in github.mutation_log] == ["edit_labels"]
+    assert item.attempts == original_attempts
+    assert item.payload.get("review_round", 0) == 0
+
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="test-org",
+            repos=["test-repo"],
+            projects_dir=tmp_path,
+            rate_guard_enabled=False,
+        ),
+        github=github,
+        **fake_worker_factories(FakeWorkerPool(), None),
+        install_signals=False,
+    )
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=False)
+    coordinator._route(claim_test_item(coordinator, item), review_outcome)
+
+    assert item.stage is StageName.PLANNING
+    assert item.payload.get("update_plan_required", False) is (replacement_plan is not None)
+    assert PlanningStage().on_enter(item, ctx) is None
+    assert item.stage is StageName.PLANNING
+    assert STATE_PLAN_GO not in github.labels[1]
+    assert item.payload.get("planning_main_refresh_pending", False) is (
+        replacement_plan is not None
+    )
+    assert "update_plan_required" not in item.payload
+    next_state = "FETCH_MAIN_WAIT" if replacement_plan is not None else "ADVISE_WAIT"
+    assert PlanningStage().step(item, ctx) == Continue(next_state=next_state)
+
+
+@pytest.mark.parametrize("prior_forced_epoch", [False, True])
+def test_missing_restart_plan_cannot_reuse_stale_plan_go(
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    prior_forced_epoch: bool,
+) -> None:
+    """An absent admission plan forces a new planning epoch before work."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+    ctx = make_ctx(github=github, config_overrides={"agent": "codex"})
+    item = make_work_item(
+        issue=1,
+        stage=StageName.PLAN_REVIEW,
+        state="ENTER",
+        payload={
+            "_synced_default_branch_sha": "a" * 40,
+            "plan_text": "cached stale plan",
+            "plan_revision": 1,
+            "forced_planning_epoch_started": prior_forced_epoch,
+        },
+    )
+    original_payload = dict(item.payload)
+    original_attempts = dict(item.attempts)
+
+    review_outcome = PlanReviewStage().on_enter(item, ctx)
+
+    assert review_outcome == StageOutcome(Disposition.FAIL_BACK, "plan_changed")
+    assert github.labels[1] == {STATE_PLAN_GO}
+    assert github.mutation_log == []
+    assert item.payload == original_payload
+    assert item.attempts == original_attempts
+
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="test-org",
+            repos=["test-repo"],
+            projects_dir=tmp_path,
+            rate_guard_enabled=False,
+        ),
+        github=github,
+        **fake_worker_factories(FakeWorkerPool(), None),
+        install_signals=False,
+    )
+    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=False)
+    coordinator._route(claim_test_item(coordinator, item), review_outcome)
+
+    assert item.stage is StageName.PLANNING
+    assert item.payload["update_plan_required"] is True
+    assert PlanningStage().on_enter(item, ctx) is None
+    assert item.stage is StageName.PLANNING
+    assert STATE_PLAN_GO not in github.labels[1]
+    assert item.payload["planning_main_refresh_pending"] is True
+    assert "update_plan_required" not in item.payload
+    assert PlanningStage().step(item, ctx) == Continue(next_state="FETCH_MAIN_WAIT")
+
+
+def _adopted_writer_result(item: Any) -> dict[str, object]:
+    """Return the current source receipt for the adopted test writer."""
+    receipt = SourceWorkspaceReceipt(
+        repository=item.repo,
+        repository_identity=item.repo + ":test",
+        ownership_key=f"{item.repo}:test:{item.issue}:impl",
+        item_number=item.issue,
+        lane=SourceLane.IMPLEMENTATION,
+        path=Path("/tmp/adopted-pr"),
+        revision="a" * 40,
+        generation=1,
+        detached=False,
+        branch=item.branch,
+    )
+    return {
+        "path": str(receipt.path),
+        "source_workspace": receipt.to_binding(Path("/tmp/repo")).to_dict(),
+        "source_receipt": receipt.to_dict(),
+        "impl_source_revision": receipt.revision,
+        "dirty": False,
+    }
+
+
+def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 60) -> Any:
+    """Drive one stage pass to its outcome, mirroring the coordinator loop."""
+    entry = stage.on_enter(item, ctx)
+    if entry is not None:
+        return entry
+    for _ in range(max_steps):
+        result = stage.step(item, ctx)
+        if isinstance(result, Continue):
+            item.state = result.next_state
+            continue
+        if isinstance(result, JobRequest):
+            if isinstance(result.job, GitHubJob) and isinstance(
+                result.job.request, ReconcileScopeExpansionDependenciesRequest
+            ):
+                receipt = PipelineGitHubJobRunner._reconcile_scope_expansion_dependencies(
+                    result.job.request,
+                    ctx.github,
+                )
+                stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+                item.state = result.on_done_state
+                continue
+            if (
+                isinstance(result.job, GitJob)
+                and result.job.op == "create_worktree"
+                and result.job.descr == "direct_pr_review_worktree"
+            ):
+                stage.on_job_done(
+                    item,
+                    JobResult(ok=True, value={"path": "/tmp/detached-review", "dirty": False}),
+                    ctx,
+                )
+                item.state = result.on_done_state
+                continue
+            if isinstance(result.job, GitJob) and result.job.op == "verify_pr_review_checkout":
+                stage.on_job_done(
+                    item,
+                    JobResult(
+                        ok=True,
+                        value={"ready": True, "diff": "checkout diff", "changed_paths": []},
+                    ),
+                    ctx,
+                )
+                item.state = result.on_done_state
+                continue
+            pool.submit(result.job, result.on_done_state)
+            _handle, job_result = pool.completion_q.get_nowait()
+            stage.on_job_done(item, job_result, ctx)
+            item.state = result.on_done_state
+            continue
+        return result
+    raise AssertionError("stage driver did not terminate")
+
+
+def _drive_pr_review_to_agent_error(
+    pr_stage: PrReviewStage, item: Any, ctx: Any, max_passes: int = 10
+) -> StageOutcome:
+    """Run pr_review passes with a failing reviewer until it fails back.
+
+    Each pass's review job fails (no verdict), so EVAL RETRYs until the
+    consecutive-failure cap, then fails back ``agent_error``. RETRY passes
+    re-enter the stage (coordinator semantics: same stage, fresh pass).
+    """
+    for _ in range(max_passes):
+        item.state = "ENTER"
+        pool = FakeWorkerPool()
+        pool.script(JobResult(ok=False, error="reviewer crashed"))
+        outcome = _drive(pr_stage, item, ctx, pool)
+        assert isinstance(outcome, StageOutcome)
+        if outcome.disposition == Disposition.RETRY:
+            continue
+        return outcome
+    raise AssertionError("pr_review never escalated past RETRY")
+
+
+class TestAgentErrorPingPongTerminates:
+    """pr_review agent_error -> implementation -> pr_review twice: bounded."""
+
+    def test_composition_terminates_at_the_implement_budget(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Two fail-back round trips exhaust implement=2; no label writes.
+
+        Trip 1: pr_review reviewer-error cap -> FAIL_BACK(agent_error) ->
+        implementation GATE re-adopts the PR, consuming implement (1/2) ->
+        ADVANCE back to pr_review (fresh cycle, error streak reset).
+        Trip 2: same fail-back -> GATE consumption hits the budget (2/2) ->
+        FINISH_FAIL(agent_error_exhausted). Nothing ever labels the PR or
+        the issue along the way.
+        """
+        impl_stage = ImplementationStage()
+        pr_stage = PrReviewStage()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO], open_pr=1001, pr_head_branch="1-real-branch"
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        item.branch = "1-real-branch"
+
+        # Trip 1: pr_review exhausts its reviewer-error retries.
+        outcome = _drive_pr_review_to_agent_error(pr_stage, item, ctx)
+        assert outcome.disposition == Disposition.FAIL_BACK
+        assert outcome.note == "agent_error"
+        assert item.payload["agent_error_failback"] is True
+
+        # ROUTES: agent_error -> implementation. GATE re-adopts, consuming
+        # the implement budget; the adopted worktree leg runs and ADVANCEs.
+        item.state = "ENTER"
+        implementation_pool = FakeWorkerPool()
+        implementation_pool.queue_result(JobResult(ok=True, value=_adopted_writer_result(item)))
+        outcome = _drive(impl_stage, item, ctx, implementation_pool)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+        assert item.attempts["implement"] == 1  # the bound moved
+
+        # Trip 2: pr_review gets a FRESH error budget (new cycle)...
+        outcome = _drive_pr_review_to_agent_error(pr_stage, item, ctx)
+        assert outcome.disposition == Disposition.FAIL_BACK
+        assert outcome.note == "agent_error"
+
+        # ...and the second GATE re-adoption exhausts the implement budget.
+        item.state = "ENTER"
+        outcome = _drive(impl_stage, item, ctx, FakeWorkerPool())
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note == "agent_error_exhausted"
+        assert item.attempts["implement"] == 2  # terminated AT the budget
+
+        # No label writes anywhere along the dead cycle.
+        label_writes = [name for name, _ in github.mutation_log if name in _LABEL_MUTATIONS]
+        assert label_writes == []
+
+    def test_missing_pr_error_path_is_bounded_the_same_way(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A missing PR consumes the same budget when implementation finds it."""
+        impl_stage = ImplementationStage()
+        pr_stage = PrReviewStage()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO], open_pr=1001, pr_head_branch="1-real-branch"
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=2, pr=None, state="ENTER")
+        item.branch = "1-real-branch"
+        item.attempts["implement"] = 1  # one prior trip already consumed
+
+        assert pr_stage.on_enter(item, ctx) is None
+        outcome = pr_stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FAIL_BACK
+        assert outcome.note == "agent_error"
+        assert item.payload["agent_error_failback"] is True
+
+        item.state = "ENTER"
+        final = _drive(impl_stage, item, ctx, FakeWorkerPool())
+        assert isinstance(final, StageOutcome)
+        assert final.disposition == Disposition.FINISH_FAIL
+        assert final.note == "agent_error_exhausted"
+        label_writes = [name for name, _ in github.mutation_log if name in _LABEL_MUTATIONS]
+        assert label_writes == []
+
+
+def test_pushed_remediation_head_survives_stale_review_entry_read(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A fresh review waits for pushed head B instead of reconciling stale A."""
+
+    class SequencedHeadGitHub(FakeStageGitHub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.heads = deque(("b" * 40, "a" * 40, "b" * 40))
+
+        def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+            del pr_number
+            head = self.heads.popleft() if len(self.heads) > 1 else self.heads[0]
+            return {
+                "state": "OPEN",
+                "headRefOid": head,
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+            }
+
+    github = SequencedHeadGitHub()
+    ctx = make_ctx(github=github)
+    implementation = ImplementationStage()
+    implementation_item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+    implementation_item.payload.update(
+        {
+            "implementation_remediation": True,
+            "remediation_thread_snapshots": [
+                {
+                    "id": "thread-1",
+                    "path": "a.py",
+                    "line": 3,
+                    "body": "fix it",
+                    "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                }
+            ],
+            "remediation_output": {
+                "addressed": ["thread-l"],
+                "replies": {"thread-l": "[Response] Fixed the missing guard."},
+            },
+        }
+    )
+
+    implementation.on_job_done(
+        implementation_item,
+        JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+        ctx,
+    )
+
+    assert implementation_item.payload["_impl_source_revision"] == "b" * 40
+    assert implementation_item.payload["_post_remediation_review_head_sha"] == "b" * 40
+
+    review = PrReviewStage()
+    review_item = make_work_item(issue=1, pr=1001, state="ENTER")
+    review_item.payload.update(implementation_item.payload)
+    review_item.payload.update(
+        {
+            "review_audit": "stale",
+            "pr_diff": "stale diff",
+            "_scope_dependency_pending_request": "stale request",
+            "_scope_dependency_receipt": "stale receipt",
+            "_scope_dependency_receipt_error": "stale error",
+        }
+    )
+    assert review.on_enter(review_item, ctx) is None
+
+    first = review.step(review_item, ctx)
+
+    assert isinstance(first, StageOutcome)
+    assert first.disposition is Disposition.RETRY
+    assert not isinstance(first, JobRequest)
+    assert "_scope_dependency_pending_request" not in review_item.payload
+
+    second = review.step(review_item, ctx)
+
+    assert isinstance(second, JobRequest)
+    assert isinstance(second.job, GitHubJob)
+    request = second.job.request
+    assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
+    assert request.source_head_sha == "b" * 40
+
+
+@pytest.mark.parametrize("rebase_state", ["REBASE_WAIT", "REBASE_CONTINUE_WAIT"])
+def test_published_rebase_head_survives_stale_review_entry_read(
+    make_ctx: Any, make_work_item: Any, rebase_state: str
+) -> None:
+    """A published rebase head waits for visibility before dependency review."""
+
+    class SequencedHeadGitHub(FakeStageGitHub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.heads = deque(("b" * 40, "a" * 40, "b" * 40))
+
+        def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+            del pr_number
+            head = self.heads.popleft() if len(self.heads) > 1 else self.heads[0]
+            return {
+                "state": "OPEN",
+                "headRefOid": head,
+                "autoMergeRequest": None,
+                "baseRefName": "main",
+            }
+
+    github = SequencedHeadGitHub()
+    ctx = make_ctx(github=github)
+    implementation = ImplementationStage()
+    implementation_item = make_work_item(issue=1, pr=1001, state=rebase_state)
+
+    implementation.on_job_done(
+        implementation_item,
+        JobResult(
+            ok=True,
+            value={"rebased": True, "published": True, "head_sha": "b" * 40},
+        ),
+        ctx,
+    )
+
+    assert implementation_item.payload["_post_remediation_review_head_sha"] == "b" * 40
+
+    review = PrReviewStage()
+    review_item = make_work_item(issue=1, pr=1001, state="ENTER")
+    review_item.payload.update(implementation_item.payload)
+    assert review.on_enter(review_item, ctx) is None
+
+    first = review.step(review_item, ctx)
+
+    assert first == StageOutcome(Disposition.RETRY, "post_remediation_head_visibility")
+    assert not isinstance(first, JobRequest)
+
+    second = review.step(review_item, ctx)
+
+    assert isinstance(second, JobRequest)
+    assert isinstance(second.job, GitHubJob)
+    request = second.job.request
+    assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
+    assert request.source_head_sha == "b" * 40
+
+
+def test_noop_rebase_does_not_wait_for_published_head_visibility(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """An unchanged writer head enters review without a visibility wait."""
+    github = FakeStageGitHub()
+    ctx = make_ctx(github=github)
+    implementation = ImplementationStage()
+    implementation_item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+
+    implementation.on_job_done(
+        implementation_item,
+        JobResult(
+            ok=True,
+            value={"rebased": False, "published": False, "head_sha": "a" * 40},
+        ),
+        ctx,
+    )
+
+    assert "_post_remediation_review_head_sha" not in implementation_item.payload
+
+    review = PrReviewStage()
+    review_item = make_work_item(issue=1, pr=1001, state="ENTER")
+    review_item.payload.update(implementation_item.payload)
+    assert review.on_enter(review_item, ctx) is None
+
+    result = review.step(review_item, ctx)
+
+    assert isinstance(result, JobRequest)
+    assert isinstance(result.job, GitHubJob)
+    request = result.job.request
+    assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
+    assert request.source_head_sha == "a" * 40
+
+
+class TestEmptyDiffReroutesToSubstantiveImplementation:
+    """pr_review empty-diff fail-back reaches the implementation adopter."""
+
+    def test_empty_diff_fail_back_consumes_the_marker_before_re_adopting(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An empty review diff must be handed to implementation, not re-reviewed."""
+        assert ROUTES[StageName.PR_REVIEW].fail_routes["empty_pr_diff"] == StageName.IMPLEMENTATION
+
+        impl_stage = ImplementationStage()
+        item = make_work_item(issue=3, pr=1001, state="ADOPTED")
+        item.branch = "3-real-branch"
+        item.payload["empty_diff_reimplementation"] = True
+
+        outcome = impl_stage.step(item, make_ctx())
+
+        assert outcome == Continue(next_state="ADVISE_WAIT")
+        assert "empty_diff_reimplementation" not in item.payload
+
+
+class TestPostReviewRebaseReusesRestoredWriter:
+    """pr_review cleanup -> merge_wait rebase fail-back -> implementation reuses writer."""
+
+    def test_transition_reuses_restored_writer_without_second_worktree(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale reviewed head resumes the stowed writer before rebasing."""
+        pr_stage = PrReviewStage()
+        impl_stage = ImplementationStage()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=1001,
+            pr_head_branch="1-real-branch",
+            pr_impl_state=(True, False),
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.branch = "1-real-branch"
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "writer_worktree": "/tmp/implementation-writer",
+                "review_worktree": "/tmp/detached-review",
+                "review_worktree_expected_head": "a" * 40,
+            }
+        )
+
+        cleanup = pr_stage._cleanup_review_worktree_then(
+            item,
+            StageOutcome(Disposition.ADVANCE, "review_go"),
+        )
+        assert cleanup == Continue(next_state="CLEANUP_REVIEW_WORKTREE_WAIT")
+        item.state = cleanup.next_state
+
+        remove = pr_stage.step(item, ctx)
+        assert isinstance(remove, JobRequest)
+        assert isinstance(remove.job, GitJob)
+        assert remove.job.op == "remove_worktree"
+        pr_stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        item.state = remove.on_done_state
+
+        reviewed = pr_stage.step(item, ctx)
+        assert reviewed == StageOutcome(Disposition.ADVANCE, "review_go")
+        assert ROUTES[StageName.PR_REVIEW].next is StageName.MERGE_WAIT
+        assert item.worktree == "/tmp/implementation-writer"
+        assert item.payload["implementation_writer_restored"] is True
+        assert "writer_worktree" not in item.payload
+        assert "review_worktree" not in item.payload
+
+        rebase_failback = MergeWaitStage._post_review_rebase(
+            item,
+            "merge_conflicting",
+        )
+        assert rebase_failback == StageOutcome(
+            Disposition.FAIL_BACK,
+            "merge_conflicting",
+        )
+
+        item.stage = ROUTES[StageName.MERGE_WAIT].fail_routes[rebase_failback.note]
+        item.state = "ENTER"
+        assert impl_stage.on_enter(item, ctx) is None
+
+        entered = impl_stage.step(item, ctx)
+        assert entered == Continue(next_state="GATE")
+        item.state = entered.next_state
+
+        gated = impl_stage.step(item, ctx)
+        assert gated == Continue(next_state="WORKTREE_WAIT")
+        item.state = gated.next_state
+
+        reused = impl_stage.step(item, ctx)
+        assert reused == Continue(next_state="DIRTY_DECISION_WAIT")
+        assert item.worktree == "/tmp/implementation-writer"
+        assert item.payload["worktree_dirty"] is False
+        assert "implementation_writer_restored" not in item.payload
+
+        item.state = reused.next_state
+        dirty = impl_stage.step(item, ctx)
+        assert dirty == Continue(next_state="REBASE_WAIT")
