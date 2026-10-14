@@ -4570,9 +4570,92 @@ def test_parse_opencode_json_events_extracts_session_id_and_final_text() -> None
 
 
 def test_parse_opencode_json_events_handles_empty_and_malformed_output() -> None:
-    """No JSON events yields no session id and no message."""
-    assert agent_runtime._parse_opencode_json_events("") == (None, "")
-    assert agent_runtime._parse_opencode_json_events("garbage\n\n[1,2]") == (None, "")
+    """No JSON events yields no session id and no assistant text."""
+    assert agent_runtime._parse_opencode_json_events("") == (None, None)
+    assert agent_runtime._parse_opencode_json_events("garbage\n\n[1,2]") == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("trailing_text", "case"),
+    [
+        pytest.param("", "empty", id="empty"),
+        pytest.param("   \n\t ", "whitespace-only", id="whitespace-only"),
+    ],
+)
+def test_parse_opencode_json_events_keeps_the_last_text_that_carried_content(
+    trailing_text: str, case: str
+) -> None:
+    """A later empty text event must not replace an earlier answer.
+
+    The recorded incident assigned the selected text on every text event with
+    no guard. A stream whose last text event carried no content therefore
+    discarded the earlier answer, and the contract parser received an empty
+    string.
+    """
+    answer = '{"disposition":"REQUIREMENTS","requirements":"keep the default"}'
+    text = "\n".join(
+        [
+            '{"type":"step_start","sessionID":"ses_fd61","part":{}}',
+            json.dumps(
+                {
+                    "type": "text",
+                    "sessionID": "ses_fd61",
+                    "part": {"type": "text", "text": f"```json\n{answer}\n```"},
+                }
+            ),
+            '{"type":"step_finish","sessionID":"ses_fd61","part":{}}',
+            json.dumps(
+                {
+                    "type": "text",
+                    "sessionID": "ses_fd61",
+                    "part": {"type": "text", "text": trailing_text},
+                }
+            ),
+        ]
+    )
+
+    session_id, message = agent_runtime._parse_opencode_json_events(text)
+
+    assert session_id == "ses_fd61"
+    assert message == f"```json\n{answer}\n```", case
+
+
+def test_parse_opencode_json_events_keeps_the_last_of_several_answers() -> None:
+    """The last event that carried content wins, not the first one."""
+    text = "\n".join(
+        [
+            json.dumps({"type": "text", "sessionID": "s", "part": {"text": "first"}}),
+            json.dumps({"type": "text", "sessionID": "s", "part": {"text": "second"}}),
+            json.dumps({"type": "text", "sessionID": "s", "part": {"text": ""}}),
+        ]
+    )
+
+    _session_id, message = agent_runtime._parse_opencode_json_events(text)
+
+    assert message == "second"
+
+
+def test_parse_opencode_json_events_reports_absent_assistant_text() -> None:
+    """A stream with no assistant text must be distinguishable from empty text.
+
+    ``None`` means the stream carried no text with any content. An empty
+    string means a text event carried content that was then discarded. The
+    first is a transport fact. The second is a contract fact. The caller needs
+    to tell them apart.
+    """
+    only_tools = "\n".join(
+        [
+            '{"type":"step_start","sessionID":"ses_fd61","part":{}}',
+            '{"type":"tool_use","sessionID":"ses_fd61","part":{"tool":"read"}}',
+            '{"type":"step_finish","sessionID":"ses_fd61","part":{}}',
+        ]
+    )
+    empty_text = json.dumps({"type": "text", "sessionID": "ses_fd61", "part": {"text": ""}})
+    null_text = json.dumps({"type": "text", "sessionID": "ses_fd61", "part": {"text": None}})
+
+    assert agent_runtime._parse_opencode_json_events(only_tools) == ("ses_fd61", None)
+    assert agent_runtime._parse_opencode_json_events(empty_text) == ("ses_fd61", None)
+    assert agent_runtime._parse_opencode_json_events(null_text) == ("ses_fd61", None)
 
 
 def test_run_opencode_session_returns_session_id_and_final_text(tmp_path: Path) -> None:
@@ -4590,6 +4673,29 @@ def test_run_opencode_session_returns_session_id_and_final_text(tmp_path: Path) 
 
     assert result.session_id == "ses_fd61"
     assert result.stdout == "OK"
+    assert result.assistant_text_missing is False
+
+
+def test_run_opencode_session_keeps_the_answer_a_trailing_empty_event_would_discard(
+    tmp_path: Path,
+) -> None:
+    """The recorded incident: a trailing empty text event must not win."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"step_start","sessionID":"ses_fd61","part":{"type":"step-start"}}\n'
+            '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"the answer"}}\n'
+            '{"type":"step_finish","sessionID":"ses_fd61","part":{"reason":"stop"}}\n'
+            '{"type":"step_start","sessionID":"ses_fd61","part":{"type":"step-start"}}\n'
+            '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":""}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        result = agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+    assert result.stdout == "the answer"
+    assert result.assistant_text_missing is False
 
 
 def test_run_opencode_session_returns_empty_when_events_carry_no_text(tmp_path: Path) -> None:
@@ -4609,6 +4715,33 @@ def test_run_opencode_session_returns_empty_when_events_carry_no_text(tmp_path: 
 
     assert result.session_id == "ses_fd61"
     assert result.stdout == ""
+    assert result.assistant_text_missing is True
+
+
+def test_run_opencode_session_reports_absent_text_as_a_transport_fact(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stream with events but no text must be distinguishable in the log.
+
+    The caller receives an empty string either way. Only the runtime knows that
+    the stream carried events and no assistant text, so it must say so.
+    """
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"step_start","sessionID":"ses_fd61","part":{"type":"step-start"}}\n'
+            '{"type":"tool_use","sessionID":"ses_fd61","part":{"tool":"read"}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with caplog.at_level("WARNING", logger="hephaestus.agents.runtime"):
+        with patch("subprocess.Popen", side_effect=fake_popen):
+            result = agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+    assert result.stdout == ""
+    assert result.assistant_text_missing is True
+    assert "no assistant text" in caplog.text
+    assert "ses_fd61" in caplog.text
 
 
 def test_run_opencode_session_raises_on_structured_error_event(tmp_path: Path) -> None:

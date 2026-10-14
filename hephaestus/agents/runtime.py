@@ -235,6 +235,8 @@ class AgentRunResult:
     session_id: str | None = None
     session_binding: AgentSessionBinding | None = None
     observed_skill_invocations: tuple[str, ...] = ()
+    assistant_text_missing: bool = False
+    """The provider emitted events but no assistant text carried any content."""
 
 
 class AgentExecutionError(RuntimeError):
@@ -4800,10 +4802,24 @@ def _run_codex_command(
     return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
 
 
-def _parse_opencode_json_events(text: str) -> tuple[str | None, str]:
-    """Extract OpenCode session id and final assistant text from JSONL output."""
+def _parse_opencode_json_events(text: str) -> tuple[str | None, str | None]:
+    """Extract OpenCode session id and the last assistant text from JSONL output.
+
+    A text event that carries no content must not replace an earlier event that
+    did. Assigning on every text event discarded a correct answer whenever the
+    stream ended in an empty text event, and the caller then handed an empty
+    string to the contract parser as if the model had answered nothing. The
+    last event that carried content wins.
+
+    Returns:
+        The session id, and the last assistant text that carried content. The
+        text is ``None`` when the stream carried no assistant text with any
+        content. ``None`` is a transport fact. An empty or malformed string is
+        a contract fact, and the caller needs to tell them apart.
+
+    """
     session_id: str | None = None
-    final_message = ""
+    final_message: str | None = None
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -4822,8 +4838,10 @@ def _parse_opencode_json_events(text: str) -> tuple[str | None, str]:
             and isinstance(part, dict)
             and isinstance(part.get("text"), str)
         ):
-            final_message = part["text"]
-    return session_id, final_message.strip()
+            candidate = part["text"].strip()
+            if candidate:
+                final_message = candidate
+    return session_id, final_message
 
 
 def _has_jsonl_event(text: str) -> bool:
@@ -4941,14 +4959,29 @@ def _run_opencode_command(
             output=stdout_text,
             stderr=stderr_text,
         )
-    session_id, event_message = _parse_opencode_json_events(stdout_text or "")
-    if event_message:
-        stdout: str = event_message.strip()
-    elif _has_jsonl_event(stdout_text or ""):
+    stream_text = stdout_text or ""
+    session_id, event_message = _parse_opencode_json_events(stream_text)
+    stream_had_events = _has_jsonl_event(stream_text)
+    assistant_text_missing = event_message is None and stream_had_events
+    if assistant_text_missing:
+        LOG.warning(
+            "opencode stream for session %s carried %d events but no assistant text; "
+            "a caller that parses stdout sees an empty string",
+            session_id or "<unknown>",
+            sum(1 for line in stream_text.splitlines() if line.strip()),
+        )
+    if event_message is not None:
+        stdout: str = event_message
+    elif stream_had_events:
         stdout = ""
     else:
-        stdout = (stdout_text or "").strip()
-    return AgentRunResult(stdout=stdout, stderr=stderr_text or "", session_id=session_id)
+        stdout = stream_text.strip()
+    return AgentRunResult(
+        stdout=stdout,
+        stderr=stderr_text or "",
+        session_id=session_id,
+        assistant_text_missing=assistant_text_missing,
+    )
 
 
 OPENCODE_PLAN_AGENT = "plan"

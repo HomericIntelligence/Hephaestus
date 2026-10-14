@@ -2072,6 +2072,7 @@ class TestPrReviewStageStep:
         )
         session_id, final_text = agent_runtime._parse_opencode_json_events(events)
         assert result.job.parse is not None
+        assert final_text is not None
         parsed = result.job.parse(final_text)
         audit = parsed.audit
 
