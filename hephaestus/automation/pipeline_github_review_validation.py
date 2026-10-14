@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NoReturn, cast
 
 import hephaestus.automation.comet_profile_7c2772e as comet_profile_7c2772e
+import hephaestus.automation.comet_profile_d5d960f4 as comet_profile_d5d960f4
 from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.config.child_environments import build_gh_child_env
 from hephaestus.utils.helpers import SubprocessOutputLimitExceeded, run_subprocess
@@ -271,6 +272,10 @@ _SELECTION: dict[str, Any] = {
             "scripts/configure-test-postgres-tls.sh",
             "scripts/criu_spike.sbatch",
             "scripts/criu_spike2.sbatch",
+            "scripts/criu_driver_probe.sbatch",
+            "scripts/criu_spike3.sbatch",
+            "scripts/criu_spike4.sbatch",
+            "scripts/criu_spike_criu_build.sh",
             "scripts/deployed_artifact_validators.py",
             "scripts/diagnose-test-postgres.sh",
             "scripts/derisk_smg.sbatch",
@@ -798,19 +803,28 @@ _PROFILES = {
         _HISTORICAL_CONTROLS,
         _HISTORICAL_SELECTION,
     ),
+    comet_profile_d5d960f4.PROFILE_ID: (
+        comet_profile_d5d960f4.PROFILE_DIGEST,
+        comet_profile_d5d960f4.CONTROLS,
+        _SELECTION,
+    ),
 }
+_ADMISSION_INDEX: dict[tuple[tuple[str, int, int, str], ...], str] = {
+    tuple(expected): profile for profile, (_, expected, _) in _PROFILES.items()
+}
+for _alias in comet_profile_d5d960f4.ALIAS_CONTROLS:
+    _ADMISSION_INDEX.setdefault(tuple(_alias), comet_profile_d5d960f4.PROFILE_ID)
 _BASE_CONTROL_PATHS = frozenset(row[0] for row in _CONTROLS)
-_CONTROL_PATHS = frozenset(row[0] for _, controls, _ in _PROFILES.values() for row in controls)
+_ADMITTED_CONTROL_ROWS: tuple[tuple[str, int, int, str], ...] = tuple(
+    row for _, controls, _ in _PROFILES.values() for row in controls
+) + tuple(row for alias in comet_profile_d5d960f4.ALIAS_CONTROLS for row in alias)
+_CONTROL_PATHS = frozenset(row[0] for row in _ADMITTED_CONTROL_ROWS)
 _CONTROL_MODES = {
-    path: frozenset(
-        row[1] for _, controls, _ in _PROFILES.values() for row in controls if row[0] == path
-    )
+    path: frozenset(row[1] for row in _ADMITTED_CONTROL_ROWS if row[0] == path)
     for path in _CONTROL_PATHS
 }
 _CONTROL_SIZES = {
-    path: frozenset(
-        row[2] for _, controls, _ in _PROFILES.values() for row in controls if row[0] == path
-    )
+    path: frozenset(row[2] for row in _ADMITTED_CONTROL_ROWS if row[0] == path)
     for path in _CONTROL_PATHS
 }
 
@@ -1323,10 +1337,10 @@ def admit_comet_controls(
         if total > 64 * 1024 * 1024:
             raise ValueError("The control files exceed their aggregate limit.")
         actual.append((path, mode, len(data), hashlib.sha256(data).hexdigest()))
-    for profile, (_, expected, _) in _PROFILES.items():
-        if tuple(actual) == expected:
-            return profile
-    raise ValueError("The control files do not match an admitted profile.")
+    try:
+        return _ADMISSION_INDEX[tuple(actual)]
+    except KeyError:
+        raise ValueError("The control files do not match an admitted profile.") from None
 
 
 def _pattern_matches(pattern: str, path: str) -> bool:
