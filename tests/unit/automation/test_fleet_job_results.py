@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -667,3 +668,54 @@ def test_prior_interactive_terminal_replay_keeps_next_associated_input_usable(co
     assert worker.journal.sessions["session-1"]["providerTurnId"] != prior_turn
     assert read_result(worker)["result"] is None
     assert "remove" not in owner.engine.calls
+
+
+def test_worker_journal_creates_a_private_writer_lock_under_any_umask(
+    tmp_path: Path,
+) -> None:
+    """The writer lock must not inherit the process umask.
+
+    ``_stopped_worker`` refuses a lock whose mode carries group or other write.
+    The journal creates that lock, so a bare ``open`` left the two modules in
+    disagreement: on a host with umask ``0002`` the journal produced a ``0664``
+    lock that the guard then rejected as ``invalid_worker_journal_lock``.
+
+    This test pins the mode directly, so the repair holds on any host umask
+    rather than only where the ambient umask is permissive.
+    """
+    from hephaestus.automation.fleet_journal import WorkerJournal
+
+    directory = tmp_path / "journal"
+    directory.mkdir(mode=0o700)
+    previous = os.umask(0o002)
+    try:
+        journal = WorkerJournal(directory)
+    finally:
+        os.umask(previous)
+
+    try:
+        mode = (directory / "writer.lock").stat().st_mode
+        assert not mode & 0o022, f"writer.lock mode {mode & 0o777:o} is group or world writable"
+        assert mode & 0o700 == 0o600
+    finally:
+        journal._lock.close()
+
+
+def test_stopped_worker_accepts_the_lock_the_journal_creates(tmp_path: Path) -> None:
+    """The guard and the journal must agree under a permissive umask."""
+    from hephaestus.automation.fleet_journal import WorkerJournal
+    from hephaestus.automation.fleet_session_output import _stopped_worker
+
+    directory = tmp_path / "journal"
+    directory.mkdir(mode=0o700)
+    previous = os.umask(0o002)
+    try:
+        journal = WorkerJournal(directory)
+    finally:
+        os.umask(previous)
+
+    # The journal holds the writer flock, so release it first. _stopped_worker
+    # models the state where no writer is active.
+    journal._lock.close()
+    with _stopped_worker(directory):
+        pass

@@ -20,7 +20,18 @@ class WorkerJournal:
             raise RuntimeError("journal directory must be private")
         self.directory = directory
         self.max_bytes = max_bytes
-        self._lock = (directory / "writer.lock").open("a+b")
+        # Create the lock with an explicit private mode. A bare open() inherits
+        # the process umask, so a host with umask 0002 produced a 0664 lock that
+        # _stopped_worker rejects as invalid_worker_journal_lock. The journal and
+        # that guard disagreed about a file this class owns.
+        self._lock = os.fdopen(
+            os.open(
+                directory / "writer.lock",
+                os.O_RDWR | os.O_CREAT | os.O_APPEND,
+                0o600,
+            ),
+            "r+b",
+        )
         try:
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
