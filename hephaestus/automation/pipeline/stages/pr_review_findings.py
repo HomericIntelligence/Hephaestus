@@ -7,6 +7,7 @@ from hephaestus.automation.review_anchors import (
     MAX_REVIEW_FINDINGS,
     ReviewAnchorCorrection,
     ReviewAnchorCorrectionReason,
+    anchor_warning_for_reason,
 )
 from hephaestus.automation.review_audit import MAX_REVIEW_WARNINGS
 from hephaestus.automation.review_finding_history import normalize_review_finding_batch_records
@@ -61,31 +62,15 @@ _DEMOTION_BUDGET_WARNING_TEXT = (
     "Read the review body and the pipeline log for the complete demoted set.",
 )
 
-#: Warning code and recovery text for each anchor reason. Every warning states
-#: the action a reviewer must take to publish the finding inline later.
+#: Anchor reason to warning code. The warning message and the recovery text
+#: are NOT duplicated here. ``anchor_warning_for_reason`` owns that text, so
+#: the visible review body and the host logs cannot drift apart.
 _ANCHOR_WARNING_CODES: dict[ReviewAnchorCorrectionReason, AnchorCorrectionWarningReason] = {
     "reviewed_diff_unavailable": "anchor_reviewed_diff_unavailable",
     "path_not_in_diff": "anchor_path_not_in_diff",
     "line_not_in_diff": "anchor_line_not_in_diff",
     "unsupported_side": "anchor_unsupported_side",
 }
-_ANCHOR_RECOVERY: dict[ReviewAnchorCorrectionReason, str] = {
-    "reviewed_diff_unavailable": (
-        "Read the reviewed diff again and send the reviewed lines with the review."
-    ),
-    "path_not_in_diff": (
-        "Rebase the pull request so the reviewed diff contains this file. "
-        "Review again to publish this finding inline."
-    ),
-    "line_not_in_diff": (
-        "Rebase the pull request so the reviewed diff contains this line. "
-        "Review again to publish this finding inline."
-    ),
-    "unsupported_side": (
-        "Review this finding again and send side as RIGHT. The host publishes no other side inline."
-    ),
-}
-
 #: Anchor reasons that describe a demotion. A receipt record with any other
 #: reason, or without a reason, is an integrity failure. It must not reach the
 #: informational demotion path.
@@ -184,7 +169,7 @@ def _unanchored_reported_finding(
     correction: ReviewAnchorCorrection,
 ) -> dict[str, object]:
     """Build one visible reported record for a finding outside the diff."""
-    code = _ANCHOR_WARNING_CODES[correction.reason]
+    code, _, recovery = anchor_warning_for_reason(correction.reason)
     finding = dict(correction.finding)
     return {
         "finding": finding,
@@ -202,7 +187,7 @@ def _unanchored_reported_finding(
                         f"The host cannot publish finding {correction.finding_id} "
                         "inline because its anchor is not in the reviewed diff."
                     ),
-                    recovery=_ANCHOR_RECOVERY[correction.reason],
+                    recovery=recovery,
                 )
             )
         ],
@@ -367,14 +352,15 @@ def carry_demoted_findings(
     item.payload[DEMOTED_FINDINGS_PAYLOAD_KEY] = [*existing, *kept]
     warnings: list[ReviewWarning] = []
     for demotion in demotions:
+        code, _, recovery = anchor_warning_for_reason(demotion.reason)
         record_review_warning(
             warnings,
-            _ANCHOR_WARNING_CODES[demotion.reason],
+            code,
             message=(
                 f"The host cannot publish finding {demotion.finding_id} as an "
                 "inline comment because its anchor is not in the reviewed diff."
             ),
-            recovery=_ANCHOR_RECOVERY[demotion.reason],
+            recovery=recovery,
         )
     carry_review_warnings(item, warnings, note_truncation=len(kept) < len(reported))
     return True

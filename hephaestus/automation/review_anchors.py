@@ -499,6 +499,27 @@ def _valid_review_positions(diff_text: str) -> dict[str, set[tuple[int, str]]]:
     return positions
 
 
+def anchor_warning_for_reason(
+    reason: ReviewAnchorCorrectionReason,
+) -> tuple[AnchorCorrectionWarningReason, str, str]:
+    """Return the one warning text every layer uses for an anchor reason.
+
+    This function is the single source for anchor warning code, message, and
+    recovery. Every layer that reports a demoted finding reads it here, so the
+    text cannot drift between the visible review body and the host logs.
+
+    Args:
+        reason: The anchor correction reason from the host.
+
+    Returns:
+        The warning code, the warning message, and the recovery instruction.
+
+    """
+    code = _ANCHOR_WARNING_CODES[reason]
+    message, recovery = _ANCHOR_WARNING_TEXT[code]
+    return code, message, recovery
+
+
 def validate_comments_to_diff(
     comments: list[dict[str, Any]],
     diff_text: str,
