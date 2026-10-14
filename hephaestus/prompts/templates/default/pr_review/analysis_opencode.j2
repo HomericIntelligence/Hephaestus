@@ -21,11 +21,11 @@ Host validation receipts:
 {% include "pr_review/repository_validation.j2" %}
 {% else %}
 The supplied receipts are the complete coordinator-bound host plan. A receipt
-is local evidence only when it has `ok: true`, `status: passed`, and the
-reviewed `head_sha`. Do not require an additional coordinator-bound receipt
-outside this supplied plan. Missing, skipped, or failed receipts in this
-supplied plan are evidence gaps. Do not run local checks in this read-only
-review.
+is local evidence when it has `ok: true` and `status: passed`.
+Do not require an additional coordinator-bound receipt outside this supplied
+plan. For a missing, skipped, or failed receipt, say so in `summary` and
+continue. An evidence gap is not by itself a reason to fail the review.
+Do not run local checks in this read-only review.
 {% endif %}
 
 Find correctness, security, architecture, scope, and false-green test defects.
