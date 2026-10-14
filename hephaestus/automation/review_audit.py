@@ -78,7 +78,7 @@ _FINDING_WARNING_TEXT: dict[str, tuple[str, str]] = {
     ),
     "finding_side_unsupported": (
         "The review finding side is not RIGHT.",
-        "Send side as RIGHT. Use the anchor correction response for the other sides.",
+        "Send side as RIGHT. The host publishes no other side inline.",
     ),
     "finding_severity_invalid": (
         "The review finding severity is not supported.",

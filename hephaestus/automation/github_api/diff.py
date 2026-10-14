@@ -127,7 +127,7 @@ def _validate_comments_to_diff(
         strict=True,
     ):
         _api.logger.warning(
-            "Preserving review finding %s on %s:%s (%s) for anchor correction %s: %s Recovery: %s",
+            "Preserving review finding %s on %s:%s (%s) as a demoted finding %s: %s Recovery: %s",
             correction.finding_id,
             correction.path,
             correction.line,
