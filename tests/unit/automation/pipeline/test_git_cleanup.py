@@ -15,6 +15,7 @@ from hephaestus.automation.pipeline import git_cleanup
 from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import GitJob
+from hephaestus.automation.repo_intake import RepoIntakeError
 from hephaestus.automation.worktree_manager import WorktreeManager
 
 
@@ -1338,3 +1339,64 @@ def test_remove_worktree_retry_releases_branch_after_checkout_is_absent(
         sum(call.args[0][:3] == ["git", "worktree", "remove"] for call in git_run.call_args_list)
         == 1
     )
+
+
+def test_remove_worktree_accepts_intake_managed_source_checkout(tmp_path: Path) -> None:
+    """A verified intake workspace is a cleanup-safe managed worktree."""
+    (tmp_path / ".git").mkdir()
+    intake_base = tmp_path / "state" / "build" / ".worktrees"
+    intake_base.mkdir(parents=True)
+    worktree = intake_base / "auto-7-review"
+
+    with (
+        patch(
+            "hephaestus.automation.pipeline.git_cleanup.checkout_intake_worker_base",
+            return_value=intake_base,
+        ),
+        patch.object(WorktreeManager, "list_worktrees", return_value=[]),
+    ):
+        result = run_cleanup_job(_remove_job(tmp_path, worktree))
+
+    assert result == JobResult(ok=True)
+
+
+def test_remove_worktree_rejects_wrong_name_under_intake_base(tmp_path: Path) -> None:
+    """An intake workspace for another issue is not a managed identity."""
+    (tmp_path / ".git").mkdir()
+    intake_base = tmp_path / "state" / "build" / ".worktrees"
+    intake_base.mkdir(parents=True)
+    worktree = intake_base / "auto-8-review"
+
+    with (
+        patch(
+            "hephaestus.automation.pipeline.git_cleanup.checkout_intake_worker_base",
+            return_value=intake_base,
+        ),
+        patch("hephaestus.automation.pipeline.git_cleanup.run") as git_run,
+    ):
+        result = run_cleanup_job(_remove_job(tmp_path, worktree))
+
+    assert result.ok is False
+    assert result.error == "worktree cleanup identity is invalid"
+    git_run.assert_not_called()
+
+
+def test_remove_worktree_rejects_intake_base_without_receipt(tmp_path: Path) -> None:
+    """An unverifiable intake base stays outside the cleanup identity."""
+    (tmp_path / ".git").mkdir()
+    intake_base = tmp_path / "state" / "build" / ".worktrees"
+    intake_base.mkdir(parents=True)
+    worktree = intake_base / "auto-7-review"
+
+    with (
+        patch(
+            "hephaestus.automation.pipeline.git_cleanup.checkout_intake_worker_base",
+            side_effect=RepoIntakeError("bad receipt"),
+        ),
+        patch("hephaestus.automation.pipeline.git_cleanup.run") as git_run,
+    ):
+        result = run_cleanup_job(_remove_job(tmp_path, worktree))
+
+    assert result.ok is False
+    assert result.error == "worktree cleanup identity is invalid"
+    git_run.assert_not_called()

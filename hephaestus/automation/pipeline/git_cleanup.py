@@ -25,6 +25,7 @@ from hephaestus.automation.git_utils import (
     delete_reserved_branch_if_unchanged,
     run,
 )
+from hephaestus.automation.repo_intake import RepoIntakeError, checkout_intake_worker_base
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
@@ -32,7 +33,11 @@ from hephaestus.automation.source_worktree import (
 )
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.utils.helpers import get_repo_root
-from hephaestus.utils.worktree_identity import is_expected_managed_worktree_path
+from hephaestus.utils.worktree_identity import (
+    SOURCE_WORKTREE_LANES,
+    is_expected_managed_worktree_path,
+    source_worktree_name,
+)
 
 from .git_jobs import GitJob
 from .job_results import JobResult
@@ -978,7 +983,13 @@ def _is_full_commit_sha(value: object) -> bool:
     )
 
 
-def _is_expected_worktree_path(path: Path, *, repo_root: Path, issue_number: int) -> bool:
+def _is_expected_worktree_path(
+    path: Path,
+    *,
+    repo_root: Path,
+    issue_number: int,
+    repository: str | None = None,
+) -> bool:
     """Bind destructive cleanup to one managed issue worktree identity."""
     lexical = _normalized_lexical_path(path)
     try:
@@ -986,11 +997,44 @@ def _is_expected_worktree_path(path: Path, *, repo_root: Path, issue_number: int
             return False
     except OSError:
         return False
-    return is_expected_managed_worktree_path(
+    if is_expected_managed_worktree_path(
         lexical,
         repo_root=repo_root,
         issue_number=issue_number,
+    ):
+        return True
+    return _is_intake_worktree_path(
+        lexical,
+        repo_root=repo_root,
+        issue_number=issue_number,
+        repository=repository,
     )
+
+
+def _is_intake_worktree_path(
+    path: Path,
+    *,
+    repo_root: Path,
+    issue_number: int,
+    repository: str | None,
+) -> bool:
+    """Return whether ``path`` is an intake-managed source worktree identity.
+
+    A receipt-bound intake checkout keeps its managed source workspaces under
+    ``<state_root>/build/.worktrees``, outside the intake worker root. The
+    generic managed-path check cannot see that base, so this fallback reads
+    the verified intake boundary. It never creates state.
+    """
+    if repository is None or issue_number <= 0:
+        return False
+    try:
+        base = checkout_intake_worker_base(repo_root, repository=repository)
+    except (OSError, RepoIntakeError):
+        return False
+    if base is None or path.parent != base:
+        return False
+    managed_names = {source_worktree_name(issue_number, lane) for lane in SOURCE_WORKTREE_LANES}
+    return path.name in managed_names
 
 
 def _worktree_record(
@@ -1229,6 +1273,7 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
                 worktree_path,
                 repo_root=repo_root,
                 issue_number=issue_number,
+                repository=job.transport_repository,
             )
             or (expected_branch is None and expected_head is None)
             or not isinstance(expected_detached, bool)
