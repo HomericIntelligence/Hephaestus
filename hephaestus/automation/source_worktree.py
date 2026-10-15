@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -24,7 +25,6 @@ from hephaestus.agents.workspace import (
     SourceLane,
     WorkspaceBinding,
     WorkspaceBindingError,
-    _dirty_workspace_permit,
     validate_workspace_binding,
 )
 from hephaestus.automation.git_runtime import (
@@ -51,6 +51,8 @@ from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
+
+logger = logging.getLogger(__name__)
 
 
 class SourceWorkspaceRecoveryKind(StrEnum):
@@ -832,7 +834,11 @@ class SourceWorkspaceManager:
         old = self._read_receipt(item_number, lane)
         self._reject_foreign_owner(old, item_number, lane)
         if path.exists() and self._is_dirty(path, deadline=deadline):
-            raise SourceWorkspaceError(f"source workspace is dirty and preserved: {path}")
+            logger.warning(
+                "source workspace %s has uncommitted changes; continuing and leaving them intact. "
+                "Recovery: the agent classifies the changes and stages only its own files.",
+                path,
+            )
         desired_detached = lane is SourceLane.REVIEW or branch is None
         physical_revision = self._head_revision(path, deadline=deadline) if path.exists() else None
         physical_branch = self._head_branch(path, deadline=deadline) if path.exists() else None
@@ -962,7 +968,11 @@ class SourceWorkspaceManager:
         if not expected_path.exists():
             raise SourceWorkspaceError("implementation writer worktree does not exist")
         if self._is_dirty(expected_path):
-            raise SourceWorkspaceError(f"source workspace is dirty and preserved: {expected_path}")
+            logger.warning(
+                "implementation writer worktree %s has uncommitted changes; continuing. "
+                "Recovery: the agent classifies the changes and stages only its own files.",
+                expected_path,
+            )
         revision = self._head_revision(expected_path)
         if self._head_branch(expected_path) != f"refs/heads/{branch}":
             raise SourceWorkspaceError(
@@ -1325,17 +1335,20 @@ class SourceWorkspaceManager:
                 ),
             ) from exc
         if is_dirty:
+            # A transition reuses this path. Git cannot remove a worktree that
+            # holds uncommitted work, so the transition cannot complete without
+            # discarding the agent's edits. Refuse here, at the boundary, and say
+            # how to proceed.
             raise SourceWorkspaceError(
-                "implementation writer predecessor is invalid because source workspace is "
-                f"dirty and preserved: {expected_path}",
+                "implementation writer predecessor has uncommitted changes that the "
+                f"transition would discard: {expected_path}",
                 recovery=self._recovery(
                     SourceWorkspaceRecoveryKind.DIRTY_WORKTREE,
                     item_number=item_number,
                     path=expected_path,
                     receipt_path=receipt_path,
                     manual_action=(
-                        f"Commit or stash the changes in {expected_path}. Verify that the "
-                        f"worktree is clean. Then rerun issue #{item_number}."
+                        f"Commit the changes in {expected_path}, then rerun issue #{item_number}."
                     ),
                 ),
             )
@@ -1726,15 +1739,13 @@ class SourceWorkspaceManager:
                     validated = self._validate_dirty_operation(
                         receipt, binding, source_operation, deadline
                     )
-                    with _dirty_workspace_permit(validated) as permit:
-                        yield validate_workspace_binding(
-                            validated,
-                            allowed_tools=allowed_tools,
-                            dirty_permit=permit,
-                            remaining_timeout=deadline.remaining,
-                            shutdown=deadline.shutdown,
-                            expected_branch=receipt.branch if not validated.detached else None,
-                        )
+                    yield validate_workspace_binding(
+                        validated,
+                        allowed_tools=allowed_tools,
+                        remaining_timeout=deadline.remaining,
+                        shutdown=deadline.shutdown,
+                        expected_branch=receipt.branch if not validated.detached else None,
+                    )
                     return
                 if binding.schema_version == 1:
                     yield validate_workspace_binding(
@@ -1764,15 +1775,12 @@ class SourceWorkspaceManager:
                 self._write_receipt(consumed)
                 if self._read_receipt(binding.item_number, binding.lane) != consumed:
                     raise SourceWorkspaceError("dirty direct consumption is unconfirmed")
-                with _dirty_workspace_permit(binding) as permit:
-                    cwd = validate_workspace_binding(
-                        binding,
-                        allowed_tools=allowed_tools,
-                        dirty_permit=permit,
-                        remaining_timeout=deadline.remaining,
-                        shutdown=deadline.shutdown,
-                    )
-                    yield cwd
+                yield validate_workspace_binding(
+                    binding,
+                    allowed_tools=allowed_tools,
+                    remaining_timeout=deadline.remaining,
+                    shutdown=deadline.shutdown,
+                )
             except WorkspaceBindingError as exc:
                 raise SourceWorkspaceError(str(exc)) from exc
 
@@ -1929,9 +1937,12 @@ class SourceWorkspaceManager:
             if receipt.obligations:
                 raise SourceWorkspaceError("source workspace still has active obligations")
             if receipt.path.exists() and self._is_dirty(receipt.path, deadline=deadline):
-                raise SourceWorkspaceError(
-                    f"source workspace is dirty and preserved: {receipt.path}"
+                logger.warning(
+                    "source workspace %s has uncommitted changes at cleanup; preserving it. "
+                    "Recovery: commit or remove the changes by hand, then run cleanup again.",
+                    receipt.path,
                 )
+                return
             if physical_cleanup is not None:
                 physical_cleanup()
             else:
@@ -2638,7 +2649,10 @@ class SourceWorkspaceManager:
         if path.exists():
             self._require_registered_transition_path(path)
             if self._is_dirty(path):
-                raise SourceWorkspaceError("source workspace transition checkout is dirty")
+                raise SourceWorkspaceError(
+                    "source workspace transition checkout has uncommitted changes. "
+                    "Recovery: commit them on the predecessor branch, then retry the transition."
+                )
             physical_revision = self._head_revision(path)
             physical_branch = self._head_branch(path)
             if physical_revision == predecessor.revision and physical_branch == (

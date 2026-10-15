@@ -1,6 +1,7 @@
-"""Tests for one-use dirty workspace data and active permits."""
+"""Tests for dirty source workspaces."""
 
-from contextvars import copy_context
+from __future__ import annotations
+
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,7 +12,6 @@ from hephaestus.agents.workspace import (
     SourceLane,
     WorkspaceBinding,
     WorkspaceBindingError,
-    _dirty_workspace_permit,
     validate_workspace_binding,
 )
 from tests.unit.agents.test_workspace import _git, _repository
@@ -50,8 +50,8 @@ def test_dirty_claim_rejects_unsafe_scope(path: str) -> None:
         DirtyDirectClaim.from_dict(payload)
 
 
-def test_dirty_binding_needs_exact_active_permit(tmp_path: Path) -> None:
-    """Serialized, cloned, and expired data cannot grant dirty execution."""
+def _dirty_source_binding(tmp_path: Path) -> tuple[Path, WorkspaceBinding]:
+    """Build a source binding whose worktree has uncommitted changes."""
     repo, revision = _repository(tmp_path)
     claim = replace(_claim(), reservation_base_sha=revision)
     path = tmp_path / "auto-12-impl"
@@ -72,15 +72,55 @@ def test_dirty_binding_needs_exact_active_permit(tmp_path: Path) -> None:
         schema_version=2,
         dirty_claim=claim,
     )
+    return path, binding
+
+
+def test_dirty_source_workspace_is_accepted(tmp_path: Path) -> None:
+    """Uncommitted changes do not block an agent invocation."""
+    path, binding = _dirty_source_binding(tmp_path)
+
+    assert validate_workspace_binding(binding) == path
+
+
+def test_dirty_workspace_accepted_after_round_trip_through_json(tmp_path: Path) -> None:
+    """A deserialized dirty binding works without a process-local permit."""
+    path, binding = _dirty_source_binding(tmp_path)
+
     clone = WorkspaceBinding.from_dict(binding.to_dict())
-    with pytest.raises(WorkspaceBindingError, match="permit"):
+
+    assert validate_workspace_binding(clone) == path
+
+
+def test_dirty_source_workspace_accepted_again_after_use(tmp_path: Path) -> None:
+    """A dirty workspace stays usable; no permit is consumed or revoked."""
+    _, binding = _dirty_source_binding(tmp_path)
+
+    validate_workspace_binding(binding)
+    validate_workspace_binding(binding)
+
+
+def test_untracked_file_does_not_block_invocation(tmp_path: Path) -> None:
+    """An untracked scratch file is data for the agent, not a refusal."""
+    path, binding = _dirty_source_binding(tmp_path)
+    (path / "scratch.txt").write_text("notes\n")
+
+    assert validate_workspace_binding(binding) == path
+
+
+def test_workspace_on_a_different_branch_is_accepted(tmp_path: Path) -> None:
+    """A reused worktree switched to another branch still runs."""
+    path, binding = _dirty_source_binding(tmp_path)
+    _git(path, "checkout", "-b", "12-impl-continuation")
+
+    assert validate_workspace_binding(binding) == path
+
+
+def test_workspace_revision_change_is_still_refused(tmp_path: Path) -> None:
+    """A moved HEAD remains a real error, distinct from a dirty tree."""
+    path, binding = _dirty_source_binding(tmp_path)
+    (path / "extra.txt").write_text("x\n")
+    _git(path, "add", "extra.txt")
+    _git(path, "commit", "-m", "advance")
+
+    with pytest.raises(WorkspaceBindingError, match="revision changed"):
         validate_workspace_binding(binding)
-    with _dirty_workspace_permit(binding) as permit:
-        captured_context = copy_context()
-        assert validate_workspace_binding(binding, dirty_permit=permit) == path
-        with pytest.raises(WorkspaceBindingError, match="permit"):
-            validate_workspace_binding(clone, dirty_permit=permit)
-    with pytest.raises(WorkspaceBindingError, match="permit"):
-        validate_workspace_binding(binding, dirty_permit=permit)
-    with pytest.raises(WorkspaceBindingError, match="permit"):
-        captured_context.run(validate_workspace_binding, binding, dirty_permit=permit)

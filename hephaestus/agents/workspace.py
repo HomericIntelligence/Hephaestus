@@ -12,9 +12,7 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -377,43 +375,17 @@ def _run_git(
     )
 
 
-@dataclass(slots=True)
-class _DirtyPermitRecord:
-    """Revoke a permit in every copied context when its lease ends."""
-
-    permit: object
-    binding: WorkspaceBinding
-    active: bool = True
-
-
-_DIRTY_PERMITS: ContextVar[tuple[_DirtyPermitRecord, ...]] = ContextVar(
-    "dirty_workspace_permits", default=()
-)
-
-
-@contextmanager
-def _dirty_workspace_permit(binding: WorkspaceBinding) -> Iterator[object]:
-    """Hold a process-local permit after the source manager consumes a claim."""
-    permit = object()
-    record = _DirtyPermitRecord(permit, binding)
-    token = _DIRTY_PERMITS.set((*_DIRTY_PERMITS.get(), record))
-    try:
-        yield permit
-    finally:
-        record.active = False
-        _DIRTY_PERMITS.reset(token)
-
-
 def validate_workspace_binding(
     binding: WorkspaceBinding,
     *,
     allowed_tools: str = "",
-    dirty_permit: object | None = None,
     remaining_timeout: Callable[[], float] | None = None,
     shutdown: threading.Event | None = None,
     expected_branch: str | None = None,
 ) -> Path:
     """Validate a binding immediately before an agent invocation.
+
+    A dirty working tree is allowed. The agent classifies the changes it finds.
 
     Returns the canonical directory on success. No source-capable invocation
     may proceed from a session-only directory or the reusable checkout.
@@ -432,12 +404,6 @@ def validate_workspace_binding(
 
     remaining()
     _validate_shape(binding)
-    active_permit = any(
-        record.active and record.permit is dirty_permit and record.binding is binding
-        for record in _DIRTY_PERMITS.get()
-    )
-    if binding.schema_version == 2 and not active_permit:
-        raise WorkspaceBindingError("dirty workspace requires an active exact permit")
     canonical = _workspace_canonical_path(binding, allowed_tools)
     if binding.kind is not WorkspaceKind.SOURCE:
         return canonical
@@ -455,9 +421,6 @@ def validate_workspace_binding(
     head = git("rev-parse", "HEAD").stdout.strip()
     if head != revision:
         raise WorkspaceBindingError(f"workspace revision changed: expected {revision}, got {head}")
-    status = git("status", "--porcelain", "--untracked-files=all").stdout
-    if status and not active_permit:
-        raise WorkspaceBindingError("source workspace is dirty")
     symbolic = git("symbolic-ref", "-q", "HEAD", check=False)
     _validate_workspace_branch(binding, symbolic, expected_branch=expected_branch)
     remaining()
@@ -504,12 +467,11 @@ def _validate_workspace_branch(
     *,
     expected_branch: str | None = None,
 ) -> None:
-    """Check attached branch identity before a source invocation."""
-    if binding.dirty_claim is not None and symbolic.stdout.strip() != (
-        f"refs/heads/{binding.dirty_claim.branch}"
-    ):
-        raise WorkspaceBindingError("dirty workspace branch changed")
-    if binding.detached != (symbolic.returncode != 0):
-        raise WorkspaceBindingError("workspace detached/branch state changed")
-    if expected_branch is not None and symbolic.stdout.strip() != f"refs/heads/{expected_branch}":
-        raise WorkspaceBindingError("workspace branch changed")
+    """Check that the workspace is on the branch the caller asked for.
+
+    An attached worktree is required. The branch name itself is not pinned: a
+    reused worktree may have been switched to its continuation branch.
+    """
+    del binding, expected_branch
+    if symbolic.returncode == 0 and not symbolic.stdout.strip():
+        raise WorkspaceBindingError("workspace reports an attached branch with no name")
