@@ -192,7 +192,7 @@ def test_coordinator_passes_bound_rebase_policy_selector_to_recording_pool(
     policy = selector("Hephaestus")
     assert policy is not None
     assert policy.name == "hephaestus-adr-v1"
-    assert selector("Comet") is None
+    assert selector("Ledger") is None
 
 
 def test_admission_rejects_when_global_worker_capacity_is_live(tmp_path: Path) -> None:

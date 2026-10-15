@@ -282,11 +282,11 @@ def test_repository_ci_request_keeps_complete_immutable_context(tmp_path: Path) 
     """Keep plan ownership, branch, deadline, and job target in the closed request."""
     api, request = _ci_request_fixture(tmp_path)
     assert (request.repository, request.issue_number, request.pr_number) == (
-        "LLM360/comet",
+        "acme/ledger",
         1623,
         1639,
     )
-    job = api.GitHubJob("comet", tmp_path, request, "Read CI validation.")
+    job = api.GitHubJob("ledger", tmp_path, request, "Read CI validation.")
     assert job.request is request
     assert api.github_request_issue(request) == 1623
     assert api.github_request_pr(request) == 1639
@@ -348,15 +348,20 @@ def test_repository_ci_dispatch_uses_the_smallest_deadline(
     from types import SimpleNamespace
 
     from hephaestus.automation import pipeline_github, pipeline_github_jobs
-    from hephaestus.automation.pipeline_github_review_validation import CometCICollection
+    from hephaestus.automation.pipeline_github_review_validation import ValidationCICollection
+    from tests.unit.automation.test_pipeline_github_review_validation import (
+        _install_nightly_profile,
+    )
 
+    _install_nightly_profile(monkeypatch)
     api, request = _ci_request_fixture(tmp_path)
     request = replace(request, deadline_s=request_deadline)
     stop = threading.Event()
     captured = []
     monkeypatch.setattr("time.monotonic", lambda: 100.0)
 
-    def reader(**kwargs: Any) -> Any:
+    def reader(*args: Any, **kwargs: Any) -> Any:
+        del args
         captured.append(kwargs)
         return SimpleNamespace(**kwargs)
 
@@ -364,13 +369,13 @@ def test_repository_ci_dispatch_uses_the_smallest_deadline(
         assert invocation == request.invocation
         assert head_branch == request.head_branch
         assert reader.shutdown is stop
-        return CometCICollection()
+        return ValidationCICollection()
 
-    monkeypatch.setattr(pipeline_github, "CometCIReader", reader)
-    monkeypatch.setattr(pipeline_github, "collect_comet_ci", collect)
-    runner = pipeline_github_jobs.PipelineGitHubJobRunner(org="LLM360", dry_run=False)
+    monkeypatch.setattr(pipeline_github, "ValidationCIReader", reader)
+    monkeypatch.setattr(pipeline_github, "collect_repository_validation_ci", collect)
+    runner = pipeline_github_jobs.PipelineGitHubJobRunner(org="acme", dry_run=False)
     result = runner.run(
-        api.GitHubJob("comet", tmp_path, request, "Read CI validation."),
+        api.GitHubJob("ledger", tmp_path, request, "Read CI validation."),
         deadline_s=caller_deadline,
         shutdown=stop,
     )
@@ -389,7 +394,11 @@ def test_repository_ci_dispatch_returns_typed_early_interruption(
 
     from hephaestus.automation import pipeline_github_jobs
     from hephaestus.automation.pipeline.github_jobs import RepositoryValidationCIRead
+    from tests.unit.automation.test_pipeline_github_review_validation import (
+        _install_nightly_profile,
+    )
 
+    _install_nightly_profile(monkeypatch)
     api, request = _ci_request_fixture(tmp_path)
     monkeypatch.setattr("time.monotonic", lambda: 100.0)
     stop = threading.Event()
@@ -397,9 +406,9 @@ def test_repository_ci_dispatch_returns_typed_early_interruption(
         request = replace(request, deadline_s=90.0)
     else:
         stop.set()
-    runner = pipeline_github_jobs.PipelineGitHubJobRunner(org="LLM360", dry_run=False)
+    runner = pipeline_github_jobs.PipelineGitHubJobRunner(org="acme", dry_run=False)
     result = runner.run(
-        api.GitHubJob("comet", tmp_path, request, "Read CI validation."), shutdown=stop
+        api.GitHubJob("ledger", tmp_path, request, "Read CI validation."), shutdown=stop
     )
     assert isinstance(result, RepositoryValidationCIRead)
     assert result.request == request and result.receipts == ()
@@ -407,8 +416,10 @@ def test_repository_ci_dispatch_returns_typed_early_interruption(
 
 
 def _repository_execution(tmp_path: Path) -> Any:
-    """Build execution metadata from the complete current Comet profile."""
+    """Build execution metadata from the complete installed profile."""
     from hephaestus.automation.pipeline import repository_validation as api
+    from hephaestus.automation.repository_validation_runtime import CAPABILITY_ROOT
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import RUNTIME_SLUG
     from tests.unit.automation.test_pipeline_github_review_validation import _ci_collection_fixture
 
     assert hasattr(api, "RepositoryValidationExecution"), "Execution metadata is not available."
@@ -422,7 +433,7 @@ def _repository_execution(tmp_path: Path) -> Any:
         check_id=plan.checks[0].check_id,
         attempt_generation=1,
         request_nonce="f" * 32,
-        runtime_root=tmp_path / "host/build/hephaestus-review-validation/comet" / lock_digest,
+        runtime_root=tmp_path / "host" / CAPABILITY_ROOT / RUNTIME_SLUG / lock_digest,
         runtime_manifest_sha256="c" * 64,
         runtime_tree_sha256="d" * 64,
     )
@@ -431,7 +442,7 @@ def _repository_execution(tmp_path: Path) -> Any:
 def _repository_build_job(execution: Any, **overrides: Any) -> BuildTestJob:
     """Bind the selected command and source to one build job."""
     values = {
-        "repo": "comet",
+        "repo": "ledger",
         "cwd": execution.plan.source_workspace.cwd,
         "argv": execution.plan.checks[0].argv,
         "timeout_s": 60,
@@ -524,7 +535,7 @@ def test_repository_validation_source_preparation_requires_closed_request(tmp_pa
         123.0,
     )
     job = GitJob(
-        "comet",
+        "ledger",
         "prepare_repository_validation",
         60,
         expected_repository=plan.repository,
@@ -591,7 +602,7 @@ def test_repository_execution_preserves_build_job_compatibility(tmp_path: Path) 
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("check_id", "comet.unknown"),
+        ("check_id", "ledger.unknown"),
         ("attempt_generation", 0),
         ("attempt_generation", True),
         ("request_nonce", "e" * 31),

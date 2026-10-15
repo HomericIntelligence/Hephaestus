@@ -43,8 +43,7 @@ are maintained together.
    component and use case, declare least-privilege capabilities and the data
    boundary, supply authentication at runtime without committed secrets, and
    document startup, timeout, and unavailable-server behaviour. It must also
-   update `docs/mcp.md` and the posture assertions in
-   `tests/unit/docs/test_mcp_config.py`.
+   update `docs/mcp.md`.
 
 ## Alternatives considered
 
@@ -64,7 +63,8 @@ are maintained together.
 - The empty `.mcp.json` has a documented meaning: optional, project-scoped, and
   non-load-bearing. Contributors can neither silently delete it nor let an MCP
   server become mandatory.
-- `docs/mcp.md`, `AGENTS.md`, and `tests/unit/docs/test_mcp_config.py` state and
-  enforce the same boundary; drift fails the test suite.
+- `docs/mcp.md` and `AGENTS.md` state the same boundary. The executable posture
+  assertions that once enforced it were removed with the non-core-library test
+  re-scope, so a reviewer must confirm the boundary by reading both documents.
 - Making MCP required for package operation, automation startup, or a
   production workflow requires a superseding ADR.

@@ -1,8 +1,9 @@
-"""Regression tests for import cycles between hephaestus.github and hephaestus.automation.
+"""Regression tests for import cycles in the hephaestus core library.
 
 These tests use fresh subprocesses so that a partial-import failure in one test
 cannot contaminate sys.modules for the next. The AST layering test enforces the
-structural invariant at the source level so CI catches regressions before runtime.
+one-way automation-to-library boundary at the source level so CI catches
+regressions before runtime.
 """
 
 from __future__ import annotations
@@ -24,19 +25,10 @@ def _run(code: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_planner_imports_cleanly() -> None:
+def test_github_package_imports_cleanly() -> None:
     """Direct repro of the original circular-import failure."""
-    r = _run("from hephaestus.automation.planner import main")
-    assert r.returncode == 0, f"planner import failed:\n{r.stderr}"
-
-
-def test_packages_import_in_either_order() -> None:
-    """Order-dependent cycles surface only in one direction; test both."""
-    r1 = _run("import hephaestus.github, hephaestus.automation")
-    assert r1.returncode == 0, f"github-first import failed:\n{r1.stderr}"
-
-    r2 = _run("import hephaestus.automation, hephaestus.github")
-    assert r2.returncode == 0, f"automation-first import failed:\n{r2.stderr}"
+    r = _run("import hephaestus.github")
+    assert r.returncode == 0, f"hephaestus.github import failed:\n{r.stderr}"
 
 
 def test_console_script_entry_points_resolve() -> None:

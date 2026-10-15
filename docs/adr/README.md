@@ -7,9 +7,10 @@ Each ADR is immutable once Accepted; supersede rather than edit.
 To add an ADR: take the next zero-padded number, copy the section skeleton from
 any existing ADR (`# ADR-NNNN: …`, `- Status:`, `- Date:`, `- Tracks:`,
 `## Context`, `## Decision`, `## Alternatives considered`, `## Consequences`),
-and add a row to the table below. The structural guard
-`tests/unit/docs/test_adr_records.py` keeps every ADR well-formed, contiguously
-numbered, and listed here.
+and add a row to the table below. The `check-doc-maintenance` pre-commit hook
+scans this index for unowned dated-state claims. No executable guard checks the
+numbering, the section skeleton, or the index entries, so a reviewer must
+confirm all three.
 
 | ADR | Title | Status |
 |-----|-------|--------|
@@ -66,6 +67,5 @@ numbered, and listed here.
 | [0051](0051-manual-final-rebase-verification.md) | Manual final-rebase verification | Superseded by 0053 |
 | [0052](0052-verified-default-branch-merge-admission.md) | Verified default branch for merge admission | Accepted |
 | [0053](0053-focused-local-ci-full-validation.md) | Focused local checks and CI-owned full validation | Manual rebase trigger superseded by 0055 |
-| [0054](0054-comet-review-validation.md) | Comet review validation | Accepted |
 | [0055](0055-conditional-manual-rebases.md) | Conditional manual rebases | Accepted |
 | [0056](0056-explicit-host-capabilities-and-operation-recovery.md) | Explicit host capabilities and durable operation recovery | Draft |

@@ -19,8 +19,12 @@ or `F`; `summary` is a concise informational summary; `comments` is an array
 of concrete findings; and
 `scope_expansions` is an array of child-issue prerequisites that must not be
 routed to the current branch. Each comment must provide a repository-relative
-`path`, positive changed-line `line`, `"RIGHT"` side, one of `critical`,
-`major`, `minor`, or `nitpick` severity, and actionable `body`. Emit an empty
-`comments` array only when no findings remain. Emit an empty
+`path`, a positive integer `line`, `"RIGHT"` side, one of `critical`,
+`major`, `minor`, or `nitpick` severity, and actionable `body`. Prefer a
+changed line for `line`. Never invent an anchor that you cannot justify from the
+reviewed diff. A comment that the reviewed diff cannot place inline is still
+reported. The host keeps it and shows it in the review body with a warning and a
+recovery instruction, so do not discard the finding for that reason. Emit an
+empty `comments` array only when no findings remain. Emit an empty
 `scope_expansions` array when there is no required child issue. Do not emit
 `Verdict:` or any other textual decision line.

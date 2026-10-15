@@ -24,6 +24,7 @@ from hephaestus.automation.review_journal import (
     render_current_review,
     top_level_marker_occurrences,
 )
+from hephaestus.automation.review_warnings import ReviewWarning
 
 
 def _owned(body: str) -> IssueComment:
@@ -264,19 +265,28 @@ def test_normalization_reports_foreign_planning_marker_as_identity_conflict() ->
 
 
 @pytest.mark.parametrize("body", [None, 1, {}, []])
-def test_normalization_rejects_non_string_body(body: object) -> None:
-    """Malformed comment bodies cannot become successful plan absence."""
-    with pytest.raises(CommentJournalReadError, match="body was not a string"):
+def test_normalization_quarantines_non_string_body(body: object) -> None:
+    """A malformed comment is quarantined with a warning, not a hard failure."""
+    warnings: list[ReviewWarning] = []
+
+    assert (
         normalize_issue_comments(
             [{"body": body, "user": {"login": "bot"}}],
             viewer_login="bot",
+            warnings=warnings,
         )
+        == []
+    )
+    assert [warning.code for warning in warnings] == ["journal_comment_quarantined"]
+    assert all(warning.message and warning.recovery for warning in warnings)
 
 
 @pytest.mark.parametrize("database_id", [True, 1.5, 0, -1])
-def test_normalization_rejects_invalid_database_id(database_id: object) -> None:
-    """Only a positive integer can identify a comment for mutation."""
-    with pytest.raises(CommentJournalReadError, match="database id was not correct"):
+def test_normalization_quarantines_invalid_database_id(database_id: object) -> None:
+    """A comment without a usable identity is quarantined with a warning."""
+    warnings: list[ReviewWarning] = []
+
+    assert (
         normalize_issue_comments(
             [
                 {
@@ -285,6 +295,19 @@ def test_normalization_rejects_invalid_database_id(database_id: object) -> None:
                     "user": {"login": "bot"},
                 }
             ],
+            viewer_login="bot",
+            warnings=warnings,
+        )
+        == []
+    )
+    assert [warning.code for warning in warnings] == ["journal_comment_quarantined"]
+
+
+def test_normalization_rejects_malformed_state_changing_comment() -> None:
+    """A malformed automation comment stays all-or-nothing."""
+    with pytest.raises(CommentJournalReadError):
+        normalize_issue_comments(
+            [{"body": render_current_plan("owned"), "databaseId": 0, "user": {"login": "bot"}}],
             viewer_login="bot",
         )
 

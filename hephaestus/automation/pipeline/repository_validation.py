@@ -1,4 +1,4 @@
-"""Bind admitted validation evidence to one immutable Comet review plan.
+"""Bind admitted validation evidence to one immutable repository review plan.
 
 These data checks do not prove source, CI, or runtime authority. The host
 adapters must establish that authority before they construct these records.
@@ -19,6 +19,13 @@ from hephaestus.agents.workspace import SourceLane, WorkspaceBinding, WorkspaceK
 type SourceDigests = tuple[tuple[str, int, str], ...]
 type EvidenceKind = Literal["ci", "local"]
 type ReceiptStatus = Literal["success", "failed"]
+
+_NAME_PART = r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?"
+_REPOSITORY = re.compile(rf"{_NAME_PART}/{_NAME_PART}")
+_PROFILE_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
+_CHECK_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\.[a-z0-9.-]{1,100}")
+_RUNTIME_PARTS = ("build", "hephaestus-review-validation")
+_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 
 
 def _require(condition: bool, message: str) -> None:
@@ -108,13 +115,19 @@ class RepositoryValidationCheck:
         _validate_check(self)
 
 
+def valid_repository_name(repository: object) -> bool:
+    """Accept one complete ``owner/name`` repository identity."""
+    return type(repository) is str and _REPOSITORY.fullmatch(repository) is not None
+
+
+def _valid_check_id(check_id: object) -> bool:
+    """Accept one namespaced check identifier."""
+    return type(check_id) is str and _CHECK_ID.fullmatch(check_id) is not None
+
+
 def _validate_check(check: RepositoryValidationCheck) -> None:
     _require(type(check) is RepositoryValidationCheck, "The check type is invalid.")
-    _require(
-        type(check.check_id) is str
-        and re.fullmatch(r"comet\.[a-z0-9.-]{1,100}", check.check_id) is not None,
-        "The check identifier is invalid.",
-    )
+    _require(_valid_check_id(check.check_id), "The check identifier is invalid.")
     _validate_command(check.argv, check.source_digests)
 
 
@@ -146,9 +159,11 @@ class RepositoryValidationPlan:
 
 def repository_workspace_name_matches(repository: str, workspace_repository: object) -> bool:
     """Accept the full repository name or its local workspace name."""
-    return type(workspace_repository) is str and workspace_repository.casefold() in {
+    if not valid_repository_name(repository) or type(workspace_repository) is not str:
+        return False
+    return workspace_repository.casefold() in {
         repository.casefold(),
-        "comet" if repository == "LLM360/comet" else repository.casefold(),
+        repository.split("/", 1)[1].casefold(),
     }
 
 
@@ -187,7 +202,7 @@ def _validate_workspace(plan: RepositoryValidationPlan) -> None:
 def _validate_plan(plan: RepositoryValidationPlan) -> None:
     _require(type(plan) is RepositoryValidationPlan, "The validation plan type is invalid.")
     _require(type(plan.schema_version) is int and plan.schema_version == 1, "Unknown plan schema.")
-    _require(plan.repository == "LLM360/comet", "The validation repository is unsupported.")
+    _require(valid_repository_name(plan.repository), "The validation repository is unsupported.")
     _require(_positive(plan.pr_number), "The pull-request number is invalid.")
     _require(
         plan.issue_number is None or _positive(plan.issue_number), "The issue number is invalid."
@@ -198,7 +213,7 @@ def _validate_plan(plan: RepositoryValidationPlan) -> None:
     _validate_workspace(plan)
     _require(
         type(plan.profile_id) is str
-        and re.fullmatch(r"comet-[a-z0-9-]{1,64}", plan.profile_id) is not None
+        and _PROFILE_ID.fullmatch(plan.profile_id) is not None
         and _sha(plan.profile_digest, 64),
         "The workflow profile binding is invalid.",
     )
@@ -262,7 +277,10 @@ def _validate_receipt(receipt: RepositoryValidationReceipt) -> None:
         type(receipt.schema_version) is int and receipt.schema_version == 1,
         "Unknown receipt schema.",
     )
-    _require(receipt.repository == "LLM360/comet", "The receipt repository is unsupported.")
+    _require(
+        valid_repository_name(receipt.repository),
+        "The receipt repository is unsupported.",
+    )
     _require(_positive(receipt.pr_number) and _sha(receipt.plan_id, 64), "Invalid receipt context.")
     _require(
         _sha(receipt.reviewed_head, 40) and _sha(receipt.reviewed_base, 40),
@@ -772,8 +790,10 @@ def validate_repository_validation_execution(
         isinstance(root, Path)
         and root.is_absolute()
         and ".." not in root.parts
-        and root.parts[-4:]
-        == ("build", "hephaestus-review-validation", "comet", sources["uv.lock"]),
+        and len(root.parts) >= len(_RUNTIME_PARTS) + 2
+        and root.parts[-4:-2] == _RUNTIME_PARTS
+        and _SLUG.fullmatch(root.parts[-2]) is not None
+        and root.parts[-1] == sources["uv.lock"],
         "The execution runtime path does not match the capability layout.",
     )
     return check

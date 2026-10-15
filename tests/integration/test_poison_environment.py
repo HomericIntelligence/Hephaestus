@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from hephaestus.agents.runtime import _pi_env
-from hephaestus.automation import pipeline_cli
 from hephaestus.forensics import coredump_handler, gdb_runner
 from hephaestus.github.fleet_sync import cli as fleet_cli
 from hephaestus.nats.config import NATSConfig
@@ -41,17 +40,11 @@ def test_poisoned_names_do_not_change_cli_or_config_defaults(
     poisoned_environment: None,
 ) -> None:
     """Representative CLI boundaries retain typed defaults under poison input."""
-    loop = pipeline_cli.parse_args([])
     coredump = coredump_handler._build_parser().parse_args([])
     gdb = gdb_runner._build_parser().parse_args(["/tmp/core", "true"])
     fleet = fleet_cli._build_parser().parse_args([])
     nats = NATSConfig()
 
-    assert loop.planner_model == ""
-    assert loop.log_format == "text"
-    assert loop.rate_guard_threshold == 200
-    assert loop.pi_isolation_adapter is None
-    assert loop.pi_dir is None
     assert coredump.target_dir is None
     assert coredump.max_bytes == coredump_handler.DEFAULT_MAX_BYTES
     assert gdb.direct is False

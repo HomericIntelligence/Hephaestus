@@ -1,1 +1,0 @@
-"""Comet test support package."""

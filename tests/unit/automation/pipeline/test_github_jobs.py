@@ -2001,6 +2001,7 @@ def test_pr_reconciliation_retries_exact_missing_pending_finding() -> None:
         [finding],
         expected_head_sha="a" * 40,
         review_diff=diff,
+        demoted_findings=[],
     )
     assert receipt.final_finding_records is not None
     assert receipt.final_finding_records.thaw() == [{**pending_record, "status": "published"}]

@@ -16,6 +16,7 @@ from hephaestus.automation.worktree_snapshot import (
 )
 
 from .host_capabilities import CapabilityRequestTarget
+from .repository_validation import repository_workspace_name_matches
 from .repository_validation_preparation import RepositoryValidationSourceRequest
 from .scope_retraction import is_safe_scope_retraction_path
 
@@ -444,7 +445,7 @@ def validate_git_repository_validation(job: GitJob) -> None:
         job.op != "prepare_repository_validation"
         or job.kwargs != {}
         or type(job.repo) is not str
-        or job.repo.casefold() not in {request.repository.casefold(), "comet"}
+        or not repository_workspace_name_matches(request.repository, job.repo)
         or job.transport_repository.casefold() != request.repository.casefold()
         or job.workspace != request.workspace
         or type(job.timeout_s) is not int

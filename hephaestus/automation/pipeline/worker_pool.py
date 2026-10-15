@@ -203,6 +203,11 @@ from hephaestus.automation.pipeline.repository_validation_preparation import (
     RepositoryValidationRuntimeRead,
     RepositoryValidationSourceRead,
 )
+from hephaestus.automation.pipeline.repository_validation_profiles import (
+    local_validation_check_ids,
+    plan_validation_checks,
+    plan_validation_profile,
+)
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
 from hephaestus.automation.pipeline.tool_scopes import (
@@ -210,12 +215,7 @@ from hephaestus.automation.pipeline.tool_scopes import (
     ToolScope,
     tool_scope_for,
 )
-from hephaestus.automation.pipeline_github_review_validation import (
-    comet_local_check_ids,
-    comet_plan_for_workspace,
-    comet_profile_digest,
-    comet_validation_checks,
-)
+from hephaestus.automation.pipeline_github_review_validation import validation_plan_for_workspace
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
 from hephaestus.automation.pyxis_artifact_io import (
@@ -2300,7 +2300,7 @@ def _repository_validation_executable(
 
 
 def _repository_validation_host_environment(cwd: Path, runtime: AdmittedRuntime | None) -> Path:
-    """Select the existing host environment or the admitted Comet environment."""
+    """Select the existing host environment or the admitted sealed environment."""
     if runtime is None:
         return _verifier_owned_runtime_environment(cwd)
     return runtime.root / "environment"
@@ -2321,7 +2321,7 @@ def _repository_validation_binding(
 def _repository_validation_argv(
     argv: tuple[str, ...], runtime: AdmittedRuntime | None
 ) -> tuple[str, ...]:
-    """Keep legacy commands or select the sealed Comet launcher."""
+    """Keep legacy commands or select the sealed repository launcher."""
     if runtime is None:
         return argv
     return (str(runtime.root / "environment/bin/uv"), *argv[1:])
@@ -6412,15 +6412,16 @@ class WorkerPool:
             check = next(
                 check for check in plan.checks if check.check_id == invocation.check_ids[0]
             )
-            if (
-                plan.profile_digest != comet_profile_digest(plan.profile_id)
-                or plan.checks != comet_validation_checks(plan.profile_id, plan.changes)
-                or check.check_id not in comet_local_check_ids(plan.checks)
+            if plan.checks != plan_validation_checks(
+                plan
+            ) or check.check_id not in local_validation_check_ids(
+                plan_validation_profile(plan), plan.checks
             ):
                 raise ValueError("The runtime request does not match the fixed profile.")
             sources = {path: digest for path, _, digest in check.source_digests}
             runtime = admit_runtime(
                 _repository_validation_host_root(),
+                profile=plan_validation_profile(plan),
                 pyproject_sha256=sources["pyproject.toml"],
                 uv_lock_sha256=sources["uv.lock"],
                 timeout_s=_repository_validation_timeout(job.timeout_s),
@@ -6493,8 +6494,9 @@ class WorkerPool:
             )
             if cwd != job.cwd:
                 raise ValueError("The workspace path changed.")
-            observed = comet_plan_for_workspace(
+            observed = validation_plan_for_workspace(
                 plan.source_workspace,
+                repository=plan.repository,
                 issue_number=plan.issue_number,
                 pr_number=plan.pr_number,
                 reviewed_base=plan.reviewed_base,
@@ -7851,8 +7853,9 @@ class WorkerPool:
                 cast(float, job.deadline_s), time.monotonic, self._shutdown
             )
             with manager.acquire(binding, allowed_tools="Read,Glob,Grep", deadline=deadline):
-                plan = comet_plan_for_workspace(
+                plan = validation_plan_for_workspace(
                     binding,
+                    repository=request.repository,
                     issue_number=request.issue_number,
                     pr_number=request.pr_number,
                     reviewed_base=request.reviewed_base,

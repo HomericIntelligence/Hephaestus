@@ -53,18 +53,26 @@ def test_anchor_validation_rejects_more_than_the_finding_limit() -> None:
         _validate_comments_to_diff([dict(finding) for _ in range(65)], DIFF)
 
 
-def test_anchor_validation_rejects_oversized_finding_content() -> None:
-    """A correction record cannot retain an unbounded finding body."""
+def test_anchor_validation_truncates_oversized_finding_content() -> None:
+    """The reviewer intake path bounds an oversized finding body and warns.
+
+    Reviewer intake truncates and warns. The host keeps the retained text
+    bounded. A correction record and a durable journal record stay fail-closed
+    on host-owned content, which this intake path never produces.
+    """
     finding = {
         "path": "mod.py",
-        "line": 99,
+        "line": 10,
         "side": "RIGHT",
         "severity": "major",
         "body": "x" * 20_000,
     }
 
-    with pytest.raises(ValueError, match="review finding body exceeds"):
-        _validate_comments_to_diff([finding], DIFF)
+    result = _validate_comments_to_diff([finding], DIFF)
+
+    assert len(result.valid[0]["body"]) < 20_000
+    assert [warning.code for warning in result.warnings] == ["finding_content_truncated"]
+    assert all(warning.recovery for warning in result.warnings)
 
 
 def test_anchor_validation_assigns_stable_ids_to_valid_findings() -> None:

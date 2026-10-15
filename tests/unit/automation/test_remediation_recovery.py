@@ -37,6 +37,7 @@ from hephaestus.automation.remediation_recovery import (
     encode_remediation_review_input,
 )
 from hephaestus.automation.review_journal import IssueComment
+from hephaestus.automation.review_warnings import ReviewWarning
 
 
 def _threads() -> list[dict[str, Any]]:
@@ -821,8 +822,9 @@ def test_format_three_rejects_duplicate_json_members(nested: bool) -> None:
     else:
         payload = payload.replace('{"armed":true', '{"armed":false,"armed":true', 1)
     duplicated = f"{marker}\n<!-- {payload} -->"
+    duplicate_warnings: list[ReviewWarning] = []
 
-    with pytest.raises(ValueError, match="duplicate"):
+    assert (
         journaled_implementation_remediation_reply_handoff(
             [IssueComment(body=duplicated, viewer_did_author=True)],
             repository=review_input.repository,
@@ -831,7 +833,12 @@ def test_format_three_rejects_duplicate_json_members(nested: bool) -> None:
             branch=review_input.branch,
             current_remote_head=review_input.recovery_commit_sha,
             threads=_threads(),
+            warnings=duplicate_warnings,
         )
+        is None
+    )
+    assert [warning.code for warning in duplicate_warnings] == ["reply_handoff_entry_quarantined"]
+    assert all(warning.message and warning.recovery for warning in duplicate_warnings)
 
 
 @pytest.mark.parametrize(
@@ -861,6 +868,8 @@ def test_remediation_recovery_rejects_non_remediation_or_incomplete_records(
         del payload["armed"]
     body = marker + "\n<!-- " + json.dumps(payload) + " -->"
     review_input = _review_input()
+    # The unchanged-head cross-record guard stays all-or-nothing. It compares
+    # one record with the chain, so a quarantined record could hide an overlap.
     with pytest.raises(ValueError, match=message):
         journaled_implementation_remediation_reply_handoff(
             [IssueComment(body=body, viewer_did_author=True)],
@@ -877,7 +886,8 @@ def test_remediation_recovery_rejects_non_remediation_or_incomplete_records(
         f"pr=3010:head={'c' * 40}:batch={'d' * 32}:seq=0 -->"
     )
     incomplete = f'{marker}\n<!-- {{"format":3,"kind":"remediation-recovery"}} -->'
-    with pytest.raises(ValueError, match="schema"):
+    incomplete_warnings: list[ReviewWarning] = []
+    assert (
         journaled_implementation_remediation_reply_handoff(
             [IssueComment(body=incomplete, viewer_did_author=True)],
             repository=review_input.repository,
@@ -886,7 +896,11 @@ def test_remediation_recovery_rejects_non_remediation_or_incomplete_records(
             branch=review_input.branch,
             current_remote_head=review_input.recovery_commit_sha,
             threads=_threads(),
+            warnings=incomplete_warnings,
         )
+        is None
+    )
+    assert [warning.code for warning in incomplete_warnings] == ["reply_handoff_entry_quarantined"]
 
 
 def test_remediation_recovery_ignores_an_ordinary_journal_for_an_old_head() -> None:
@@ -939,8 +953,8 @@ def test_format_three_rejects_expansion_and_identity_swap() -> None:
     rendered = implementation_remediation_reply_handoff_journal_entry(3010, handoff)
     assert rendered is not None
     _marker, body = rendered
-
-    with pytest.raises(ValueError, match="repository"):
+    foreign_warnings: list[ReviewWarning] = []
+    assert (
         journaled_implementation_remediation_reply_handoff(
             [IssueComment(body=body, viewer_did_author=True)],
             repository="homericintelligence/other",
@@ -949,13 +963,18 @@ def test_format_three_rejects_expansion_and_identity_swap() -> None:
             branch=review_input.branch,
             current_remote_head=review_input.recovery_commit_sha,
             threads=_threads(),
+            warnings=foreign_warnings,
         )
+        is None
+    )
+    assert [warning.code for warning in foreign_warnings] == ["reply_handoff_entry_quarantined"]
 
     marker, payload_comment = body.split("\n", 1)
     payload = json.loads(payload_comment.removeprefix("<!-- ").removesuffix(" -->"))
     payload["review_input_encoding"] = "unknown"
     changed = f"{marker}\n<!-- {json.dumps(payload, sort_keys=True, separators=(',', ':'))} -->"
-    with pytest.raises(ValueError, match="encoding"):
+    encoding_warnings: list[ReviewWarning] = []
+    assert (
         journaled_implementation_remediation_reply_handoff(
             [IssueComment(body=changed, viewer_did_author=True)],
             repository=review_input.repository,
@@ -964,7 +983,11 @@ def test_format_three_rejects_expansion_and_identity_swap() -> None:
             branch=review_input.branch,
             current_remote_head=review_input.recovery_commit_sha,
             threads=_threads(),
+            warnings=encoding_warnings,
         )
+        is None
+    )
+    assert [warning.code for warning in encoding_warnings] == ["reply_handoff_entry_quarantined"]
 
 
 @pytest.mark.parametrize(

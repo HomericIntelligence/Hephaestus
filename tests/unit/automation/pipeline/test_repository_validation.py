@@ -12,6 +12,12 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding, WorkspaceKind
+from tests.unit.automation.pipeline.repository_validation_profile_stub import (
+    PROFILE_ID,
+    REPOSITORY,
+)
+
+FOREIGN_REPOSITORY = "foreign/ledger"
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -28,8 +34,8 @@ def _plan(api: ModuleType, root: Path) -> Any:
     workspace = WorkspaceBinding.source(
         cwd=root,
         reusable_root=root.parent,
-        repository="LLM360/comet",
-        ownership_key="comet-review-1639",
+        repository=REPOSITORY,
+        ownership_key="ledger-review-1639",
         item_number=1623,
         lane=SourceLane.REVIEW,
         revision=HEAD,
@@ -43,23 +49,23 @@ def _plan(api: ModuleType, root: Path) -> Any:
             source_digests=SOURCES,
         )
         for check_id, argv in (
-            ("comet.python.ruff-check", ("uv", "run", "--locked", "ruff", "check", ".")),
+            ("ledger.python.ruff-check", ("uv", "run", "--locked", "ruff", "check", ".")),
             (
-                "comet.python.ruff-format",
+                "ledger.python.format-check",
                 ("uv", "run", "--locked", "ruff", "format", "--check", "."),
             ),
         )
     )
     return api.RepositoryValidationPlan(
-        repository="LLM360/comet",
+        repository=REPOSITORY,
         issue_number=1623,
         pr_number=1639,
         reviewed_head=HEAD,
         reviewed_base=BASE,
         diff_base_sha=BASE,
         source_workspace=workspace,
-        changes=(("M", "src/comet/proxy/app.py"),),
-        profile_id="comet-v1",
+        changes=(("M", "src/ledger/app.py"),),
+        profile_id=PROFILE_ID,
         profile_digest="e" * 64,
         checks=checks,
     )
@@ -140,10 +146,10 @@ def test_current_revision_drift_invalidates_complete_evidence(tmp_path: Path, fi
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("repository", "foreign/comet"),
+        ("repository", FOREIGN_REPOSITORY),
         ("pr_number", 1640),
         ("plan_id", "f" * 64),
-        ("check_id", "comet.python.ty-check"),
+        ("check_id", "ledger.python.ty-check"),
         ("reviewed_head", "f" * 40),
         ("reviewed_base", "f" * 40),
         ("argv", ("uv", "run", "echo", "success")),
@@ -240,7 +246,7 @@ def test_plan_identity_includes_context_and_selection(tmp_path: Path, field: str
     changes = {
         "issue_number": 1624,
         "pr_number": 1640,
-        "changes": (("M", "src/comet/gateway_client.py"),),
+        "changes": (("M", "src/ledger/gateway_client.py"),),
         "profile_digest": "f" * 64,
         "diff_base_sha": "f" * 40,
         "source_workspace": replace(plan.source_workspace, generation=2),
@@ -259,7 +265,7 @@ def test_mutated_plan_is_not_a_valid_coverage_authority(tmp_path: Path, field: s
     receipts = tuple(_receipt(api, plan, index) for index in range(2))
     values = {
         "reviewed_head": "f" * 40,
-        "repository": "foreign/comet",
+        "repository": FOREIGN_REPOSITORY,
         "source_workspace": replace(plan.source_workspace, detached=False),
     }
     object.__setattr__(plan, field, values[field])
@@ -310,15 +316,15 @@ def test_each_changed_plan_field_invalidates_its_stored_identity(
     receipts = tuple(_receipt(api, plan, index) for index in range(2))
     changes = {
         "schema_version": 2,
-        "repository": "foreign/comet",
+        "repository": FOREIGN_REPOSITORY,
         "issue_number": 1624,
         "pr_number": 1640,
         "reviewed_head": "f" * 40,
         "reviewed_base": "f" * 40,
         "diff_base_sha": "f" * 40,
         "source_workspace": replace(plan.source_workspace, generation=2),
-        "changes": (("M", "src/comet/gateway_client.py"),),
-        "profile_id": "comet-v2",
+        "changes": (("M", "src/ledger/gateway_client.py"),),
+        "profile_id": "ledger-v2",
         "profile_digest": "f" * 64,
         "checks": tuple(reversed(plan.checks)),
         "execution_allowed": False,
@@ -340,7 +346,7 @@ def test_nested_check_mutation_invalidates_plan_identity(tmp_path: Path, field: 
     plan = _plan(api, tmp_path)
     receipts = tuple(_receipt(api, plan, index) for index in range(2))
     values = {
-        "check_id": "comet.python.ty-check",
+        "check_id": "ledger.python.ty-check",
         "argv": ("uv", "run", "echo", "success"),
         "source_digests": (("uv.lock", 4096, "f" * 64),),
         "source_size": ((".github/workflows/ci.yml", 513, "c" * 64), SOURCES[1]),
@@ -391,7 +397,7 @@ def test_pr_only_plan_uses_pr_workspace_ownership(tmp_path: Path) -> None:
         ("lane", SourceLane.IMPLEMENTATION),
         ("lane", "review"),
         ("detached", False),
-        ("repository", "foreign/comet"),
+        ("repository", FOREIGN_REPOSITORY),
         ("revision", "f" * 40),
         ("schema_version", 2),
         ("dirty_claim", object()),
@@ -638,7 +644,7 @@ def test_local_result_rejects_conflicting_evidence(tmp_path: Path, fault: str) -
         ("deadline_s", 0),
         ("deadline_s", float("inf")),
         ("deadline_s", True),
-        ("changes", [("M", "src/comet/proxy/app.py")]),
+        ("changes", [("M", "src/ledger/app.py")]),
         ("changes", (("M", "../outside"),)),
     ],
 )
@@ -706,7 +712,7 @@ def test_runtime_preparation_rejects_incomplete_invocation(tmp_path: Path, fault
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("repository", "foreign/comet"),
+        ("repository", FOREIGN_REPOSITORY),
         ("repository", "LLM360/other"),
         ("repository", "other"),
         ("revision", "f" * 40),

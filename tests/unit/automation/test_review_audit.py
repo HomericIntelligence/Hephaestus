@@ -6,10 +6,9 @@ import json
 
 import pytest
 
-from hephaestus.automation import review_audit as review_audit_module
-from hephaestus.automation.github_api import ReviewAnchorCorrection
 from hephaestus.automation.review_audit import (
     ReviewAudit,
+    is_clean_go_review,
     parse_review_audit,
     render_review_audit,
 )
@@ -122,13 +121,24 @@ def test_parse_review_audit_raw_json_string_has_no_json_feedback_artifact() -> N
     assert audit.raw_feedback == ""
 
 
-def test_parse_review_audit_rejects_unpostable_finding() -> None:
-    """A material finding that cannot become a durable thread fails closed."""
+def test_parse_review_audit_reports_an_unpostable_finding() -> None:
+    """A finding that cannot become a durable thread is reported and warned.
+
+    Validation of one finding never invalidates the surrounding review. The
+    host reports the malformed finding, warns about it with a recovery
+    instruction, and carries its content as bounded text. A reported finding
+    still prevents a clean sign-off, so the gate never fails open.
+    """
     audit = parse_review_audit(
         '{"grade":"F","verdict":"BLOCKED","summary":"Needs work","comments":[{"body":"fix it"}]}'
     )
 
-    assert audit.valid is False
+    assert audit.valid is True
+    assert audit.findings == ()
+    assert [warning.code for warning in audit.warnings] == ["finding_path_invalid"]
+    assert all(warning.recovery for warning in audit.warnings)
+    assert [record["code"] for record in audit.reported_findings] == ["finding_path_invalid"]
+    assert is_clean_go_review(audit) is False
 
 
 def test_parse_review_audit_preserves_finding_evidence() -> None:
@@ -143,122 +153,6 @@ def test_parse_review_audit_preserves_finding_evidence() -> None:
     assert audit.valid is True
     assert audit.findings[0]["body"] == "Fix the worker state"
     assert audit.findings[0]["evidence"] == "The child process receives no descriptor state."
-
-
-def _anchor_correction(*, severity: str = "major") -> ReviewAnchorCorrection:
-    finding = {
-        "path": "old.py",
-        "line": 99,
-        "side": "RIGHT",
-        "severity": severity,
-        "body": "Preserve the finding body.",
-        "evidence": "Preserve the finding evidence.",
-    }
-    return ReviewAnchorCorrection(
-        finding=finding,
-        path="old.py",
-        line=99,
-        side="RIGHT",
-        reason="line_not_in_diff",
-    )
-
-
-def test_parse_anchor_correction_changes_only_the_inline_anchor() -> None:
-    """The host keeps finding content while it applies an agent-selected anchor."""
-    correction = _anchor_correction()
-    response = json.dumps(
-        {
-            "corrections": [
-                {
-                    "finding_id": correction.finding_id,
-                    "surface": "inline",
-                    "path": "new.py",
-                    "line": 7,
-                    "side": "RIGHT",
-                }
-            ]
-        }
-    )
-
-    result = review_audit_module.parse_review_anchor_correction_response(response, (correction,))
-
-    assert result is not None
-    assert result.inline_findings == (
-        {
-            **correction.finding,
-            "path": "new.py",
-            "line": 7,
-            "side": "RIGHT",
-        },
-    )
-    assert result.audit_findings == ()
-    assert result.not_publishable_findings == ()
-
-
-@pytest.mark.parametrize(
-    "response",
-    [
-        {"corrections": []},
-        {"corrections": [{"finding_id": "f" * 64, "surface": "not_publishable"}]},
-        {
-            "corrections": [
-                {
-                    "finding_id": "{finding_id}",
-                    "surface": "inline",
-                    "path": "a.py",
-                    "line": 1,
-                    "side": "LEFT",
-                }
-            ]
-        },
-        {
-            "corrections": [
-                {
-                    "finding_id": "{finding_id}",
-                    "surface": "inline",
-                    "path": "a.py",
-                    "line": 1,
-                    "side": "RIGHT",
-                    "body": "agent replacement",
-                }
-            ]
-        },
-    ],
-)
-def test_parse_anchor_correction_rejects_incomplete_or_unowned_results(
-    response: dict[str, object],
-) -> None:
-    """A correction result cannot omit IDs or change host-owned fields."""
-    correction = _anchor_correction()
-    rendered = json.dumps(response).replace("{finding_id}", correction.finding_id)
-
-    assert (
-        review_audit_module.parse_review_anchor_correction_response(rendered, (correction,)) is None
-    )
-
-
-def test_parse_anchor_correction_allows_audit_only_for_advisory_finding() -> None:
-    """Only an advisory finding can use the non-inline audit surface."""
-    major = _anchor_correction()
-    minor = _anchor_correction(severity="minor")
-    major_response = json.dumps(
-        {"corrections": [{"finding_id": major.finding_id, "surface": "audit"}]}
-    )
-    minor_response = json.dumps(
-        {"corrections": [{"finding_id": minor.finding_id, "surface": "audit"}]}
-    )
-
-    assert (
-        review_audit_module.parse_review_anchor_correction_response(major_response, (major,))
-        is None
-    )
-    result = review_audit_module.parse_review_anchor_correction_response(minor_response, (minor,))
-    assert result is not None
-    assert result.audit_findings == (minor.finding,)
-
-
-def test_parse_review_audit_rejects_reserved_control_text_in_finding() -> None:
-    """Agent findings cannot supply durable severity or verdict controls."""
     audit = parse_review_audit(
         '{"grade":"F","summary":"Needs work","comments":[{"path":"a.py",'
         '"line":1,"side":"RIGHT","severity":"critical",'
@@ -286,8 +180,12 @@ def test_parse_review_audit_promotes_scope_retraction_to_blocking() -> None:
     assert audit.findings[0]["scope_retraction_paths"] == ("a.py", "b.py")
 
 
-def test_parse_review_audit_rejects_scope_retraction_without_complete_paths() -> None:
-    """A reviewer cannot leave the publisher to guess a scope-removal footprint."""
+def test_parse_review_audit_reports_scope_retraction_without_complete_paths() -> None:
+    """A reviewer cannot leave the publisher to guess a scope-removal footprint.
+
+    The host reports the incomplete scope retraction and warns about it. It
+    does not turn the retraction into a structured child request.
+    """
     audit = parse_review_audit(
         '{"grade":"F","verdict":"BLOCKED","summary":"Split unrelated code",'
         '"comments":[{"path":"a.py",'
@@ -295,7 +193,13 @@ def test_parse_review_audit_rejects_scope_retraction_without_complete_paths() ->
         '"body":"Drop this unrelated change."}]}'
     )
 
-    assert audit.valid is False
+    assert audit.valid is True
+    assert audit.scope_expansions == ()
+    assert [warning.code for warning in audit.warnings] == [
+        "finding_scope_retraction_paths_invalid"
+    ]
+    assert all(warning.recovery for warning in audit.warnings)
+    assert is_clean_go_review(audit) is False
 
 
 def test_parse_review_audit_accepts_scope_expansions() -> None:

@@ -13,6 +13,7 @@ from .repository_validation import (
     RepositoryValidationInvocation,
     RepositoryValidationPlan,
     repository_workspace_name_matches,
+    valid_repository_name,
     validate_repository_validation_execution,
     validate_repository_validation_invocation,
 )
@@ -53,7 +54,7 @@ class RepositoryValidationSourceRequest:
     def __post_init__(self) -> None:
         """Reject incomplete source identity and mutable change records."""
         _deadline(self.deadline_s)
-        _require(self.repository == "LLM360/comet", "The source repository is unsupported.")
+        _require(valid_repository_name(self.repository), "The source repository is unsupported.")
         _require(type(self.pr_number) is int and self.pr_number > 0, "The PR number is invalid.")
         _require(
             self.issue_number is None or (type(self.issue_number) is int and self.issue_number > 0),

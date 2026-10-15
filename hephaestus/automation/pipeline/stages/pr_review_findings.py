@@ -1,17 +1,26 @@
 """Bounded finding journals and review receipt transitions."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import cast
 
 from hephaestus.automation.review_anchors import (
+    MAX_REVIEW_FINDINGS,
     ReviewAnchorCorrection,
+    ReviewAnchorCorrectionReason,
+    anchor_warning_for_reason,
 )
+from hephaestus.automation.review_audit import MAX_REVIEW_WARNINGS
 from hephaestus.automation.review_finding_history import normalize_review_finding_batch_records
+from hephaestus.automation.review_warnings import (
+    AnchorCorrectionWarningReason,
+    ReviewWarning,
+    make_review_warning,
+    record_review_warning,
+)
 
 from ..github_jobs import PrReviewReconciled
 from .base import Continue, Disposition, StageOutcome, StepResult, WorkItem
 from .pr_review_threads import (
-    _ANCHOR_CORRECTION_RETRY,
     _COMMENT_VALIDATION_ONLY,
     BLOCKING_SEVERITIES,
     EVAL,
@@ -21,8 +30,368 @@ from .pr_review_threads import (
     logger,
 )
 
+#: Item payload key for the findings that the review body must show. Each entry
+#: carries the finding text, its anchor, the reason, and its warnings. The
+#: publication step renders this collection when it builds the visible review.
+REPORTED_FINDINGS_PAYLOAD_KEY = "review_reported_findings"
 
-def _finding_anchor(finding: dict[str, object]) -> dict[str, object]:
+#: Item payload key for the host warnings of one review round. Each entry is a
+#: plain warning dict so the payload stays JSON serializable. The list never
+#: holds more than :data:`MAX_CARRIED_REVIEW_WARNINGS` entries.
+REVIEW_WARNINGS_PAYLOAD_KEY = "review_warnings"
+
+#: Item payload key for the number of warnings that the bounded carried list
+#: could not hold. The host clears this key when it starts a new review round.
+REVIEW_WARNINGS_DROPPED_PAYLOAD_KEY = "review_warnings_dropped"
+
+#: Reason recorded for an advisory finding. GitHub accepts no inline thread for
+#: a finding without a blocking severity, so the host shows it in the body.
+ADVISORY_REPORTED_REASON = "advisory"
+
+#: Item payload key for the findings that the publication receipt demoted. Each
+#: entry carries the finding text, its anchor, its anchor reason, and one
+#: warning. The publication step renders this collection in the visible review
+#: body, and the finding journal records each demotion as ``not_publishable``.
+#: The host clears this key when it starts a new review round.
+DEMOTED_FINDINGS_PAYLOAD_KEY = "review_demoted_findings"
+
+#: Message and recovery text for the demotion reporting budget. The warning
+#: states the problem and the action an operator must take.
+_DEMOTION_BUDGET_WARNING_TEXT = (
+    "The host did not show every finding that it demoted from the inline surface.",
+    "Read the review body and the pipeline log for the complete demoted set.",
+)
+
+#: Message and recovery text for the generic carried-warning budget. This
+#: text names no list type, so a non-demotion caller does not misreport.
+_GENERIC_BUDGET_WARNING_TEXT = (
+    "The host did not carry every review warning for this round.",
+    "Read the pipeline log for the complete warning set.",
+)
+
+#: Anchor reason to warning code. The warning message and the recovery text
+#: are NOT duplicated here. ``anchor_warning_for_reason`` owns that text, so
+#: the visible review body and the host logs cannot drift apart.
+_ANCHOR_WARNING_CODES: dict[ReviewAnchorCorrectionReason, AnchorCorrectionWarningReason] = {
+    "reviewed_diff_unavailable": "anchor_reviewed_diff_unavailable",
+    "path_not_in_diff": "anchor_path_not_in_diff",
+    "line_not_in_diff": "anchor_line_not_in_diff",
+    "unsupported_side": "anchor_unsupported_side",
+}
+#: Anchor reasons that describe a demotion. A receipt record with any other
+#: reason, or without a reason, is an integrity failure. It must not reach the
+#: informational demotion path.
+_DEMOTION_REASONS = frozenset(_ANCHOR_WARNING_CODES)
+
+#: Maximum number of warning dicts that the item payload carries for one review
+#: round. The host truncates the list and states the truncation in one warning.
+MAX_CARRIED_REVIEW_WARNINGS = MAX_REVIEW_WARNINGS
+
+
+def _warning_payload(warning: ReviewWarning) -> dict[str, str]:
+    """Return one warning as a bounded plain dict."""
+    return {
+        "code": warning.code,
+        "message": warning.message,
+        "recovery": warning.recovery,
+    }
+
+
+def _carried_warning_payloads(item: WorkItem) -> list[dict[str, object]]:
+    """Return the bounded warning dicts that the item payload already carries."""
+    carried = item.payload.get(REVIEW_WARNINGS_PAYLOAD_KEY)
+    if not isinstance(carried, list):
+        return []
+    return [dict(value) for value in carried if isinstance(value, dict)]
+
+
+def carry_review_warnings(
+    item: WorkItem,
+    warnings: Sequence[ReviewWarning],
+    *,
+    note_truncation: bool = False,
+    budget_warning: ReviewWarning | None = None,
+) -> None:
+    """Append bounded warning text to the item payload of one review round.
+
+    The carried list never exceeds :data:`MAX_CARRIED_REVIEW_WARNINGS`. When
+    the host drops warnings it states the truncation in one warning, so no
+    caller loses the fact that the list is incomplete. The truncation warning
+    names the list that was truncated. A demotion carrier passes its own
+    demotion text; every other caller gets the generic text.
+
+    Args:
+        item: The review work item that carries the warnings.
+        warnings: Bounded warnings that one step produced.
+        note_truncation: The caller dropped warnings of its own. The host then
+            states that fact in one warning even when every warning fits.
+        budget_warning: The truncation warning for this list. When omitted,
+            the generic capacity warning is used.
+
+    """
+    if not warnings and not note_truncation:
+        return
+    carried = _carried_warning_payloads(item)
+    room = max(MAX_CARRIED_REVIEW_WARNINGS - len(carried), 0)
+    if room < 1:
+        _note_dropped_warnings(item, len(warnings))
+        return
+    kept = list(warnings[:room])
+    truncated = note_truncation or len(kept) < len(warnings)
+    if truncated:
+        # Reserve one slot so the notice always fits inside the bound.
+        kept = kept[: room - 1]
+    payloads = [_warning_payload(warning) for warning in kept]
+    if truncated:
+        dropped = len(warnings) - len(kept)
+        payloads.append(_warning_payload(budget_warning or _generic_budget_warning()))
+        _note_dropped_warnings(item, dropped)
+    item.payload[REVIEW_WARNINGS_PAYLOAD_KEY] = [*carried, *payloads]
+
+
+def _note_dropped_warnings(item: WorkItem, dropped: int) -> None:
+    """Record how many warnings the bounded carried list could not hold.
+
+    The host logs the first drop only. The counter keeps the total so an
+    operator can see that the carried list is incomplete.
+    """
+    if dropped < 1:
+        return
+    previous = item.payload.get(REVIEW_WARNINGS_DROPPED_PAYLOAD_KEY)
+    first = not isinstance(previous, int)
+    total = (previous if isinstance(previous, int) else 0) + dropped
+    item.payload[REVIEW_WARNINGS_DROPPED_PAYLOAD_KEY] = total
+    if first:
+        logger.warning(
+            "pr_review:%d: the review warning list is full; the host dropped %d warning(s)",
+            _issue_number(item),
+            total,
+        )
+
+
+def _demotion_budget_warning() -> ReviewWarning:
+    """Return the warning that states the host dropped reported findings."""
+    message, recovery = _DEMOTION_BUDGET_WARNING_TEXT
+    return make_review_warning(
+        "anchor_demotion_budget_exhausted", message=message, recovery=recovery
+    )
+
+
+def _generic_budget_warning() -> ReviewWarning:
+    """Return the warning that states the host dropped generic warnings."""
+    message, recovery = _GENERIC_BUDGET_WARNING_TEXT
+    return make_review_warning(
+        "review_warning_budget_exhausted", message=message, recovery=recovery
+    )
+
+
+def _unanchored_reported_finding(
+    correction: ReviewAnchorCorrection,
+) -> dict[str, object]:
+    """Build one visible reported record for a finding outside the diff."""
+    code, _, recovery = anchor_warning_for_reason(correction.reason)
+    finding = dict(correction.finding)
+    return {
+        "finding": finding,
+        "finding_id": correction.finding_id,
+        "severity": str(finding.get("severity") or "").strip().lower(),
+        "path": correction.path,
+        "line": correction.line,
+        "side": correction.side,
+        "reason": correction.reason,
+        "warnings": [
+            _warning_payload(
+                make_review_warning(
+                    code,
+                    message=(
+                        f"The host cannot publish finding {correction.finding_id} "
+                        "inline because its anchor is not in the reviewed diff."
+                    ),
+                    recovery=recovery,
+                )
+            )
+        ],
+    }
+
+
+def _advisory_reported_finding(finding: Mapping[str, object]) -> dict[str, object]:
+    """Build one visible reported record for an advisory finding."""
+    value = dict(finding)
+    return {
+        "finding": value,
+        "finding_id": str(value.get("finding_id") or ""),
+        "severity": str(value.get("severity") or "").strip().lower(),
+        "path": str(value.get("path") or "").strip(),
+        "line": value.get("line"),
+        "side": str(value.get("side") or "").strip(),
+        "reason": ADVISORY_REPORTED_REASON,
+        "warnings": [],
+    }
+
+
+def build_reported_findings(
+    advisory: Sequence[dict[str, object]],
+    corrections: Sequence[ReviewAnchorCorrection],
+) -> list[dict[str, object]]:
+    """Build every finding that the review body must show.
+
+    Args:
+        advisory: Findings that the reviewed diff accepts but that carry no
+            blocking severity.
+        corrections: Findings whose anchor is not in the reviewed diff.
+
+    Returns:
+        One reported record for each finding.
+
+    """
+    return [
+        *(_advisory_reported_finding(finding) for finding in advisory),
+        *(_unanchored_reported_finding(correction) for correction in corrections),
+    ]
+
+
+def _receipt_demotion(record: Mapping[str, object]) -> ReviewAnchorCorrection | None:
+    """Return one typed demotion, or None when the record is not a demotion.
+
+    The publication receipt states every demoted finding with a typed anchor
+    reason. The stage reads that reason instead of guessing. A record without a
+    typed anchor reason is not review feedback. The host must fail closed on it.
+
+    Args:
+        record: One frozen record from ``corrections`` or
+            ``unpublishable_findings``.
+
+    Returns:
+        The typed demotion, or None when the record carries no supported anchor
+        reason or an invalid anchor field.
+
+    """
+    finding = record.get("finding")
+    path = record.get("path")
+    line = record.get("line")
+    side = record.get("side")
+    reason = record.get("reason")
+    finding_id = record.get("finding_id")
+    if (
+        not isinstance(finding, dict)
+        or not isinstance(path, str)
+        or not path.strip()
+        or (line is not None and (isinstance(line, bool) or not isinstance(line, int)))
+        or not isinstance(side, str)
+        or not side.strip()
+        or not isinstance(reason, str)
+        or reason not in _DEMOTION_REASONS
+        or not isinstance(finding_id, str)
+        or not finding_id
+    ):
+        return None
+    try:
+        return ReviewAnchorCorrection(
+            finding=dict(finding),
+            path=path,
+            line=line,
+            side=side,
+            reason=reason,
+            finding_id=finding_id,
+        )
+    except ValueError:
+        return None
+
+
+def _demotion_identity(demotion: ReviewAnchorCorrection) -> tuple[str, ...]:
+    """Return the identity that records of one demoted finding share.
+
+    The publication receipt states one demoted finding in both its correction
+    list and its unpublishable list. The host reads that receipt as one set, so
+    it needs one identity to recognize the same finding twice. The finding id
+    is the host-owned identity of the finding. The anchor is the fallback for a
+    record that states no finding id.
+
+    Args:
+        demotion: One typed anchor demotion.
+
+    Returns:
+        The identity of the finding that this demotion demoted.
+
+    """
+    if demotion.finding_id:
+        return ("finding_id", demotion.finding_id)
+    return ("anchor", demotion.path, str(demotion.line or ""), demotion.side)
+
+
+def carry_demoted_findings(
+    item: WorkItem,
+    records: Sequence[Mapping[str, object]],
+) -> bool:
+    """Carry one receipt's demoted findings as visible, bounded review data.
+
+    A demotion is a normal, expected publication outcome. The host keeps each
+    demoted finding under :data:`DEMOTED_FINDINGS_PAYLOAD_KEY` so it stays
+    visible and auditable, and records one warning with a real recovery
+    instruction for each. The item keeps its normal post-publication path.
+
+    The publication receipt states one demoted finding in both its correction
+    list and its unpublishable list. The host keeps the first record of each
+    finding and ignores later records of that same finding. It then reports the
+    finding and warns about it exactly once. A record that states a different
+    finding stays a separate demotion.
+
+    Args:
+        item: The review work item that holds the publication receipt.
+        records: The frozen correction and unpublishable records of one receipt.
+
+    Returns:
+        False when any record is not a typed anchor demotion. The caller then
+        keeps failing closed, because the receipt and this stage disagree. True
+        when every record is a typed demotion.
+
+    """
+    demotions: list[ReviewAnchorCorrection] = []
+    identities: set[tuple[str, ...]] = set()
+    for record in records:
+        demotion = _receipt_demotion(record)
+        if demotion is None:
+            return False
+        identity = _demotion_identity(demotion)
+        if identity in identities:
+            continue
+        identities.add(identity)
+        demotions.append(demotion)
+    if not demotions:
+        return True
+
+    carried = item.payload.get(DEMOTED_FINDINGS_PAYLOAD_KEY)
+    existing = (
+        [dict(value) for value in carried if isinstance(value, dict)]
+        if isinstance(carried, list)
+        else []
+    )
+    reported = build_reported_findings((), demotions)
+    room = max(MAX_REVIEW_FINDINGS - len(existing), 0)
+    kept = reported[:room]
+    item.payload[DEMOTED_FINDINGS_PAYLOAD_KEY] = [*existing, *kept]
+    warnings: list[ReviewWarning] = []
+    for demotion in demotions:
+        code, _, recovery = anchor_warning_for_reason(demotion.reason)
+        record_review_warning(
+            warnings,
+            code,
+            message=(
+                f"The host cannot publish finding {demotion.finding_id} as an "
+                "inline comment because its anchor is not in the reviewed diff."
+            ),
+            recovery=recovery,
+        )
+    carry_review_warnings(
+        item,
+        warnings,
+        note_truncation=len(kept) < len(reported),
+        budget_warning=_demotion_budget_warning(),
+    )
+    return True
+
+
+def _finding_anchor(finding: Mapping[str, object]) -> dict[str, object]:
     """Return the host-owned anchor fields for one review finding."""
     return {
         "path": str(finding.get("path") or "").strip(),
@@ -64,12 +433,24 @@ def _build_review_finding_records(
     *,
     source_head: str,
     initial_valid: list[dict[str, object]],
-    corrections: list[ReviewAnchorCorrection],
-    corrected_inline: list[dict[str, object]],
-    corrected_audit: list[dict[str, object]],
-    not_publishable: list[dict[str, object]],
+    unanchored: list[ReviewAnchorCorrection],
 ) -> list[dict[str, object]]:
-    """Build the complete journal for all findings in one review response."""
+    """Build the complete journal for all findings in one review response.
+
+    A blocking finding with an anchor in the reviewed diff publishes inline.
+    An advisory finding publishes on the review body surface. A finding whose
+    anchor is not in the reviewed diff records its anchor problem, so the
+    review body can show it with a warning.
+
+    Args:
+        source_head: The reviewed head that owns every finding.
+        initial_valid: Every finding whose anchor the reviewed diff accepts.
+        unanchored: Findings that the reviewed diff does not accept.
+
+    Returns:
+        One normalized journal record for every finding.
+
+    """
     records: list[dict[str, object]] = []
     for finding in initial_valid:
         blocking = str(finding.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
@@ -77,52 +458,26 @@ def _build_review_finding_records(
             _finding_record(
                 finding,
                 source_head=source_head,
-                status="published" if blocking else "not_publishable",
-                surface="inline" if blocking else "not_publishable",
+                status="published",
+                surface="inline" if blocking else "audit",
                 original_anchor=_finding_anchor(finding),
                 final_anchor=_finding_anchor(finding) if blocking else None,
-                reason=None if blocking else "audit_surface_unavailable",
+                reason=None,
             )
         )
-    outcomes: dict[str, tuple[str, str, dict[str, object], dict[str, object] | None]] = {}
-    for finding in corrected_inline:
-        outcomes[str(finding.get("finding_id") or "")] = (
-            "corrected",
-            "inline",
-            finding,
-            _finding_anchor(finding),
-        )
-    for finding in corrected_audit:
-        outcomes[str(finding.get("finding_id") or "")] = (
-            "corrected",
-            "audit",
-            finding,
-            None,
-        )
-    for finding in not_publishable:
-        outcomes[str(finding.get("finding_id") or "")] = (
-            "not_publishable",
-            "not_publishable",
-            finding,
-            None,
-        )
-    for correction in corrections:
-        outcome = outcomes.get(correction.finding_id)
-        if outcome is None:
-            raise ValueError("review finding correction outcome is incomplete")
-        status, surface, finding, final_anchor = outcome
+    for correction in unanchored:
         records.append(
             _finding_record(
-                finding,
+                dict(correction.finding),
                 source_head=source_head,
-                status=status,
-                surface=surface,
+                status="not_publishable",
+                surface="not_publishable",
                 original_anchor={
                     "path": correction.path,
                     "line": correction.line,
                     "side": correction.side,
                 },
-                final_anchor=final_anchor,
+                final_anchor=None,
                 reason=correction.reason,
             )
         )
@@ -137,7 +492,7 @@ def _review_receipt_lists(
         receipt.posted_receipts.thaw(),
         receipt.unresolved_threads.thaw(),
         receipt.remediation_threads.thaw(),
-        receipt.anchor_corrections.thaw(),
+        receipt.corrections.thaw(),
         receipt.unpublishable_findings.thaw(),
     )
     if not all(isinstance(value, list) for value in values):
@@ -166,7 +521,12 @@ def _apply_review_receipt(
     ):
         item.payload["review_audit_failure"] = True
         return Continue(next_state=EVAL)
-    if corrections or unpublishable:
+    # A demotion is a normal, expected publication outcome. The receipt states
+    # each demoted finding with a typed anchor reason. The host keeps the
+    # demotion visible and warns about it. It does not fail the review round.
+    # A record that carries no typed anchor reason is not a demotion. It means
+    # the publication path and this stage disagree, so the host fails closed.
+    if not carry_demoted_findings(item, [*corrections, *unpublishable]):
         item.payload["review_audit_failure"] = True
         return Continue(next_state=EVAL)
     item.payload["review_threads"] = [dict(value) for value in raw_findings]
@@ -175,8 +535,6 @@ def _apply_review_receipt(
     item.payload["remediation_threads"] = [dict(value) for value in remediation]
     item.payload["remediation_thread_snapshots"] = [dict(value) for value in unresolved]
     item.payload["unresolved_threads_before_address"] = len(remediation)
-    item.payload.pop("review_anchor_corrections", None)
-    item.payload.pop(_ANCHOR_CORRECTION_RETRY, None)
     if item.payload.pop(_COMMENT_VALIDATION_ONLY, None):
         # Thread validation can resolve comments but cannot manufacture
         # the reviewer-owned decision required to authorize GO.

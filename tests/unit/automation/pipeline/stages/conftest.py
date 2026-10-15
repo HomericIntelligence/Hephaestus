@@ -207,6 +207,7 @@ class FakeStageGitHub(FakeGitHub):
             }
         )
         self._posted_thread_ids: dict[int, list[str]] = {}
+        self.demoted_findings: dict[int, list[Any]] = {}
         self._thread_replies: dict[str, list[dict[str, str]]] = {}
         self.review_rebase_records: dict[int, RebaseReviewRecord] = {}
         self.pending_go_audits: dict[int, PendingImplementationGoAudit] = {}
@@ -561,9 +562,11 @@ class FakeStageGitHub(FakeGitHub):
         *,
         expected_head_sha: str,
         review_diff: str,
+        demoted_findings: Sequence[Any] = (),
     ) -> list[dict[str, Any]]:
         """Mirror a post-time immutable receipt returned by the coordinator."""
         del expected_head_sha, review_diff
+        self.demoted_findings[pr_number] = list(demoted_findings)
         ids = self.gh_pr_review_post(pr_number, threads, "")
         self._posted_thread_ids[pr_number] = list(ids)
         review_id = f"review-{pr_number}-{len(self.reviews.get(pr_number, []))}"

@@ -6,9 +6,15 @@ from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.review_anchors import normalize_review_finding_records
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.review_finding_history import (
+    ReviewFindingCompactedOutcomes,
     empty_review_finding_compacted_outcomes,
     normalize_review_finding_collection,
     normalize_review_finding_compacted_outcomes,
+)
+from hephaestus.automation.review_warnings import (
+    PublicationGateWarningReason,
+    ReviewWarning,
+    make_review_warning,
 )
 
 from ..github_jobs import (
@@ -28,11 +34,13 @@ from .base import (
     WorkItem,
     stage_timeout,
 )
-from .pr_review_findings import _apply_review_receipt
+from .pr_review_findings import (
+    _apply_review_receipt,
+    carry_review_warnings,
+)
 from .pr_review_gate import PrReviewGate
 from .pr_review_history import _pending_review_finding, _publication_head
 from .pr_review_threads import (
-    BLOCKING_SEVERITIES,
     ENTER,
     EVAL,
     GIT_JOB_TIMEOUT_S,
@@ -42,6 +50,7 @@ from .pr_review_threads import (
     REVIEW_WAIT,
     VALIDATE_WAIT,
     _PrReviewHost,
+    logger,
 )
 from .repo import is_full_commit_sha
 
@@ -51,6 +60,85 @@ _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
 _PENDING_FINDING_RECOVERY = "_pending_review_finding_recovery"
 _PENDING_FINDING_RECOVERY_DEADLINE = "_pending_review_finding_recovery_deadline_s"
 
+#: Payload key that records why the host dropped an unusable finding journal.
+FINDING_HISTORY_DEGRADED_KEY = "review_finding_history_degraded"
+
+_FINDING_HISTORY_RECOVERY = (
+    "Review the pull request again. The next review starts a new finding journal, "
+    "so the findings from the dropped journal appear again in the review body."
+)
+
+#: Warning code for a blocking finding that an earlier round compacted out of the
+#: retained records without publishing it. The code names the cross-round
+#: condition, because the current round can hold no finding record at all.
+_COMPACTED_BLOCKING_FINDING_UNPUBLISHED: PublicationGateWarningReason = (
+    "compacted_blocking_finding_unpublished"
+)
+
+#: Recovery text for that cross-round condition. The compacted history is
+#: durable, so a new review round alone does not clear it.
+_COMPACTED_BLOCKING_FINDING_RECOVERY = (
+    "Publish this finding inline. To do that, rebase the branch so the reviewed "
+    "diff contains the anchor of the finding. Then clear the hidden review finding "
+    "journal comment and remove the state:implementation-no-go label. Run the "
+    "review again."
+)
+
+
+def _compacted_blocking_unpublished(compacted: ReviewFindingCompactedOutcomes) -> bool:
+    """Return whether an earlier round compacted an unpublished blocking finding.
+
+    Args:
+        compacted: The cumulative outcome history of all earlier rounds.
+
+    Returns:
+        True when one compacted identity holds a not_publishable outcome of
+        blocking severity.
+
+    """
+    return any(identity[2] == "n" and identity[3] == "b" for identity in compacted["identities"])
+
+
+def quarantine_finding_history(item: WorkItem, reason: str) -> None:
+    """Drop an unusable finding journal and warn about the lost outcomes.
+
+    A journal that the host cannot read is not reviewer evidence. The host
+    keeps the valid review result, warns once, and starts a fresh review. No
+    review item ends because its saved finding journal is unusable.
+
+    Args:
+        item: The review work item that holds the unusable journal.
+        reason: The host reason that made the journal unusable.
+
+    """
+    logger.warning(
+        "pr_review:%s: dropping unusable finding journal (%s); starting a fresh review",
+        item.issue,
+        reason,
+    )
+    item.payload[FINDING_HISTORY_DEGRADED_KEY] = reason
+    item.payload["review_finding_records"] = []
+    item.payload["review_finding_compacted_outcomes"] = empty_review_finding_compacted_outcomes()
+    item.payload["carried_review_finding_records"] = []
+    item.payload["carried_review_finding_compacted_outcomes"] = (
+        empty_review_finding_compacted_outcomes()
+    )
+    item.payload.pop("review_finding_journal_head", None)
+    item.payload.pop(_PENDING_FINDING_RECOVERY, None)
+    item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+    item.payload.pop(_PENDING_FINDING_RECOVERY_DEADLINE, None)
+    warning = make_review_warning(
+        "finding_invalid",
+        message=(
+            f"The saved review finding journal is not usable: {reason}. "
+            "The host dropped it and kept the review result."
+        ),
+        recovery=_FINDING_HISTORY_RECOVERY,
+    )
+    # The carried warning list is bounded, so this quarantine warning cannot
+    # grow it without a limit.
+    carry_review_warnings(item, [warning])
+
 
 class PrReviewRecoveryMixin(_PrReviewHost):
     """Apply exact publication receipts before the next review can start."""
@@ -59,6 +147,7 @@ class PrReviewRecoveryMixin(_PrReviewHost):
         self, item: WorkItem, ctx: StageContext
     ) -> StepResult | None:
         """Reconcile an exact-head pending publication before a new review."""
+        quarantine_warnings: list[ReviewWarning] = []
         try:
             records = list(
                 normalize_review_finding_records(
@@ -71,12 +160,13 @@ class PrReviewRecoveryMixin(_PrReviewHost):
                     empty_review_finding_compacted_outcomes(),
                 ),
                 retained_finding_ids=[record["finding_id"] for record in records],
+                warnings=quarantine_warnings,
             )
         except ValueError:
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
-            )
+            carry_review_warnings(item, quarantine_warnings)
+            quarantine_finding_history(item, "carried_records_invalid")
+            return None
+        carry_review_warnings(item, quarantine_warnings)
         pending_records = [record for record in records if record["status"] == "pending"]
         if not pending_records:
             return None
@@ -87,10 +177,8 @@ class PrReviewRecoveryMixin(_PrReviewHost):
             )
         reviewed_head = str(item.payload.get("review_finding_journal_head") or "")
         if not is_full_commit_sha(reviewed_head):
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
-            )
+            quarantine_finding_history(item, "journal_head_invalid")
+            return None
         active_head = item.payload.get("reviewed_pr_head_sha")
         if is_full_commit_sha(active_head) and active_head != reviewed_head:
             terminal_records = [record for record in records if record["status"] != "pending"]
@@ -103,17 +191,13 @@ class PrReviewRecoveryMixin(_PrReviewHost):
             item.payload.pop(_PENDING_FINDING_RECOVERY_DEADLINE, None)
             return None
         if any(_publication_head(record) != reviewed_head for record in pending_records):
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
-            )
+            quarantine_finding_history(item, "pending_publication_head_mismatch")
+            return None
         try:
             findings = [_pending_review_finding(record) for record in pending_records]
         except ValueError:
-            return self._cleanup_review_worktree_then(
-                item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_finding_history_invalid"),
-            )
+            quarantine_finding_history(item, "pending_publication_finding_invalid")
+            return None
         prior_request = item.payload.get(_PENDING_GITHUB_REQUEST)
         saved_deadline = item.payload.get(_PENDING_FINDING_RECOVERY_DEADLINE)
         deadline_s = (
@@ -268,14 +352,18 @@ class PrReviewRecoveryMixin(_PrReviewHost):
             if receipt.final_compacted_outcomes is not None
             else receipt.request.compacted_outcomes
         )
+        quarantine_warnings: list[ReviewWarning] = []
         try:
             records, compacted = normalize_review_finding_collection(
                 record_source.thaw(),
                 compacted_outcomes=None if compacted_source is None else compacted_source.thaw(),
+                warnings=quarantine_warnings,
             )
         except ValueError:
+            carry_review_warnings(item, quarantine_warnings)
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
+        carry_review_warnings(item, quarantine_warnings)
         item.payload["review_finding_records"] = [dict(record) for record in records]
         item.payload["review_finding_compacted_outcomes"] = compacted
         if pending_finding_recovery:
@@ -290,20 +378,46 @@ class PrReviewRecoveryMixin(_PrReviewHost):
                 dict(record) for record in records if record["status"] == "not_publishable"
             ],
         }
-        if any(
-            record["status"] == "not_publishable" and record["severity"] in BLOCKING_SEVERITIES
-            for record in records
-        ) or any(identity[2] == "n" and identity[3] == "b" for identity in compacted["identities"]):
+        # This round's own not_publishable record is not a gate. It stays
+        # visible in the review body, and the reviewer verdict governs the
+        # round. A compacted identity is a different fact. It is the cumulative
+        # record of a blocking finding that an EARLIER round never published.
+        # That fact outlives the records of the current round, so it still
+        # applies in a later round whose audit holds no finding. Without this
+        # check such a later round can reach GO while a blocking finding from an
+        # earlier round was never published.
+        if _compacted_blocking_unpublished(compacted):
+            carry_review_warnings(
+                item,
+                [
+                    make_review_warning(
+                        _COMPACTED_BLOCKING_FINDING_UNPUBLISHED,
+                        message=(
+                            "An earlier review round recorded a blocking finding that "
+                            "the host never published inline. The host wrote the "
+                            "state:implementation-no-go label and stopped this round."
+                        ),
+                        recovery=_COMPACTED_BLOCKING_FINDING_RECOVERY,
+                    )
+                ],
+            )
             no_go_outcome = PrReviewGate._write_no_go(item, ctx)
             if no_go_outcome is not None:
                 return no_go_outcome
+            # BLOCKED parks the pull request for an operator. It does not end
+            # the loop on a removed terminal reason, and it cannot reach the GO
+            # proof. The compacted history is durable, so the negative label
+            # stays until an operator clears it.
             return self._cleanup_review_worktree_then(
                 item,
                 StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    "review_finding_not_publishable",
+                    Disposition.BLOCKED,
+                    _COMPACTED_BLOCKING_FINDING_UNPUBLISHED,
                 ),
             )
+        # A finding that the reviewed diff does not anchor stays visible in the
+        # review body. It never ends the round on its own. The reviewer verdict
+        # and the open-thread readback govern the gate below.
         audit = item.payload.get("review_audit")
         if isinstance(audit, ReviewAudit) and audit.scope_expansions:
             return Continue(next_state=EVAL)

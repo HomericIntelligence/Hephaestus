@@ -776,15 +776,6 @@ def test_adapter_command_substitution_is_rejected(name: str, tmp_path: Path) -> 
         )
 
 
-def test_installed_wheel_entry_point_loads_in_fresh_process(tmp_path: Path) -> None:
-    """The exact production admission path loads one installed wheel."""
-    from tests.unit.automation import test_codex_adapter_admission
-
-    test_codex_adapter_admission.test_public_admission_loads_verified_installed_bytes_in_a_fresh_process(
-        tmp_path
-    )
-
-
 def test_protocol_rejects_noncanonical_values_and_wrong_versions(tmp_path: Path) -> None:
     """Canonical protocol values reject mutable and invalid scalar inputs."""
     iso = _module()

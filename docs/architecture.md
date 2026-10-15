@@ -1298,25 +1298,34 @@ later branch push does not invalidate that posted review; only the final
 the current open, unarmed PR head.
 
 The host validates each finding against the complete immutable diff before it
-selects a publication surface. It gives each finding a stable SHA-256 ID. If an
-anchor is not valid, the host sends one bounded correction request to the same
-reviewer session. The request uses `REVIEW_VALIDATE` with read-only
-`Read,Glob,Grep` tools. The reviewer can change only the anchor or the surface.
-The host keeps the finding body, evidence, severity, ID, and source scope. It
-validates a corrected inline anchor against the same diff. It then sends all
-valid blocking findings in one GitHub review request.
+selects a publication surface. It gives each finding a stable SHA-256 ID.
+Validation of one finding is informational. A finding with an anchor that the
+reviewed diff cannot place is not discarded and does not fail publication. The
+host demotes it from the inline surface and renders it in the visible review
+body. The body uses a warning marker and states the location, the finding ID, the
+finding text, and a recovery instruction. GitHub renders a review-level body as
+an unanchored general comment, so the feedback stays on the pull request. The
+host then sends all valid blocking findings in one GitHub review request. It
+never asks the reviewer for a second turn.
+
+A malformed finding is also reported, not skipped. The host keeps every other
+finding, emits one warning for the malformed item, and carries its content as
+bounded text. Every warning carries a stable machine-readable code, a short
+message, and a recovery instruction that states the operator action. The host
+never infers a verdict from warning text, and a missing or malformed reviewer
+verdict still invalidates the whole audit before any label write.
 
 Before that GitHub review request, the host writes one actor-owned finding
 journal for the exact reviewed head. This first write marks each inline
 finding as pending, not published. After GitHub confirms the review request,
 the host writes the published inline outcomes to the journal. The journal also records
-corrected and not-publishable outcomes, the original and final anchors, and the
+demoted and not-publishable outcomes, the original and final anchors, and the
 typed failure reason. Restart seeding keeps these bounded records for a new
 review. A final public GO audit includes the retained records. Only a confirmed
-public-audit readback permits deletion of the finding journal. A
-critical or major finding that has no publishable surface causes a verified
-`state:implementation-no-go` transition and the terminal
-`review_finding_not_publishable` result.
+public-audit readback permits deletion of the finding journal. A demoted or
+reported finding prevents a clean sign-off. It routes the item through the
+ordinary non-GO review path with a verified `state:implementation-no-go`
+transition. It never raises and it never fails open.
 
 For the registered host-verification plan, macOS uses `sandbox-exec` plus
 disposable, quota-backed disk images. Linux uses a local Pyxis/Enroot squashfs
@@ -1344,7 +1353,8 @@ filesystem. The completed PR #3006 bootstrap is retired. There is no
 target-specific grant, comment selector, or skip-to-pass path. Generic host receipts remain in
 [`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
 
-For `LLM360/comet`, the coordinator first binds the detached source workspace.
+For a repository with an installed validation profile, the coordinator first
+binds the detached source workspace.
 A closed `prepare_repository_validation` Git job then builds the exact
 source-profile plan on a worker. The worker holds the repository locks and
 the current review-lane lease. This read operation does not receive writer
@@ -1353,21 +1363,15 @@ identities, head, workspace, generation, and nonce. No bootstrap grant is
 necessary. The plan
 keeps applicable checks separate from the checks eligible for ordinary PR CI
 or offline local execution. Unknown or mixed control versions fail admission.
-See [ADR-0054](adr/0054-comet-review-validation.md) for profile and receipt rules.
 
-The admitted profiles are `comet-5232ef5-v1`, `comet-d19d3dd-v1`,
-`comet-fe5a67d-v1`, and `comet-7c2772e-v1`. Each profile keeps its complete
-control inventory and selection policy. The `comet-fe5a67d-v1` profile binds
-the public-root test controls and adds `scripts/build_public_access_application.py`
-to the control-deployment policy. Its deployment contract remains a nightly
-check. Profile admission does not prove that a validation command passed.
-
-The `comet-7c2772e-v1` profile includes the affected-test selector, shard data,
-and quarantine manifest. Full test evidence requires a proved legacy route.
-The scope-classifier job must succeed. All 32 PR test shards must supply the
-required source and execution steps. A subset or successful no-op cannot
-supply full-test evidence. The pinned quarantine exceptions remain part of
-the profile; skipped tests are not reported as passed tests.
+Hephaestus owns this mechanism and ships no profile. An installed distribution
+registers one factory per repository in the
+`hephaestus.repository_validation_profiles` entry-point group. The registry and
+the profile contract are in
+[`repository_validation_profiles.py`](../hephaestus/automation/pipeline/repository_validation_profiles.py).
+A profile binds its repository identity, control inventory, fixed command
+selection, pull-request workflow, and sealed runtime layout. Profile admission
+does not prove that a validation command passed.
 
 The submitted GitHub job collects two agreeing CI observations. The retained
 PR identity, reviewed head, target base, immutable merge parents, control bytes,
@@ -1399,7 +1403,7 @@ Pure coverage and prompt summaries are in
 The effectful runtime adapter is outside the pure pipeline, in
 [`repository_validation_runtime.py`](../hephaestus/automation/repository_validation_runtime.py).
 
-Local Comet execution uses the existing isolation backend and a separately
+Local execution uses the existing isolation backend and a separately
 admitted sealed runtime at the fixed host capability path. Unlike the host's
 working virtual environment, this runtime is explicitly bound and read-only.
 The reviewed source precedes installed packages for the main and nested Python
@@ -1465,7 +1469,7 @@ stateDiagram-v2
     ThreadGate --> Checkout: explicit operator broad review; preserve inherited threads
     Checkout --> Review: broad audit entry and clean snapshot matches H
     Checkout --> Validate: comment-validation entry and clean snapshot matches H
-    Checkout --> SourcePreparation: Comet bound checkout manifest
+    Checkout --> SourcePreparation: bound checkout manifest
     SourcePreparation --> RepositoryValidation: worker admits exact source plan
     RepositoryValidation --> RuntimePreparation: uncovered eligible local check
     RuntimePreparation --> RepositoryValidation: worker admits runtime; separate check execution
@@ -1483,17 +1487,14 @@ stateDiagram-v2
     Checkout --> Review: clean source checkout matches snapshot head
     Checkout --> Failed: checkout or head drift; cleanup then a later loop gets a new snapshot
     Review --> Validate: review produced
-    Validate --> CorrectAnchor: one or more anchors are invalid
-    CorrectAnchor --> Validate: one bounded read-only correction
     Review --> Implementation: invalid output requires fresh implementation context
-    Validate --> Journal: all findings normalized
+    Validate --> Journal: valid findings partitioned; demoted and reported findings carried
     Journal --> Post: exact-head finding record has exact readback
     Journal --> Failed: finding record is not durable
-    Post --> Failed: blocking finding has no publishable surface; durable no-go
     Post --> Implementation: any open review thread, after durable no-go and checkout cleanup
     Post --> Evaluate: no open review thread
     Evaluate --> Implementation: a late open thread, after durable no-go and checkout cleanup
-    Evaluate --> Approve: verdict GO and no unresolved findings; cleanup then implementation-go durable
+    Evaluate --> Approve: verdict GO and no unresolved or reported findings; cleanup then implementation-go durable
     Approve --> MergeReady
     MergeReady --> [*]
     Implementation --> [*]
@@ -1505,13 +1506,23 @@ Architectural contract:
 - Every implementation review is posted to the pull request.
 - The initial review fetches and verifies one detached checkout of `H`, then
   validates all severities before it selects inline or audit publication. It
-  uses one bounded correction request for invalid anchors, then submits all
-  valid blocking inline findings in one GitHub review request. It neither rebases
-  nor pushes the PR branch, and its checkout is removed before it exits.
-- A correction response has exactly one result for each host finding ID. Only
-  `minor` and `nitpick` findings can use the audit surface. A missing, duplicate,
-  unknown, malformed, or still-invalid result becomes not publishable. The host
-  does not start a second correction request.
+  submits all valid blocking inline findings in one GitHub review request. It
+  neither rebases nor pushes the PR branch, and its checkout is removed before it
+  exits.
+- Validation of one finding is informational. The host keeps every usable
+  finding. A malformed finding becomes a warning plus bounded reported text. A
+  finding the reviewed diff cannot anchor inline becomes a demoted finding that
+  the review body shows with a warning marker and a recovery instruction. The
+  host starts no second reviewer turn for either case. Only `minor` and
+  `nitpick` findings use the audit surface.
+- The demoted-findings section and every per-finding field stay bounded. If the
+  section cannot hold every demoted finding, the host omits the later blocks and
+  states that it omitted them, so no demoted finding disappears silently.
+- A demoted or reported finding prevents a clean sign-off. The gate never raises
+  and never fails open.
+- A durable item that still holds the wait state of the removed anchor-repair
+  review round reroutes to a fresh review step. The host records a warning and
+  does not fail closed on a state it no longer owns.
 - The exact-head finding journal is durable before an inline review write. Its
   first state does not claim that an unconfirmed inline finding is published.
   A confirmed review write promotes that finding to the published state. The
@@ -2505,12 +2516,8 @@ and raw tool output keep their original content.
 It includes local private-denylist policy. It uses native check flags or detects
 changes to the private copy, and restores the input before each subsequent
 hook. Missing prepared tools and unknown execution contracts fail verification.
-Policy hooks accept only three reviewed root selector pairs: the default with
-no exclusions, the external Comet fixture exclusion for `current/`, `fe5a67d/`,
-and `historical/controls/`, and that same exclusion with `7c2772e/` added.
-Each fixture directory is under `tests/fixtures/comet-review-validation/`.
-The adapter keeps pre-commit's file selection and preserves external fixture
-bytes. Other root selector changes fail preparation before hooks run.
+Policy hooks accept only the default root selector pair with no exclusions.
+Any other root selector change fails preparation before hooks run.
 It does not install hook dependencies or request the queue's native fallback.
 The CI builder prepares hooks with the same pinned Node/npm prefix copied into
 the runtime. This keeps the Markdown hook's system Node environment consistent
@@ -2793,11 +2800,13 @@ Each collaborator owns an explicit responsibility:
 | [`pipeline_github.py`](../hephaestus/automation/pipeline_github.py) | `pipeline_github_contract.py`, `pipeline_github_transport.py`, `pipeline_github_queries.py`, `pipeline_github_reviews.py`, `pipeline_github_mutations.py` | static host contract; adapter construction; transport; reads; review evidence; non-review mutations |
 | [`pipeline/stages/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py) | `pr_review_threads.py`, `pr_review_verification.py`, `pr_review_diagnostics.py`, `pr_review_jobs.py`, `pr_review_gate.py` | public stage surface; thread parsing; host verification and diagnostics; jobs/worktrees; GO/NO-GO gate |
 
-The source budgets are executable in
-[`test_automation_hotspot_architecture.py`](../tests/unit/automation/test_automation_hotspot_architecture.py)
-and are strictly below the pre-decomposition hotspot sizes.
-Collaborators must not import their assembly module. Tests inject the
-transport command runner or patch the actual external boundary. Facade symbol
+The per-facade source budgets are no longer executable. The budget tests were
+removed with the non-core-library test re-scope. The `ruff-check-complexity`
+pre-commit hook still enforces the McCabe limit on every `hephaestus/` module,
+including the product layer. No check now enforces a facade line budget, so a
+reviewer must confirm that a facade stays within its budget by reading the
+collaborators. Collaborators must not import their assembly module. Tests inject
+the transport command runner or patch the actual external boundary. Facade symbol
 copies and runtime monkeypatch translators are removed.
 
 `pipeline_github_merge_policy.py` owns the immutable `EffectiveMergePolicy`
@@ -2823,8 +2832,11 @@ retains finding provenance and reserves space for the next review batch.
 `pr_review_recovery.py` reconciles pending publications and applies exact-request
 receipts before a new review. `coordinator_observability.py` records bounded
 finding outcome events without review text. These owners retain the existing
-identity, deadline, recovery, and source-size limits. The anchor correction job
-retains the `Read,Glob,Grep` tool scope and worker-owned I/O.
+identity, deadline, recovery, and source-size limits. The host now owns the
+worker-side review publication partition and the warning contract in
+[`review_warnings.py`](../hephaestus/automation/review_warnings.py). That module
+has no transport dependency and refuses a warning without a recovery
+instruction.
 
 ## 12. Interrupt semantics and exit codes
 

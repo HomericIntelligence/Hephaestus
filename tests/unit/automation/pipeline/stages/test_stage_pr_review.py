@@ -10,6 +10,7 @@ import tarfile
 import threading
 import time
 from collections import deque
+from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -22,7 +23,6 @@ import pytest
 import hephaestus.automation.pipeline.stages.pr_review_jobs as pr_review_jobs
 import hephaestus.automation.pipeline.stages.pr_review_recovery as pr_review_recovery
 from hephaestus.agents import runtime as agent_runtime
-from hephaestus.agents.execution_policy import AgentOperation
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.address_review_core import parse_addressed_replies
 from hephaestus.automation.github_api.diff import (
@@ -96,10 +96,7 @@ from hephaestus.automation.pipeline.summary import _review_finding_outcomes
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
-from hephaestus.automation.prompts.pr_review import (
-    MAX_PR_REVIEW_RENDERED_CHARS,
-    build_bounded_review_anchor_correction_prompt,
-)
+from hephaestus.automation.prompts.pr_review import MAX_PR_REVIEW_RENDERED_CHARS
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.scope_expansion_domain import ScopeExpansion
@@ -323,10 +320,7 @@ def _prepare_direct_post_fixture(item: Any) -> None:
     item.payload["review_finding_records"] = pr_review_jobs._build_review_finding_records(
         source_head=str(item.payload.get("reviewed_pr_head_sha") or ""),
         initial_valid=valid,
-        corrections=[],
-        corrected_inline=[],
-        corrected_audit=[],
-        not_publishable=[],
+        unanchored=[],
     )
 
 
@@ -496,12 +490,14 @@ class TestExplicitPrReviewRetry:
                 *,
                 expected_head_sha: str,
                 review_diff: str,
+                demoted_findings: Sequence[Any] = (),
             ) -> list[dict[str, Any]]:
                 receipts = super().post_review_threads(
                     pr_number,
                     threads,
                     expected_head_sha=expected_head_sha,
                     review_diff=review_diff,
+                    demoted_findings=demoted_findings,
                 )
                 self.live_threads.extend(dict(receipt) for receipt in receipts)
                 return receipts
@@ -4791,8 +4787,9 @@ class TestReviewThreadLifecycle:
                 *,
                 expected_head_sha: str,
                 review_diff: str,
+                demoted_findings: Sequence[Any] = (),
             ) -> list[dict[str, Any]]:
-                del expected_head_sha, review_diff
+                del expected_head_sha, review_diff, demoted_findings
                 self.posted_batches.append([dict(thread) for thread in threads])
                 thread_ids: list[str] = []
                 for thread in threads:
@@ -4944,6 +4941,7 @@ class TestReviewThreadLifecycle:
                 *,
                 expected_head_sha: str,
                 review_diff: str,
+                demoted_findings: Sequence[Any] = (),
             ) -> list[dict[str, Any]]:
                 self.posted_batches.append([dict(thread) for thread in threads])
                 return super().post_review_threads(
@@ -4951,6 +4949,7 @@ class TestReviewThreadLifecycle:
                     threads,
                     expected_head_sha=expected_head_sha,
                     review_diff=review_diff,
+                    demoted_findings=demoted_findings,
                 )
 
         github = CapturePostsGitHub()
@@ -5031,8 +5030,9 @@ class TestReviewThreadLifecycle:
                 *,
                 expected_head_sha: str,
                 review_diff: str,
+                demoted_findings: Sequence[Any] = (),
             ) -> list[dict[str, Any]]:
-                del expected_head_sha, review_diff
+                del expected_head_sha, review_diff, demoted_findings
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
@@ -5094,8 +5094,9 @@ class TestReviewThreadLifecycle:
                 *,
                 expected_head_sha: str,
                 review_diff: str,
+                demoted_findings: Sequence[Any] = (),
             ) -> list[dict[str, Any]]:
-                del expected_head_sha, review_diff
+                del expected_head_sha, review_diff, demoted_findings
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
@@ -5324,8 +5325,9 @@ class TestReviewThreadLifecycle:
                 *,
                 expected_head_sha: str,
                 review_diff: str,
+                demoted_findings: Sequence[Any] = (),
             ) -> list[dict[str, Any]]:
-                del expected_head_sha, review_diff
+                del expected_head_sha, review_diff, demoted_findings
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
                 return []
 
@@ -7604,9 +7606,11 @@ class TestAuditPublication:
                 *,
                 expected_head_sha: str,
                 review_diff: str,
+                demoted_findings: Sequence[Any] = (),
             ) -> list[dict[str, Any]]:
                 assert pr_number == 1001
                 assert expected_head_sha == "a" * 40
+                assert not list(demoted_findings)
                 self.received_diff = review_diff
                 self._log("gh_pr_review_post", pr_number, "COMMENT")
                 return [
@@ -7656,27 +7660,14 @@ class TestAuditPublication:
         assert result == Continue(next_state="EVAL")
         assert github.received_diff == item.payload["pr_diff"]
 
-    def test_anchor_correction_retry_does_not_advance_review_budget(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The gate does not count a reviewer-only anchor correction."""
-        item = make_work_item(issue=50, pr=1001, state="EVAL")
-        item.payload.update(
-            {
-                "reviewed_pr_head_sha": "a" * 40,
-                "review_audit": _valid_audit(),
-                "review_anchor_correction_retry": True,
-            }
-        )
-
-        result = PrReviewStage().step(item, make_ctx(github=FakeStageGitHub()))
-
-        assert isinstance(result, StageOutcome)
-        assert item.attempts.get("pr_review_iter", 0) == 0
-
     @pytest.mark.precommit
-    def test_valid_advisory_without_a_publication_surface_is_not_publishable(self) -> None:
-        """A valid advisory does not claim publication without an audit write."""
+    def test_valid_advisory_publishes_on_the_review_body_surface(self) -> None:
+        """A valid advisory publishes on the visible review body surface.
+
+        The review body is a real publication surface. An advisory finding
+        that the reviewed diff anchors therefore publishes there. The host
+        never records it as an unpublishable finding.
+        """
         findings = [
             {
                 "path": "a.py",
@@ -7699,381 +7690,25 @@ class TestAuditPublication:
         records = pr_review_jobs._build_review_finding_records(
             source_head="c" * 40,
             initial_valid=findings,
-            corrections=[],
-            corrected_inline=[],
-            corrected_audit=[],
-            not_publishable=[],
+            unanchored=[],
         )
 
         assert [(record["status"], record["surface"], record["reason"]) for record in records] == [
             ("published", "inline", None),
-            ("not_publishable", "not_publishable", "audit_surface_unavailable"),
+            ("published", "audit", None),
         ]
-
-    def test_invalid_anchor_starts_one_dedicated_correction_before_post(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A broad audit corrects all invalid anchors before a GitHub write."""
-        valid = {
-            "path": "a.py",
-            "line": 1,
-            "side": "RIGHT",
-            "severity": "major",
-            "body": "valid finding",
-        }
-        invalid = {
-            "path": "a.py",
-            "line": 99,
-            "side": "RIGHT",
-            "severity": "major",
-            "body": "invalid anchor",
-            "evidence": "the changed behavior is still incorrect",
-        }
-        item = make_work_item(issue=50, pr=1001, state="VALIDATE_WAIT")
-        item.worktree = "/tmp/review-worktree"
-        item.session_ids["pr-reviewer"] = "review-session-id"
-        item.payload.update(
-            {
-                "reviewed_pr_head_sha": "a" * 40,
-                "pr_diff": (
-                    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
-                ),
-                "review_audit": ReviewAudit(
-                    grade="F",
-                    verdict="NOGO",
-                    summary="Needs work",
-                    findings=(valid, invalid),
-                    raw_feedback="",
-                    valid=True,
-                ),
-                "review_threads": [valid, invalid],
-            }
-        )
-        github = FakeStageGitHub()
-
-        request = PrReviewStage().step(item, make_ctx(github=github))
-
-        assert isinstance(request, JobRequest)
-        assert isinstance(request.job, AgentJob)
-        assert request.job.prompt_builder is build_bounded_review_anchor_correction_prompt
-        assert request.job.execution_request is not None
-        assert request.job.execution_request.operation is AgentOperation.REVIEW_VALIDATE
-        assert request.job.resume_session_id == "review-session-id"
-        assert request.job.allowed_tools == "Read,Glob,Grep"
-        assert request.on_done_state == "ANCHOR_CORRECTION_WAIT"
-        assert github.mutation_log == []
-
-    def test_correction_result_builds_one_final_mixed_batch(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """The host combines an initially valid finding with one corrected finding."""
-        valid = {
-            "path": "a.py",
-            "line": 1,
-            "side": "RIGHT",
-            "severity": "major",
-            "body": "valid finding",
-        }
-        invalid = {
-            "path": "a.py",
-            "line": 99,
-            "side": "RIGHT",
-            "severity": "major",
-            "body": "invalid anchor",
-            "evidence": "preserve this evidence",
-            "scope_retraction_paths": ("a.py",),
-        }
-        item = make_work_item(issue=50, pr=1001, state="VALIDATE_WAIT")
-        item.worktree = "/tmp/review-worktree"
-        item.payload.update(
-            {
-                "reviewed_pr_head_sha": "a" * 40,
-                "pr_diff": (
-                    "diff --git a/a.py b/a.py\n"
-                    "--- a/a.py\n"
-                    "+++ b/a.py\n"
-                    "@@ -1,2 +1,2 @@\n"
-                    "-old\n"
-                    "+new\n"
-                    " context\n"
-                ),
-                "review_audit": ReviewAudit(
-                    grade="F",
-                    verdict="NOGO",
-                    summary="Needs work",
-                    findings=(valid, invalid),
-                    raw_feedback="",
-                    valid=True,
-                ),
-                "review_threads": [valid, invalid],
-            }
-        )
-        stage = PrReviewStage()
-        github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
-        correction_request = stage.step(item, ctx)
-        assert isinstance(correction_request, JobRequest)
-        pending = item.payload["review_anchor_corrections"][0]
-        response = json.dumps(
-            {
-                "corrections": [
-                    {
-                        "finding_id": pending["finding_id"],
-                        "surface": "inline",
-                        "path": "a.py",
-                        "line": 2,
-                        "side": "RIGHT",
-                    }
-                ]
-            }
-        )
-        stage.on_job_done(item, JobResult(ok=True, value=response), ctx)
-        item.state = correction_request.on_done_state
-
-        after_correction = stage.step(item, ctx)
-
-        assert after_correction == Continue(next_state="VALIDATE_WAIT")
-        assert [finding["body"] for finding in item.payload["review_threads"]] == [
-            "valid finding",
-            "invalid anchor",
-        ]
-        assert item.payload["review_threads"][1]["evidence"] == "preserve this evidence"
-        assert item.payload["review_threads"][1]["scope_retraction_paths"] == ("a.py",)
-        assert item.payload["review_threads"][1]["line"] == 2
-        assert item.attempts.get("pr_review_iter", 0) == 0
-
-        item.state = after_correction.next_state
-        validation = stage.step(item, ctx)
-        assert isinstance(validation, JobRequest)
-        assert isinstance(validation.job, AgentJob)
-        stage.on_job_done(
-            item,
-            JobResult(ok=True, value={"resolved": [], "unaddressed": []}),
-            ctx,
-        )
-        item.state = validation.on_done_state
-
-        reconciliation = stage.step(item, ctx)
-        assert isinstance(reconciliation, JobRequest)
-        assert isinstance(reconciliation.job, GitHubJob)
-        receipt = PipelineGitHubJobRunner._reconcile_pr_review(
-            cast(ReconcilePrReviewRequest, reconciliation.job.request),
-            github,
-        )
-        stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
-
-        assert [entry[0] for entry in github.mutation_log].count("gh_pr_review_post") == 1
-        assert [comment["body"] for comment in github.reviews[1001][0]["comments"]] == [
-            "valid finding",
-            "invalid anchor",
-        ]
-        journal = github.pending_review_finding_journal(1001)
-        assert journal is not None
-        assert [record["status"] for record in journal.finding_records] == [
-            "published",
-            "corrected",
-        ]
-        assert journal.finding_records[1]["evidence"] == "preserve this evidence"
-        assert journal.finding_records[1]["scope_retraction_paths"] == ["a.py"]
-
-    def test_audit_anchor_correction_is_recorded_as_not_publishable(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """An audit selection has no durable non-inline publication surface."""
-        invalid = {
-            "path": "a.py",
-            "line": 99,
-            "side": "RIGHT",
-            "severity": "minor",
-            "body": "invalid minor anchor",
-            "evidence": "keep the advisory evidence",
-        }
-        item = make_work_item(issue=50, pr=1001, state="VALIDATE_WAIT")
-        item.worktree = "/tmp/review-worktree"
-        item.payload.update(
-            {
-                "reviewed_pr_head_sha": "a" * 40,
-                "pr_diff": (
-                    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
-                ),
-                "review_audit": ReviewAudit(
-                    grade="C",
-                    verdict="NOGO",
-                    summary="Needs work",
-                    findings=(invalid,),
-                    raw_feedback="",
-                    valid=True,
-                ),
-                "review_threads": [invalid],
-            }
-        )
-        stage = PrReviewStage()
-        ctx = make_ctx(github=FakeStageGitHub())
-        request = stage.step(item, ctx)
-        assert isinstance(request, JobRequest)
-        correction = item.payload["review_anchor_corrections"][0]
-        response = json.dumps(
-            {"corrections": [{"finding_id": correction["finding_id"], "surface": "audit"}]}
-        )
-        stage.on_job_done(item, JobResult(ok=True, value=response), ctx)
-        item.state = request.on_done_state
-
-        result = stage.step(item, ctx)
-
-        assert result == Continue(next_state="VALIDATE_WAIT")
-        assert item.payload["review_advisory_findings"] == []
-        assert item.payload["review_not_publishable_findings"] == [
-            {**invalid, "finding_id": correction["finding_id"]}
-        ]
-        assert item.payload["review_finding_records"] == [
-            {
-                "finding_id": correction["finding_id"],
-                "source_head": "a" * 40,
-                "severity": "minor",
-                "body": "invalid minor anchor",
-                "evidence": "keep the advisory evidence",
-                "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
-                "final_anchor": None,
-                "status": "not_publishable",
-                "surface": "not_publishable",
-                "reason": "line_not_in_diff",
-            }
-        ]
-
-    def test_malformed_correction_does_not_start_a_second_correction(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """One malformed correction result ends the correction attempt."""
-        invalid = {
-            "path": "a.py",
-            "line": 99,
-            "side": "RIGHT",
-            "severity": "major",
-            "body": "invalid anchor",
-        }
-        item = make_work_item(issue=50, pr=1001, state="VALIDATE_WAIT")
-        item.worktree = "/tmp/review-worktree"
-        item.payload.update(
-            {
-                "reviewed_pr_head_sha": "a" * 40,
-                "pr_diff": "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-old\n+new\n",
-                "review_audit": ReviewAudit(
-                    grade="F",
-                    verdict="NOGO",
-                    summary="Needs work",
-                    findings=(invalid,),
-                    raw_feedback="",
-                    valid=True,
-                ),
-                "review_threads": [invalid],
-            }
-        )
-        stage = PrReviewStage()
-        ctx = make_ctx(github=FakeStageGitHub())
-        request = stage.step(item, ctx)
-        assert isinstance(request, JobRequest)
-        stage.on_job_done(item, JobResult(ok=True, value='{"corrections":[]}'), ctx)
-        item.state = request.on_done_state
-
-        result = stage.step(item, ctx)
-
-        assert result == Continue(next_state="VALIDATE_WAIT")
-        assert item.payload["review_anchor_correction_attempted"] is True
-        assert item.payload["review_not_publishable_findings"]
-        item.state = "VALIDATE_WAIT"
-        followup = stage.step(item, ctx)
-        assert not isinstance(followup, JobRequest) or (
-            followup.on_done_state != "ANCHOR_CORRECTION_WAIT"
-        )
 
     @staticmethod
-    def _not_publishable_receipt(item: Any) -> PrReviewReconciled:
-        """Attach one worker receipt for a blocking unpublishable finding."""
-        record = {
-            "finding_id": "f" * 64,
-            "source_head": "a" * 40,
-            "severity": "major",
-            "body": "This blocking finding has no valid source anchor.",
-            "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
-            "final_anchor": None,
-            "status": "not_publishable",
-            "surface": "not_publishable",
-            "reason": "line_not_in_diff",
-        }
-        request = ReconcilePrReviewRequest(
-            pr_number=1001,
-            reviewed_head_sha="a" * 40,
-            validated_receipt_fingerprints=None,
-            validated_metadata_fingerprint=None,
-            resolved_thread_ids=(),
-            feedback=FrozenJson.snapshot({}),
-            findings=FrozenJson.snapshot([]),
-            finding_records=FrozenJson.snapshot([record]),
-            review_diff="diff",
-            deadline_s=time.monotonic() + 60,
-        )
-        receipt = PrReviewReconciled(
-            request=request,
-            action="apply",
-            posted_receipts=FrozenJson.snapshot([]),
-            unresolved_threads=FrozenJson.snapshot([]),
-            remediation_threads=FrozenJson.snapshot([]),
-        )
-        item.payload[pr_review_jobs._PENDING_GITHUB_REQUEST] = request
-        item.payload[pr_review_recovery._PR_REVIEW_RECEIPT] = receipt
-        item.payload["review_not_publishable_findings"] = [
-            {
-                "finding_id": "f" * 64,
-                "severity": "major",
-                "body": record["body"],
-            }
-        ]
-        item.payload["review_finding_records"] = [record]
-        return receipt
+    def _compacted_blocking_receipt(item: Any) -> PrReviewReconciled:
+        """Attach one receipt whose compacted history records a blocked finding.
 
-    def test_blocking_not_publishable_finding_writes_no_go_then_stops(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A blocking unpublishable finding has a verified terminal NO-GO."""
-        item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
-        item.payload["reviewed_pr_head_sha"] = "a" * 40
-        self._not_publishable_receipt(item)
-        github = FakeStageGitHub()
-
-        result = PrReviewStage().step(item, make_ctx(github=github))
-
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "review_finding_not_publishable")
-        assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
-        summary = item.payload["review_publication_summary"]
-        assert summary["published"] == []
-        assert summary["corrected"] == []
-        assert [record["finding_id"] for record in summary["could_not_publish"]] == ["f" * 64]
-
-    def test_recovered_blocking_not_publishable_record_still_stops(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A restart uses the durable record for the blocking NO-GO decision."""
-        item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
-        item.payload["reviewed_pr_head_sha"] = "a" * 40
-        self._not_publishable_receipt(item)
-        item.payload.pop("review_not_publishable_findings")
-        github = FakeStageGitHub()
-
-        result = PrReviewStage().step(item, make_ctx(github=github))
-
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "review_finding_not_publishable")
-        assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
-
-    def test_compacted_blocking_not_publishable_outcome_still_stops(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A compacted blocking publication failure keeps the terminal NO-GO."""
+        The compacted history states a blocking finding that an earlier round
+        never published inline. It is durable and outlives the current round.
+        """
         compacted = {
             "counts": {"corrected": 0, "not_publishable": 1, "published": 0},
             "identities": [["f" * 64, "9" * 40, "n", "b"]],
         }
-        item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
-        item.payload["reviewed_pr_head_sha"] = "a" * 40
         request = ReconcilePrReviewRequest(
             pr_number=1001,
             reviewed_head_sha="a" * 40,
@@ -8098,12 +7733,138 @@ class TestAuditPublication:
         )
         item.payload[pr_review_jobs._PENDING_GITHUB_REQUEST] = request
         item.payload[pr_review_recovery._PR_REVIEW_RECEIPT] = receipt
+        return receipt
+
+    @staticmethod
+    def _not_publishable_receipt(item: Any) -> PrReviewReconciled:
+        """Attach one worker receipt for a demoted blocking finding.
+
+        The finding has a typed anchor reason, so the host reports it and
+        warns about it. A record without a typed reason is not a demotion.
+        """
+        finding = {
+            "finding_id": "f" * 64,
+            "path": "a.py",
+            "line": 99,
+            "side": "RIGHT",
+            "severity": "major",
+            "body": "This blocking finding has no valid source anchor.",
+        }
+        demotion = {
+            "finding": finding,
+            "finding_id": "f" * 64,
+            "path": "a.py",
+            "line": 99,
+            "side": "RIGHT",
+            "reason": "line_not_in_diff",
+        }
+        record = {
+            "finding_id": "f" * 64,
+            "source_head": "a" * 40,
+            "severity": "major",
+            "body": "This blocking finding has no valid source anchor.",
+            "original_anchor": {"path": "a.py", "line": 99, "side": "RIGHT"},
+            "final_anchor": None,
+            "status": "not_publishable",
+            "surface": "not_publishable",
+            "reason": "line_not_in_diff",
+        }
+        request = ReconcilePrReviewRequest(
+            pr_number=1001,
+            reviewed_head_sha="a" * 40,
+            validated_receipt_fingerprints=None,
+            validated_metadata_fingerprint=None,
+            resolved_thread_ids=(),
+            feedback=FrozenJson.snapshot({}),
+            findings=FrozenJson.snapshot([finding]),
+            finding_records=FrozenJson.snapshot([record]),
+            review_diff="diff",
+            deadline_s=time.monotonic() + 60,
+        )
+        receipt = PrReviewReconciled(
+            request=request,
+            action="apply",
+            posted_receipts=FrozenJson.snapshot([]),
+            unresolved_threads=FrozenJson.snapshot([]),
+            remediation_threads=FrozenJson.snapshot([]),
+            unpublishable_findings=FrozenJson.snapshot([demotion]),
+        )
+        item.payload[pr_review_jobs._PENDING_GITHUB_REQUEST] = request
+        item.payload[pr_review_recovery._PR_REVIEW_RECEIPT] = receipt
+        item.payload["review_finding_records"] = [record]
+        return receipt
+
+    def test_demoted_blocking_finding_is_reported_and_does_not_end_the_round(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A demoted blocking finding stays visible and the round continues.
+
+        The finding cannot publish inline, so the host renders it in the
+        review body under a warning marker. The round then returns to its own
+        gate. The host does not write the negative label for a demotion that
+        belongs to the current round.
+        """
+        item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        self._not_publishable_receipt(item)
         github = FakeStageGitHub()
 
         result = PrReviewStage().step(item, make_ctx(github=github))
 
-        assert result == StageOutcome(Disposition.FINISH_FAIL, "review_finding_not_publishable")
+        assert result == Continue(next_state="EVAL")
+        assert github.mutation_log == []
+        summary = item.payload["review_publication_summary"]
+        assert summary["published"] == []
+        assert summary["corrected"] == []
+        assert [record["finding_id"] for record in summary["could_not_publish"]] == ["f" * 64]
+
+    def test_recovered_blocking_demotion_is_reported_and_is_not_terminal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart reports the durable demotion and returns to the round gate.
+
+        Validation of one finding is informational. A finding that the
+        reviewed diff does not anchor stays visible in the review body with a
+        warning. It never ends the round on its own. The reviewer verdict and
+        the open-thread readback govern the gate.
+        """
+        item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        self._not_publishable_receipt(item)
+        github = FakeStageGitHub()
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="EVAL")
+        assert github.mutation_log == []
+        demoted = item.payload["review_demoted_findings"]
+        assert [entry["finding_id"] for entry in demoted] == ["f" * 64]
+        assert demoted[0]["reason"] == "line_not_in_diff"
+        codes = [warning["code"] for warning in item.payload["review_warnings"]]
+        assert "anchor_line_not_in_diff" in codes
+
+    def test_compacted_blocking_not_publishable_outcome_still_stops(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A compacted blocking publication failure parks the pull request.
+
+        The compacted history is durable. It records a blocking finding that
+        an earlier round never published inline. That fact outlives the
+        records of the current round, so the host writes the negative label
+        and parks the item for an operator. It does not end the loop on a
+        removed terminal reason, and it cannot reach the GO proof.
+        """
+        item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        self._compacted_blocking_receipt(item)
+        github = FakeStageGitHub()
+
+        result = PrReviewStage().step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.BLOCKED, "compacted_blocking_finding_unpublished")
         assert github.mutation_log == [("mark_pr_implementation_no_go", (1001,))]
+        codes = [warning["code"] for warning in item.payload["review_warnings"]]
+        assert "compacted_blocking_finding_unpublished" in codes
 
     def test_pending_record_from_old_head_does_not_bind_current_publication(
         self, make_work_item: Any
@@ -8282,10 +8043,7 @@ class TestAuditPublication:
             pr_review_jobs._build_review_finding_records(
                 source_head="a" * 40,
                 initial_valid=[finding],
-                corrections=[],
-                corrected_inline=[],
-                corrected_audit=[],
-                not_publishable=[],
+                unanchored=[],
             )
 
     def test_compact_history_stops_when_transport_reserve_is_full(
@@ -8679,12 +8437,14 @@ class TestAuditPublication:
                 *,
                 expected_head_sha: str,
                 review_diff: str,
+                demoted_findings: Sequence[Any] = (),
             ) -> list[dict[str, Any]]:
                 receipts = super().post_review_threads(
                     pr_number,
                     threads,
                     expected_head_sha=expected_head_sha,
                     review_diff=review_diff,
+                    demoted_findings=demoted_findings,
                 )
                 self.live.extend(dict(receipt) for receipt in receipts)
                 return receipts
@@ -8730,32 +8490,14 @@ class TestAuditPublication:
         assert pr_review_jobs._review_finding_history_has_capacity(item)
         assert "review_finding_records" not in item.payload
 
-    @pytest.mark.parametrize(
-        ("compacted", "note"),
-        [
-            ({"counts": {}, "identities": []}, "review_finding_history_invalid"),
-            (
-                {
-                    "counts": {
-                        "corrected": 0,
-                        "not_publishable": 0,
-                        "published": 256,
-                    },
-                    "identities": [[f"{index:064x}", "a" * 40, "p", "a"] for index in range(256)],
-                },
-                "review_finding_history_full",
-            ),
-        ],
-        ids=["invalid", "full"],
-    )
-    def test_checkout_history_guard_schedules_review_worktree_cleanup(
-        self,
-        make_ctx: Any,
-        make_work_item: Any,
-        compacted: dict[str, object],
-        note: str,
+    def test_full_history_guard_schedules_review_worktree_cleanup(
+        self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A terminal history guard removes the detached review checkout."""
+        """A full finding history removes the detached review checkout."""
+        compacted: dict[str, object] = {
+            "counts": {"corrected": 0, "not_publishable": 0, "published": 256},
+            "identities": [[f"{index:064x}", "a" * 40, "p", "a"] for index in range(256)],
+        }
         stage = PrReviewStage()
         item = make_work_item(issue=50, pr=1001, state=REVIEW_CHECKOUT_WAIT)
         item.worktree = "/tmp/detached-review"
@@ -8775,11 +8517,45 @@ class TestAuditPublication:
 
         assert result == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
         assert item.payload["review_worktree_cleanup_outcome"] == "finish_fail"
-        assert item.payload["review_worktree_cleanup_note"] == note
-        if note == "review_finding_history_full":
-            assert item.payload["review_finding_records"] == []
-            assert item.payload["review_finding_compacted_outcomes"] == compacted
-            assert _review_finding_outcomes(item) == {"published": 256}
+        assert item.payload["review_worktree_cleanup_note"] == "review_finding_history_full"
+        assert item.payload["review_finding_records"] == []
+        assert item.payload["review_finding_compacted_outcomes"] == compacted
+        assert _review_finding_outcomes(item) == {"published": 256}
+
+    def test_invalid_history_is_quarantined_and_the_review_continues(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A malformed finding history is quarantined with a recovery warning.
+
+        Data hygiene is informational. The host drops the malformed history,
+        warns about it with a recovery instruction, and starts the review
+        round. It does not remove the checkout.
+        """
+        stage = PrReviewStage()
+        item = make_work_item(issue=50, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "review_checkout_ready": True,
+                "review_checkout_expected_head": "a" * 40,
+                "review_worktree": item.worktree,
+                "review_worktree_expected_head": "a" * 40,
+                "pr_diff": "diff --git a/a.py b/a.py",
+                "review_changed_paths": ["a.py"],
+                "carried_review_finding_compacted_outcomes": {"counts": {}, "identities": []},
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=FakeStageGitHub()))
+
+        assert isinstance(result, JobRequest)
+        assert result.on_done_state == "VALIDATE_WAIT"
+        assert "review_worktree_cleanup_outcome" not in item.payload
+        assert item.payload["review_finding_history_degraded"] == ("carried_records_invalid")
+        assert item.payload["review_finding_records"] == []
+        codes = [warning["code"] for warning in item.payload["review_warnings"]]
+        assert "finding_invalid" in codes
+        assert all(warning["recovery"] for warning in item.payload["review_warnings"])
 
     def test_current_finding_decompacts_prior_identity_and_keeps_first_source_head(
         self, make_work_item: Any
@@ -8911,13 +8687,13 @@ class TestAuditPublication:
 
         assert item.payload["review_finding_records"] == [published]
 
-    def test_blocking_not_publishable_finding_does_not_label_a_changed_head(
+    def test_compacted_blocking_outcome_does_not_label_a_changed_head(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A head change stops the terminal label transition."""
+        """A head change stops the negative label transition of a parked round."""
         item = make_work_item(issue=50, pr=1001, state="POST_APPLY")
         item.payload["reviewed_pr_head_sha"] = "a" * 40
-        self._not_publishable_receipt(item)
+        self._compacted_blocking_receipt(item)
         github = FakeStageGitHub(
             pr_state={
                 "state": "OPEN",

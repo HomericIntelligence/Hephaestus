@@ -12,20 +12,22 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from html import escape
-from typing import TYPE_CHECKING, Literal, cast
-
-from hephaestus.automation.review_finding_history import (
-    normalize_review_finding_collection,
-    review_finding_collection_payload,
-)
-
-if TYPE_CHECKING:
-    from hephaestus.automation.review_anchors import ReviewAnchorCorrection
+from typing import Literal, cast
 
 from hephaestus.automation.pipeline.scope_retraction import (
     SCOPE_RETRACTION_MARKER_PREFIX,
     is_scope_retraction_finding,
     normalize_scope_retraction_paths,
+)
+from hephaestus.automation.review_finding_history import (
+    normalize_review_finding_collection,
+    review_finding_collection_payload,
+)
+from hephaestus.automation.review_warnings import (
+    MalformedReviewFindingReason,
+    ReviewWarning,
+    bounded_review_text,
+    make_review_warning,
 )
 from hephaestus.automation.scope_expansion_domain import (
     ScopeExpansion,
@@ -49,15 +51,94 @@ _RESERVED_AUTHORITY_CLAIM_RE = re.compile(
 _SEVERITY_MARKER_RE = re.compile(r"(?im)^[ \t]*<!--\s*hephaestus-severity\s*:")
 MAX_REVIEW_SUMMARY_CHARS = 200
 MAX_RAW_FEEDBACK_CHARS = 4000
+MAX_REVIEW_WARNINGS = 64
+MAX_REVIEW_REPORTED_FINDINGS = 32
+MAX_REVIEW_REPORTED_FINDING_CHARS = 2_000
 _INVALID_SUMMARY = "No structured reviewer summary was provided."
+_REDACTED_CONTROL_TEXT = "[redacted control text]"
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_FINDING_FIELDS = "Send each finding with a path, a line, side RIGHT, a severity, and a body."
+# One message and one recovery instruction per malformed-finding reason.
+_FINDING_WARNING_TEXT: dict[str, tuple[str, str]] = {
+    "finding_invalid": (
+        "The host did not accept one review finding.",
+        f"Send the finding again. {_FINDING_FIELDS}",
+    ),
+    "finding_not_an_object": (
+        "The review finding is not a JSON object.",
+        f"Send each finding as a JSON object. {_FINDING_FIELDS}",
+    ),
+    "finding_path_invalid": (
+        "The review finding path is missing or is not a non-empty string.",
+        "Send a path as a non-empty string that stays inside the path size limit.",
+    ),
+    "finding_line_invalid": (
+        "The review finding line is missing or is not a positive integer.",
+        "Send a line number as an integer that is greater than zero.",
+    ),
+    "finding_side_unsupported": (
+        "The review finding side is not RIGHT.",
+        "Send side as RIGHT. The host publishes no other side inline.",
+    ),
+    "finding_severity_invalid": (
+        "The review finding severity is not supported.",
+        "Send severity as critical, major, minor, or nitpick.",
+    ),
+    "finding_body_invalid": (
+        "The review finding body is missing or is empty.",
+        "Send a non-empty body as a string.",
+    ),
+    "finding_evidence_invalid": (
+        "The review finding evidence is missing or is not a non-empty string.",
+        "Send evidence as a non-empty string, or omit the evidence field.",
+    ),
+    "finding_id_invalid": (
+        "The review finding ID is not a lowercase SHA-256 digest.",
+        "Send finding_id as a 64 character lowercase hexadecimal digest, or omit the field.",
+    ),
+    "finding_reserved_control_text": (
+        "The review finding body contains reserved control text.",
+        "Remove the reserved control text from the body, then send the finding again.",
+    ),
+    "finding_scope_retraction_paths_invalid": (
+        "The scope retraction finding does not carry valid paths.",
+        "Send a scope retraction finding with a non-empty list of scope_retraction_paths strings.",
+    ),
+    "finding_scope_retraction_conflict": (
+        "The review finding sends scope_retraction_paths without a scope retraction marker.",
+        "Add the scope retraction marker to the body, or remove the scope_retraction_paths field.",
+    ),
+    "finding_content_truncated": (
+        "The host truncated one review finding field.",
+        "Send a shorter finding field so the host does not truncate the finding.",
+    ),
+    "malformed_finding_budget_exhausted": (
+        "The review sends more malformed findings than the reporting limit.",
+        "Send fewer findings so that the host can report each malformed finding.",
+    ),
+}
+_DEFAULT_WARNING_TEXT = _FINDING_WARNING_TEXT["finding_invalid"]
+_FindingNormalization = tuple[dict[str, object] | None, MalformedReviewFindingReason | None]
 
 ReviewVerdict = Literal["GO", "NOGO", "BLOCKED"]
 
 
 @dataclass(frozen=True)
 class ReviewAudit:
-    """Sanitized structural output from one implementation review."""
+    """Sanitized structural output from one implementation review.
+
+    Attributes:
+        grade: Reviewer grade from A to F, or None for an invalid audit.
+        summary: Bounded reviewer summary.
+        findings: Findings that the host can publish.
+        raw_feedback: Bounded reviewer prose outside the JSON object.
+        valid: Whether the host accepted the review structure.
+        verdict: Explicit reviewer verdict, or None for an invalid audit.
+        scope_expansions: Scope expansions that the reviewer reported.
+        warnings: Bounded warnings about malformed findings.
+        reported_findings: Bounded text for each malformed finding.
+
+    """
 
     grade: str | None
     summary: str
@@ -66,128 +147,46 @@ class ReviewAudit:
     valid: bool
     verdict: ReviewVerdict | None = None
     scope_expansions: tuple[ScopeExpansion, ...] = ()
-
-
-@dataclass(frozen=True)
-class ReviewAnchorCorrectionResponse:
-    """Host-owned findings after one typed anchor-correction response."""
-
-    inline_findings: tuple[dict[str, object], ...]
-    audit_findings: tuple[dict[str, object], ...]
-    not_publishable_findings: tuple[dict[str, object], ...]
-
-
-def _corrected_inline_finding(
-    value: Mapping[str, object], finding: dict[str, object]
-) -> dict[str, object] | None:
-    """Apply one valid inline anchor to host-owned finding content."""
-    if set(value) != {"finding_id", "surface", "path", "line", "side"}:
-        return None
-    path = value.get("path")
-    line = value.get("line")
-    if (
-        not isinstance(path, str)
-        or not path.strip()
-        or len(path) > 4_096
-        or isinstance(line, bool)
-        or not isinstance(line, int)
-        or line < 1
-        or value.get("side") != "RIGHT"
-    ):
-        return None
-    finding.update(path=path.strip(), line=line, side="RIGHT")
-    return finding
-
-
-def _correction_item(
-    value: object,
-    expected_by_id: Mapping[str, ReviewAnchorCorrection],
-    seen: set[str],
-) -> tuple[str, str, dict[str, object]] | None:
-    """Validate one response item and retain host-owned finding content."""
-    if not isinstance(value, Mapping):
-        return None
-    finding_id = value.get("finding_id")
-    surface = value.get("surface")
-    if (
-        not isinstance(finding_id, str)
-        or finding_id in seen
-        or finding_id not in expected_by_id
-        or surface not in {"inline", "audit", "not_publishable"}
-    ):
-        return None
-    finding = dict(expected_by_id[finding_id].finding)
-    if surface == "inline":
-        corrected_finding = _corrected_inline_finding(value, finding)
-        if corrected_finding is None:
-            return None
-        finding = corrected_finding
-    else:
-        if set(value) != {"finding_id", "surface"}:
-            return None
-        severity = str(finding.get("severity") or "").lower()
-        if surface == "audit" and severity not in {"minor", "nitpick"}:
-            return None
-    return finding_id, str(surface), finding
-
-
-def parse_review_anchor_correction_response(
-    response: str | Mapping[str, object],
-    expected: tuple[ReviewAnchorCorrection, ...],
-) -> ReviewAnchorCorrectionResponse | None:
-    """Apply one strict correction response without accepting finding-content changes."""
-    _source, payload = _response_payload(response)
-    if payload is None or set(payload) != {"corrections"}:
-        return None
-    values = payload.get("corrections")
-    if not isinstance(values, list) or len(values) != len(expected):
-        return None
-    expected_by_id = {correction.finding_id: correction for correction in expected}
-    if len(expected_by_id) != len(expected):
-        return None
-    seen: set[str] = set()
-    inline: list[dict[str, object]] = []
-    audit: list[dict[str, object]] = []
-    not_publishable: list[dict[str, object]] = []
-    for value in values:
-        item = _correction_item(value, expected_by_id, seen)
-        if item is None:
-            return None
-        finding_id, surface, finding = item
-        if surface == "inline":
-            inline.append(finding)
-        elif surface == "audit":
-            audit.append(finding)
-        else:
-            not_publishable.append(finding)
-        seen.add(finding_id)
-    if seen != set(expected_by_id):
-        return None
-    return ReviewAnchorCorrectionResponse(
-        inline_findings=tuple(inline),
-        audit_findings=tuple(audit),
-        not_publishable_findings=tuple(not_publishable),
-    )
+    warnings: tuple[ReviewWarning, ...] = ()
+    reported_findings: tuple[dict[str, object], ...] = ()
 
 
 def is_clean_go_review(audit: object | None) -> bool:
-    """Return whether one parsed audit can authorize implementation GO."""
+    """Return whether one parsed audit can authorize implementation GO.
+
+    A reported finding is not a warning. It is a defect that the reviewer found
+    and that the host could not publish as an inline anchor. The implementation
+    sign-off gate is the one blocking gate in this design, so it must not
+    authorize a GO while such a defect is unresolved. Any reported finding
+    therefore prevents a clean sign-off here.
+
+    This boundary does not skip the finding. The publication path still renders
+    the finding in the visible review body with a warning marker, the reviewer
+    can re-anchor it, and the work item routes through the normal non-GO review
+    path. The gate never raises and never fails open.
+    """
     return (
         isinstance(audit, ReviewAudit)
         and audit.valid
         and audit.verdict == "GO"
         and not audit.findings
+        and not audit.reported_findings
         and not audit.scope_expansions
     )
 
 
 def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
-    """Parse one strict structural review response.
+    """Parse one structural review response.
 
     The response may be Claude's JSON envelope, Codex stdout, a fenced JSON
     block following reviewer prose, or a raw JSON object. Text outside the
     object is retained only as bounded supplemental feedback; it never affects
     validity or a label transition.
+
+    The grade, the summary, the comment list, and the explicit verdict stay
+    strict. Validation of one finding is informational. The host warns about a
+    malformed finding, keeps the other findings, and carries the malformed
+    content as bounded text in ``reported_findings``.
     """
     source, payload = _response_payload(response)
     raw_feedback = _bounded_feedback(source, payload)
@@ -217,11 +216,23 @@ def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
         return _invalid_audit(raw_feedback)
 
     findings: list[dict[str, object]] = []
+    warnings: list[ReviewWarning] = []
+    reported_findings: list[dict[str, object]] = []
+    # Finding validation is informational. The host keeps every valid finding,
+    # warns about each malformed finding, and carries the malformed content as
+    # bounded text. One malformed finding never invalidates this audit.
     for comment in comments:
-        normalized = _normalize_finding(comment)
-        if normalized is None:
-            return _invalid_audit(raw_feedback)
-        findings.append(normalized)
+        normalized, reason = _normalize_finding(comment)
+        if normalized is not None:
+            findings.append(normalized)
+            continue
+        if len(reported_findings) >= MAX_REVIEW_REPORTED_FINDINGS:
+            _record_budget_warning(warnings)
+            continue
+        code = reason or "finding_invalid"
+        message, recovery = _FINDING_WARNING_TEXT.get(code, _DEFAULT_WARNING_TEXT)
+        warnings.append(make_review_warning(code, message=message, recovery=recovery))
+        reported_findings.append(_reported_finding(code, comment))
 
     return ReviewAudit(
         grade=grade.strip().upper(),
@@ -231,7 +242,74 @@ def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
         scope_expansions=normalized_scope_expansions,
         raw_feedback=raw_feedback,
         valid=True,
+        warnings=tuple(warnings),
+        reported_findings=tuple(reported_findings),
     )
+
+
+def _record_budget_warning(warnings: list[ReviewWarning]) -> None:
+    """Record the reporting budget warning once and keep the list bounded."""
+    if len(warnings) >= MAX_REVIEW_WARNINGS:
+        return
+    if any(warning.code == "malformed_finding_budget_exhausted" for warning in warnings):
+        return
+    message, recovery = _FINDING_WARNING_TEXT["malformed_finding_budget_exhausted"]
+    warnings.append(
+        make_review_warning(
+            "malformed_finding_budget_exhausted", message=message, recovery=recovery
+        )
+    )
+
+
+def _reported_finding(code: str, comment: object) -> dict[str, object]:
+    """Carry one malformed finding as bounded text for a later public report."""
+    reported: dict[str, object] = {"code": code, "text": _reported_finding_text(comment)}
+    if isinstance(comment, Mapping):
+        path = comment.get("path")
+        line = comment.get("line")
+        if isinstance(path, str):
+            reported["path"] = bounded_review_text(path, MAX_REVIEW_REPORTED_FINDING_CHARS)
+        if isinstance(line, int) and not isinstance(line, bool):
+            reported["line"] = line
+    return reported
+
+
+def _reported_finding_text(comment: object) -> str:
+    """Return bounded and redacted text for one malformed finding."""
+    try:
+        text = json.dumps(
+            _redact_finding_value(comment), ensure_ascii=False, sort_keys=True, default=str
+        )
+    except (TypeError, ValueError):
+        text = str(_redact_finding_value(comment))
+    return bounded_review_text(text, MAX_REVIEW_REPORTED_FINDING_CHARS)
+
+
+def _redact_finding_value(value: object) -> object:
+    """Return one finding value with its untrusted control text removed.
+
+    The host redacts each untrusted string before it encodes the finding, so a
+    reported finding keeps its JSON structure for a later public report.
+    """
+    if isinstance(value, str):
+        return _redact_reserved_control(value)
+    if isinstance(value, (list, tuple)):
+        return [_redact_finding_value(item) for item in value]
+    if isinstance(value, Mapping):
+        return {str(key): _redact_finding_value(item) for key, item in value.items()}
+    return value
+
+
+def _redact_reserved_control(text: str) -> str:
+    """Remove pipeline-owned control text before the host stores or reports it.
+
+    A malformed finding is reported as text only. The host never publishes it
+    inline, and the host never carries a control token into a public comment or
+    a later review prompt.
+    """
+    redacted = _RESERVED_AUTHORITY_CLAIM_RE.sub("", text)
+    redacted = _SEVERITY_MARKER_RE.sub(_REDACTED_CONTROL_TEXT, redacted)
+    return redacted.replace(SCOPE_RETRACTION_MARKER_PREFIX, _REDACTED_CONTROL_TEXT)
 
 
 def _response_payload(response: str | Mapping[str, object]) -> tuple[str, dict[str, object] | None]:
@@ -267,63 +345,90 @@ def _response_payload(response: str | Mapping[str, object]) -> tuple[str, dict[s
     return response, dict(payload) if isinstance(payload, dict) else None
 
 
-def _normalize_finding(comment: object) -> dict[str, object] | None:
-    """Validate and normalize one finding that must become a GitHub thread."""
-    if not isinstance(comment, Mapping):
-        return None
+def _finding_field_reason(comment: Mapping[str, object]) -> MalformedReviewFindingReason | None:
+    """Return why one finding field is not acceptable, or None for a valid field set.
+
+    Args:
+        comment: One raw reviewer finding.
+
+    Returns:
+        One typed reason, or None.
+
+    """
     path = comment.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return "finding_path_invalid"
     line = comment.get("line")
-    side = comment.get("side")
+    if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+        return "finding_line_invalid"
+    if comment.get("side") != "RIGHT":
+        return "finding_side_unsupported"
     severity = comment.get("severity")
+    if not isinstance(severity, str) or severity.lower() not in _VALID_SEVERITIES:
+        return "finding_severity_invalid"
     body = comment.get("body")
-    if (
-        not isinstance(path, str)
-        or not path.strip()
-        or isinstance(line, bool)
-        or not isinstance(line, int)
-        or line < 1
-        or side != "RIGHT"
-        or not isinstance(severity, str)
-        or severity.lower() not in _VALID_SEVERITIES
-        or not isinstance(body, str)
-        or not body.strip()
-        or has_reserved_finding_control(body)
+    if not isinstance(body, str) or not body.strip():
+        return "finding_body_invalid"
+    if has_reserved_finding_control(body):
+        return "finding_reserved_control_text"
+    finding_id = comment.get("finding_id")
+    if finding_id is not None and (
+        not isinstance(finding_id, str) or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None
     ):
-        return None
+        return "finding_id_invalid"
+    evidence = comment.get("evidence")
+    if evidence is not None and (not isinstance(evidence, str) or not evidence.strip()):
+        return "finding_evidence_invalid"
+    return None
+
+
+def _normalize_finding(comment: object) -> _FindingNormalization:
+    """Validate and normalize one finding, and report why a finding fails.
+
+    Args:
+        comment: One raw reviewer finding.
+
+    Returns:
+        The normalized finding and no reason, or no finding and one typed
+        reason that states why the host did not accept the finding.
+
+    """
+    if not isinstance(comment, Mapping):
+        return None, "finding_not_an_object"
+    reason = _finding_field_reason(comment)
+    if reason is not None:
+        return None, reason
+    body = cast(str, comment["body"])
     scope_retraction_paths = comment.get("scope_retraction_paths")
     if is_scope_retraction_finding(body):
         paths = normalize_scope_retraction_paths(scope_retraction_paths)
         if paths is None:
-            return None
+            return None, "finding_scope_retraction_paths_invalid"
         # A scope retraction is a publication-safety boundary, not advisory
         # review prose. Host-normalize it to blocking before POST filters
         # minor/nitpick comments out of the remediation path.
         normalized_severity = "major"
     elif scope_retraction_paths is not None:
-        return None
+        return None, "finding_scope_retraction_conflict"
     else:
         paths = ()
-        normalized_severity = severity.lower()
+        normalized_severity = cast(str, comment["severity"]).lower()
     finding: dict[str, object] = {
-        "path": path.strip(),
-        "line": line,
+        "path": cast(str, comment["path"]).strip(),
+        "line": cast(int, comment["line"]),
         "side": "RIGHT",
         "severity": normalized_severity,
         "body": body.strip(),
     }
     finding_id = comment.get("finding_id")
     if finding_id is not None:
-        if not isinstance(finding_id, str) or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None:
-            return None
-        finding["finding_id"] = finding_id
+        finding["finding_id"] = cast(str, finding_id)
     evidence = comment.get("evidence")
     if evidence is not None:
-        if not isinstance(evidence, str) or not evidence.strip():
-            return None
-        finding["evidence"] = evidence.strip()
+        finding["evidence"] = cast(str, evidence).strip()
     if paths:
         finding["scope_retraction_paths"] = paths
-    return finding
+    return finding, None
 
 
 def has_reserved_finding_control(body: str) -> bool:

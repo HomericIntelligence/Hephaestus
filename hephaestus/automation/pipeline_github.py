@@ -1,6 +1,7 @@
 """Compose the queue-owned GitHub adapter."""
 
 from .pipeline.github_jobs import ReadRepositoryValidationCIRequest, RepositoryValidationCIRead
+from .pipeline.repository_validation_profiles import require_repository_validation_profile
 from .pipeline_github_audit import PipelineGitHubAuditReceipts
 from .pipeline_github_check_policy import PipelineGitHubCheckPolicy
 from .pipeline_github_mutations import PipelineGitHubMutations
@@ -8,7 +9,10 @@ from .pipeline_github_queries import PipelineGitHubQueries
 from .pipeline_github_repository import PipelineGitHubRepositoryMetadata
 from .pipeline_github_required_checks import PipelineGitHubRequiredChecks
 from .pipeline_github_review_queries import PipelineGitHubReviewQueries
-from .pipeline_github_review_validation import CometCIReader, collect_comet_ci
+from .pipeline_github_review_validation import (
+    ValidationCIReader,
+    collect_repository_validation_ci,
+)
 from .pipeline_github_reviews import PipelineGitHubReviews
 from .pipeline_github_scope_expansion import PipelineGitHubScopeExpansion
 from .pipeline_github_transport import PipelineGitHubTransport
@@ -43,8 +47,14 @@ class PipelineGitHub(
         deadline = request.deadline_s
         if self._operation_deadline_s is not None:
             deadline = min(deadline, self._operation_deadline_s)
-        reader = CometCIReader(deadline_s=deadline, shutdown=self._operation_shutdown)
-        collection = collect_comet_ci(
+        profile = require_repository_validation_profile(request.invocation.plan.repository)
+        reader = ValidationCIReader(
+            profile.repository,
+            profile.ci_workflow_path,
+            deadline_s=deadline,
+            shutdown=self._operation_shutdown,
+        )
+        collection = collect_repository_validation_ci(
             request.invocation, head_branch=request.head_branch, reader=reader
         )
         return RepositoryValidationCIRead(request, collection.receipts, collection.gaps)

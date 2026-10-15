@@ -232,7 +232,7 @@ class TestWiring:
         selected_policy = created["rebase_policy_selector"]("Hephaestus")
         assert selected_policy is not None
         assert selected_policy.name == "hephaestus-adr-v1"
-        assert created["rebase_policy_selector"]("Comet") is None
+        assert created["rebase_policy_selector"]("Ledger") is None
         assert created["evidence_receipt_dir"] is None
         assert created["host_verification_pyxis_image"] == config.host_verification_pyxis_image
         assert created["host_verification_pyxis_sha256"] == config.host_verification_pyxis_sha256
