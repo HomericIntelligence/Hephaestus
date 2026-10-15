@@ -1339,13 +1339,23 @@ read-only. The host virtual environment is not mounted.
 
 Scratch and Pi logs are on an owner-private shared filesystem with a maximum
 1 GiB capacity. Slurm and inherited OS limits bound CPU, memory, process count,
-file size, and wall-clock time. Acceptance requires a real Linux Pyxis run of
-the integration test with `--require-pyxis-host-verification`. A skipped test
-supplies no acceptance evidence. A missing image,
+file size, and wall-clock time. The Pyxis boundary is optional for local
+lanes. When the pinned image digest, the trust authority, and the writable
+quota root are not all configured — the Linux rule `select_quota_backend`
+applies — a Linux worker runs the fixed immutable check directly from a
+disposable archive of the proven commit, with a scrubbed environment (no
+inherited credentials), bounded wall time, and a bounded writable scratch. The direct path does not deny network access or
+host file access: candidate code executes with the operator's reach, which
+the operator accepts by not configuring a backend. This covers the rebase
+lanes and the repository-validation lane on the operator's own source. Two
+lanes execute code from arbitrary pull requests and stay fail closed when the
+strict sandbox is not configured: the PR-review host-verification lane, which
+also requires a configured Pyxis backend for its durable receipt contract, and
+the Comet repository-validation local lane, which on Linux has no sandbox
+without Pyxis. A configured rear-end fails closed: a missing image,
 authority, bounded filesystem, Pyxis allocation, or Enroot runtime produces a
-failed receipt. It cannot become a passing skip. Other platforms remain
-fail-closed until a separately reviewed isolation backend exists. There is no
-unsandboxed fallback.
+failed receipt. Other platforms remain fail-closed until a separately
+reviewed isolation backend exists.
 
 Capability-dependent Hephaestus execution uses the boundary above. Ordinary
 source review does not execute these checks or require their image and quota

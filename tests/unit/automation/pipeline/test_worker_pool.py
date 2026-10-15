@@ -75,7 +75,10 @@ from hephaestus.automation.pipeline.host_capabilities import (
     SigningConfigurationError,
     WorkerCapabilities,
 )
-from hephaestus.automation.pipeline.host_verification_pyxis import PyxisImageMetadata
+from hephaestus.automation.pipeline.host_verification_pyxis import (
+    DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
+    PyxisImageMetadata,
+)
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -4583,7 +4586,10 @@ class TestWorkerPoolSubmitComplete:
     def test_immutable_build_test_rejects_missing_linux_pyxis_image_before_execution(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """Linux fails closed when its verified Pyxis image is unavailable."""
+        """A configured Pyxis backend fails closed when its image is unavailable."""
+        pool._host_verification_pyxis_sha256 = "b" * 64
+        pool._host_verification_pyxis_authority = tmp_path / "authority.json"
+        pool._host_verification_pyxis_quota_root = tmp_path
         job = BuildTestJob(
             repo="test/repo",
             cwd=tmp_path,
@@ -4596,6 +4602,7 @@ class TestWorkerPoolSubmitComplete:
         archive = MagicMock(return_value=(b"", ""))
         with (
             patch(f"{_WP}._pyxis_runtime_available", return_value=True),
+            patch.object(pool, "_host_verification_pyxis_image", str(tmp_path / "missing.sqsh")),
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}._trusted_executable", return_value=sys.executable),
             patch(
@@ -4663,6 +4670,7 @@ class TestWorkerPoolSubmitComplete:
         with (
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}.sys.platform", "linux"),
+            patch.object(pool, "_host_verification_pyxis_image", str(tmp_path / "image.sqsh")),
             patch(f"{_WP}._pyxis_runtime_available", return_value=True),
             patch(f"{_WP}._validate_pyxis_image", return_value=metadata),
             patch(f"{_WP}._validate_pyxis_quota_root", return_value=tmp_path),
@@ -4728,6 +4736,9 @@ class TestWorkerPoolSubmitComplete:
         )
         quota_root = tmp_path / "quota"
         quota_root.mkdir(mode=0o700)
+        pool._host_verification_pyxis_image = image
+        pool._host_verification_pyxis_sha256 = digest
+        pool._host_verification_pyxis_authority = tmp_path / "authority.json"
         pool._host_verification_pyxis_quota_root = quota_root
         job = BuildTestJob(
             repo="test/repo",
@@ -24712,7 +24723,10 @@ def test_pretest_job_issue_requires_an_integer(
 
 
 def test_pyxis_capability_failure_prevents_image_staging(pool: WorkerPool, tmp_path: Path) -> None:
-    """An unavailable runtime cannot start image staging or reviewed code."""
+    """A configured backend with an unavailable runtime cannot stage reviewed code."""
+    pool._host_verification_pyxis_sha256 = "b" * 64
+    pool._host_verification_pyxis_authority = tmp_path / "authority.json"
+    pool._host_verification_pyxis_quota_root = tmp_path
     job = BuildTestJob(
         repo="test/repo",
         cwd=tmp_path,
@@ -24723,6 +24737,7 @@ def test_pyxis_capability_failure_prevents_image_staging(pool: WorkerPool, tmp_p
     )
     with (
         patch(f"{_WP}._pyxis_runtime_available", return_value=False),
+        patch.object(pool, "_host_verification_pyxis_image", str(tmp_path / "missing.sqsh")),
         patch(f"{_WP}._validate_pyxis_image") as image,
         patch(f"{_WP}._stage_verified_pyxis_image") as stage,
         patch(f"{_WP}._run_bounded_host_command") as run,
@@ -24739,6 +24754,120 @@ def test_pyxis_capability_failure_prevents_image_staging(pool: WorkerPool, tmp_p
     image.assert_not_called()
     stage.assert_not_called()
     run.assert_not_called()
+
+
+def test_linux_immutable_build_test_runs_directly_without_configured_backend(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """Without any configured Pyxis input the fixed check runs from the archive."""
+    job = BuildTestJob(
+        repo="test/repo",
+        cwd=tmp_path,
+        argv=("uv", "run", "pytest"),
+        timeout_s=60,
+        expected_head_sha="a" * 40,
+        immutable_source=True,
+    )
+    run_result = JobResult(ok=True, value={"failure_kind": "none"}, stdout_tail="out")
+    with (
+        patch(f"{_WP}._pyxis_runtime_available") as runtime,
+        patch(f"{_WP}._validate_pyxis_image") as image,
+        patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+        patch(f"{_WP}._trusted_uv_executable", return_value="/usr/bin/uv"),
+        patch(f"{_WP}._trusted_git_executable", return_value="/usr/bin/git"),
+        patch(f"{_WP}._repository_validation_host_environment", return_value=tmp_path),
+        patch(f"{_WP}._bounded_git_archive", return_value=(b"", b"")),
+        patch(f"{_WP}._extract_immutable_archive"),
+        patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "m.git"),
+        patch(f"{_WP}._prepare_host_output_aliases"),
+        patch(f"{_WP}._seal_host_runtime"),
+        patch(f"{_WP}._host_verification_env", return_value={}),
+        patch(f"{_WP}._linux_resource_limited_command", side_effect=lambda c, **_: c),
+        patch(f"{_WP}._run_bounded_host_command", return_value=run_result) as run,
+    ):
+        result = pool._run_linux_immutable_build_test(job)
+    runtime.assert_not_called()
+    image.assert_not_called()
+    assert run.call_count == 1
+    assert result.ok is True
+    assert result.value["immutable_source"] is True
+    assert result.value["head_sha"] == "a" * 40
+    assert result.value["platform"] == "linux"
+    assert result.value["status"] == "passed"
+
+
+def test_linux_direct_dispatch_matches_production_wiring(pool: WorkerPool, tmp_path: Path) -> None:
+    """A default image without trust inputs dispatches to the direct check."""
+    pool._host_verification_pyxis_image = DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE
+    job = BuildTestJob(
+        repo="test/repo",
+        cwd=tmp_path,
+        argv=("uv", "run", "pytest"),
+        timeout_s=60,
+        expected_head_sha="a" * 40,
+        immutable_source=True,
+    )
+    with (
+        patch.object(pool, "_run_linux_direct_immutable_build_test") as direct,
+        patch(f"{_WP}._pyxis_runtime_available") as runtime,
+        patch(f"{_WP}._validate_pyxis_image") as image,
+    ):
+        pool._run_linux_immutable_build_test(job)
+    direct.assert_called_once_with(job, repository_runtime=None)
+    runtime.assert_not_called()
+    image.assert_not_called()
+
+
+def test_build_test_skips_quota_gate_without_configured_backend(
+    pool: WorkerPool, tmp_path: Path
+) -> None:
+    """An unconfigured quota backend never blocks an immutable build job."""
+    job = BuildTestJob(
+        repo="test/repo",
+        cwd=tmp_path,
+        argv=("uv", "run", "pytest"),
+        timeout_s=60,
+        expected_head_sha="a" * 40,
+        immutable_source=True,
+        capability_target=Mock(repository="test/repo"),
+    )
+    with (
+        patch.object(pool, "_run_host_capability") as capability,
+        patch.object(
+            pool, "_run_immutable_build_test", return_value=JobResult(ok=True)
+        ) as immutable,
+    ):
+        result = pool._run_build_test(job)
+    assert result.ok is True
+    assert immutable.call_count == 1
+    capability.assert_not_called()
+
+
+def test_build_test_enforces_quota_gate_with_configured_backend(pool: WorkerPool) -> None:
+    """A configured rear-end keeps the capability receipt gate fail closed."""
+    capabilities = pool._host_capabilities
+    assert capabilities is not None
+    pool._host_capabilities = replace(capabilities, quota_backend=Mock())
+    job = BuildTestJob(
+        repo="test/repo",
+        cwd=Path.cwd(),
+        argv=("uv", "run", "pytest"),
+        timeout_s=60,
+        expected_head_sha="a" * 40,
+        immutable_source=True,
+        capability_target=Mock(repository="test/repo"),
+    )
+    unavailable = JobResult(ok=False, error="host_verification_quota_unavailable")
+    with (
+        patch(f"{_WP}.HostCapabilityJob"),
+        patch.object(pool, "_run_host_capability", return_value=unavailable) as capability,
+        patch.object(pool, "_run_immutable_build_test") as immutable,
+    ):
+        result = pool._run_build_test(job)
+    assert result.ok is False
+    assert result.error == "host_verification_quota_unavailable"
+    assert capability.call_count == 1
+    immutable.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -25766,6 +25895,9 @@ def test_repository_validation_worker_returns_attempt_bound_evidence(
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
     install_profile(monkeypatch, nightly=True)
+    pool._host_verification_pyxis_sha256 = "b" * 64
+    pool._host_verification_pyxis_authority = tmp_path / "authority.json"
+    pool._host_verification_pyxis_quota_root = tmp_path
     trusted, execution = _execution_runtime(tmp_path)
     job = _repository_build_job(execution)
     value = {
@@ -25836,6 +25968,36 @@ def test_repository_validation_worker_rejects_source_before_execution(
     assert not result.ok
     assert result.value.receipt is None
     assert result.value.gap.reason == "local_source_unavailable"
+
+
+def test_repository_validation_linux_requires_the_pyxis_sandbox(
+    pool: WorkerPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Comet PR code stays fail closed when the sandbox is not configured."""
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import install_profile
+    from tests.unit.automation.pipeline.test_jobs import _repository_build_job
+    from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
+
+    install_profile(monkeypatch, nightly=True)
+    trusted, execution = _execution_runtime(tmp_path)
+    job = _repository_build_job(execution)
+    with (
+        patch(f"{_WP}.sys.platform", "linux"),
+        patch(f"{_WP}._repository_validation_host_root", return_value=trusted, create=True),
+        patch(f"{_WP}.validate_workspace_binding", return_value=job.cwd, create=True),
+        patch(f"{_WP}.validation_plan_for_workspace", return_value=execution.plan, create=True),
+        patch.object(
+            pool,
+            "_run_immutable_build_test",
+            side_effect=AssertionError("Arbitrary PR code must not execute directly."),
+        ),
+        patch("subprocess.Popen", side_effect=AssertionError("No subprocess is allowed.")),
+    ):
+        result = pool._run_build_test(job)
+    assert not result.ok
+    assert result.error == "host_verification_pyxis_runtime_unavailable"
+    assert result.value.receipt is None
+    assert result.value.gap.reason == "local_execution_unavailable"
 
 
 @pytest.mark.parametrize("site_input", ["absent", "file", "symlink"])
@@ -25939,6 +26101,9 @@ def test_repository_validation_linux_mounts_runtime_read_only(
         source_revision="a" * 40,
         launch_binding=MagicMock(),
     )
+    pool._host_verification_pyxis_image = metadata.path
+    pool._host_verification_pyxis_sha256 = metadata.sha256
+    pool._host_verification_pyxis_authority = tmp_path / "authority.json"
     pool._host_verification_pyxis_quota_root = tmp_path
 
     def fixture_ancestry(path: Path) -> None:
