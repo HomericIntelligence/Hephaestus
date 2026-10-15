@@ -106,20 +106,7 @@ _PYGREP_CONTRACTS = {
     ),
 }
 # Keep the reviewed root policies explicit. A wider exclusion requires review.
-_PYGREP_ROOT_SELECTORS = frozenset(
-    {
-        ("", "^$"),
-        (
-            "",
-            "^tests/fixtures/comet-review-validation/(current/|fe5a67d/|historical/controls/)",
-        ),
-        (
-            "",
-            "^tests/fixtures/comet-review-validation/"
-            "(current/|fe5a67d/|7c2772e/|historical/controls/)",
-        ),
-    }
-)
+_PYGREP_ROOT_SELECTORS = frozenset({("", "^$")})
 _REMOTE_ENTRIES = {
     "https://github.com/pre-commit/pre-commit-hooks": {
         "trailing-whitespace": "trailing-whitespace-fixer",

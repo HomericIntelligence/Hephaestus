@@ -181,26 +181,24 @@ directory, `/Library`, `/Applications`, or an entire development-tool root.
 The candidate environment does not contain `GIT_EXEC_PATH`. A discovery or
 validation error stops host verification before candidate code starts.
 
-Run the focused resolver, profile, and immutable boundary regressions on a
-macOS host:
-
-```bash
-uv run pytest -o addopts= \
-  tests/unit/automation/pipeline/test_worker_pool.py::TestHostVerificationGitExecPath \
-  tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_trusted_runner_preserves_native_fallback \
-  tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_changed_runner_rejects_native_fallback \
-  tests/unit/automation/pipeline/test_worker_pool.py::TestWorkerPoolSubmitComplete::test_immutable_changed_helper_rejects_native_fallback \
-  -q --tb=short
-```
-
 The host must have the project virtual environment, `sandbox-exec`, system Git
 in an approved toolchain, and usable HFS+ quota mounts. A missing prerequisite
 must fail the macOS acceptance run. A platform skip is not acceptance evidence.
 
+The focused resolver, profile, and immutable-boundary regressions that this
+section used to name were removed with the non-core-library test re-scope. The
+`hephaestus/automation` product layer now sits outside the unit-test suite, so
+no automated command exercises this boundary. The worker owns the resolver and
+the sandbox profile in
+[`worker_pool.py`](../../hephaestus/automation/pipeline/worker_pool.py). A
+reviewer must confirm a change by reading that module, and must report a macOS
+boundary regression that no test can catch.
+
 If a released resolver or profile rule causes a macOS boundary regression,
-revert the resolver, its exact profile rule, its tests, and this section in one
-revert commit. Run the existing host-verification protection tests before the
-next release. Do not add broader sandbox permissions as a rollback action.
+revert the resolver, its exact profile rule, and this section in one revert
+commit. Report the regression on the pull request, because no host-verification
+protection test remains. Do not add broader sandbox permissions as a rollback
+action.
 
 ## Linux PR-review host verification
 

@@ -85,8 +85,11 @@ Hephaestus/
 │   └── version/                # Version management
 ├── scripts/                    # Automation and maintenance scripts
 ├── tests/                      # Unit and integration tests
-│   ├── unit/                   # Unit tests (mirror hephaestus/ subpackages; a small sanctioned set of extra dirs covers non-package targets — scripts/, docs/, shell, top-level modules)
-│   └── integration/            # Integration tests
+│   ├── unit/                   # Unit tests (mirror hephaestus/ subpackages; SANCTIONED_EXTRA_TEST_DIRS names the extra directories that have no source counterpart)
+│   ├── integration/            # Integration tests
+│   ├── performance/            # Load and regression benchmarks
+│   ├── fixtures/               # Versioned test fixtures
+│   └── shell/                  # Shell installer and justfile tests (bats)
 ├── docs/                       # Documentation
 └── .claude/                    # Claude Code configurations
 ```
@@ -123,20 +126,50 @@ exact assigned numbers.
 
 ### Coverage omit-list invariant
 
-Whole `hephaestus/automation/*.py` modules remain in coverage measurement.
-Hermetic unit tests inject agent, GitHub, Git, subprocess, clock, and terminal
-seams, while `coverage.toml` applies explicit per-module line-coverage floors
-to orchestration facades.
+The Coverage.py gate measures the whole `hephaestus/` package. That includes the
+opt-in `hephaestus/automation/` product layer. The product layer ships behind
+the `HomericIntelligence-Hephaestus[automation]` extra, and the dependency
+arrow points only from the product layer to the library. The extra controls
+imports. It does not remove the layer from measurement.
 
-`tests/unit/validation/test_omit_allowlist.py` requires the Coverage.py omit
-list to equal the two generic exclusions for tests and package
-`__init__.py` files. The retained migration sources and the shared
-`pipeline_cli.py` must each meet a 70% line-coverage floor. These sources are
-`implementer.py`, `planner.py`, `loop_runner.py`, `loop_repo_manager.py`,
-`address_review_core.py`, and `pipeline_cli.py`. Remove a module floor only when
-its source is deleted. Keep all other module floors. A future omission for
-external execution requires a documented boundary and an explicit change to
-this allowlist contract. Imports and test names do not prove coverage.
+The omit list holds exactly two entries: the test tree and the package
+`__init__.py` files. Keep both generic exclusions. Do not add another entry
+without a documented boundary and an explicit change to this invariant.
+`tests/unit/validation/test_omit_allowlist.py` enforces exact membership, so a
+whole `hephaestus/automation/*.py` module must stay measured.
+
+`coverage.toml` holds the aggregate threshold and the per-module floors. The
+retained floors are `validation/schema.py`, `automation/models.py`,
+`automation/dependency_resolver.py`, and the line-coverage floors for
+`automation/implementer.py`, `automation/planner.py`,
+`automation/loop_runner.py`, `automation/loop_repo_manager.py`,
+`automation/address_review_core.py`, and `automation/pipeline_cli.py`. Remove a
+module floor only when its source is deleted. Keep all other module floors.
+
+`fail_under` in `[tool.coverage.report]` is 85. The gate measures the whole
+package. Hermetic unit tests inject the agent, GitHub, Git, subprocess, clock,
+and terminal seams, so live boundaries are exercised without a live transport.
+Imports and test names do not prove coverage.
+
+Measuring the product layer does not relax a safety boundary. The following
+rules apply to every module in that layer, and a change to any of them needs
+the same source review as a library change.
+
+- **Prompt fencing stays.** Every untrusted GitHub value still passes through
+  `fence_untrusted()` in `hephaestus/prompts/fencing.py` with a fresh nonce, and
+  still carries the untrusted-content notice.
+- **Transport size caps stay.** Review publication still caps the finding count,
+  each finding path, body, and evidence field, the aggregate record bytes, the
+  review body, the demoted-findings section, the summary, the raw feedback, the
+  warning list, and the reported-finding text.
+- **The sign-off gates stay fail closed.** The plan-review `GO` verdict and the
+  implementation-review `GO` plus the `state:implementation-go` label proof
+  still require the explicit reviewer verdict. A missing or malformed verdict
+  invalidates the audit before any label write. Informational validation never
+  relaxes this rule.
+
+Change the omit list, a module floor, or `fail_under` only in a commit that
+also updates this section.
 
 ## Python Development Guidelines
 
@@ -205,7 +238,7 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 - Type hints required for all functions
 - Clear docstrings for public functions and classes
 - Comprehensive error handling
-- Comprehensive test coverage (unit tests) — 85%+ test coverage enforced by the CI gate (`fail_under = 85`); target 90%
+- Comprehensive test coverage (unit tests) — 85% test coverage for the whole `hephaestus/` package, enforced by the CI gate (`fail_under = 85`)
 - Follow PEP 8 style guidelines
 
 ## Key Development Principles
@@ -630,7 +663,9 @@ pre-commit run --all-files
 - `hephaestus/cli/` - CLI utilities (argument parsing, output formatting)
 - `hephaestus/system/` - System information collection
 - `hephaestus/github/` - GitHub automation (PR merging)
-- `tests/unit/` - Unit test suite (mirrors hephaestus/ subpackages; sanctioned extra dirs in SANCTIONED_EXTRA_TEST_DIRS cover non-package targets like scripts/, docs/, shell installers, top-level modules)
+- `tests/unit/` - Unit test suite. It mirrors the hephaestus/ subpackages.
+  `SANCTIONED_EXTRA_TEST_DIRS` in `hephaestus/validation/test_layout.py` names
+  the extra test directories that have no source counterpart.
 - `tests/integration/` - Integration tests (package importability, smoke tests)
 - `scripts/` - Automation and maintenance tools
 - `docs/` - Documentation and guides
@@ -694,6 +729,21 @@ admission when the effective ruleset requires a merge queue. Otherwise, direct m
 protection from a source that the current actor cannot bypass. No queue stage
 mutates native auto-merge.
 
+**These approval boundaries are unchanged.** The informational validation
+described below changes only how the host shows one finding. It does not relax
+any gate. The following rules still fail closed:
+
+- The plan-review `GO` verdict and the implementation-review `GO` verdict stay
+  required. A missing or malformed verdict invalidates the audit before any
+  label write. The host never infers a verdict from a grade, a summary, or
+  warning text.
+- `state:implementation-go` still needs the exact reviewed head, the exact-head
+  readback, the exclusive label transition, and its label readback.
+- Every exact-head proof, the retry budgets, and the bounded per-round budgets
+  stay in force. An expired budget cannot be renewed.
+- Prompt fencing for untrusted GitHub content stays mandatory, and the
+  transport size caps on every published body stay in force.
+
 A reviewer can report a required scope expansion in its structural audit. The
 host creates one deterministic child issue and keeps the source PR in the
 exclusive implementation-NO-GO state. The host reconciles that child before a
@@ -704,13 +754,40 @@ The source PR then needs a fresh broad review. No agent receives the expansion a
 work. In a mixed audit, only a validated scope retraction can go to the writer
 before the source PR parks.
 
+**Review validation is informational.** Validation of one finding never
+invalidates the surrounding review. The host keeps every usable finding,
+quarantines the malformed ones, and reports each one.
+
+- A finding whose anchor is not in the reviewed immutable diff is not discarded
+  and does not fail publication. The host demotes it from the inline surface and
+  renders it in the visible review body under a warning marker, with its
+  location, its finding ID, its text, and a recovery instruction. GitHub renders
+  that body as an unanchored general comment, so the feedback stays on the pull
+  request.
+- A malformed finding is reported, not skipped. The host keeps the other
+  findings, emits a warning for the malformed one, and carries its content as
+  bounded text.
+- Every warning carries three parts: a stable machine-readable code, a short
+  message, and a recovery instruction that states the operator action. A warning
+  without a recovery instruction is not a valid warning.
+- The reviewer never invents an anchor it cannot justify, and it still prefers a
+  changed line in the diff.
+- A demoted or reported finding is not a clean sign-off. It prevents
+  `state:implementation-go` and routes the item through the ordinary non-GO
+  review path. It does not raise and it does not fail open.
+
+The host no longer runs a second reviewer turn to repair an invalid anchor. A
+durable item that still holds the wait state of that removed review round
+reroutes to a fresh review step instead of failing closed on a state the host
+no longer owns.
+
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
 | repo | `hephaestus.automation.pipeline.stages.repo` | Clone/discover, classify issues/PRs, and seed entry queues |
 | planning | `hephaestus.automation.pipeline.stages.planning` | Advise and produce an implementation plan |
 | plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | PR-writer worktree, rebase, implementation, tests, commit/push, and PR creation |
-| pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Scope-dependency reconciliation, detached read-only review, validation, one batched inline review, and implementation labels |
+| pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Scope-dependency reconciliation, detached read-only review, informational finding validation, one batched inline review, and implementation labels |
 | merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Conditionally merges the exact reviewed head and emits post-merge learning intent |
 | learning | `hephaestus.automation.pipeline.stages.learning` | Claims durable intents and submits host-owned learning work |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and auxiliary worktree cleanup/preservation |
@@ -869,12 +946,15 @@ would run; no clone, worktree, rebase, or other Git mutation is executed.
 ## Prompt safety
 
 `hephaestus.automation.prompts` builds every prompt the agents see. The module's
-contract — enforced by the test suite — is that **all untrusted GitHub content**
+contract is that **all untrusted GitHub content**
 (issue bodies, PR diffs, reviewer comments, plan text) is wrapped with
 `_fence_untrusted()` using random nonces and accompanied by `_UNTRUSTED_NOTICE`.
 This prevents a hostile issue body from forging a verdict line or injecting
-instructions that bypass the PR review loop. See the tests in
-`tests/unit/automation/test_prompts.py` for the regression coverage.
+instructions that bypass the PR review loop.
+`hephaestus/prompts/fencing.py` holds the single definition of the fence.
+`shared/untrusted_notice.j2` in the packaged catalog supplies the notice.
+`tests/unit/prompts/test_writing_standard.py` renders the fenced templates and
+guards the packaged prompt contract.
 
 ## Agent safety checkpoints
 

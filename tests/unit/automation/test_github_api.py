@@ -3229,7 +3229,6 @@ class TestUpsertAndDeleteComment:
     @pytest.mark.parametrize(
         "comment",
         [
-            _recovery_comment(None),
             _recovery_comment(_recovery_body(), comment_id="not-an-integer"),
             _recovery_comment(_recovery_body(), comment_id=True),
             _recovery_comment(_recovery_body(), comment_id=1.5),
@@ -3238,7 +3237,6 @@ class TestUpsertAndDeleteComment:
             {"id": 2, "body": _recovery_body(), "user": {}},
         ],
         ids=[
-            "body",
             "database-id-text",
             "database-id-bool",
             "database-id-fraction",
@@ -3274,6 +3272,38 @@ class TestUpsertAndDeleteComment:
                 )
 
         mock_create.assert_not_called()
+        mock_gh_call.assert_not_called()
+
+    def test_recovery_upsert_treats_an_unreadable_body_as_not_the_canonical_pointer(self) -> None:
+        """An unreadable stored body cannot match the canonical marker.
+
+        The host reads the malformed body as absent, so the stored comment
+        does not carry the marker and cannot be the canonical pointer. The
+        host writes a fresh canonical comment instead of updating or
+        deleting an artifact it cannot identify.
+        """
+        body = _recovery_body()
+        with (
+            patch(
+                "hephaestus.automation.github_api.gh_current_login",
+                return_value="hephaestus-bot",
+            ),
+            patch(
+                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
+                return_value=[_recovery_comment(None)],
+            ),
+            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
+            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
+        ):
+            with pytest.raises(RuntimeError, match="actor-owned"):
+                gh_issue_upsert_comment(
+                    5,
+                    RECOVERY_PROVENANCE_PREFIX,
+                    body,
+                    repo=("o", "r"),
+                )
+
+        assert mock_create.call_count == 1
         mock_gh_call.assert_not_called()
 
     def test_upsert_rejects_older_duplicates_without_deleting_them(self) -> None:

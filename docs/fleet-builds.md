@@ -90,9 +90,10 @@ synchronizes the exact retained owner binding before it requests a grant. Output
 publication synchronizes the output file and its directory before it sends a
 terminal fact. These build-only helpers do not change other journal callers.
 
-The local ordering tests observe real file and directory synchronization before
-the first transport call and after a reported interruption on restart. They are
-not power-loss experiments or scheduler qualification.
+The local ordering behavior must synchronize a real file and directory before
+the first transport call and after a reported interruption on restart. No test
+observes this behavior. No power-loss experiment and no scheduler qualification
+covers it.
 
 1. Validate the exact command and retain one generated claim ID.
 2. Request the controller grant with that retained claim. Validate the full
@@ -200,9 +201,10 @@ summary. They remain readable, but cannot qualify result evidence until a new
 `dispose()` call observes the same fenced lease and step. This call cannot start
 or release another process. Changed retained observations require reconciliation.
 
-The step tests use actual gated local processes and the harmless producer fixture
-Justfile. Their allocation and step identities are explicitly synthetic. They do
-not qualify Slurm, Pyxis, the full Hephaestus recipe or an operational allocation.
+The step owner must use actual gated local processes and the harmless producer
+fixture Justfile. Its allocation and step identities are explicitly synthetic.
+No test runs these steps. Nothing here qualifies Slurm, Pyxis, the full
+Hephaestus recipe, or an operational allocation.
 
 ## Output and evidence
 
@@ -276,11 +278,13 @@ recipe execution and operational collection remain
 required integration/acceptance steps. Remote HTTPS artifact retrieval remains
 unavailable; the collector supports only an explicitly supplied private root.
 The current registered recipe requires Linux/aarch64. Both requested `m1-builds`
-and `m2-builds` pools declare Linux/amd64. Neither requested pool is qualified by
-these controlled tests. A measured amd64 recipe and toolchain policy remain an
+and `m2-builds` pools declare Linux/amd64. No controlled test qualifies either
+requested pool. A measured amd64 recipe and toolchain policy remain an
 integration gate; the implementation does not change desired platform settings.
 
-The [focused tests](../tests/unit/automation/test_fleet_build_supervisor.py) use
-actual exported controller and snapshot fixtures. They distinguish controlled
-process observations from synthetic allocation metadata. Their results do not
-enable admission, change an image, or authorize a provider turn.
+The supervisor tests that once used exported controller and snapshot fixtures
+were removed with the non-core-library test re-scope. No test now covers this
+module. A reviewer must confirm that a change preserves the exported
+controller and snapshot behavior by reading the contract in the modules above.
+These modules are not core library surface, so they sit outside the coverage
+gate.

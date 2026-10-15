@@ -1,4 +1,10 @@
-"""Check the bounded manifest contract for a sealed Comet runtime."""
+"""Check the bounded manifest contract for a sealed validation runtime.
+
+The sealed layout, its manifest header, and its required programs belong to the
+installed repository profile. Hephaestus ships no profile. These tests build one
+generic profile through the shared stub and exercise the admission rules that
+Hephaestus owns.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,13 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+
+from hephaestus.automation.repository_validation_runtime import CAPABILITY_ROOT, MANIFEST_SCHEMA
+from tests.unit.automation.pipeline.repository_validation_profile_stub import (
+    RUNTIME_SLUG,
+    build_profile,
+    install_profile as _install_profile,
+)
 
 PROJECT = "a" * 64
 LOCK = "b" * 64
@@ -30,22 +43,21 @@ def _entry(path: str, *, size: int = 0, mode: int = 0o444) -> dict[str, Any]:
     return {"path": path, "size": size, "mode": mode, "sha256": hashlib.sha256(b"").hexdigest()}
 
 
+def _header() -> dict[str, Any]:
+    """Return the complete manifest header owned by the stub profile."""
+    return {"schema": MANIFEST_SCHEMA, **dict(build_profile().runtime_header)}
+
+
 def _manifest(
     extra: list[dict[str, Any]] | None = None, *, project: str = PROJECT, lock: str = LOCK
 ) -> dict[str, Any]:
-    entries = [
-        _entry(f"bin/{name}", mode=0o555) for name in ("uv", "python", "ruff", "ty", "mkdocs")
-    ]
+    entries = [_entry(path, mode=0o555) for path in sorted(build_profile().runtime_executables)]
     entries.extend(extra or [])
     entries.sort(key=lambda entry: entry["path"])
     return {
-        "schema": "hephaestus-comet-review-runtime-v1",
-        "profile": "comet",
-        "repository": "llm360/comet",
+        **_header(),
         "pyproject_sha256": project,
         "uv_lock_sha256": lock,
-        "python_version": "3.12",
-        "uv_version": "0.12.7",
         "entries": entries,
         "tree_sha256": hashlib.sha256(_canonical(entries)).hexdigest(),
     }
@@ -57,7 +69,9 @@ def _encode(manifest: dict[str, Any]) -> bytes:
 
 
 def _parse(raw: bytes) -> Any:
-    return _api().parse_runtime_manifest(raw, pyproject_sha256=PROJECT, uv_lock_sha256=LOCK)
+    return _api().parse_runtime_manifest(
+        raw, profile=build_profile(), pyproject_sha256=PROJECT, uv_lock_sha256=LOCK
+    )
 
 
 def test_runtime_manifest_accepts_bound_inventory() -> None:
@@ -78,8 +92,8 @@ def test_runtime_manifest_accepts_bound_inventory() -> None:
     [
         ("schema", "other"),
         ("profile", "other"),
-        ("repository", "other/comet"),
-        ("python_version", "3.13"),
+        ("repository", "other/ledger"),
+        ("python_version", "3.14"),
         ("uv_version", "0.12.8"),
         ("pyproject_sha256", "c" * 64),
         ("uv_lock_sha256", "c" * 64),
@@ -168,7 +182,7 @@ def test_runtime_manifest_requires_canonical_utf8_json(fault: str) -> None:
     """Reject ambiguous, noncanonical, and malformed JSON encodings."""
     raw = _encode(_manifest())
     if fault == "duplicate_key":
-        raw = b'{"profile":"comet",' + raw[1:]
+        raw = b'{"profile":"other",' + raw[1:]
     elif fault == "whitespace":
         raw = b" " + raw
     elif fault == "newline":
@@ -184,7 +198,10 @@ def test_runtime_manifest_requires_canonical_utf8_json(fault: str) -> None:
 @pytest.mark.parametrize("count,accepted", [(50_000, True), (50_001, False)])
 def test_runtime_manifest_file_count_limit(count: int, accepted: bool) -> None:
     """Accept the maximum file count and reject one additional file."""
-    raw = _encode(_manifest([_entry(f"lib/file-{index:05}.py") for index in range(count - 5)]))
+    required = len(build_profile().runtime_executables)
+    raw = _encode(
+        _manifest([_entry(f"lib/file-{index:05}.py") for index in range(count - required)])
+    )
     if accepted:
         assert len(_parse(raw).entries) == count
     else:
@@ -240,7 +257,7 @@ def _sealed_runtime(
 ) -> tuple[Any, Any, dict[str, Any]]:
     """Make a sealed file fixture without claiming an executable environment."""
     trusted = tmp_path.resolve() / "host"
-    parent = trusted / "build/hephaestus-review-validation/comet"
+    parent = trusted / CAPABILITY_ROOT / RUNTIME_SLUG
     root = parent / lock
     environment = root / "environment"
     data = _manifest([_entry("lib/example.py")], project=project, lock=lock)
@@ -266,7 +283,13 @@ def _sealed_runtime(
 def _admit(trusted: Any, **kwargs: Any) -> Any:
     api = _api()
     assert hasattr(api, "admit_runtime"), "Runtime file admission is not available."
-    return api.admit_runtime(trusted, pyproject_sha256=PROJECT, uv_lock_sha256=LOCK, **kwargs)
+    return api.admit_runtime(
+        trusted,
+        profile=build_profile(),
+        pyproject_sha256=PROJECT,
+        uv_lock_sha256=LOCK,
+        **kwargs,
+    )
 
 
 def test_runtime_admission_verifies_complete_sealed_files(tmp_path: Any) -> None:
@@ -521,10 +544,13 @@ def _admit_execution(trusted: Any, execution: Any) -> Any:
     return api.admit_execution_runtime(execution, trusted_root=trusted)
 
 
-def test_execution_runtime_admission_binds_profile_and_fixed_host_root(tmp_path: Any) -> None:
+def test_execution_runtime_admission_binds_profile_and_fixed_host_root(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
     """Admit the exact runtime identities without starting a subprocess."""
     from unittest.mock import patch
 
+    _install_profile(monkeypatch, nightly=True)
     trusted, execution = _execution_runtime(tmp_path)
     with patch("subprocess.Popen", side_effect=AssertionError("No subprocess is allowed.")):
         result = _admit_execution(trusted, execution)
@@ -536,11 +562,14 @@ def test_execution_runtime_admission_binds_profile_and_fixed_host_root(tmp_path:
 @pytest.mark.parametrize(
     "fault", ["host_root", "profile", "command", "manifest_digest", "tree_digest", "nonce"]
 )
-def test_execution_runtime_admission_rejects_unbound_metadata(tmp_path: Any, fault: str) -> None:
+def test_execution_runtime_admission_rejects_unbound_metadata(
+    tmp_path: Any, fault: str, monkeypatch: Any
+) -> None:
     """Reject foreign runtime roots, altered commands, and stale identities."""
     from dataclasses import replace
     from unittest.mock import patch
 
+    _install_profile(monkeypatch, nightly=True)
     trusted, execution = _execution_runtime(tmp_path)
     if fault == "host_root":
         trusted = tmp_path / "other-host"
@@ -562,127 +591,27 @@ def test_execution_runtime_admission_rejects_unbound_metadata(tmp_path: Any, fau
             _admit_execution(trusted, execution)
 
 
-def test_execution_runtime_admission_rejects_network_dependent_check(tmp_path: Any) -> None:
-    """Keep the validator that downloads actionlint unavailable to local execution."""
+def test_execution_runtime_admission_rejects_a_check_outside_local_execution(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Reject a check that the installed profile does not allow locally.
+
+    A network-dependent validator is the repository-specific example. The
+    admission rule is generic: the profile owns which checks a sealed local
+    runtime may execute.
+    """
     from dataclasses import replace
     from unittest.mock import patch
 
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import NIGHTLY_CHECK_ID
     from tests.unit.automation.test_pipeline_github_review_validation import _ci_collection_fixture
 
+    _install_profile(monkeypatch, nightly=True)
     trusted, execution = _execution_runtime(tmp_path)
-    invocation, _ = _ci_collection_fixture(
-        tmp_path / "checkout", (("M", "scripts/deployed_artifact_validators.py"),)
-    )
-    check_id = "comet.contract.workflow-contracts"
+    invocation, _ = _ci_collection_fixture(tmp_path / "checkout", (("M", "src/ledger/example.py"),))
+    check_id = NIGHTLY_CHECK_ID
     assert check_id in {check.check_id for check in invocation.plan.checks}
     execution = replace(execution, plan=invocation.plan, check_id=check_id)
     with patch("subprocess.Popen", side_effect=AssertionError("No subprocess is allowed.")):
         with pytest.raises(ValueError):
             _admit_execution(trusted, execution)
-
-
-@pytest.mark.parametrize("reviewed_imports", [True, False], ids=["reviewed", "negative-control"])
-def test_real_runtime_fixed_command_imports_reviewed_source(
-    tmp_path: Any, reviewed_imports: bool
-) -> None:
-    """Qualify the optional real capability without substituting a dummy runtime.
-
-    This test uses a small source fixture and the fixed PR command. It proves
-    runtime admission and import precedence, not the worker isolation boundary.
-    The normal unit suite can run without this optional host capability.
-    """
-    import shutil
-    import subprocess
-    from pathlib import Path
-
-    from hephaestus.automation.pipeline.worker_pool import (
-        _host_verification_env,
-        _repository_validation_environment,
-        _seal_host_runtime,
-    )
-    from hephaestus.automation.pipeline_github_review_validation import (
-        COMET_PROFILE_ID,
-        comet_validation_checks,
-    )
-
-    root = Path(__file__).resolve().parents[4]
-    capability = root / "build/hephaestus-review-validation/comet"
-    if not capability.exists():
-        pytest.skip("The optional real Comet runtime is not prepared on this host.")
-    check = next(
-        check
-        for check in comet_validation_checks(COMET_PROFILE_ID, (("M", "tests/test_pool.py"),))
-        if check.check_id == "comet.python.pr-tests"
-    )
-    sources = {path: digest for path, _, digest in check.source_digests}
-    runtime = _api().admit_runtime(
-        root, pyproject_sha256=sources["pyproject.toml"], uv_lock_sha256=sources["uv.lock"]
-    )
-    fixture = root / "tests/fixtures/comet-review-validation"
-    source, scratch = tmp_path / "source", tmp_path / "scratch"
-    shutil.copytree(fixture / "runtime-imports", source)
-    scratch.mkdir()
-    for name in ("pyproject.toml", "uv.lock", "scripts/ci/run-test-tier.py"):
-        target = source / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(fixture / "current" / name, target)
-    _seal_host_runtime(source)
-    executable = runtime.root / "environment/bin/uv"
-    environment = _host_verification_env(scratch, str(executable), runtime.root / "environment")
-    dependencies = [
-        "typer",
-        "pydantic",
-        "jinja2",
-        "httpx",
-        "grpc",
-        "grpc_health",
-        "yaml",
-        "fastapi",
-        "uvicorn",
-        "uvloop",
-        "asyncpg",
-        "huggingface_hub",
-        "pytest",
-        "pytest_asyncio",
-        "pytest_cov",
-        "jsonschema",
-        "mkdocs",
-        "pymdownx",
-    ]
-    probe = subprocess.run(
-        [
-            str(runtime.root / "environment/bin/python"),
-            "-c",
-            "import importlib,json,sys; "
-            "[importlib.import_module(name) for name in json.loads(sys.argv[1])]; "
-            "import comet; print(comet.QUALIFICATION_VALUE)",
-            json.dumps(dependencies),
-        ],
-        cwd=scratch,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert probe.returncode == 0, probe.stderr
-    assert probe.stdout.strip() == "installed-old"
-    if reviewed_imports:
-        environment = _repository_validation_environment(environment, source, runtime)
-    result = subprocess.run(
-        [str(executable), *check.argv[1:]],
-        cwd=source,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == (0 if reviewed_imports else 1), result.stdout + result.stderr
-    proof = json.loads((scratch / "import-proof.json").read_text(encoding="utf-8"))
-    expected = "reviewed-source" if reviewed_imports else "installed-old"
-    assert proof["main"]["value"] == proof["child"]["value"] == expected
-    assert (
-        _api().admit_runtime(
-            root, pyproject_sha256=sources["pyproject.toml"], uv_lock_sha256=sources["uv.lock"]
-        )
-        == runtime
-    )

@@ -6145,7 +6145,6 @@ class TestMutatorMapping:
     @pytest.mark.parametrize(
         "comment",
         [
-            _recovery_comment(None),
             _recovery_comment(_recovery_body(), comment_id="not-an-integer"),
             _recovery_comment(_recovery_body(), comment_id=True),
             _recovery_comment(_recovery_body(), comment_id=1.5),
@@ -6154,7 +6153,6 @@ class TestMutatorMapping:
             {"id": 2, "body": _recovery_body(), "user": {}},
         ],
         ids=[
-            "body",
             "database-id-text",
             "database-id-bool",
             "database-id-fraction",
@@ -6181,6 +6179,34 @@ class TestMutatorMapping:
             adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, _recovery_body())
 
         post.assert_not_called()
+        patch_comment.assert_not_called()
+
+    def test_recovery_upsert_quarantines_a_comment_with_a_non_string_body(
+        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A comment the host cannot read is quarantined, then the host writes a new one."""
+        adapter._viewer_login_cache = "hephaestus-bot"
+        post = MagicMock()
+        patch_comment = MagicMock()
+        reads: list[int] = []
+
+        def fake_comments(_number: int) -> list[dict[str, object]]:
+            # The first read sees the unreadable comment. Every later read sees
+            # the complete record that the host wrote.
+            reads.append(1)
+            if len(reads) == 1:
+                return [_recovery_comment(None)]
+            return [_recovery_comment(_recovery_body(), comment_id=3)]
+
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fake_comments)
+        monkeypatch.setattr(adapter, "_post_issue_comment", post)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+
+        adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, _recovery_body())
+
+        # The malformed comment names no marker, so it cannot change pipeline
+        # state. The host reports it and writes the complete record again.
+        post.assert_called_once()
         patch_comment.assert_not_called()
 
     def test_upsert_rejects_foreign_canonical_marker_without_shadow_comment(
@@ -7103,6 +7129,26 @@ def test_dry_run_state_transitions_do_not_reach_transport(
     dry_adapter.mark_pr_implementation_go(7)
 
     call_mock.assert_not_called()
+
+
+def _no_review_threads_payload() -> dict[str, object]:
+    """Return a GraphQL review-receipt response that holds no review thread."""
+    return {
+        "data": {
+            "repository": {
+                "owner": {"login": "org"},
+                "name": "repo-a",
+                "pullRequest": {
+                    "id": "PR_7",
+                    "number": 7,
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [],
+                    },
+                },
+            }
+        }
+    }
 
 
 class TestRepoScoping:
@@ -8931,7 +8977,7 @@ class TestRepoScoping:
     ) -> None:
         """A source-anchored finding has no review-level response pathway."""
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
-        review_payloads: list[dict[str, object]] = []
+        review_payloads: list[dict[str, Any]] = []
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             if argv[:2] == ["pr", "diff"]:
@@ -8978,12 +9024,12 @@ class TestRepoScoping:
             }
         ]
 
-    def test_repo_scoped_review_post_rejects_the_complete_batch_before_writing(
+    def test_repo_scoped_review_post_publishes_usable_findings_and_demotes_the_rest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
-        """One invalid anchor stops the full review batch before publication."""
+        """One invalid anchor demotes that finding and keeps the usable ones."""
         calls: list[list[str]] = []
-        review_payloads: list[dict[str, object]] = []
+        review_payloads: list[dict[str, Any]] = []
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
@@ -9033,7 +9079,9 @@ class TestRepoScoping:
             review_diff=diff,
         )
 
-        assert result == []
+        assert result == [
+            {"id": "thread-valid", "path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"}
+        ]
         assert len(result.corrections) == 1
         correction = result.corrections[0]
         assert correction.path == "a.py"
@@ -9042,18 +9090,37 @@ class TestRepoScoping:
         assert correction.reason == "line_not_in_diff"
         assert correction.finding["body"] == "stale"
         assert correction.finding["evidence"] == "descriptor state is not propagated"
-        assert review_payloads == []
-        assert calls == []
+        # The usable finding stays inline. The demoted finding stays visible in
+        # the review body, so no finding is discarded.
+        assert len(review_payloads) == 1
+        payload = review_payloads[0]
+        assert len(payload["comments"]) == 1
+        assert payload["comments"][0]["path"] == "a.py"
+        assert payload["comments"][0]["line"] == 1
+        assert "stale" in payload["body"]
+        assert "anchor_line_not_in_diff" in payload["body"]
+        assert "descriptor state is not propagated" not in payload["comments"][0]["body"]
+        assert calls == [
+            ["api", "-X", "POST", "repos/org/repo-a/pulls/7/reviews", "--input", calls[0][-1]]
+        ]
 
-    def test_repo_scoped_review_post_reports_all_invalid_findings_without_writing(
+    def test_repo_scoped_review_post_reports_all_invalid_findings_in_the_review_body(
         self, tmp_path: Path, command_runner: MagicMock
     ) -> None:
-        """An all-invalid batch keeps every finding without creating a review."""
+        """An all-invalid batch keeps every finding in the review body."""
         calls: list[list[str]] = []
+        review_payloads: list[dict[str, Any]] = []
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(argv)
+            if argv[:3] == ["api", "-X", "POST"]:
+                review_payloads.append(json.loads(Path(argv[-1]).read_text()))
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
+            if argv[:2] == ["api", "graphql"]:
+                return SimpleNamespace(
+                    stdout=json.dumps(_no_review_threads_payload()), returncode=0
+                )
             raise AssertionError(f"unexpected GitHub write: {argv}")
 
         command_runner.side_effect = fake_gh_call
@@ -9093,13 +9160,22 @@ class TestRepoScoping:
             "evidence two",
         ]
         assert result.unpublishable == result.corrections
-        assert calls == []
+        # The host creates the review with no inline comment. The body carries
+        # every demoted finding, so no finding is discarded.
+        assert len(review_payloads) == 1
+        assert review_payloads[0]["comments"] == []
+        assert "stale one" in review_payloads[0]["body"]
+        assert "stale two" in review_payloads[0]["body"]
+        # The host creates the review, then reads back its thread receipts.
+        assert calls[0][:4] == ["api", "-X", "POST", "repos/org/repo-a/pulls/7/reviews"]
+        assert calls[1][:2] == ["api", "graphql"]
+        assert len(calls) == 2
 
     def test_repo_scoped_review_post_uses_the_supplied_snapshot_for_validation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
     ) -> None:
         """Validation uses the reviewed snapshot when the remote head changed."""
-        review_payloads: list[dict[str, object]] = []
+        review_payloads: list[dict[str, Any]] = []
         snapshot_diff = (
             "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+snapshot\n"
         )
@@ -9136,19 +9212,31 @@ class TestRepoScoping:
             review_diff=snapshot_diff,
         )
 
-        assert result == []
+        assert result == [{"id": "snapshot-thread"}]
         assert result.corrections[0].path == "b.py"
         assert result.corrections[0].reason == "path_not_in_diff"
-        assert review_payloads == []
+        # The finding that the snapshot does not change stays inline. The other
+        # one is demoted into the review body.
+        assert len(review_payloads) == 1
+        assert len(review_payloads[0]["comments"]) == 1
+        assert "valid only on a later head" in review_payloads[0]["body"]
 
     def test_repo_scoped_review_post_reports_missing_snapshot_as_unpublishable(
         self, tmp_path: Path, command_runner: MagicMock
     ) -> None:
-        """A missing immutable diff never permits an inline review write."""
+        """A missing immutable diff keeps the finding out of the inline surface."""
         calls: list[list[str]] = []
+        review_payloads: list[dict[str, Any]] = []
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(argv)
+            if argv[:3] == ["api", "-X", "POST"]:
+                review_payloads.append(json.loads(Path(argv[-1]).read_text()))
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
+            if argv[:2] == ["api", "graphql"]:
+                return SimpleNamespace(
+                    stdout=json.dumps(_no_review_threads_payload()), returncode=0
+                )
             raise AssertionError(f"unexpected GitHub write: {argv}")
 
         command_runner.side_effect = fake_gh_call
@@ -9165,7 +9253,14 @@ class TestRepoScoping:
         assert result == []
         assert len(result.corrections) == 1
         assert result.corrections[0].reason == "reviewed_diff_unavailable"
-        assert calls == []
+        assert len(review_payloads) == 1
+        assert review_payloads[0]["comments"] == []
+        assert "anchor_reviewed_diff_unavailable" in review_payloads[0]["body"]
+        assert "finding" in review_payloads[0]["body"]
+        # The host creates the review, then reads back its thread receipts.
+        assert calls[0][:4] == ["api", "-X", "POST", "repos/org/repo-a/pulls/7/reviews"]
+        assert calls[1][:2] == ["api", "graphql"]
+        assert len(calls) == 2
 
     def test_repo_scoped_review_post_does_not_reject_a_reviewed_commit_after_a_push(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock

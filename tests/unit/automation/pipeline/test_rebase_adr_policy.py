@@ -85,8 +85,8 @@ def test_policy_selector_returns_none_for_unconfigured_target() -> None:
     """The selector does not apply Hephaestus policy to another target."""
     selector = _selector()
 
-    assert selector("HomericIntelligence", "Comet") is None
-    assert selector("HomericIntelligence/Comet", None) is None
+    assert selector("HomericIntelligence", "Ledger") is None
+    assert selector("HomericIntelligence/Ledger", None) is None
 
 
 def test_hephaestus_policy_rejects_duplicate_numbers(tmp_path: Path) -> None:

@@ -1,10 +1,18 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
 
+from collections.abc import Sequence
+from html import escape
+
 import hephaestus.automation.pipeline_github_reply_recovery as reply_recovery
+from hephaestus.automation.github_api.diff import anchor_review_warnings
 from hephaestus.automation.review_anchors import (
     ReviewAnchorCorrection as ReviewAnchorCorrection,
     ReviewPublicationResult as ReviewPublicationResult,
+)
+from hephaestus.automation.review_warnings import (
+    ReviewWarning as ReviewWarning,
+    bounded_review_text,
 )
 
 from .pipeline.github_jobs import ImplementationReplyProgress
@@ -12,6 +20,123 @@ from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 
 __all__ = ["ReviewAnchorCorrection", "reply_recovery"]
+
+# GitHub rejects an issue or review comment body above 65,536 characters. The
+# demoted section keeps a margin below that limit so the notice that names the
+# omitted findings always fits.
+MAX_GITHUB_REVIEW_BODY_CHARS = 65_536
+MAX_DEMOTED_FINDINGS_SECTION_CHARS = 60_000
+MAX_DEMOTED_FINDING_TEXT_CHARS = 2_000
+MAX_OMITTED_FINDING_IDS = 8
+DEMOTED_FINDINGS_HEADING = "## Findings that could not be anchored to the diff"
+DEMOTED_FINDINGS_WARNING_MARKER = "> [!WARNING]"
+
+
+def _demoted_finding_block(
+    index: int,
+    correction: ReviewAnchorCorrection,
+    warning: ReviewWarning,
+) -> str:
+    """Return the visible warning block for one demoted finding.
+
+    Args:
+        index: The one-based position of this finding in the demoted set.
+        correction: The finding that the reviewed diff cannot place inline.
+        warning: The shared warning that states the problem and the recovery.
+
+    Returns:
+        One bounded markdown block with a warning marker, the location, the
+        finding text, and the recovery instruction.
+
+    """
+    location = f"`{correction.path}`"
+    if correction.line is not None:
+        location += f" line `{correction.line}`"
+    location += f", side `{correction.side}`"
+    text = bounded_review_text(
+        str(correction.finding.get("body") or "").strip(),
+        MAX_DEMOTED_FINDING_TEXT_CHARS,
+    )
+    finding_text = escape(text, quote=False) or "the review sent no text for this finding."
+    return "\n".join(
+        [
+            f"### Finding {index}",
+            "",
+            DEMOTED_FINDINGS_WARNING_MARKER,
+            f"> `{warning.code}`: {warning.message}",
+            "",
+            f"- Location: {location}",
+            f"- Finding ID: `{correction.finding_id}`",
+            f"- Finding: {finding_text}",
+            f"- Recovery: {warning.recovery}",
+        ]
+    )
+
+
+def render_demoted_findings_body(
+    corrections: Sequence[ReviewAnchorCorrection],
+    *,
+    max_chars: int = MAX_GITHUB_REVIEW_BODY_CHARS,
+) -> str:
+    """Return a bounded review body for findings the diff cannot place inline.
+
+    GitHub renders a review-level ``body`` as an unanchored general comment, so
+    this text is the only place a demoted finding stays visible. Publication
+    never fails for an anchor reason, so the host reports each demoted finding
+    here with a warning marker and a recovery instruction. The body never
+    carries a verdict and never grants a label.
+
+    Args:
+        corrections: Findings that the reviewed diff cannot place inline.
+        max_chars: Maximum number of characters in the returned body.
+
+    Returns:
+        The complete body, or a body with a clear truncation notice. The result
+        is never longer than ``max_chars``.
+
+    Raises:
+        ValueError: If the character limit is not positive.
+
+    """
+    if max_chars <= 0:
+        raise ValueError("demoted findings body limit must be positive")
+    if not corrections:
+        return ""
+    warnings = anchor_review_warnings(corrections)
+    section_limit = min(MAX_DEMOTED_FINDINGS_SECTION_CHARS, max_chars)
+    header = "\n".join(
+        [
+            DEMOTED_FINDINGS_HEADING,
+            "",
+            "The host cannot place these findings as inline comments on the reviewed diff.",
+            "Each finding below has a warning marker and a recovery instruction.",
+            "Rebase the pull request and review it again to publish these findings inline.",
+        ]
+    )
+    blocks: list[str] = []
+    omitted: list[str] = []
+    used = len(header) + 2
+    for index, (correction, warning) in enumerate(zip(corrections, warnings, strict=True), start=1):
+        block = _demoted_finding_block(index, correction, warning)
+        cost = len(block) + 2
+        # The first block always renders. A later block is omitted instead of
+        # returning an empty section, so no demoted finding is lost silently.
+        if blocks and used + cost > section_limit:
+            omitted.append(correction.finding_id)
+            continue
+        blocks.append(block)
+        used += cost
+    body = "\n\n".join([header, *blocks])
+    if omitted:
+        named = ", ".join(f"`{value}`" for value in omitted[:MAX_OMITTED_FINDING_IDS])
+        remainder = len(omitted) - min(len(omitted), MAX_OMITTED_FINDING_IDS)
+        suffix = f" and {remainder} more" if remainder > 0 else ""
+        body += (
+            f"\n\nThe host did not show {len(omitted)} more findings. "
+            "The host keeps this comment inside the GitHub comment size limit. "
+            f"The hidden findings have these finding IDs: {named}{suffix}."
+        )
+    return bounded_review_text(body, max_chars)
 
 
 class PipelineGitHubReviews(_PipelineGitHubHost):
@@ -1376,11 +1501,20 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
         *,
         expected_head_sha: str,
         review_diff: str,
+        demoted_findings: Sequence[ReviewAnchorCorrection] = (),
     ) -> ReviewPublicationResult:
-        """Post one source-anchored review batch for an immutable snapshot."""
-        # GitHub renders a review-level ``body`` as an unanchored general
-        # comment. Publish only reviews that contain source-positioned threads.
-        if not threads:
+        """Post one review batch for an immutable snapshot.
+
+        Publication never fails for an anchor reason. The host publishes the
+        valid subset as inline comments and renders every demoted finding in
+        the review body with a warning marker and a recovery instruction.
+        GitHub renders that body as an unanchored general comment, so the
+        demoted feedback stays visible on the pull request. A batch with no
+        valid inline finding and at least one demoted finding posts as one
+        body-only review comment.
+        """
+        demoted = list(demoted_findings)
+        if not threads and not demoted:
             logger.info(
                 "PR #%s: skipped review publication without source-anchored threads",
                 pr_number,
@@ -1391,25 +1525,15 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                 threads,
                 review_diff,
             )
-            if validation.corrections:
-                return ReviewPublicationResult(
-                    [],
-                    corrections=validation.corrections,
-                    unpublishable=validation.corrections,
-                )
+            demoted = [*validation.corrections, *demoted]
             threads = list(validation.valid)
+            body = render_demoted_findings_body(demoted)
             if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
                 return ReviewPublicationResult(
                     [],
                     validated_findings=threads,
-                    corrections=validation.corrections,
-                    unpublishable=validation.corrections,
-                )
-            if not threads:
-                return ReviewPublicationResult(
-                    [],
-                    corrections=validation.corrections,
-                    unpublishable=validation.corrections,
+                    corrections=demoted,
+                    unpublishable=demoted,
                 )
             review_comments = [
                 {
@@ -1420,12 +1544,24 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                 }
                 for c in threads
             ]
+            if not review_comments and not body:
+                logger.warning(
+                    "PR #%s: skipped an empty review publication with no demoted findings",
+                    pr_number,
+                )
+                return ReviewPublicationResult(
+                    [],
+                    validated_findings=threads,
+                    corrections=demoted,
+                    unpublishable=demoted,
+                )
             owner, name = self._owner_name()
             request_body = json.dumps(
                 {
                     "commit_id": expected_head_sha,
                     "event": "COMMENT",
                     "comments": review_comments,
+                    **({"body": body} if body else {}),
                 }
             )
             with github_api._body_file(request_body) as input_path:
@@ -1447,8 +1583,8 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                 return ReviewPublicationResult(
                     [],
                     validated_findings=threads,
-                    corrections=validation.corrections,
-                    unpublishable=validation.corrections,
+                    corrections=demoted,
+                    unpublishable=demoted,
                 )
             receipts = self._repo_review_thread_receipts_for_review(
                 pr_number,
@@ -1467,7 +1603,12 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
             return ReviewPublicationResult(
                 receipts,
                 validated_findings=threads,
-                corrections=validation.corrections,
-                unpublishable=validation.corrections,
+                corrections=demoted,
+                unpublishable=demoted,
             )
-        return ReviewPublicationResult([])
+        return ReviewPublicationResult(
+            [],
+            validated_findings=threads,
+            corrections=demoted,
+            unpublishable=demoted,
+        )

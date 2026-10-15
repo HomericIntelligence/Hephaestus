@@ -676,6 +676,8 @@ def _prepare_one_file_rebase_conflict(
         capture_output=True,
         text=True,
     )
+    # Git uses the host umask. Recovery rejects a Git directory with group write bits.
+    (checkout / ".git").chmod(0o700)
     subprocess.run(
         [
             _executable_path("ssh-keygen"),
@@ -1027,7 +1029,7 @@ def _retained_continuation_case(
         tmp_path, monkeypatch, fallback=False, fault="clean", structural=True
     ) as case:
         policy = select_rebase_policy(
-            "HomericIntelligence", "Comet" if scenario == "unconfigured" else "Hephaestus"
+            "HomericIntelligence", "Ledger" if scenario == "unconfigured" else "Hephaestus"
         )
         monkeypatch.setattr(case.pool, "_rebase_policy_selector", lambda repo: policy)
         case.checks = recovery._publication_validation_seams(case, "continued", monkeypatch)
@@ -25646,7 +25648,7 @@ def test_review_checkout_preserves_change_statuses_and_distinct_bases(
     ):
         result = pool._git_verify_pr_review_checkout(
             GitJob(
-                repo="comet",
+                repo="ledger",
                 op="verify_pr_review_checkout",
                 timeout_s=60,
                 kwargs={
@@ -25728,7 +25730,7 @@ def test_review_checkout_bounds_status_manifest(
     "case", ["valid", "changed_argv", "changed_timeout", "expired", "cancelled"]
 )
 def test_repository_validation_runtime_preparation_is_not_execution(
-    pool: WorkerPool, tmp_path: Path, case: str
+    pool: WorkerPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     """Admit runtime metadata without execution, and reject stale job authority."""
     import time
@@ -25738,9 +25740,11 @@ def test_repository_validation_runtime_preparation_is_not_execution(
         RepositoryValidationRuntimeRead,
         RepositoryValidationRuntimeRequest,
     )
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import install_profile
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
+    install_profile(monkeypatch, nightly=True)
     trusted, execution = _execution_runtime(tmp_path)
     request = RepositoryValidationRuntimeRequest(
         RepositoryValidationInvocation(
@@ -25883,12 +25887,14 @@ def test_repository_validation_worker_rechecks_frozen_job(
     "status", ["success", "failed", "runner_gap", "wrong_head", "no_source_proof"]
 )
 def test_repository_validation_worker_returns_attempt_bound_evidence(
-    pool: WorkerPool, tmp_path: Path, status: str
+    pool: WorkerPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:
     """Correlate local evidence with the frozen attempt and actual isolation proof."""
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import install_profile
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
+    install_profile(monkeypatch, nightly=True)
     pool._host_verification_pyxis_sha256 = "b" * 64
     pool._host_verification_pyxis_authority = tmp_path / "authority.json"
     pool._host_verification_pyxis_quota_root = tmp_path
@@ -25907,7 +25913,7 @@ def test_repository_validation_worker_returns_attempt_bound_evidence(
         patch(f"{_WP}._repository_validation_host_root", return_value=trusted, create=True),
         patch(f"{_WP}.validate_workspace_binding", return_value=job.cwd, create=True) as source,
         patch(
-            f"{_WP}.comet_plan_for_workspace", return_value=execution.plan, create=True
+            f"{_WP}.validation_plan_for_workspace", return_value=execution.plan, create=True
         ) as controls,
         patch.object(pool, "_run_immutable_build_test", return_value=raw) as runner,
         patch("subprocess.Popen", side_effect=AssertionError("The test controls execution.")),
@@ -25930,13 +25936,15 @@ def test_repository_validation_worker_returns_attempt_bound_evidence(
 
 @pytest.mark.parametrize("fault", ["workspace", "changed_plan"])
 def test_repository_validation_worker_rejects_source_before_execution(
-    pool: WorkerPool, tmp_path: Path, fault: str
+    pool: WorkerPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     """Recheck workspace authority and complete immutable source controls."""
     from hephaestus.agents.workspace import WorkspaceBindingError
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import install_profile
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
+    install_profile(monkeypatch, nightly=True)
     trusted, execution = _execution_runtime(tmp_path)
     job = _repository_build_job(execution)
     changed = replace(execution.plan, reviewed_base="c" * 40)
@@ -25948,7 +25956,7 @@ def test_repository_validation_worker_rejects_source_before_execution(
             return_value=job.cwd,
             create=True,
         ),
-        patch(f"{_WP}.comet_plan_for_workspace", return_value=changed, create=True),
+        patch(f"{_WP}.validation_plan_for_workspace", return_value=changed, create=True),
         patch.object(
             pool,
             "_run_immutable_build_test",
@@ -25963,19 +25971,21 @@ def test_repository_validation_worker_rejects_source_before_execution(
 
 
 def test_repository_validation_linux_requires_the_pyxis_sandbox(
-    pool: WorkerPool, tmp_path: Path
+    pool: WorkerPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Comet PR code stays fail closed when the sandbox is not configured."""
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import install_profile
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
+    install_profile(monkeypatch, nightly=True)
     trusted, execution = _execution_runtime(tmp_path)
     job = _repository_build_job(execution)
     with (
         patch(f"{_WP}.sys.platform", "linux"),
         patch(f"{_WP}._repository_validation_host_root", return_value=trusted, create=True),
         patch(f"{_WP}.validate_workspace_binding", return_value=job.cwd, create=True),
-        patch(f"{_WP}.comet_plan_for_workspace", return_value=execution.plan, create=True),
+        patch(f"{_WP}.validation_plan_for_workspace", return_value=execution.plan, create=True),
         patch.object(
             pool,
             "_run_immutable_build_test",
@@ -25996,9 +26006,11 @@ def test_repository_validation_darwin_uses_sealed_runtime_and_reviewed_imports(
 ) -> None:
     """Use the admitted tools, source imports, and bounded documentation output."""
     from hephaestus.automation.repository_validation_runtime import admit_execution_runtime
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import install_profile
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
+    install_profile(monkeypatch, nightly=True)
     trusted, execution = _execution_runtime(tmp_path)
     runtime = admit_execution_runtime(execution, trusted_root=trusted)
     job = _repository_build_job(execution)
@@ -26068,13 +26080,15 @@ def test_repository_validation_darwin_uses_sealed_runtime_and_reviewed_imports(
 
 
 def test_repository_validation_linux_mounts_runtime_read_only(
-    pool: WorkerPool, tmp_path: Path
+    pool: WorkerPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Use the existing Pyxis boundary with the admitted runtime and source imports."""
     from hephaestus.automation.repository_validation_runtime import admit_execution_runtime
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import install_profile
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
+    install_profile(monkeypatch, nightly=True)
     trusted, execution = _execution_runtime(tmp_path)
     runtime = admit_execution_runtime(execution, trusted_root=trusted)
     job = _repository_build_job(execution)
@@ -26134,13 +26148,15 @@ def test_repository_validation_linux_mounts_runtime_read_only(
 
 @pytest.mark.parametrize("fault", ["content", "job"])
 def test_repository_validation_rechecks_runtime_before_launch(
-    pool: WorkerPool, tmp_path: Path, fault: str
+    pool: WorkerPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     """Reject a runtime or job change after initial admission and before launch."""
     from hephaestus.automation.repository_validation_runtime import admit_execution_runtime
+    from tests.unit.automation.pipeline.repository_validation_profile_stub import install_profile
     from tests.unit.automation.pipeline.test_jobs import _repository_build_job
     from tests.unit.automation.pipeline.test_repository_validation_runtime import _execution_runtime
 
+    install_profile(monkeypatch, nightly=True)
     trusted, execution = _execution_runtime(tmp_path)
     runtime = admit_execution_runtime(execution, trusted_root=trusted)
     job = _repository_build_job(execution)

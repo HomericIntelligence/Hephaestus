@@ -72,12 +72,12 @@ def test_learning_intent_payload_round_trips_closed_schema(
     "intent",
     [
         work_item.LearningIntent.approved_plan(
-            repo="comet",
+            repo="ledger",
             issue=813,
             plan_revision=4,
             plan_fingerprint="a" * 64,
         ),
-        work_item.LearningIntent.post_merge(repo="comet", issue=813, pr=900),
+        work_item.LearningIntent.post_merge(repo="ledger", issue=813, pr=900),
     ],
 )
 def test_learning_intent_qualifies_delivery_without_changing_durable_key(
@@ -89,17 +89,17 @@ def test_learning_intent_qualifies_delivery_without_changing_durable_key(
     payload = intent.to_payload(owner="LLM360")
     parsed = work_item.LearningIntent.from_payload(payload)
 
-    assert payload["repo"] == "LLM360/comet"
-    assert payload["identity_repo"] == "comet"
+    assert payload["repo"] == "LLM360/ledger"
+    assert payload["identity_repo"] == "ledger"
     assert payload["intent_key"] == original_key
-    assert parsed.repo == "LLM360/comet"
+    assert parsed.repo == "LLM360/ledger"
     assert parsed.key == original_key
-    assert parsed.journal_identity()["repo"] == "comet"
+    assert parsed.journal_identity()["repo"] == "ledger"
 
 
 def test_recovered_learning_intent_keeps_key_when_delivery_adds_owner() -> None:
     """Restart recovery keeps the short key at the qualified host boundary."""
-    original = work_item.LearningIntent.post_merge(repo="comet", issue=813, pr=900)
+    original = work_item.LearningIntent.post_merge(repo="ledger", issue=813, pr=900)
     record = {
         "key": original.key,
         "kind": original.kind.value,
@@ -111,11 +111,11 @@ def test_recovered_learning_intent_keeps_key_when_delivery_adds_owner() -> None:
 
     assert recovered.key == original.key
     assert payload["intent_key"] == original.key
-    assert payload["repo"] == "LLM360/comet"
-    assert payload["identity_repo"] == "comet"
+    assert payload["repo"] == "LLM360/ledger"
+    assert payload["identity_repo"] == "ledger"
 
 
-@pytest.mark.parametrize("repo", ["Other/comet", "bad/name/extra", "bad name"])
+@pytest.mark.parametrize("repo", ["Other/ledger", "bad/name/extra", "bad name"])
 def test_learning_intent_rejects_foreign_or_malformed_delivery_repository(repo: str) -> None:
     """The trusted boundary cannot send a foreign or malformed repository."""
     intent = work_item.LearningIntent.post_merge(repo=repo, issue=813, pr=900)

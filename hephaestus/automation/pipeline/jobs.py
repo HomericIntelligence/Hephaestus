@@ -32,6 +32,7 @@ from .host_capabilities import CapabilityRequestTarget
 from .job_results import JobHandle, JobResult, ProcessFailureMetadata
 from .repository_validation import (
     RepositoryValidationExecution,
+    repository_workspace_name_matches,
     validate_repository_validation_execution,
 )
 from .repository_validation_preparation import RepositoryValidationRuntimeRequest
@@ -345,7 +346,7 @@ def validate_build_test_repository_validation(job: BuildTestJob) -> None:
         return
     if (
         type(job.repo) is not str
-        or job.repo.casefold() not in {plan.repository.casefold(), "comet"}
+        or not repository_workspace_name_matches(plan.repository, job.repo)
         or job.cwd != plan.source_workspace.cwd
         or job.argv != check.argv
         or job.expected_head_sha != plan.reviewed_head

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Integration tests verifying every CLI entry point is importable and runnable.
+"""Integration tests verifying every library CLI entry point is importable and runnable.
 
 The list of entry points is parsed from ``pyproject.toml`` at collection time
 so adding a new ``[project.scripts]`` entry automatically gets covered with
-no test edits required.
+no test edits required. The opt-in ``hephaestus.automation`` product layer is
+out of scope: its entry points are not part of the core library surface.
 
 Each entry point must:
 
@@ -11,9 +12,7 @@ Each entry point must:
 2. Respond to ``--help`` with exit code 0 when invoked as a console script.
 
 The console-script invocation (rather than ``python -m``) is intentional —
-it mirrors how end-users and other repos run these binaries, and it avoids
-the CWD-shadowing class of bug that previously broke the AchaeanFleet
-automation loop.
+it mirrors how end-users and other repos run these binaries.
 """
 
 from __future__ import annotations
@@ -32,9 +31,13 @@ pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: Entry points owned by the opt-in automation product layer. They ship behind
+#: the ``[automation]`` extra and are not part of the core library surface.
+PRODUCT_LAYER_PREFIX = "hephaestus.automation"
+
 
 def _load_entry_points() -> list[tuple[str, str, str]]:
-    """Return ``[(command, module, attr), ...]`` from pyproject [project.scripts]."""
+    """Return the library ``[(command, module, attr), ...]`` from pyproject."""
     pyproject = REPO_ROOT / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     scripts: dict[str, str] = data.get("project", {}).get("scripts", {})
@@ -42,6 +45,8 @@ def _load_entry_points() -> list[tuple[str, str, str]]:
     for command, target in sorted(scripts.items()):
         module, _, attr = target.partition(":")
         assert module and attr, f"Malformed entry point: {command} = {target!r}"
+        if module == PRODUCT_LAYER_PREFIX or module.startswith(f"{PRODUCT_LAYER_PREFIX}."):
+            continue
         parsed.append((command, module, attr))
     return parsed
 
@@ -89,9 +94,6 @@ class TestCLITargetImportable:
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
     def test_target_importable(self, command: str, module_path: str, attr: str) -> None:
-        # The agent runtime requires fcntl, which Windows does not provide.
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require fcntl, which is unavailable on Windows")
         mod = importlib.import_module(module_path)
         assert hasattr(mod, attr), f"{module_path} has no '{attr}' attribute"
         assert callable(getattr(mod, attr)), f"{module_path}.{attr} is not callable"
@@ -102,9 +104,6 @@ class TestCLIHelpFlag:
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
     def test_help_flag(self, command: str, module_path: str, attr: str, require_cli: bool) -> None:
-        # Queue commands require fcntl through the agent runtime.
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -138,8 +137,6 @@ class TestCLIJsonFlag:
         appears in ``--help`` text proves the parser registered it without
         having to execute the CLI's main logic.
         """
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -171,8 +168,6 @@ class TestCLIVersionFlag:
         self, command: str, module_path: str, attr: str, require_cli: bool
     ) -> None:
         """``<cmd> --version`` must exit 0 and print a version line."""
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -198,8 +193,6 @@ class TestCLIVersionFlag:
         self, command: str, module_path: str, attr: str, require_cli: bool
     ) -> None:
         """``<cmd> -V`` must also work (short form of --version)."""
-        if sys.platform == "win32" and "automation" in module_path:
-            pytest.skip("automation CLIs require the POSIX fcntl module")
         binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
@@ -225,26 +218,6 @@ class TestCLIEntryPointDiscovery:
     def test_no_duplicate_commands(self) -> None:
         commands = [ep[0] for ep in ENTRY_POINTS]
         assert len(commands) == len(set(commands)), "Duplicate command names in [project.scripts]"
-
-
-class TestMaxWorkersValidation:
-    """Regression for #723: --max-workers validation must be consistent."""
-
-    def test_automation_loop_rejects_zero_max_workers(self, require_cli: bool) -> None:
-        """hephaestus-automation-loop --max-workers=0 exits non-zero with clear error."""
-        binary = _resolve_binary("hephaestus-automation-loop", required=require_cli)
-
-        result = subprocess.run(
-            [binary, "--max-workers", "0"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            env=_cli_subprocess_env(),
-        )
-        assert result.returncode != 0, "Expected non-zero exit for --max-workers=0"
-        assert "--max-workers" in result.stderr, "Error must mention --max-workers argument"
-        assert "invalid choice" in result.stderr.lower(), "Error must mention invalid choice"
 
 
 class TestRequireCliGate:

@@ -8,18 +8,31 @@ from ..repository_validation import (
     RepositoryValidationGap,
     validation_attempt_coverage,
 )
+from ..repository_validation_profiles import (
+    RepositoryValidationProfile,
+    repository_validation_profile,
+)
 from ..work_item import WorkItem
+
+
+def _validation_profile(item: WorkItem, org: str | None) -> RepositoryValidationProfile | None:
+    """Return the installed profile that owns the item repository, if any."""
+    if org is None:
+        return repository_validation_profile(item.repo)
+    return repository_validation_profile(f"{org}/{item.repo}")
 
 
 def _repository_validation_coverage(item: WorkItem) -> RepositoryValidationCoverage:
     """Bind live attempt coverage to the current review identity."""
     attempt = item.payload.get("repository_validation_attempt")
     generation = item.payload.get("reviewed_pr_proof_generation")
+    profile = repository_validation_profile(item.repo)
     if (
         type(attempt) is not RepositoryValidationAttempt
         or type(generation) is not int
         or attempt.generation != generation
-        or attempt.plan.repository.casefold() != f"llm360/{item.repo.casefold()}"
+        or profile is None
+        or attempt.plan.repository != profile.repository
         or attempt.plan.pr_number != item.pr
         or attempt.plan.issue_number != item.issue
         or attempt.plan.reviewed_head != item.payload.get("pr_head_sha")
@@ -38,7 +51,7 @@ def _repository_validation_coverage(item: WorkItem) -> RepositoryValidationCover
 
 def _repository_validation_required(item: WorkItem, org: str | None) -> bool:
     """Select the repository that requires a bound validation attempt."""
-    return item.repo.casefold() == "comet" and (org is None or org.casefold() == "llm360")
+    return _validation_profile(item, org) is not None
 
 
 def _repository_validation_complete(item: WorkItem, org: str | None) -> bool:

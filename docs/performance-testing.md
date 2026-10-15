@@ -1,53 +1,58 @@
 # Performance Testing
 
-The dedicated performance lane exercises the queue pipeline's `WorkerPool`.
-It measures scheduling capacity, completion latency, and sustained concurrency
-through the real submit, executor, callback, and `CompletionQueue` path.
+The dedicated bounded worker-pool load lane no longer exists. The non-core-library
+test re-scope removed the whole load-test directory, its `conftest.py`, and
+every test that measured scheduling capacity, completion latency, and sustained
+concurrency through the real submit, executor, callback, and `CompletionQueue`
+path.
 
-The synthetic jobs replace only `WorkerPool._run_build_test` with a fixed
-service delay. They do not invoke agents, subprocesses, GitHub, Git, or other
-external services. This keeps the lane focused on the worker-pool concurrency
-boundary and prevents credentials, network state, or process startup from
-changing its result.
+## What remains
 
-## Safety bounds
+Three artifacts of the lane survive. A future operator can reuse them.
 
-The weekly/manual workflow uses a 30-second submission window and permits at
-most 50,000 jobs, 8 workers, and 64 in-flight jobs. The test configuration
-rejects non-positive values and hard limits exceeding 60 seconds, 100,000 jobs,
-32 workers, 256 in-flight jobs, 1,000 ms of synthetic service time, or a
-60,000 ms p95 budget before a load run starts. The workflow job has a 10-minute
-timeout. The in-flight cap must also be at least the worker count so every
-configured worker can become active.
+- The `performance` pytest marker stays registered in the `[tool.pytest.ini_options]`
+  `markers` list. It reads
+  `bounded capacity, latency, and sustained-concurrency tests`.
+- The `justfile` target, the nightly workflow, and the release workflow still
+  deselect the lane with `-m "not performance"`. These selections are inert
+  while no test carries the marker.
+- The `precommit` marker remains the default selection, so an operator must pass
+  `--override-ini="addopts="` to run any lane that the default deselects.
 
-The lane gates on all submitted jobs producing exactly one successful
-completion, no duplicates, use of every configured worker during sustained
-load, a bounded drain, end-to-end p95 latency no higher than 500 ms, and
-four-worker capacity at least twice the one-worker control.
+No `--load-duration-s`, `--load-max-jobs`, `--load-workers`, `--load-max-in-flight`,
+`--load-service-ms`, `--load-p95-budget-ms`, or `--load-report` option is
+registered in `tests/conftest.py`. The command that this page used to publish
+now fails with an unknown-option error.
 
-Percentiles are computed by linear interpolation between closest ranks
-(`rank = percentile * (n - 1)`, numpy's default `linear` method), which is
-tail-inclusive: a small fraction of very slow completions cannot hide below
-the p95 gate the way a nearest-rank formula rounding down into the fast body
-would (issue #2229).
+## Reintroducing a lane
 
-## Running locally
+An operator who reintroduces a load lane owns all of the following.
 
-Run the same bounded profile used by CI explicitly; the directory is excluded
-from normal pytest collection:
+1. Register every load option in `pytest_addoption()` in `tests/conftest.py`.
+2. Place the lane under a path in `testpaths`, or add an explicit path to the
+   command, because the old directory sat outside collection.
+3. Restore the bounded configuration checks. The lane must reject non-positive
+   values and must cap the submission window, the job count, the worker count,
+   the in-flight count, the synthetic service time, and the p95 budget.
+   The in-flight cap must be at least the worker count.
+4. Restore the gate. Every submitted job must produce exactly one successful
+   completion, with no duplicates, with every configured worker active under
+   sustained load, with a bounded drain, with end-to-end p95 latency inside the
+   budget, and with four-worker capacity at least twice the one-worker control.
+5. Restore a runtime evidence report. Do not commit or hand-author report
+   values. Read the generated artifact instead.
 
-```bash
-uv run pytest tests/performance --override-ini="addopts=" -v --strict-markers --load-duration-s=30 --load-max-jobs=50000 --load-workers=8 --load-max-in-flight=64 --load-service-ms=5 --load-p95-budget-ms=500 --load-report=build/performance/worker-pool.json
-```
+## Percentile method
 
-## Runtime evidence
+Keep the previous method if a lane returns percentiles. The old lane used
+linear interpolation between closest ranks (`rank = percentile * (n - 1)`,
+the numpy `linear` method). That method is tail-inclusive. A nearest-rank
+formula that rounds down into the fast body can hide a small fraction of very
+slow completions below a p95 gate (issue #2229).
 
-The generated JSON report records schema version, profile, Python/platform and
-commit metadata, completion invariants, concurrency, throughput, and p50/p95/
-p99/max queue and end-to-end latency. It also retains the one-worker and
-four-worker capacity controls plus their measured throughput ratio. GitHub
-Actions uploads it as the `worker-pool-performance` artifact for 14 days, even
-when a threshold fails.
+## Why this page remains
 
-Measurements are runtime evidence only. Do not commit or hand-author report
-values; inspect the generated CI artifact instead.
+`tests/unit/ci/test_workflows.py::TestPerformanceWorkflow` requires this file
+and the link to it in [`index.md`](index.md). The page records the removed lane
+so that the surviving marker, the inert selections, and the missing load options
+are not mistaken for an oversight.

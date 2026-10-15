@@ -86,8 +86,8 @@ def test_post_merge_learning_uses_the_qualified_delivery_contract(
     """Post-merge learning qualifies the source and retains its journal key."""
     journal = LearningJournalStore(lambda: tmp_path)
     ctx = make_ctx(org="LLM360", learning_journal=journal)
-    item = make_work_item(repo="comet", issue=813, pr=900, state="ENTER")
-    intent = LearningIntent.post_merge(repo="comet", issue=813, pr=900)
+    item = make_work_item(repo="ledger", issue=813, pr=900, state="ENTER")
+    intent = LearningIntent.post_merge(repo="ledger", issue=813, pr=900)
     item.learning_intents.append(intent)
     item.learning_resume_stage = StageName.FINISHED
     stage = LearningStage()
@@ -100,7 +100,7 @@ def test_post_merge_learning_uses_the_qualified_delivery_contract(
     payload = request.job.request.payload["learning_intent"]
     assert isinstance(payload, dict)
     parsed = LearningIntent.from_payload(payload)
-    assert parsed.repo == "LLM360/comet"
+    assert parsed.repo == "LLM360/ledger"
     assert parsed.key == intent.key
 
 
@@ -110,7 +110,7 @@ def test_foreign_learning_repository_records_safe_summary_failure(
     """A foreign source fails before host dispatch with a safe failure class."""
     journal = LearningJournalStore(lambda: tmp_path)
     ctx = make_ctx(org="LLM360", learning_journal=journal)
-    item = make_work_item(repo="Other/comet", issue=813, pr=900, state="ENTER")
+    item = make_work_item(repo="Other/ledger", issue=813, pr=900, state="ENTER")
     intent = LearningIntent.post_merge(repo=item.repo, issue=813, pr=900)
     item.learning_intents.append(intent)
     item.learning_resume_stage = StageName.FINISHED
@@ -136,10 +136,10 @@ def test_mismatched_historical_identity_fails_before_host_dispatch(
     """A malformed historical identity cannot enter the host learning queue."""
     journal = LearningJournalStore(lambda: tmp_path)
     ctx = make_ctx(org="LLM360", learning_journal=journal)
-    item = make_work_item(repo="comet", issue=813, pr=900, state="ENTER")
+    item = make_work_item(repo="ledger", issue=813, pr=900, state="ENTER")
     intent = LearningIntent(
         kind=LearningIntentKind.POST_MERGE,
-        repo="comet",
+        repo="ledger",
         issue=813,
         pr=900,
         identity_repo="different-repo",

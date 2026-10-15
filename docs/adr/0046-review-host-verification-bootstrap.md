@@ -45,11 +45,13 @@ as deletion and addition; deletions and operations outside the map fail.
 
 The observed PR #3006 head `c81cc334232abebd6621915627a3fc5ab5734361` has
 32 records and is ineligible. Its owner must remove the changes to
-`hephaestus/automation/host_coverage.py` and
-`tests/unit/automation/test_host_coverage.py`. These changes belong to #3035.
-Use a base that contains that repair, retain its base behavior, and obtain a
-fresh review and separate authenticated grant for the resulting exact head.
-This decision does not modify PR #3006 or supply that grant.
+`hephaestus/automation/host_coverage.py` and to the host-coverage test that the
+pull request added. The non-core-library test re-scope later deleted that test,
+so the path in the pull request no longer exists in this repository. These
+changes belong to #3035. Use a base that contains that repair, retain its base
+behavior, and obtain a fresh review and separate authenticated grant for the
+resulting exact head. This decision does not modify PR #3006 or supply that
+grant.
 
 Only an authentic Linux unsupported-boundary result for the first fixed
 command and exact reviewed head can enter this exception. The receipt retains

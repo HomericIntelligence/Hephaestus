@@ -62,11 +62,11 @@ The split is the same across every row above:
   hygiene, graceful degradation (circuit breaker, retries, provider fallback),
   and operator runbooks.
 
-**Adding a new external service requires a new inventory row.** This is
-enforced executably: `tests/unit/docs/test_third_party_services_doc.py` fails
-CI if any remote GitHub Action owner referenced by a `uses:` line in a workflow
-or composite action is absent from this document, and if the required services
-above are not all named.
+**Adding a new external service requires a new inventory row.** The check that
+once enforced this row was removed with the non-core-library test re-scope. A
+reviewer must confirm that every remote GitHub Action owner named by a `uses:`
+line in a workflow or composite action appears in this table, and that every
+required service above is named.
 
 ## Degradation matrix
 

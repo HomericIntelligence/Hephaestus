@@ -49,10 +49,12 @@ or recreatable from committed sources (`.venv` via `uv sync` from `uv.lock` per
    re-provisioned on recovery — never written into a backup archive. This
    upholds the `AGENTS.md` secrets policy (no secrets in artifacts).
 
-3. **The restore procedure is continuously tested in CI, not documented in
-   prose.** `tests/unit/scripts/test_backup_state.py` executes a
-   backup → destroy → restore round-trip and fail-closed tamper checks on every
-   run, so the procedure cannot silently rot.
+3. **The restore procedure is not documented in prose alone.** The runbook in
+   [`../runbooks/backup-restore.md`](../runbooks/backup-restore.md) gives the
+   exact commands. The executable round-trip and tamper checks that once ran in
+   CI were removed with the non-core-library test re-scope, so an operator must
+   run `python3 scripts/backup_state.py` through the full cycle after any
+   change to the tool.
 
 4. **DR tooling is stdlib-only and runs under bare `python3`.** The tool that
    recovers a broken environment must not itself depend on that environment, so
@@ -88,8 +90,9 @@ or recreatable from committed sources (`.venv` via `uv sync` from `uv.lock` per
   (`scripts/backup_state.py`) and a DR runbook
   ([`../runbooks/backup-restore.md`](../runbooks/backup-restore.md)) wired into
   the runbook index.
-- The restore path is regression-guarded: a change that breaks backup or restore
-  fails `tests/unit/scripts/test_backup_state.py` in CI.
+- The restore path is no longer regression-guarded by a test. Run the full
+  backup → destroy → restore cycle in [`../runbooks/backup-restore.md`](../runbooks/backup-restore.md)
+  after any change to `scripts/backup_state.py`.
 - Backups default to `~/.hephaestus-backups/` (outside the repo) so a backup
   survives deletion of the workspace it protects.
 - Restore is destructive-safe: it refuses a non-empty target without `--force`,

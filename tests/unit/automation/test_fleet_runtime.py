@@ -15,7 +15,6 @@ import tempfile
 import threading
 import time
 import tomllib
-import venv
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +31,17 @@ from tests.unit.automation.test_fleet_worker import command
 
 pytestmark = pytest.mark.precommit
 FIXTURE = Path(__file__).parents[2] / "fixtures" / "fleet_provider.py"
+ATTACHMENT_PROGRAM = "attachment-python"
+
+
+def private_attachment_program(root: Path) -> Path:
+    """Create the attachment program and declare its private mode."""
+    program = root / "control" / ATTACHMENT_PROGRAM
+    shutil.copyfile(sys.executable, program)
+    # The host interpreter can carry group write bits. The runtime rejects that program.
+    program.chmod(0o700)
+    assert program.is_file() and program.stat().st_mode & 0o022 == 0
+    return program
 
 
 class RuntimeEngine:
@@ -124,7 +134,7 @@ def runtime_setup(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureReques
                 "socket": str(root / "engine" / "engine.sock"),
                 "home": str(root / "engine"),
             },
-            "attachmentProgram": sys.executable,
+            "attachmentProgram": str(private_attachment_program(root)),
             "authorityRoots": {
                 "controller": str(root / "control"),
                 "gateway": str(root / "gateway"),
@@ -498,9 +508,12 @@ def test_registry_program_keeps_its_virtual_environment(
     """The serialized interpreter must load packages from its configured environment."""
     root, config, path, arguments, _engine, providers = runtime_setup
     environment = root / "attachment-venv"
-    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    # The environment base is the private program, so the resolved program stays private.
+    base = private_attachment_program(root)
+    subprocess.run([str(base), "-m", "venv", "--without-pip", str(environment)], check=True)
     program = environment / "bin" / "python"
     assert program.is_symlink()
+    assert program.resolve() == base
     packages = Path(
         sysconfig.get_path("purelib", vars={"base": str(environment), "platbase": str(environment)})
     )
@@ -619,12 +632,13 @@ def test_attachment_program_cannot_overlap_a_workspace(
 ) -> None:
     """Keep the invocation path and its resolved executable outside workspaces."""
     root, config, path, arguments, engine, providers = runtime_setup
+    private = private_attachment_program(root)
     workspace_program = root / "work" / "1" / "python"
     if overlap == "invocation":
-        workspace_program.symlink_to(sys.executable)
+        workspace_program.symlink_to(private)
         program = workspace_program
     else:
-        shutil.copyfile(sys.executable, workspace_program)
+        shutil.copyfile(private, workspace_program)
         workspace_program.chmod(0o700)
         program = root / "python"
         program.symlink_to(workspace_program)

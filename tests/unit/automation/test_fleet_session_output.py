@@ -22,8 +22,15 @@ def worker(tmp_path: Path):
     workspace.mkdir()
     home = tmp_path / "codex"
     home.mkdir(mode=0o700)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    journal_lock = state / "writer.lock"
+    journal_lock.touch(mode=0o600)
+    # The host umask can add group write bits to a created lock. Export rejects that lock.
+    journal_lock.chmod(0o600)
+    assert journal_lock.stat().st_mode & 0o022 == 0
     value = FleetWorker(
-        state_dir=tmp_path / "state",
+        state_dir=state,
         workspace_root=workspace,
         codex_home=home,
         worker_id="worker-one",

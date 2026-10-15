@@ -36,7 +36,7 @@ def _supply_registered_worktree_listing(root: Path, monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize("case", ["valid", "stale", "changed_manifest", "expired"])
-@pytest.mark.parametrize("workspace_repository", ["comet", "LLM360/comet"])
+@pytest.mark.parametrize("workspace_repository", ["ledger", "acme/ledger"])
 def test_repository_validation_source_preparation_holds_review_lease(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, workspace_repository: str
 ) -> None:
@@ -49,7 +49,7 @@ def test_repository_validation_source_preparation_holds_review_lease(
     )
     from tests.unit.automation.pipeline.test_repository_validation import _api, _plan
 
-    root, _, revision = _repository(tmp_path, origin_repository="LLM360/comet")
+    root, _, revision = _repository(tmp_path, origin_repository="acme/ledger")
     manager = SourceWorkspaceManager(root, repository=workspace_repository)
     binding = manager.prepare(1623, SourceLane.REVIEW, revision)
     _supply_registered_worktree_listing(root, monkeypatch)
@@ -87,12 +87,12 @@ def test_repository_validation_source_preparation_holds_review_lease(
             ):
                 pytest.fail("Source preparation did not hold the review lease.")
         if case == "changed_manifest":
-            return replace(plan, changes=(("D", "src/comet/proxy/app.py"),))
+            return replace(plan, changes=(("D", "src/ledger/app.py"),))
         return plan
 
     operation = Mock(side_effect=inspect)
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.worker_pool.comet_plan_for_workspace", operation
+        "hephaestus.automation.pipeline.worker_pool.validation_plan_for_workspace", operation
     )
     monkeypatch.setattr(
         pool,
@@ -107,8 +107,8 @@ def test_repository_validation_source_preparation_holds_review_lease(
     try:
         result = pool._run_git(
             GitJob(
-                repo="comet",
-                expected_repository="LLM360/comet",
+                repo="ledger",
+                expected_repository="acme/ledger",
                 op="prepare_repository_validation",
                 timeout_s=60,
                 deadline_s=request.deadline_s,

@@ -43,6 +43,15 @@ _ROUND_PAYLOAD_KEYS = (
     "review_change_records",
     "review_diff_base_sha",
     "review_target_base_sha",
+    # Informational validation results of one review round. These keys are
+    # owned by pr_review_findings and pr_review_jobs. They hold the findings of
+    # one round only, so a later round never inherits them.
+    "review_valid_findings",
+    "review_advisory_findings",
+    "review_reported_findings",
+    "review_demoted_findings",
+    "review_warnings",
+    "review_warnings_dropped",
     "repository_validation_attempt",
     "repository_validation_source_request",
     "repository_validation_source_result",

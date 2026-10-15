@@ -1,2 +1,0 @@
-vendor/sglang/patches/*.patch whitespace=-blank-at-eol
-ops/postgres/rds-global-bundle.pem whitespace=-blank-at-eof

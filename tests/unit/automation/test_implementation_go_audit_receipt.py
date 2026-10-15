@@ -10,6 +10,7 @@ import pytest
 from hephaestus.automation import implementation_go_audit_receipt as audit_receipts
 from hephaestus.automation.github_api.diff import (
     empty_review_finding_compacted_outcomes,
+    normalize_review_finding_batch_records,
     normalize_review_finding_collection,
     normalize_review_finding_records,
     review_finding_collection_payload,
@@ -21,7 +22,9 @@ from hephaestus.automation.implementation_go_audit_receipt import (
     parse_published_implementation_go_audit,
     render_pending_implementation_go_audit,
 )
+from hephaestus.automation.review_anchors import ReviewFindingSizeError
 from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
+from hephaestus.automation.review_warnings import ReviewWarning
 
 
 def _clean_audit() -> ReviewAudit:
@@ -141,17 +144,17 @@ def test_pending_and_public_audits_preserve_compacted_outcomes() -> None:
             "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
             "identities": [["f" * 64, "9" * 40, "p", "a"]],
         },
-        {
-            "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
-            "identities": [["e" * 64, "9" * 40, "pending", "a"]],
-        },
     ],
-    ids=("count-mismatch", "retained-duplicate", "pending-identity"),
+    ids=("count-mismatch", "retained-duplicate"),
 )
 def test_review_finding_collection_rejects_invalid_compacted_state(
     compacted: dict[str, object],
 ) -> None:
-    """A journal rejects inexact, duplicate, or pending compact identities."""
+    """A journal rejects inexact or duplicate compact identities.
+
+    The host cannot tell which of two conflicting durable states it would
+    overwrite, so that check stays all-or-nothing.
+    """
     with pytest.raises(ValueError, match="review finding"):
         audit_receipts.render_review_finding_journal(
             7,
@@ -159,6 +162,33 @@ def test_review_finding_collection_rejects_invalid_compacted_state(
             (_finding_record(status="corrected"),),
             compacted_outcomes=compacted,
         )
+
+
+def test_review_finding_collection_quarantines_one_malformed_compact_identity() -> None:
+    """One malformed compact identity is quarantined and reported.
+
+    A pending outcome has no durable meaning for a compacted identity. The
+    host drops that identity, warns about it, and keeps the usable records.
+    """
+    compacted = {
+        "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
+        "identities": [["e" * 64, "9" * 40, "pending", "a"]],
+    }
+
+    warnings: list[ReviewWarning] = []
+    records, retained = normalize_review_finding_collection(
+        (_finding_record(status="corrected"),),
+        compacted_outcomes=compacted,
+        warnings=warnings,
+    )
+
+    assert len(records) == 1
+    assert retained == {
+        "counts": {"corrected": 0, "not_publishable": 0, "published": 0},
+        "identities": [],
+    }
+    assert [warning.code for warning in warnings] == ["finding_identity_quarantined"]
+    assert all(warning.recovery for warning in warnings)
 
 
 def test_legacy_review_finding_payloads_normalize_without_compacted_state() -> None:
@@ -236,24 +266,59 @@ def test_legacy_list_keeps_its_original_public_rendering_boundary() -> None:
     assert compact_payload["findings"] == []
 
 
-def test_review_finding_journal_rejects_oversized_or_unknown_records() -> None:
-    """A journal cannot accept an unbounded body or an unknown status."""
-    oversized = {**_finding_record(), "body": "x" * 20_000}
-    unknown = {**_finding_record(), "status": "pending"}
+def test_review_finding_journal_quarantines_an_unknown_status_record() -> None:
+    """A journal quarantines one record whose values the host cannot read.
 
-    with pytest.raises(ValueError, match="finding record"):
-        audit_receipts.render_review_finding_journal(7, "a" * 40, (oversized,))
-    with pytest.raises(ValueError, match="finding record"):
-        audit_receipts.render_review_finding_journal(7, "a" * 40, (unknown,))
+    One corrupt retained record is quarantined. The host warns about it and
+    keeps the usable records. The envelope, the format version, and the
+    compacted state stay all-or-nothing.
+    """
+    unknown = {**_finding_record(), "status": "pending"}
+    usable = {**_finding_record(), "finding_id": "e" * 64}
+
+    warnings: list[ReviewWarning] = []
+    normalized, _ = normalize_review_finding_collection((unknown, usable), warnings=warnings)
+
+    assert [record["finding_id"] for record in normalized] == ["e" * 64]
+    assert [warning.code for warning in warnings] == ["finding_record_quarantined"]
+    assert all(warning.recovery for warning in warnings)
+    _marker, body = audit_receipts.render_review_finding_journal(7, "a" * 40, (unknown, usable))
+    assert body.count("hephaestus-review-findings") == 1
+
+
+def test_review_finding_journal_refuses_an_oversized_record_instead_of_quarantine() -> None:
+    """An oversized record raises so the host can compact it.
+
+    A size failure is not corrupt data. The host compacts an oversized record
+    into a bounded identity. The host must never drop that record.
+    """
+    oversized = {**_finding_record(), "body": "x" * 20_000}
+
+    warnings: list[ReviewWarning] = []
+    with pytest.raises(ReviewFindingSizeError):
+        normalize_review_finding_collection((oversized,), warnings=warnings)
+
+    assert warnings == []
 
 
 @pytest.mark.parametrize("status", ["corrected", "not_publishable"])
-def test_review_finding_journal_requires_reason_for_corrected_outcome(status: str) -> None:
-    """A corrected outcome keeps the typed reason that caused correction."""
+def test_review_finding_journal_quarantines_a_corrected_outcome_without_reason(
+    status: str,
+) -> None:
+    """A corrected outcome without its typed reason is quarantined.
+
+    The record does not name why the host corrected or withheld it, so the
+    host cannot explain the outcome to the reviewer. It reports the record and
+    keeps the usable records.
+    """
     record = {**_finding_record(status=status), "reason": None}
 
-    with pytest.raises(ValueError, match="finding record"):
-        audit_receipts.render_review_finding_journal(7, "a" * 40, (record,))
+    warnings: list[ReviewWarning] = []
+    normalized, _ = normalize_review_finding_collection((record,), warnings=warnings)
+
+    assert normalized == ()
+    assert [warning.code for warning in warnings] == ["finding_record_quarantined"]
+    assert all(warning.recovery for warning in warnings)
 
 
 def test_review_finding_journal_preserves_normalized_source_scope() -> None:
@@ -322,18 +387,25 @@ def test_review_finding_records_fit_all_github_comment_renderings() -> None:
     assert len(public) <= 65_536
 
 
-def test_review_finding_journal_rejects_oversized_utf8_aggregate() -> None:
-    """The aggregate limit counts encoded bytes before base64 expansion."""
-    records = (
+def test_review_finding_batch_rejects_oversized_utf8_aggregate() -> None:
+    """The aggregate limit counts encoded bytes before base64 expansion.
+
+    Each record in a new reviewer batch is individually bounded. Their
+    aggregate is not, so the aggregate check stays all-or-nothing because it
+    maps to the GitHub comment transport limit.
+    """
+    records = [
         {
             **_finding_record(status="corrected"),
+            "finding_id": f"{index:064x}",
             "body": "é" * 8_000,
-            "evidence": "é" * 8_000,
-        },
-    )
+            "evidence": "e" * 2_000,
+        }
+        for index in range(3)
+    ]
 
     with pytest.raises(ValueError, match="aggregate size limit"):
-        audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+        normalize_review_finding_batch_records(records)
 
 
 def test_review_finding_renderers_accept_bounded_utf8_records() -> None:
@@ -353,18 +425,25 @@ def test_review_finding_renderers_accept_bounded_utf8_records() -> None:
     assert len(public) <= 65_536
 
 
-def test_review_finding_records_reject_oversized_visible_rendering() -> None:
-    """HTML escaping cannot make an accepted public audit exceed its limit."""
-    records = (
+def test_review_finding_batch_records_reject_oversized_visible_rendering() -> None:
+    """HTML escaping cannot make an accepted public audit exceed its limit.
+
+    Each record in a new reviewer batch is individually bounded and
+    individually renderable. Their escaped aggregate is not, so the public
+    rendering check stays all-or-nothing.
+    """
+    records = [
         {
             **_finding_record(status="corrected"),
-            "body": "&" * 12_000,
-            "evidence": "y" * 12_000,
-        },
-    )
+            "finding_id": f"{index:064x}",
+            "body": "&" * 5_000,
+            "evidence": "y" * 500,
+        }
+        for index in range(3)
+    ]
 
     with pytest.raises(ValueError, match="public rendering limit"):
-        audit_receipts.render_review_finding_journal(7, "a" * 40, records)
+        normalize_review_finding_batch_records(records)
 
 
 def test_public_go_audit_with_escaped_summary_round_trips_retained_findings() -> None:

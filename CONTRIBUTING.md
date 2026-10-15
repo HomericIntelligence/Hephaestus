@@ -291,22 +291,20 @@ state. A complete local suite is not a PR-creation or merge prerequisite.
 The unit-test suite executes a small number of real subprocesses and therefore
 assumes a POSIX-like development environment. Specifically:
 
-- **`echo`, `false`, `ls`** on `PATH` — used by `tests/unit/automation/test_git_utils.py::TestRun`
-  to exercise the `run()` wrapper end-to-end (four cases).
-- **`git`** on `PATH` — used by `tests/unit/automation/test_session_naming.py`
-  (`TestShortGithash::test_real_repo` and
-  `TestCurrentTrunkGithash::test_falls_back_to_short_githash`) to create a
-  throwaway repo inside `tmp_path` with `git init -q` and `git commit
-  --allow-empty --no-gpg-sign`. Git environment variables (`GIT_DIR`,
-  `GIT_WORK_TREE`, etc.) are scrubbed and author/committer identity is forced
-  via `_git_test_env()` so the tests do not depend on the contributor's
+- **`echo`, `false`, `ls`** on `PATH` — used by
+  `tests/unit/utils/test_general_utils.py::TestRunSubprocess` to exercise the
+  `run_subprocess()` wrapper end-to-end.
+- **`git`** on `PATH` — used by `tests/unit/github/test_tidy.py` and
+  `tests/unit/github/test_fleet_sync.py` to create a throwaway repository inside
+  `tmp_path` with `git init -q` and `git commit --no-gpg-sign`. Each test sets
+  the author and committer identity with a local `git config user.name` and
+  `git config user.email`, so the tests do not depend on the contributor's
   `~/.gitconfig`.
 
-These cases are tagged with the `requires_posix` pytest marker and are skipped
-automatically on `sys.platform == "win32"`. They run under macOS, Linux, and
-WSL with no extra setup beyond `uv sync`. Windows contributors using Git
-Bash / MSYS2 will execute them; pure-Windows-Python runs will skip them.
-Tracking: #742.
+These cases run under macOS, Linux, and WSL with no extra setup beyond
+`uv sync`. Windows contributors using Git Bash / MSYS2 will execute them.
+A pure-Windows Python run cannot execute them, because no skip guard covers
+these cases. Tracking: #742.
 
 The command `bash scripts/run_ci_local.sh build` also requires `python3` and
 `zstd` on `PATH`. It uses these tools to provision and extract the fixed Codex

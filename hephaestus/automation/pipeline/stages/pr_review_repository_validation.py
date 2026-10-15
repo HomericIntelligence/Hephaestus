@@ -9,9 +9,12 @@ from typing import cast
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.operation_deadlines import operation_deadline_after
-from hephaestus.automation.pipeline_github_review_validation import (
-    comet_ci_check_ids,
-    comet_local_check_ids,
+from hephaestus.automation.pipeline.repository_validation_profiles import (
+    RepositoryValidationProfile,
+    ci_validation_check_ids,
+    local_validation_check_ids,
+    plan_validation_profile,
+    repository_validation_profile,
 )
 from hephaestus.automation.source_worktree import SourceWorkspaceError
 
@@ -44,7 +47,10 @@ from .base import (
     stage_timeout,
 )
 from .pr_review_diagnostics import publish_host_verification_failure
-from .pr_review_repository_validation_state import _repository_validation_coverage
+from .pr_review_repository_validation_state import (
+    _repository_validation_coverage,
+    _validation_profile,
+)
 from .pr_review_round_state import _clear_host_execution_state
 from .pr_review_threads import (
     _HOST_VERIFICATION_PENDING,
@@ -68,6 +74,14 @@ from .pr_review_verification import (
 from .repo import is_full_commit_sha
 
 
+def _require_validation_profile(item: WorkItem, org: str | None) -> RepositoryValidationProfile:
+    """Return the installed profile for the item repository or fail the stage."""
+    profile = _validation_profile(item, org)
+    if profile is None:
+        raise ValueError("The source repository is unsupported.")
+    return profile
+
+
 def _store_review_source_manifest(
     item: WorkItem, value: dict[str, object], paths: tuple[str, ...]
 ) -> bool:
@@ -86,12 +100,11 @@ def _store_review_source_manifest(
         or target_base != item.payload.get("pr_base_sha")
     ):
         return False
-    if item.repo.casefold() == "comet":
-        try:
-            for _, path in records:
-                path.encode("utf-8", errors="strict")
-        except UnicodeEncodeError:
-            return False
+    try:
+        for _, path in records:
+            path.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
     item.payload["review_change_records"] = records
     item.payload["review_diff_base_sha"] = diff_base
     item.payload["review_target_base_sha"] = target_base
@@ -134,8 +147,10 @@ def _check_repository_preparation_current(
         repository, issue, pr = plan.repository, plan.issue_number, plan.pr_number
         workspace, head, base = plan.source_workspace, plan.reviewed_head, plan.reviewed_base
         generation = invocation.generation
+    profile = repository_validation_profile(item.repo)
     if (
-        repository.casefold() != f"llm360/{item.repo.casefold()}"
+        profile is None
+        or repository != profile.repository
         or issue != item.issue
         or pr != item.pr
         or str(workspace.cwd) != item.worktree
@@ -362,7 +377,7 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
             )
         except (RuntimeError, SourceWorkspaceError):
             return StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
-        if ctx.org.casefold() == "llm360" and item.repo.casefold() == "comet":
+        if _validation_profile(item, ctx.org) is not None:
             return self._start_repository_validation(item, ctx, workspace)
         _clear_host_execution_state(item)
         return self._route_threads_before_broad_review(item, ctx)
@@ -375,12 +390,13 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
             return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_source_pending")
         timeout = min(120, stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
         try:
+            profile = _require_validation_profile(item, ctx.org)
             paths = _review_changed_paths(item.payload.get("review_changed_paths"))
             records = _review_change_records(item.payload.get("review_change_records"), paths or ())
             if records is None:
                 raise ValueError("The checkout manifest is invalid.")
             request = RepositoryValidationSourceRequest(
-                "LLM360/comet",
+                profile.repository,
                 item.issue,
                 cast(int, item.pr),
                 workspace,
@@ -452,7 +468,7 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
         item.payload["reviewed_pr_base_sha"] = plan.reviewed_base
         if not plan.execution_allowed:
             return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_profile_gap")
-        checks = comet_ci_check_ids(plan.checks, profile=plan.profile_id)
+        checks = ci_validation_check_ids(plan_validation_profile(plan), plan.checks)
         if not checks:
             return self._repository_validation_ci_wait(item, ctx)
         try:
@@ -486,7 +502,9 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
         attempt = item.payload.get("repository_validation_attempt")
         if type(attempt) is not RepositoryValidationAttempt or not coverage.uncovered_check_ids:
             return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_incomplete")
-        eligible = comet_local_check_ids(attempt.plan.checks)
+        eligible = local_validation_check_ids(
+            plan_validation_profile(attempt.plan), attempt.plan.checks
+        )
         if not set(coverage.uncovered_check_ids) <= set(eligible):
             item.payload["repository_validation_failure"] = "local_check_ineligible"
             return StageOutcome(Disposition.FINISH_FAIL, "repository_validation_local_unavailable")
@@ -715,7 +733,7 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
             ready
             and normalized_paths is not None
             and isinstance(value, dict)
-            and ("change_records" in value or item.repo.casefold() == "comet")
+            and ("change_records" in value or repository_validation_profile(item.repo) is not None)
             and not _store_review_source_manifest(item, value, normalized_paths)
         ):
             item.payload["review_checkout_error"] = (

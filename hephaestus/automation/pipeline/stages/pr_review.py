@@ -17,7 +17,14 @@ from .base import (
 from .pr_review_audit import PrReviewAudit
 from .pr_review_gate import PrReviewGate
 from .pr_review_jobs import PrReviewJobs
-from .pr_review_threads import _STEP_HANDLER_NAMES, ENTER, GO_AUDIT_RECEIPT, logger
+from .pr_review_threads import (
+    _STEP_HANDLER_NAMES,
+    ENTER,
+    EVAL,
+    GO_AUDIT_RECEIPT,
+    LEGACY_ANCHOR_CORRECTION_WAIT,
+    logger,
+)
 
 
 class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate, Stage):
@@ -80,6 +87,16 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate, Stage):
             "GO_AUDIT_RECEIPT",
         } and (terminal := _reviewed_terminal_pr_outcome(item, ctx)):
             return terminal
+        if item.state == LEGACY_ANCHOR_CORRECTION_WAIT:
+            # Issue #3389 removed the anchor-correction review round. A durable
+            # item that still holds that state loads as a fresh review step.
+            # The host must not fail closed on a state it no longer owns.
+            logger.warning(
+                "pr_review:%d: legacy %s state; loading a fresh review step",
+                item.issue,
+                LEGACY_ANCHOR_CORRECTION_WAIT,
+            )
+            return Continue(next_state=EVAL)
         handler_name = _STEP_HANDLER_NAMES.get(item.state)
         if handler_name is not None:
             handler = cast(

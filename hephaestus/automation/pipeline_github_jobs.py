@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import subprocess
 from concurrent.futures import CancelledError
@@ -72,6 +73,8 @@ from hephaestus.automation.remediation_prepublication import (
     remove_prepublication_receipt,
 )
 from hephaestus.automation.review_journal import CommentJournalReadError, PlanDiscoveryStatus
+
+logger = logging.getLogger(__name__)
 
 
 def _request_threads(value: FrozenJson, label: str) -> list[Any]:
@@ -998,6 +1001,7 @@ class PipelineGitHubJobRunner:
         """Run fresh receipt reconciliation, publication, and late-thread readback."""
         from hephaestus.automation.github_api.diff import (
             _validate_comments_to_diff,
+            anchor_review_warnings,
             compact_terminal_review_finding_collection,
             empty_review_finding_compacted_outcomes,
             normalize_review_finding_collection,
@@ -1381,8 +1385,30 @@ class PipelineGitHubJobRunner:
             review_diff,
             preserve_finding_ids=True,
         )
-        if validation.corrections or len(validation.valid) != len(findings_to_validate):
+        # Publication never fails for an anchor reason. The host publishes the
+        # valid subset inline and renders every demoted finding in the visible
+        # review body with a warning marker and a recovery instruction. The
+        # demoted finding text stays on the correction record so the body and
+        # the stage both keep the feedback.
+        demoted_findings = list(validation.corrections)
+        # The validator keeps every non-valid finding in a typed correction. A
+        # count that does not add up means a finding was lost, so it stays an
+        # integrity failure.
+        if len(validation.valid) + len(demoted_findings) != len(findings_to_validate):
             return receipt("audit_failure")
+        for correction, warning in zip(
+            demoted_findings, anchor_review_warnings(demoted_findings), strict=True
+        ):
+            logger.warning(
+                "pr_review:%d: demoted finding %s on %s:%s (%s): %s Recovery: %s",
+                request.pr_number,
+                correction.finding_id,
+                correction.path,
+                correction.line,
+                correction.reason,
+                warning.message,
+                warning.recovery,
+            )
         try:
             findings = _without_duplicate_live_findings(list(validation.valid), live_by_id)
         except ValueError:
@@ -1415,8 +1441,9 @@ class PipelineGitHubJobRunner:
                 findings,
                 expected_head_sha=request.reviewed_head_sha,
                 review_diff=review_diff,
+                demoted_findings=demoted_findings,
             )
-            if findings
+            if findings or demoted_findings
             else []
         )
         posted_receipts = list(publication)

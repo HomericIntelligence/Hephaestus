@@ -3859,12 +3859,18 @@ class TestPlanningStageStep:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Malformed REST comments cannot be treated as an absent plan."""
+        """A malformed plan comment stays all-or-nothing."""
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
-            lambda issue: [{"body": None, "user": {"login": "bot"}}],
+            lambda issue: [
+                {
+                    "body": render_current_plan("Stale plan"),
+                    "databaseId": 0,
+                    "user": {"login": "bot"},
+                }
+            ],
         )
         monkeypatch.setattr(
             adapter,

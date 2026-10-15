@@ -248,7 +248,7 @@ class StageGitHub(Protocol):
     def read_repository_validation_ci(
         self, request: ReadRepositoryValidationCIRequest
     ) -> RepositoryValidationCIRead:
-        """Collect bound Comet CI evidence through the GitHub worker."""
+        """Collect bound repository CI evidence through the GitHub worker."""
         ...
 
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:

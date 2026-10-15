@@ -143,7 +143,6 @@ REPOSITORY_VALIDATION_CI_WAIT = "REPOSITORY_VALIDATION_CI_WAIT"
 REPOSITORY_VALIDATION_SOURCE_WAIT = "REPOSITORY_VALIDATION_SOURCE_WAIT"
 REPOSITORY_VALIDATION_RUNTIME_WAIT = "REPOSITORY_VALIDATION_RUNTIME_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
-ANCHOR_CORRECTION_WAIT = "ANCHOR_CORRECTION_WAIT"
 POST = "POST"
 SCOPE_EXPANSION_PREPARE_SUBMIT = "SCOPE_EXPANSION_PREPARE_SUBMIT"
 POST_APPLY = "POST_APPLY"
@@ -152,6 +151,11 @@ GO_AUDIT_RECEIPT = "GO_AUDIT_RECEIPT"
 GO_AUDIT_PUBLISH = "GO_AUDIT_PUBLISH"
 COMPACT_REVIEWER_WAIT = "COMPACT_REVIEWER_WAIT"
 CLEANUP_REVIEW_WORKTREE_WAIT = "CLEANUP_REVIEW_WORKTREE_WAIT"
+
+#: Legacy state of the removed anchor-correction review round (issue #3389).
+#: A durable item can still hold it after a restart. The stage routes it to a
+#: fresh review step instead of failing closed as an unknown state.
+LEGACY_ANCHOR_CORRECTION_WAIT = "ANCHOR_CORRECTION_WAIT"
 
 # Public audit publication is a receipt-backed external reconciliation, not a
 # review round. Three delayed attempts (1s, 2s, 4s) bound one coordinator run;
@@ -170,7 +174,6 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     REPOSITORY_VALIDATION_SOURCE_WAIT: "_repository_validation_source_wait",
     REPOSITORY_VALIDATION_RUNTIME_WAIT: "_repository_validation_runtime_wait",
     VALIDATE_WAIT: "_validate_wait",
-    ANCHOR_CORRECTION_WAIT: "_anchor_correction_wait",
     POST: "_post",
     SCOPE_EXPANSION_PREPARE_SUBMIT: "_scope_expansion_prepare_submit",
     POST_APPLY: "_post_apply",
@@ -204,7 +207,6 @@ REVIEW_CHECKOUT_RETRY_CAP = 2
 
 _HOST_VERIFICATION_PENDING = "host_verification_pending"
 _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
-_ANCHOR_CORRECTION_RETRY = "review_anchor_correction_retry"
 
 
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
@@ -654,7 +656,6 @@ else:
 __all__ = [
     "ADOPT_WORKTREE_WAIT",
     "AGENT_PR_REVIEWER",
-    "ANCHOR_CORRECTION_WAIT",
     "BLOCKING_SEVERITIES",
     "CLEANUP_REVIEW_WORKTREE_WAIT",
     "COMPACT_REVIEWER_WAIT",
@@ -668,6 +669,7 @@ __all__ = [
     "HOST_VERIFICATION_TIMEOUT_S",
     "HOST_VERIFICATION_WAIT",
     "IMPLEMENTATION_GO_AUDIT_RETRY_CAP",
+    "LEGACY_ANCHOR_CORRECTION_WAIT",
     "POST",
     "REPOSITORY_VALIDATION_CI_WAIT",
     "REPOSITORY_VALIDATION_RUNTIME_WAIT",
@@ -682,7 +684,6 @@ __all__ = [
     "UNSUPPORTED_HOST_VERIFICATION_ERROR",
     "VALIDATE_WAIT",
     "VALID_SEVERITIES",
-    "_ANCHOR_CORRECTION_RETRY",
     "_COMMENT_VALIDATION_ONLY",
     "_HOST_VERIFICATION_PENDING",
     "_JSON_RESPONSE_BLOCK_RE",

@@ -24,6 +24,7 @@ from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.review_journal import IssueComment
+from hephaestus.automation.review_warnings import ReviewWarning
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -116,8 +117,16 @@ def test_reply_recovery_requires_the_current_armed_journal(journal_format: int) 
     comment = IssueComment(body=f"{marker}\n<!-- {json.dumps(payload)} -->", viewer_did_author=True)
 
     if journal_format == 1:
-        with pytest.raises(ValueError, match="journal identity is invalid"):
-            journaled_implementation_reply_handoff([comment], pr_number=1001, threads=threads)
+        # A retired record is quarantined with a warning. It cannot restore
+        # reply work, so recovery returns None instead of raising.
+        warnings: list[ReviewWarning] = []
+        assert (
+            journaled_implementation_reply_handoff(
+                [comment], pr_number=1001, threads=threads, warnings=warnings
+            )
+            is None
+        )
+        assert [warning.code for warning in warnings] == ["reply_handoff_entry_quarantined"]
     else:
         recovered = journaled_implementation_reply_handoff(
             [comment], pr_number=1001, threads=threads

@@ -19,7 +19,7 @@ from hephaestus.automation.review_audit import ReviewAudit, render_implementatio
 def record() -> RebaseReviewRecord:
     """Return complete review and rebase facts."""
     return RebaseReviewRecord(
-        repository="LLM360/comet",
+        repository="LLM360/ledger",
         issue_number=3,
         pr_number=7,
         reviewed_head_sha="a" * 40,
@@ -47,7 +47,7 @@ def test_record_roundtrip_preserves_original_review() -> None:
         ("pr_number", True),
         ("issue_number", 0),
         ("resulting_head_sha", "bad"),
-        ("repository", "comet"),
+        ("repository", "ledger"),
         ("state", "approved"),
         ("original_audit_id", "changed"),
     ],
@@ -75,7 +75,7 @@ class MemoryHost(PipelineGitHub):
     """Use an in-memory comment transport."""
 
     org = "LLM360"
-    repo = "comet"
+    repo = "ledger"
 
     def __init__(self, bodies: list[str]) -> None:
         """Set the initial comment bodies."""
@@ -135,7 +135,7 @@ def test_recovery_rejects_ambiguous_or_revoked_records(problem: str) -> None:
     if problem == "revoked":
         value = replace(value, state="revoked")
     if problem == "foreign_repo":
-        value = replace(value, repository="Other/comet")
+        value = replace(value, repository="Other/ledger")
     _, body = render_review_rebase_record(value)
     if problem == "malformed":
         marker, _, raw = body.partition("\n")
@@ -167,7 +167,7 @@ def test_restart_retains_record_without_process_proof() -> None:
     )
     entry = seed_entry_from_facts(facts)
     assert entry.stage is StageName.MERGE_WAIT
-    item = SourceCoordinator._entry_to_item(entry, "comet")
+    item = SourceCoordinator._entry_to_item(entry, "ledger")
     assert item.payload["pending_review_rebase_record"] == value
     assert "retained_rebase_review_proof" not in item.payload
     assert "reviewed_pr_head_sha" not in item.payload
@@ -209,7 +209,7 @@ def test_recovery_ignores_foreign_rebase_records() -> None:
 
     class Host(MemoryHost):
         org = "LLM360"
-        repo = "comet"
+        repo = "ledger"
 
         def _repo_issue_comments(self, number: int) -> list[dict[str, object]]:
             return [{"body": "<!-- hephaestus-review-rebase:v1 -->\n{}"}]
@@ -238,7 +238,7 @@ def test_closed_publication_boundary_rejects_moved_source(tmp_path: Path) -> Non
     assert callable(request_type)
     request = request_type(record())
     host = Host([])
-    job = github_jobs.GitHubJob("comet", tmp_path, request, "publish rebase record")
+    job = github_jobs.GitHubJob("ledger", tmp_path, request, "publish rebase record")
     result = PipelineGitHubJobRunner("LLM360", False)._run_request(job, host)
     assert isinstance(result, github_jobs.RebaseReviewPublished)
     assert result.published is False
@@ -282,7 +282,7 @@ def test_publication_boundary_checks_live_identity(tmp_path: Path, problem: str 
     )
     host = Host([audit_body])
     request = PublishRebaseReviewRequest(value)
-    job = GitHubJob("comet", tmp_path, request, "publish rebase record")
+    job = GitHubJob("ledger", tmp_path, request, "publish rebase record")
     result = PipelineGitHubJobRunner("LLM360", False)._run_request(job, host)
     assert isinstance(result, RebaseReviewPublished)
     assert result.request == request
@@ -331,7 +331,7 @@ def test_inspection_requires_fresh_evidence_without_writes(
 
     host = Host([])
     request = InspectRebaseReviewRequest(value)
-    job = GitHubJob("comet", tmp_path, request, "inspect rebase record")
+    job = GitHubJob("ledger", tmp_path, request, "inspect rebase record")
     result = PipelineGitHubJobRunner("LLM360", False)._run_request(job, host)
     assert isinstance(result, RebaseReviewInspected)
     assert result.request == request
@@ -344,7 +344,7 @@ def test_fresh_review_clears_old_process_rebase_proof() -> None:
     from hephaestus.automation.pipeline.stages.pr_review_threads import _clear_round_review_state
     from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 
-    item = WorkItem(repo="comet", kind=ItemKind.PR, pr=7, issue=3)
+    item = WorkItem(repo="ledger", kind=ItemKind.PR, pr=7, issue=3)
     prior = record()
     item.payload.update(
         {

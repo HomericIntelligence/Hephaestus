@@ -419,7 +419,8 @@ class TestPiCliSetup:
             for step in pi_job["steps"]
             if step.get("name") == "Run Pi conformance tests"
         )
-        assert "tests/unit/docs/test_pi_rollout_consistency.py" in command
+        assert "tests/integration/test_pi_plugin_package_smoke.py" in command
+        assert "tests/unit/agents/test_pi_plugins.py" in command
         assert '--override-ini="addopts="' in command
         assert "--require-pi-package-smoke" in command
         assert '-m "not nightly"' not in command
@@ -923,25 +924,25 @@ class TestCLIEntryPoints:
 
 
 @pytest.mark.parametrize(
-    ("path", "accepted"),
+    "path",
     [
-        ("tests/fixtures/comet-review-validation/current/scripts/tool.sh", True),
-        ("tests/fixtures/comet-review-validation/fe5a67d/scripts/tool.sh", True),
-        ("tests/fixtures/comet-review-validation/fe5a67d-extra/tool.sh", False),
-        ("tests/fixtures/comet-review-validation/7c2772e/scripts/tool.sh", True),
-        ("tests/fixtures/comet-review-validation/7c2772e-extra/tool.sh", False),
-        ("tests/fixtures/comet-review-validation/historical/controls/scripts/tool.sh", True),
-        ("scripts/tool.sh", False),
-        ("tests/fixtures/comet-review-validation/current-extra/tool.sh", False),
-        ("tests/fixtures/comet-review-validation/runtime-imports/tool.sh", False),
-        ("tests/fixtures/comet-review-validation/historical/tool.sh", False),
-        ("tests/fixtures/other/tool.sh", False),
+        "scripts/tool.sh",
+        "tests/fixtures/sigstore/scripts/tool.sh",
+        "tests/fixtures/sigstore-extra/tool.sh",
+        "tests/fixtures/other/tool.sh",
+        ".github/workflows/nightly-tests.yml",
     ],
+    ids=["source", "approved-fixture", "adjacent-fixture", "other-fixture", "owned-workflow"],
 )
-def test_suppression_scan_preserves_external_controls_only(
-    tmp_path: Path, path: str, accepted: bool, monkeypatch: pytest.MonkeyPatch
+def test_suppression_scan_rejects_every_owned_shell_suppression(
+    tmp_path: Path, path: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Keep fixed external bytes while rejecting owned shell suppressions."""
+    """Reject a silent-failure workaround in every owned source path.
+
+    The scan exempts only its own workflow and its own rule documentation.
+    It keeps no external fixture exemption, so every tracked source path is
+    scanned.
+    """
     from hephaestus.config.child_environments import build_git_child_env
 
     parent_index = tmp_path / "parent-index"
@@ -983,7 +984,6 @@ def test_suppression_scan_preserves_external_controls_only(
         timeout=10,
     )
     assert parent_index.read_bytes() == b"parent index must not change"
-    assert result.returncode == (0 if accepted else 1), result.stdout + result.stderr
-    if not accepted:
-        assert "1:false || true" in result.stdout
-        assert "Found silent-failure workarounds above" in result.stdout
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "1:false || true" in result.stdout
+    assert "Found silent-failure workarounds above" in result.stdout
