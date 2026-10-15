@@ -62,6 +62,13 @@ _DEMOTION_BUDGET_WARNING_TEXT = (
     "Read the review body and the pipeline log for the complete demoted set.",
 )
 
+#: Message and recovery text for the generic carried-warning budget. This
+#: text names no list type, so a non-demotion caller does not misreport.
+_GENERIC_BUDGET_WARNING_TEXT = (
+    "The host did not carry every review warning for this round.",
+    "Read the pipeline log for the complete warning set.",
+)
+
 #: Anchor reason to warning code. The warning message and the recovery text
 #: are NOT duplicated here. ``anchor_warning_for_reason`` owns that text, so
 #: the visible review body and the host logs cannot drift apart.
@@ -103,18 +110,23 @@ def carry_review_warnings(
     warnings: Sequence[ReviewWarning],
     *,
     note_truncation: bool = False,
+    budget_warning: ReviewWarning | None = None,
 ) -> None:
     """Append bounded warning text to the item payload of one review round.
 
     The carried list never exceeds :data:`MAX_CARRIED_REVIEW_WARNINGS`. When
     the host drops warnings it states the truncation in one warning, so no
-    caller loses the fact that the list is incomplete.
+    caller loses the fact that the list is incomplete. The truncation warning
+    names the list that was truncated. A demotion carrier passes its own
+    demotion text; every other caller gets the generic text.
 
     Args:
         item: The review work item that carries the warnings.
         warnings: Bounded warnings that one step produced.
         note_truncation: The caller dropped warnings of its own. The host then
             states that fact in one warning even when every warning fits.
+        budget_warning: The truncation warning for this list. When omitted,
+            the generic capacity warning is used.
 
     """
     if not warnings and not note_truncation:
@@ -132,7 +144,7 @@ def carry_review_warnings(
     payloads = [_warning_payload(warning) for warning in kept]
     if truncated:
         dropped = len(warnings) - len(kept)
-        payloads.append(_warning_payload(_demotion_budget_warning()))
+        payloads.append(_warning_payload(budget_warning or _generic_budget_warning()))
         _note_dropped_warnings(item, dropped)
     item.payload[REVIEW_WARNINGS_PAYLOAD_KEY] = [*carried, *payloads]
 
@@ -162,6 +174,14 @@ def _demotion_budget_warning() -> ReviewWarning:
     message, recovery = _DEMOTION_BUDGET_WARNING_TEXT
     return make_review_warning(
         "anchor_demotion_budget_exhausted", message=message, recovery=recovery
+    )
+
+
+def _generic_budget_warning() -> ReviewWarning:
+    """Return the warning that states the host dropped generic warnings."""
+    message, recovery = _GENERIC_BUDGET_WARNING_TEXT
+    return make_review_warning(
+        "review_warning_budget_exhausted", message=message, recovery=recovery
     )
 
 
@@ -362,7 +382,12 @@ def carry_demoted_findings(
             ),
             recovery=recovery,
         )
-    carry_review_warnings(item, warnings, note_truncation=len(kept) < len(reported))
+    carry_review_warnings(
+        item,
+        warnings,
+        note_truncation=len(kept) < len(reported),
+        budget_warning=_demotion_budget_warning(),
+    )
     return True
 
 

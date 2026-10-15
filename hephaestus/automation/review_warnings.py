@@ -61,6 +61,7 @@ AnchorCorrectionWarningReason = Literal[
     "anchor_line_not_in_diff",
     "anchor_unsupported_side",
     "anchor_demotion_budget_exhausted",
+    "review_warning_budget_exhausted",
 ]
 
 DataHygieneWarningReason = Literal[
