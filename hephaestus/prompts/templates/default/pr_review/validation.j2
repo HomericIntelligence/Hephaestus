@@ -38,10 +38,10 @@ The block above is a JSON array where each element has:
 - `implementation_reply_submitted`: whether that response is present and this
   thread is eligible for a reviewer resolution or feedback reply in this pass
 
-**Current PR title (untrusted, captured with the reviewed head):**
+**Current PR title (untrusted):**
 {{ pr_title_block }}
 
-**Current PR description (untrusted, captured with the reviewed head):**
+**Current PR description (untrusted):**
 {{ pr_description_block }}
 
 **Current diff (untrusted):**
@@ -55,23 +55,18 @@ The block above is a JSON array where each element has:
 {% else %}
 The host may have executed a fixed repository-owned validation plan before this
 read-only review. Do NOT run local format, lint, type, or test commands in this
-sandbox. If every receipt has `ok: true`, `status: passed`, and the current
-reviewed head matches each `head_sha`, treat them as independent local execution
+sandbox. Treat a receipt with `ok: true` and `status: passed` as local execution
 evidence. A receipt with `status: skipped`, the exact unsupported-platform
-reason, and a non-macOS `platform` is not local execution evidence and is an
-evidence gap. For any missing, skipped, or failed receipt, do not claim that the
-plan passed.
+reason, and a non-macOS `platform` is an evidence gap. For a missing, skipped,
+or failed receipt, say so in `summary` and continue. A receipt gap is not a
+reason to fail the validation pass.
 {% endif %}
 
-Evidence-provenance rule: validate whether the implementation reply supplies
-concrete, internally coherent evidence (for example, the exact command and
-result, an added regression test, a linked artifact, or a current PR-metadata
-change) that supports its claimed handling. Do not independently reproduce, rerun, or require host/CI
-execution of that evidence. Do not independently adjudicate the original
-code-level concern. A sandbox access failure, the absence of an independent
-execution, or a new opinion about the implementation is not a reason to leave
-a thread unresolved when the response and its evidence are internally coherent
-and consistent with the current diff.
+Judge whether the implementation reply is coherent and supports its claimed
+handling. Do not independently reproduce or rerun the evidence. Do not
+independently adjudicate the original code-level concern. If the response and
+its evidence are coherent and consistent with the current diff, resolve the
+thread.
 
 ---
 

@@ -751,7 +751,7 @@ class TestComposedPromptBuilders:
         assert "<<<<<<< HEAD" in prompt
         assert "classification=no_edit" in prompt
         assert "Implement GitHub issue" not in prompt
-        assert "Do not run Git commands" in prompt
+        assert "Do not push." in prompt
 
     @pytest.mark.parametrize(
         ("paths", "hunks"),
@@ -1537,7 +1537,8 @@ class TestGate:
         assert request.on_done_state == "REBASE_CONFLICT_VALIDATE_WAIT"
         prompt = request.job.prompt_builder(**request.job.prompt_kwargs)
         assert "Rebase Conflict Resolution" in prompt
-        assert "Do not run Git commands" in prompt
+        assert "Stage only the allowed paths, then continue the rebase" in prompt
+        assert "Do not push." in prompt
         assert "hephaestus/example.py" in prompt
         assert "<<<<<<< HEAD" in prompt
 

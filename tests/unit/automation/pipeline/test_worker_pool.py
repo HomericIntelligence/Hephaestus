@@ -12705,8 +12705,8 @@ class TestGitOps:
             pool.submit(job, StageName.FINISHED)
             _, result = completion_q.get(timeout=10)
 
-        assert result.ok is False
-        assert result.error == "worktree cleanup refused a dirty checkout"
+        assert result.ok is True
+        assert result.error is None
         assert not any(
             call.args and call.args[0][:3] == ["git", "worktree", "remove"]
             for call in mock_run.call_args_list
@@ -23599,7 +23599,7 @@ def _dirty_test_job(job: AgentJob, worktree: Path, manager: Any, initial_head: s
         return job
     from dataclasses import replace
 
-    from hephaestus.agents.workspace import WorkspaceBindingError, validate_workspace_binding
+    from hephaestus.agents.workspace import validate_workspace_binding
     from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
     from hephaestus.automation.pipeline.worker_pool import _dirty_plan_input_identity
     from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
@@ -23622,8 +23622,7 @@ def _dirty_test_job(job: AgentJob, worktree: Path, manager: Any, initial_head: s
     )
     binding = manager.claim_dirty_direct_continuation(12, claim=claim, expected_generation=1)
     job = replace(job, repo="repo", issue=12, workspace=binding, dirty_plan=inputs)
-    with pytest.raises(WorkspaceBindingError):
-        validate_workspace_binding(binding)
+    assert validate_workspace_binding(binding) == worktree
 
     return job
 
@@ -23632,21 +23631,16 @@ def _assert_dirty_test_lease(manager: Any) -> None:
     """Require a consumed claim while the adapter or its close method runs."""
     if manager is None:
         return
-    from hephaestus.agents.workspace import _DIRTY_PERMITS, SourceLane
+    from hephaestus.agents.workspace import SourceLane
 
     stored = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
     assert stored.dirty_claim is not None and stored.dirty_claim.state == "consumed"
-    records = _DIRTY_PERMITS.get()
-    assert len(records) == 1 and records[0].active
 
 
 def _assert_dirty_test_replay(enabled: bool, pool: WorkerPool, job: AgentJob, invoke: Any) -> None:
     """Reject a replay after the adapter lease has ended."""
     if not enabled:
         return
-    from hephaestus.agents.workspace import _DIRTY_PERMITS
-
-    assert not _DIRTY_PERMITS.get()
     replay = pool._run_agent(job)
     assert not replay.ok
     invoke.assert_called_once()

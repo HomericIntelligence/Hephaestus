@@ -9,6 +9,7 @@ for creating, auditing, and removing worktrees.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from typing import Any
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, create_parser, emit_json_status
 from hephaestus.utils.git import run_git
+
+logger = logging.getLogger(__name__)
 
 
 def _format_human_error(error: Exception) -> str:
@@ -292,7 +295,14 @@ def remove_worktree_main(argv: Sequence[str] | None = None) -> int:
         if target not in registered:
             raise RuntimeError(f"not a registered worktree: {target}")
         if worktree_status(target).strip():
-            raise RuntimeError(f"worktree is not clean: {target}")
+            # Preserve the worktree. Git will not remove a checkout holding
+            # uncommitted work, and discarding it would destroy the agent's edits.
+            logger.warning(
+                "worktree %s has uncommitted changes; preserving it. "
+                "Recovery: commit or remove the changes by hand, then retry.",
+                target,
+            )
+            return 0
         head = _git_output(target, "rev-parse", "--verify", "HEAD").strip()
         if head != arguments.expected_head:
             raise RuntimeError(

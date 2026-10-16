@@ -295,36 +295,23 @@ def test_dirty_operation_rejects_source_drift(tmp_path: Path, change: str) -> No
             pytest.fail("source drift received a lease")
 
 
-def test_dirty_operation_permit_ends_with_its_lease(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_dirty_operation_lease_yields_the_worktree_and_keeps_changes(
+    tmp_path: Path,
 ) -> None:
-    """A successful dirty lease must revoke its temporary validation permit."""
-    from hephaestus.agents.workspace import (
-        DirtySourceOperation,
-        WorkspaceBindingError,
-        validate_workspace_binding,
-    )
+    """A dirty-operation lease grants the worktree and leaves the edits intact."""
+    from hephaestus.agents.workspace import DirtySourceOperation
 
     repo, _, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     binding = manager.prepare(42, SourceLane.IMPLEMENTATION, second, branch="writer")
     (binding.cwd / "tracked.txt").write_text("candidate\n")
-    validate = validate_workspace_binding
-    permits: list[object] = []
 
-    def capture_permit(*args: Any, **kwargs: Any) -> Path:
-        if kwargs.get("dirty_permit") is not None:
-            permits.append(kwargs["dirty_permit"])
-        return validate(*args, **kwargs)
-
-    monkeypatch.setattr(source_worktree, "validate_workspace_binding", capture_permit)
     with manager.acquire(
         binding, source_operation=DirtySourceOperation("test-fix", ("tracked.txt",))
     ) as leased:
         assert leased == binding.cwd
-    assert permits
-    with pytest.raises(WorkspaceBindingError):
-        validate(binding, dirty_permit=permits[-1])
+
+    assert (binding.cwd / "tracked.txt").read_text() == "candidate\n"
 
 
 @pytest.mark.parametrize("changed_pin", ["head", "index", "content"])
@@ -1689,6 +1676,33 @@ def test_direct_writer_transition_preserves_invalid_predecessor(
     assert str(captured.value.recovery.receipt_path).endswith("9-impl.json")
 
 
+def test_direct_writer_transition_refuses_to_discard_predecessor_changes(
+    tmp_path: Path,
+) -> None:
+    """A transition that would delete uncommitted work refuses with recovery."""
+    repo, first, second = _repository(tmp_path)
+    source_manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = source_manager.prepare(
+        9, SourceLane.IMPLEMENTATION, first, branch="old-writer-branch"
+    )
+    pending = predecessor.cwd / "pending-change"
+    pending.write_text("preserve\n", encoding="utf-8")
+
+    with source_manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            source_manager.authorize_direct_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                base_sha=second,
+                handoff=handoff,
+            )
+
+    assert captured.value.recovery is not None
+    assert captured.value.recovery.kind.value == "dirty_worktree"
+    assert captured.value.recovery.manual_action
+    assert pending.read_text() == "preserve\n"
+
+
 def test_direct_writer_transition_rejects_receipt_when_path_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -2381,26 +2395,39 @@ def test_claim_implementation_writer_rejects_a_wrong_attached_branch(
     assert not (manager.state_dir / "9-impl.json").exists()
 
 
-def test_claim_implementation_writer_preserves_a_dirty_writer(tmp_path: Path) -> None:
-    """A dirty controlled writer remains available for recovery."""
+def test_claim_implementation_writer_warns_and_keeps_a_dirty_writer(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A dirty controlled writer is claimed, warned about, and left intact."""
     repo, _, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
-    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
-    _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
-    dirty_file = writer / "recover-me.txt"
-    dirty_file.write_text("preserve this\n", encoding="utf-8")
+    worktree_manager = WorktreeManager(repo_root=repo, base_dir=manager.base_dir)
+    dirty_file = None
 
-    with manager.implementation_writer_handoff(9) as handoff:
-        with pytest.raises(SourceWorkspaceError, match="dirty and preserved"):
-            manager.claim_implementation_writer(
+    with caplog.at_level("WARNING", logger="hephaestus.automation.source_worktree"):
+        with manager.implementation_writer_handoff(9) as handoff:
+            writer = worktree_manager.create_worktree(
+                9,
+                "writer-branch",
+                base_sha=second,
+                remote_branch_reserved=True,
+                source_lane=SourceLane.IMPLEMENTATION.value,
+                implementation_writer_handoff=handoff,
+            )
+            dirty_file = writer / "recover-me.txt"
+            dirty_file.write_text("preserve this\n", encoding="utf-8")
+            claimed = manager.claim_implementation_writer(
                 9,
                 branch="writer-branch",
                 path=writer,
+                authority=worktree_manager.implementation_writer_authority(writer),
                 handoff=handoff,
             )
 
+    assert claimed.cwd == writer
+    assert dirty_file is not None
     assert dirty_file.read_text(encoding="utf-8") == "preserve this\n"
-    assert not (manager.state_dir / "9-impl.json").exists()
+    assert any("uncommitted changes" in record.message for record in caplog.records)
 
 
 def test_claim_implementation_writer_rejects_a_foreign_receipt(tmp_path: Path) -> None:
@@ -2619,17 +2646,16 @@ def test_review_cleanup_receipt_error_names_operation_path_and_cause(
     assert receipt_path.exists()
 
 
-def test_dirty_lane_is_preserved_and_rejected(tmp_path: Path) -> None:
-    """Failure state is never erased by preparation or cleanup."""
+def test_dirty_lane_is_preserved_through_prepare_and_cleanup(tmp_path: Path) -> None:
+    """Failure state is never erased, and preparation still succeeds."""
     repo, _, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     binding = manager.prepare(5, SourceLane.IMPLEMENTATION, second)
     (binding.cwd / "untracked.txt").write_text("recover me\n", encoding="utf-8")
 
-    with pytest.raises(SourceWorkspaceError, match="dirty"):
-        manager.prepare(5, SourceLane.IMPLEMENTATION, second)
-    with pytest.raises(SourceWorkspaceError, match="dirty"):
-        manager.cleanup(5, SourceLane.IMPLEMENTATION)
+    assert manager.prepare(5, SourceLane.IMPLEMENTATION, second).cwd == binding.cwd
+
+    manager.cleanup(5, SourceLane.IMPLEMENTATION)
 
     assert (binding.cwd / "untracked.txt").read_text(encoding="utf-8") == "recover me\n"
 

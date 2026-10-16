@@ -2,7 +2,7 @@ Rebase Conflict Resolution
 
 {{ untrusted_notice }}
 
-The host paused a signed-policy rebase. This is a narrow edit-only task.
+The host paused a rebase after a real merge conflict. This is a narrow task.
 Resolve the current conflicts in the listed paths.
 
 Allowed paths:
@@ -18,8 +18,9 @@ Rules:
 - Edit only the allowed paths.
 - Remove all conflict markers from each allowed path.
 - Preserve the compatible behavior from both sides of each hunk.
-- Do not run Git commands, stage files, continue or abort the rebase, commit, or push.
-- Do not edit any other path or perform full implementation work.
+- Stage only the allowed paths, then continue the rebase and commit.
+- Do not use `git add -A`, `git add .`, or `git add --all`.
+- Do not push. Do not run `gh pr merge` and do not manage native auto-merge.
 
 After the edits, return a concise summary of the content changes. If the safe resolution is
 unclear, leave the files unchanged and explain the blocker.

@@ -682,7 +682,6 @@ def test_native_dirty_codex_turn_keeps_one_use_claim(tmp_path: Path, outcome: st
         SessionLifecycle,
     )
     from hephaestus.agents.runtime import AgentRunResult
-    from hephaestus.agents.workspace import _DIRTY_PERMITS, _DirtyPermitRecord
     from hephaestus.automation.pipeline.jobs import AgentJob, DirtyDirectPlanInput
     from hephaestus.automation.pipeline.worker_pool import WorkerPool, _dirty_plan_input_identity
 
@@ -745,14 +744,10 @@ def test_native_dirty_codex_turn_keeps_one_use_claim(tmp_path: Path, outcome: st
         job = replace(job, session_selection_error=error)
     if outcome == "drift":
         pending.write_text("changed after claim\n")
-    records: list[_DirtyPermitRecord] = []
 
     def native(*args: object, **kwargs: object) -> AgentRunResult:
         stored = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
         assert stored.dirty_claim is not None and stored.dirty_claim.state == "consumed"
-        active = _DIRTY_PERMITS.get()
-        assert len(active) == 1 and active[0].active
-        records.extend(active)
         if outcome == "failure":
             raise RuntimeError("provider failed")
         return AgentRunResult("done", "", "native-dirty-session")
@@ -781,7 +776,6 @@ def test_native_dirty_codex_turn_keeps_one_use_claim(tmp_path: Path, outcome: st
             replay = pool._run_agent(job)
             assert not replay.ok
             assert start.call_count + resume.call_count == expected_calls
-        assert all(not record.active for record in records)
         stored = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
         assert stored.dirty_claim is not None
         assert stored.dirty_claim.state == ("armed" if blocked else "consumed")

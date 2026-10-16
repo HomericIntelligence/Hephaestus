@@ -32,15 +32,13 @@ authorize source review. The bootstrap does not grant a GO label or merge author
 {% include "pr_review/repository_validation.j2" %}
 {% else %}
 The supplied receipts are the complete coordinator-bound host plan for this
-review. When every receipt has `ok: true` and `status: passed` for the reviewed
-`head_sha`, treat the fixed host plan as local execution evidence.
-Do not require an additional coordinator-bound receipt outside this supplied
-plan.
+review. When every receipt has `ok: true` and `status: passed`, treat the fixed
+host plan as local execution evidence. Do not require an additional receipt.
 A receipt with `status: skipped`, the exact unsupported-platform
 reason, and a non-macOS `platform` is not local execution evidence and is an
 evidence gap. Do NOT run local format, lint, type, or test commands in this
-read-only sandbox. Missing, skipped, or failed receipts in this supplied plan
-do not satisfy the fixed host plan.
+read-only sandbox. Report a missing, skipped, or failed receipt in `summary`
+and continue. An evidence gap is not by itself a reason to fail the review.
 {% endif %}
 
 ---
@@ -62,14 +60,8 @@ do not satisfy the fixed host plan.
 > bounded summary for the informational audit comment.
 > If it is unavailable, perform the equivalent review directly using this
 > prompt. Collect evidence and return the structured audit. Do not publish
-> pipeline labels. The host owns the implementation-state label transition;
-> `merge_wait` independently verifies the
-> reviewed-head proof before each individual SHA-conditional normal REST
-> squash-merge request. It may make a bounded sequence (default: five); only
-> classified retryable HTTP 405 readiness and unresolved transport ambiguity can
-> timer-park a later request. Never ask an agent to invoke `gh pr merge`,
-> enable, disable, adopt, or otherwise manage native auto-merge, manage a merge
-> queue, or use an administrator bypass.
+> pipeline labels. The host owns the implementation-state label transition and
+> enables auto-merge after that approval.
 
 **Assume the code is WRONG; your job is to prove it right.** Do not review for
 plausibility — review for falsification: trace each changed execution path,

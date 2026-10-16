@@ -71,38 +71,28 @@ Implement GitHub issue #{{ issue_number }}.
 - Clean up any backup files before finishing
 - Only stage actual implementation files
 
-**Git Boundary (MANDATORY — non-negotiable policy):**
-Your job is to edit files and run the relevant local tests. The
-Hephaestus orchestrator owns all git and GitHub mutation after this
-agent turn returns.
+**Git (you own it):**
+You edit, test, stage, and commit. The host owns only the pull request.
 
-- DO NOT run `git commit`, `git push`, `gh pr create`, `gh pr merge`, or any
-  other command that writes to GitHub.
-- DO NOT run `git config user.email`, `git config user.name`, or otherwise
-  override the committer identity. The orchestrator inherits the operator's
-  configured, GitHub-verifiable identity and signs the commit; a fabricated
-  identity (e.g. an `@anthropic.com` address not linked to a GitHub account)
-  makes every commit unverifiable (`no_user`) and fails the signed-commit gate.
-  Express agent attribution only via the orchestrator's `Co-Authored-By:` trailer.
-- Leave the final implementation changes in the working tree.
-- When you finish, summarize what changed and provide the exact test commands
-  you ran with their outcomes; this is the evidence that belongs in the PR.
+- Work only in `{{ worktree_path }}` on branch `{{ branch_name }}`.
+- A dirty working tree is normal here. Read `git status --short` at the start of
+  your turn and classify what you find. Keep the changes that belong to this
+  issue. Do not reset, discard, or stash work you did not create.
+- Stage only the files you edited. Do not use `git add -A`, `git add .`, or
+  `git add --all`; they stage every dirty and untracked path in the tree,
+  including state that is not yours.
+- Commit with `git commit -S -s -m "<conventional subject>"`. The repository
+  requires a signed commit and exactly one `Signed-off-by:` trailer that matches
+  your author identity.
+- Do not change `user.email` or `user.name`. A fabricated identity makes the
+  commit unverifiable and fails the signed-commit gate.
+- Push the branch when your work is ready. Do not run `gh pr merge`, and do not
+  enable, disable, or adopt native auto-merge. The queue's `pr_review` stage
+  applies the loop-owned `state:implementation-go` label after its review, and
+  the host enables auto-merge after that approval.
 
-After you return, the orchestrator will:
-1. Create a cryptographically signed and DCO-signed commit with `git commit -S -s`.
-2. Push the branch to origin.
-3. Create or reuse the pull request for this branch.
-4. Ensure the PR body contains the exact policy line `Closes #{{ issue_number }}`.
-5. Do not enable auto-merge yourself. The queue's `pr_review` stage applies
-   the loop-owned `state:implementation-go` label after its review.
-   The orchestrator owns that later review; finish the implementation first.
+When you finish, summarize what changed and give the exact test commands you ran
+with their outcomes.
 
-Missing `Closes #N` or signed-commit policy is enforced outside the automation
-loop. Only the queue's `pr_review` stage may publish implementation approval.
-After that approval, `merge_wait` independently revalidates the exact reviewed
-head before each individual SHA-conditional normal REST squash-merge request.
-It may make a bounded sequence (default: five); only classified retryable HTTP
-405 readiness and unresolved transport ambiguity can timer-park a later
-request. Agents must not invoke `gh pr merge`, enable, disable, adopt, or
-otherwise manage native auto-merge, manage a merge queue, or use an
-administrator bypass. This policy applies to every PR — no exceptions.
+After your approval the host enables auto-merge on the pull request and lets
+GitHub perform the merge. It rebases only when the merge reports a real conflict.

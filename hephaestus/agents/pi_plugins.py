@@ -32,6 +32,7 @@ from typing import Any, Protocol, cast
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_version_arg
 from hephaestus.config.child_environments import build_pi_child_env
+from hephaestus.errors import boundary_main
 
 CATALOG_PATH = Path(__file__).with_name("pi_package_catalog.json")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
@@ -1549,7 +1550,16 @@ def format_preflight_human_error(result: PiPreflightResult) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the package bootstrap CLI and return its stable process status."""
+    """Run the package bootstrap CLI and return its stable process status.
+
+    This is the console-script boundary, so it reports through the shared
+    error contract. A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
+    """Run the bootstrap and return its process status."""
     args = build_parser().parse_args(argv)
     yes = args.yes
     if not args.dry_run and not yes and sys.stdin.isatty() and not args.json_output:

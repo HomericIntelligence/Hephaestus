@@ -237,9 +237,48 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 - Python 3.13
 - Type hints required for all functions
 - Clear docstrings for public functions and classes
-- Comprehensive error handling
-- Comprehensive test coverage (unit tests) — 85% test coverage for the whole `hephaestus/` package, enforced by the CI gate (`fail_under = 85`)
+- Error handling at module boundaries only. See
+  [Error handling](#error-handling).
+- Core-library test coverage — 85% test coverage for the whole `hephaestus/`
+  package, enforced by the CI gate (`fail_under = 85`). See
+  [Test policy](#test-policy).
 - Follow PEP 8 style guidelines
+
+## Error handling
+
+Handle errors at module boundaries. A module boundary is a console-script
+entry point, a public library API entry point, or a call that crosses a real
+process, filesystem, or network boundary.
+
+- **Inside a helper:** raise plainly. Do not catch an exception you cannot do
+  something useful with. Do not add a guard for a state the caller already
+  excludes.
+- **At a boundary:** catch, and report. Use `hephaestus/errors.py` so the same
+  failure produces the same exit code and the same stderr message every run.
+- **Prefer a warning to a refusal.** When a condition degrades the result but
+  does not make it unusable, log a warning that names the recovery step and
+  continue. Refuse only when continuing would produce a wrong result.
+- **Never silently swallow.** A caught exception with no log, no warning, and
+  no re-raise is a defect.
+
+## Test policy
+
+Test the core library. A test must import and exercise a module under
+`hephaestus/`. Behaviour tests belong here:
+
+- A function or class that a caller uses.
+- A real error case: bad input, a missing file, a failed subprocess, an
+  unreachable network host, a timeout.
+
+Do not add tests for:
+
+- Documentation text, README content, or ADR files.
+- Prompt strings, template text, or exact message wording.
+- Repository configuration, hook wiring, or file layout.
+- An impossible state that no caller can construct.
+- A hypothetical input the type system or a caller already excludes.
+
+Keep coverage honest: do not add a test to raise a number.
 
 ## Key Development Principles
 
@@ -261,8 +300,10 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 
 - **Never hardcode secrets** in source code
 - Use environment variables for sensitive configuration
-- Reference secret management systems when appropriate
 - Document secret requirements in README, not code
+
+Do not add a provenance or attestation layer for ordinary inputs. Trust a value
+that came from your own process. Validate it at the boundary where it enters.
 
 ### Input Validation
 
@@ -328,70 +369,47 @@ Keep all applicable task, skill, and repository requirements.
 For a subagent task, use the installed catalog for the assigned scope and
 follow the task prompt.
 
-### Delegated Verification
+### Verification
 
-The main agent must not run local verification commands. It must use one or
-more test-only subagents for verification and wait for their reports. One
-subagent can run multiple related verification commands. The main agent can
-use more subagents when separate verification work benefits from parallel
-execution. Use `gpt-5.6-luna`
-with `xhigh` reasoning by default for these subagents.
+An agent verifies its own work. Run the checks you need for the change you
+made, in this order:
 
-Verification includes unit, integration, and shell tests; lint checks;
-formatter checks; and type checks. Give the subagent the exact commands that
-are necessary. The subagent must only run verification commands. It must not
-edit repository files. Use a check-only command when a tool can change files.
-Do not run `pre-commit run` separately for delegated verification. Let Git run
-its installed, mutating hooks during commit and push.
+1. Focused tests. Select the tests for the affected behaviour and each new or
+   changed test. Use locked pytest commands with explicit paths or node IDs
+   and `--override-ini="addopts="`. Confirm nonempty collection and success.
+2. Lint and format: `uv run ruff check` and `uv run ruff format --check`.
+3. Types: `uv run mypy` on the changed paths.
 
-For a pass, the subagent report must list each command and confirm that it
-passed. For a failure, the report must include the command, its exit status,
-concise failure evidence, the affected tests or checks, and a first-stage
-root-cause analysis. The subagent must not fix a failure unless it receives a
-separate direction to do so.
+A complete local suite is not a prerequisite. Nightly CI/CD owns the full
+suites and coverage. Let Git run its installed, mutating hooks during commit
+and push; do not run `pre-commit run` separately.
 
-For a manual contribution, use this verification sequence:
+Report each command you ran and its outcome. Do not claim a command ran when it
+did not. If a check fails, fix it or report the failure with its exit status
+and the evidence you collected.
 
-1. Run focused tests during implementation. Agents must use test-only
-   subagents for these checks.
-2. Verify the canonical target remote and fetch its current `main` branch.
-   Record the feature branch start commit as the local review base. A later
-   target-branch advance does not change that recorded base.
-3. Rebase only for an actual conflict, a necessary dependency, or an explicit
-   request. If a rebase is necessary, use `git rebase -S <verified-target>`.
-   Keep unrelated branches and worktrees unchanged.
-4. Commit with `git commit -s -S`. Verify every contribution commit with
-   `git verify-commit <commit>`. Require exactly one final `Signed-off-by`
-   trailer that matches the commit author. A rebase must preserve these checks.
-5. Require `git status --porcelain=v1 --untracked-files=all` to have no output.
-   Record `git rev-parse HEAD`.
-6. Run focused checks on this head. Select tests for the affected behavior and
-   each new or changed test. Use locked pytest commands with explicit paths or
-   node IDs and `--override-ini="addopts="`. Confirm nonempty collection and
-   success. For documentation-only changes, use applicable existing
-   documentation checks. Do not require a complete local suite.
-7. Record `git rev-parse HEAD` again. Require the same value and an empty
-   `git status --porcelain=v1 --untracked-files=all` result. Record each command,
-   source revision, result, and test summary.
-8. After a source change, repeat the affected checks and signature and DCO
-   verification for the resulting head. Do not require another rebase solely
-   because a check ran or the target branch advanced.
+Subagents are still useful for verification that would otherwise stall the main
+agent. A test-only subagent runs checks and edits nothing. Give it the exact
+commands it needs.
 
-Historical results retain their original executed revision. Do not report
-those results as a new run on the current head. Any use of historical evidence
-requires an explicit compatibility basis for the relevant inputs. Required CI
-must still pass for the merge candidate under the current merge policy.
+Source review is separate from test execution. The reviewer inspects source and
+the results you report.
 
-A hook result can supply focused evidence only when it collected and passed
-the selected tests on the final head and recorded the command and result.
-Keep the test-only and no-edit requirements for all delegated runs.
-Installed hooks retain the shared fast selection. Required PR checks provide
-head-bound merge evidence. Nightly CI/CD owns full suites and coverage; a fast
-PR result is not full-suite evidence. See ADR-0053 and ADR-0055.
+### Contribution sequence
 
-Source review is separate from test execution. The reviewer inspects source
-and recorded evidence; it does not need to run tests or prepare a local review
-image. CI/CD results do not replace source review or authorize its GO state.
+1. Work on a feature branch. A dirty working tree is normal; do not reset,
+   discard, or stash work you did not create.
+2. Rebase only for an actual conflict or a necessary dependency. Rebase with
+   `git rebase -S <target>`. Keep unrelated branches and worktrees unchanged.
+3. Stage only the files you edited. Never use `git add -A`, `git add .`, or
+   `git add --all`; they stage every dirty and untracked path in the tree.
+4. Commit with `git commit -s -S`. Require exactly one `Signed-off-by` trailer
+   that matches the commit author.
+5. Push the branch and open the pull request with the required
+   `Closes #<issue-number>` line.
+
+Required CI/CD supplies the merge evidence. It does not authorize the
+implementation GO state; the queue's `pr_review` stage does.
 
 ### Skill Catalog
 
@@ -502,26 +520,35 @@ for accepted forms and the grandfathered pre-#2157 history policy.
 `pr-policy` blocks PRs that fail those checks. The queue runs
 `$athena:pr-review` in its normal default profile when available. Its prose,
 grades, and decision-shaped output are audit evidence, not authorization.
-`pr_review` applies `state:implementation-go` only after its structural audit
-and fresh live GitHub facts confirm the reviewed open, unarmed head, complete
-thread state, and an exclusive label transition by readback. That GitHub label
-is automated implementation eligibility. Before each server merge request,
-`merge_wait` requires the current-process reviewed-head proof or a verified
-retained rebase proof. It requires complete passing status evidence for the
-merge head. A retained proof keeps the original review identity and binds a
-separate resulting commit after host verification. It reads the effective
-classic and ruleset policy. A required merge queue uses exact-head GraphQL
-admission. A direct SHA-conditional merge is available only when one policy
-source applies strict-update protection that the current actor cannot bypass.
-No queue stage mutates native auto-merge.
-Normal review may collect CI/CD evidence as context, but `merge_wait` uses
-complete passing required status evidence for the exact reviewed head as a
-separate merge gate. CI workflows and external artifacts never independently
-grant the loop-owned label authority. Branch protection and required CI/CD
-checks are the merge contract. This single-maintainer repository intentionally keeps the
-GitHub required-approving-review count at zero. Generic or unmarked human
-approvals are not branch-protection merge gates, and a second user or marked
-`APPROVED` review is not a queue merge requirement.
+
+`state:implementation-go` is a claim about state, not about who wrote it. Write
+it only when every condition below holds, and read it back before acting on it.
+The conditions are the contract; any actor that can satisfy them is qualified.
+
+- A completed structural audit on the current head. Its review prose, grade, and
+  decision-shaped text are not the evidence. A workflow run, a status check, an
+  artifact, or a prior label never substitutes for the audit.
+- The audit records an explicit `GO` verdict. A missing or malformed verdict
+  invalidates the audit. Never infer `GO` from a grade, a summary, or warning
+  text.
+- The pull request is open and unarmed, with native auto-merge not yet enabled.
+- No unresolved review thread remains.
+- The label transition is exclusive, and a readback confirms it.
+
+Any of these failing means no `GO`. A demoted or reported finding is not a
+clean sign-off and prevents the label. Required CI/CD checks stay green as a
+separate merge gate; passing them never produces a `GO` by itself.
+
+`merge_wait` still performs its own conditional merge. It requires a reviewed-head
+proof or a verified retained rebase proof, complete passing required status
+evidence, and an exact-head admission route. It never mutates native
+auto-merge. **Target state, tracked in #3415:** once the GO label is present it
+will enable GitHub native auto-merge, will not revalidate the head, will not
+rebase first, and will rebase only on a real merge conflict. Until #3415 lands,
+read this paragraph, not the target, as the live merge contract. GitHub applies
+branch protection and the required CI/CD checks either way; those remain the
+merge contract. This single-maintainer repository intentionally keeps the
+GitHub required-approving-review count at zero.
 
 ```bash
 # 1. Create feature branch
@@ -557,21 +584,15 @@ refactor(io): Simplify file handling logic
 
 ### Testing Strategy
 
-All utility functions must include comprehensive test coverage:
+Follow the [test policy](#test-policy). A test must import and exercise a
+module under `hephaestus/`. Cover the real error cases a caller can reach: bad
+input, a missing file, a failed subprocess, an unreachable host, a timeout.
+Do not add tests for documentation text, prompt strings, repository
+configuration, exact message wording, or impossible states.
 
-1. **Unit Tests**: Test individual functions and classes
-2. **Integration Tests**: Test component interactions
-3. **Edge Cases**: Test boundary conditions and error scenarios
-4. **Cross-platform**: Ensure compatibility across supported environments
-
-Before an agent creates a pull request, it MUST follow the verification sequence
-in [Delegated Verification](#delegated-verification). The environment setup
-commands below prepare a new environment. They do not supply change-verification
-evidence. Required CI/CD supplies separate head-bound evidence.
-
-The manual sequence uses ADR-0053 and ADR-0055. The automation loop uses the rebase policy
-in ADR-0048. It prepares the branch before implementation and does not do a
-routine final rebase. An operator can request the explicit `--rebase` path.
+Verify your change with focused tests before you open the pull request. Full
+suites and coverage run in CI/CD. The automation loop prepares the branch
+before implementation and does not do a routine final rebase.
 
 ```bash
 # Run an affected test file, including tests outside the default fast selection
@@ -624,10 +645,9 @@ uv run mypy hephaestus/ scripts/ tests/
 
 ### Pre-commit Hooks
 
-Pre-commit hooks automatically check code quality and run the shared fast test
-selection. Use the delegated verification sequence for focused change evidence.
-Required CI/CD supplies separate test evidence for the pushed head. Nightly
-CI/CD owns the full-suite and coverage results.
+Pre-commit hooks check code quality and run a fast test selection. Required
+CI/CD supplies the full merge evidence. Nightly CI/CD owns the full-suite and
+coverage results.
 
 ```bash
 # Install pre-commit hooks (one-time setup)
@@ -713,32 +733,43 @@ optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 Pi is never auto-selected.
 
-**Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
-its normal default behavior when available, otherwise uses its inline-review
+**Approval conditions:** `pr_review` invokes `$athena:pr-review` with its
+normal default behavior when available, otherwise uses its inline-review
 fallback. It posts inline findings and, after a clean Go-label proof, one
-ordinary public PR comment containing an informational audit summary. Only a
-structural audit plus fresh live GitHub head, thread, and exclusive-label facts
-may write `state:implementation-go`; review prose, grades, and decision-shaped
-output do not authorize it. Normal review may collect CI/CD evidence as
-context, but the loop does not change CI/CD and no workflow, status, artifact,
-or lease independently authorizes it. `merge_wait` additionally requires
-complete passing required status evidence for the merge head before the
-server merge request. A host-verified rebase can supply a separate merge head
-while the original reviewed head remains unchanged. It uses exact-head queue
-admission when the effective ruleset requires a merge queue. Otherwise, direct merge requires strict-update
-protection from a source that the current actor cannot bypass. No queue stage
-mutates native auto-merge.
+ordinary public PR comment containing an informational audit summary.
 
-**These approval boundaries are unchanged.** The informational validation
+`state:implementation-go` may be written by any actor that satisfies every
+condition listed under [PR policy](#pr-policy). There is no separate actor
+list. The queue's `pr_review` stage satisfies them in normal operation; a
+maintainer applying them by hand after their own review satisfies them too, and
+must say so on the pull request. What is never sufficient is review prose, a
+grade, a decision-shaped sentence, a CI status, an artifact, or a stale label
+from an earlier head.
+
+Once `state:implementation-go` is written and read back, `merge_wait` enables
+GitHub native auto-merge and stops. It does not revalidate the head before the
+merge and does not rebase first. It rebases only when the merge reports a real
+conflict, then lets GitHub merge. Agents must not invoke `gh pr merge`, manage
+a merge queue, or use an administrator bypass.
+
+**Error handling:** gates belong at module boundaries. Inside a helper, raise
+plainly instead of catching and guarding. A dirty worktree is data, not a
+fault: the agent classifies what it finds, stages only its own files, and
+continues. Do not add a refusal for a dirty tree. Do not add a provenance,
+attestation, or exact-identity check for a value your own process produced.
+
+**Test policy:** test the core library. A test must import and exercise a
+module under `hephaestus/`. Do not add tests for documentation text, prompt
+strings, repository configuration, exact message wording, or impossible
+states. Cover the real error cases a caller can reach.
+
+**These approval conditions are unchanged.** The informational validation
 described below changes only how the host shows one finding. It does not relax
-any gate. The following rules still fail closed:
+any condition. The following still hold:
 
 - The plan-review `GO` verdict and the implementation-review `GO` verdict stay
   required. A missing or malformed verdict invalidates the audit before any
-  label write. The host never infers a verdict from a grade, a summary, or
-  warning text.
-- `state:implementation-go` still needs the exact reviewed head, the exact-head
-  readback, the exclusive label transition, and its label readback.
+  label write. Never infer a verdict from a grade, a summary, or warning text.
 - Every exact-head proof, the retry budgets, and the bounded per-round budgets
   stay in force. An expired budget cannot be renewed.
 - Prompt fencing for untrusted GitHub content stays mandatory, and the
@@ -788,7 +819,7 @@ no longer owns.
 | plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | PR-writer worktree, rebase, implementation, tests, commit/push, and PR creation |
 | pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Scope-dependency reconciliation, detached read-only review, informational finding validation, one batched inline review, and implementation labels |
-| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Conditionally merges the exact reviewed head and emits post-merge learning intent |
+| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Conditionally merges the reviewed head and emits post-merge learning intent. Target state in #3415: enables auto-merge after GO approval and rebases only on a real conflict. |
 | learning | `hephaestus.automation.pipeline.stages.learning` | Claims durable intents and submits host-owned learning work |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and auxiliary worktree cleanup/preservation |
 

@@ -267,7 +267,6 @@ class AgentJob:
 def validate_job_workspace(
     job: AgentJob,
     *,
-    dirty_permit: object | None = None,
     remaining_timeout: Callable[[], float] | None = None,
     shutdown: threading.Event | None = None,
 ) -> Path:
@@ -279,7 +278,6 @@ def validate_job_workspace(
         canonical = validate_workspace_binding(
             job.workspace,
             allowed_tools=tools or "",
-            dirty_permit=dirty_permit,
             remaining_timeout=remaining_timeout,
             shutdown=shutdown,
         )

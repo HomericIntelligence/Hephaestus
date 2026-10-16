@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import stat
@@ -43,6 +44,8 @@ from .git_jobs import GitJob
 from .job_results import JobResult
 
 _CODEX_SESSION_IDENTITY = re.compile(r"[0-9a-f]{64}")
+
+logger = logging.getLogger(__name__)
 _CODEX_SESSION_CLEANUP_MAX_ENTRIES = 100_000
 _CODEX_SESSION_CLEANUP_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _CODEX_QUARANTINE_MAX_BYTES = 16 * 1024
@@ -1343,9 +1346,17 @@ def run_cleanup_job(  # noqa: C901 - cleanup validates independent durable recei
                 timeout=job.timeout_s,
             )
             if status.stdout.strip() and not quarantine_authorized:
+                # Preserve the worktree. Git will not remove a checkout that
+                # holds uncommitted work, and discarding it would destroy the
+                # agent's edits.
+                logger.warning(
+                    "worktree %s has uncommitted changes; preserving it. "
+                    "Recovery: commit or remove the changes by hand, then run cleanup again.",
+                    worktree_path,
+                )
                 return JobResult(
-                    ok=False,
-                    error="worktree cleanup refused a dirty checkout",
+                    ok=True,
+                    error=None,
                 )
             session_failure = _codex_session_cleanup_failure(
                 worktree_path,
