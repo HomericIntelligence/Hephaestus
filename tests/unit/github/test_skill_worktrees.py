@@ -246,10 +246,8 @@ def test_audit_worktrees_reports_git_failures_as_json(monkeypatch, capsys) -> No
     }
 
 
-def test_remove_worktree_requires_a_clean_expected_head(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """Removal is refused after the audited worktree becomes dirty."""
+def test_remove_worktree_preserves_a_dirty_worktree(tmp_path: Path, monkeypatch, caplog) -> None:
+    """A dirty worktree is preserved and removal reports no error."""
     repository = tmp_path / "repo"
     worktree = tmp_path / "worktree"
     _initialize_repository(repository)
@@ -258,13 +256,16 @@ def test_remove_worktree_requires_a_clean_expected_head(
     (worktree / "dirty.txt").write_text("dirty\n", encoding="utf-8")
     monkeypatch.chdir(repository)
 
-    assert remove_worktree_main([str(worktree), "--expected-head", expected_head]) == 1
+    with caplog.at_level("WARNING", logger="hephaestus.github.skill_worktrees"):
+        assert remove_worktree_main([str(worktree), "--expected-head", expected_head]) == 0
 
-    assert "not clean" in capsys.readouterr().err
+    assert worktree.exists()
+    assert (worktree / "dirty.txt").exists()
+    assert any("uncommitted changes" in record.message for record in caplog.records)
     _git(repository, "worktree", "remove", "--force", str(worktree))
 
 
-def test_remove_worktree_refuses_ignored_user_data(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_remove_worktree_preserves_ignored_user_data(tmp_path: Path, monkeypatch, caplog) -> None:
     """Removal preserves ignored files that Git's default short status omits."""
     repository = tmp_path / "repo"
     worktree = tmp_path / "worktree"
@@ -278,13 +279,13 @@ def test_remove_worktree_refuses_ignored_user_data(tmp_path: Path, monkeypatch, 
     monkeypatch.chdir(repository)
 
     try:
-        assert remove_worktree_main([str(worktree), "--expected-head", expected_head]) == 1
+        with caplog.at_level("WARNING", logger="hephaestus.github.skill_worktrees"):
+            assert remove_worktree_main([str(worktree), "--expected-head", expected_head]) == 0
         assert worktree.exists()
+        assert (worktree / "preserve.ignored").exists()
     finally:
         if worktree.exists():
             _git(repository, "worktree", "remove", "--force", str(worktree))
-
-    assert "not clean" in capsys.readouterr().err
 
 
 def test_remove_worktree_removes_only_the_approved_clean_registration(
