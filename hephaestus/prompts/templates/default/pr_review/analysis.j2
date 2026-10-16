@@ -33,9 +33,7 @@ authorize source review. The bootstrap does not grant a GO label or merge author
 {% else %}
 The supplied receipts are the complete coordinator-bound host plan for this
 review. When every receipt has `ok: true` and `status: passed`, treat the fixed
-host plan as local execution evidence.
-Do not require an additional coordinator-bound receipt outside this supplied
-plan.
+host plan as local execution evidence. Do not require an additional receipt.
 A receipt with `status: skipped`, the exact unsupported-platform
 reason, and a non-macOS `platform` is not local execution evidence and is an
 evidence gap. Do NOT run local format, lint, type, or test commands in this
