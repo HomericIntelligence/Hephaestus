@@ -713,8 +713,8 @@ def test_remove_worktree_unlinks_leaf_larger_than_byte_cap(tmp_path: Path) -> No
         os.close(descriptor)
 
 
-def test_remove_worktree_without_quarantine_refuses_dirty_checkout(tmp_path: Path) -> None:
-    """A dirty ordinary worktree remains preserved without terminal proof."""
+def test_remove_worktree_without_quarantine_preserves_dirty_checkout(tmp_path: Path) -> None:
+    """A dirty ordinary worktree is preserved and cleanup reports success."""
     (tmp_path / ".git").mkdir()
     worktree = tmp_path / "issue-7"
     worktree.mkdir()
@@ -732,8 +732,8 @@ def test_remove_worktree_without_quarantine_refuses_dirty_checkout(tmp_path: Pat
     ):
         result = run_cleanup_job(_remove_job(tmp_path, worktree))
 
-    assert result.ok is False
-    assert result.error == "worktree cleanup refused a dirty checkout"
+    assert result.ok is True
+    assert result.error is None
     assert secret.exists()
     assert not any(
         call.args and call.args[0][:3] == ["git", "worktree", "remove"]
