@@ -520,10 +520,24 @@ for accepted forms and the grandfathered pre-#2157 history policy.
 `pr-policy` blocks PRs that fail those checks. The queue runs
 `$athena:pr-review` in its normal default profile when available. Its prose,
 grades, and decision-shaped output are audit evidence, not authorization.
-`pr_review` applies `state:implementation-go` only after its structural audit
-and fresh live GitHub facts confirm the open, unarmed pull request, complete
-thread state, and an exclusive label transition by readback. That GitHub label
-is automated implementation eligibility.
+
+`state:implementation-go` is a claim about state, not about who wrote it. Write
+it only when every condition below holds, and read it back before acting on it.
+The conditions are the contract; any actor that can satisfy them is qualified.
+
+- A completed structural audit on the current head. Its review prose, grade, and
+  decision-shaped text are not the evidence. A workflow run, a status check, an
+  artifact, or a prior label never substitutes for the audit.
+- The audit records an explicit `GO` verdict. A missing or malformed verdict
+  invalidates the audit. Never infer `GO` from a grade, a summary, or warning
+  text.
+- The pull request is open and unarmed, with native auto-merge not yet enabled.
+- No unresolved review thread remains.
+- The label transition is exclusive, and a readback confirms it.
+
+Any of these failing means no `GO`. A demoted or reported finding is not a
+clean sign-off and prevents the label. Required CI/CD checks stay green as a
+separate merge gate; passing them never produces a `GO` by itself.
 
 `merge_wait` still performs its own conditional merge. It requires a reviewed-head
 proof or a verified retained rebase proof, complete passing required status
@@ -719,15 +733,18 @@ optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 Pi is never auto-selected.
 
-**Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
-its normal default behavior when available, otherwise uses its inline-review
+**Approval conditions:** `pr_review` invokes `$athena:pr-review` with its
+normal default behavior when available, otherwise uses its inline-review
 fallback. It posts inline findings and, after a clean Go-label proof, one
-ordinary public PR comment containing an informational audit summary. Only a
-structural audit plus fresh live GitHub thread and exclusive-label facts may
-write `state:implementation-go`; review prose, grades, and decision-shaped
-output do not authorize it. Normal review may collect CI/CD evidence as
-context, but the loop does not change CI/CD and no workflow, status, or artifact
-independently authorizes it.
+ordinary public PR comment containing an informational audit summary.
+
+`state:implementation-go` may be written by any actor that satisfies every
+condition listed under [PR policy](#pr-policy). There is no separate actor
+list. The queue's `pr_review` stage satisfies them in normal operation; a
+maintainer applying them by hand after their own review satisfies them too, and
+must say so on the pull request. What is never sufficient is review prose, a
+grade, a decision-shaped sentence, a CI status, an artifact, or a stale label
+from an earlier head.
 
 Once `state:implementation-go` is written and read back, `merge_wait` enables
 GitHub native auto-merge and stops. It does not revalidate the head before the
@@ -746,16 +763,13 @@ module under `hephaestus/`. Do not add tests for documentation text, prompt
 strings, repository configuration, exact message wording, or impossible
 states. Cover the real error cases a caller can reach.
 
-**These approval boundaries are unchanged.** The informational validation
+**These approval conditions are unchanged.** The informational validation
 described below changes only how the host shows one finding. It does not relax
-any gate. The following rules still fail closed:
+any condition. The following still hold:
 
 - The plan-review `GO` verdict and the implementation-review `GO` verdict stay
   required. A missing or malformed verdict invalidates the audit before any
-  label write. The host never infers a verdict from a grade, a summary, or
-  warning text.
-- `state:implementation-go` still needs the exact reviewed head, the exact-head
-  readback, the exclusive label transition, and its label readback.
+  label write. Never infer a verdict from a grade, a summary, or warning text.
 - Every exact-head proof, the retry budgets, and the bounded per-round budgets
   stay in force. An expired budget cannot be renewed.
 - Prompt fencing for untrusted GitHub content stays mandatory, and the
