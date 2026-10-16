@@ -162,13 +162,12 @@ def test_importing_the_library_does_not_load_automation() -> None:
 
     This is a real import-boundary behaviour check, not a config assertion.
     """
+    probe = (
+        "import sys, hephaestus.errors; "
+        "print(','.join(m for m in sys.modules if m.startswith('hephaestus.automation')))"
+    )
     result = subprocess.run(
-        [
-            "python",
-            "-c",
-            "import sys, hephaestus.errors; "
-            "print(','.join(m for m in sys.modules if m.startswith('hephaestus.automation')))",
-        ],
+        ["python", "-c", probe],
         capture_output=True,
         text=True,
         check=True,
