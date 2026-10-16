@@ -50,6 +50,7 @@ SANCTIONED_EXTRA_TEST_DIRS: frozenset[str] = frozenset(
     {
         "constants",  # -> hephaestus/constants.py (module, not a subpackage)
         "docs",  # -> top-level docs/ tree
+        "errors",  # -> hephaestus/errors.py (module, not a subpackage)
         "scripts",  # -> top-level scripts/*.py
         "shell",  # -> shell installer scripts
     }
