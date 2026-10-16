@@ -203,7 +203,6 @@ def test_nats_subscriber_acks_and_surfaces_disk_full_handler_failure() -> None:
 
 
 @pytest.mark.requires_posix
-@pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL requires POSIX")
 def test_process_kill_is_contained_and_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     """A killed child is contained in the parent and is not retried as transient."""
     monkeypatch.setattr(

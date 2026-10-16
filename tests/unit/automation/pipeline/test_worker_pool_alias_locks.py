@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import queue
 import subprocess
 import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from hephaestus.automation.pipeline.jobs import GitJob
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
@@ -40,7 +37,6 @@ def _repository(parent: Path) -> Path:
     return repo.resolve()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="parent aliases require directory symlinks")
 def test_create_worktree_keeps_admitted_repository_through_parent_alias(
     tmp_path: Path,
 ) -> None:

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation import git_runtime, worktree_snapshot
+from hephaestus.automation import git_runtime
 from hephaestus.automation.pipeline import worker_pool
 
 
@@ -80,15 +80,13 @@ def test_silent_archive_child_stops_with_the_active_operation(
     assert isinstance(errors[0], expected_error)
 
 
-@pytest.mark.parametrize("selector_supported", [True, False])
 @pytest.mark.parametrize("outcome", ["binary", "limit", "failed"])
 def test_archive_capture_preserves_bytes_limits_and_failure_details(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    selector_supported: bool,
     outcome: str,
 ) -> None:
-    """Both readers preserve binary output and the archive failure categories."""
+    """Archive capture preserves binary output and failure categories."""
     payload = bytes(range(256))
     code = 3 if outcome == "failed" else 0
     script = (
@@ -107,9 +105,6 @@ def test_archive_capture_preserves_bytes_limits_and_failure_details(
         return child
 
     monkeypatch.setattr(subprocess, "Popen", spawn_archive_child)
-    monkeypatch.setattr(
-        worktree_snapshot, "_subprocess_pipe_selector_supported", lambda: selector_supported
-    )
     limit = len(payload) - 1 if outcome == "limit" else len(payload)
     monkeypatch.setattr(worker_pool, "_HOST_VERIFICATION_ARCHIVE_MAX_BYTES", limit)
     if outcome == "binary":

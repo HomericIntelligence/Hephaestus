@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -27,6 +29,28 @@ def specification(tmp_path):
         memory_bytes=1024**3,
         pids_limit=128,
     )
+
+
+def test_process_cleanup_oserror_retains_uncertain_lease(tmp_path: Path) -> None:
+    """A runner cleanup failure cannot supply a confirmed container disposal."""
+    owner = supervisor(tmp_path)
+    cause = TimeoutError("fixed child exit was not confirmed")
+    failure = OSError("process cleanup could not be confirmed")
+    failure.__cause__ = cause
+    try:
+        lease = owner.create(specification(tmp_path))
+        owner.start(lease["leaseId"])
+        owner.engine.remove = Mock(side_effect=failure)
+        result = owner.dispose(lease["leaseId"])
+        assert result["phase"] == "uncertain"
+        assert result["waitingReason"] == "container_disposal_unconfirmed"
+        assert "disposal" not in result
+        assert owner.inspect(lease["leaseId"])["phase"] == "uncertain"
+        assert owner.engine.present
+        assert failure.__cause__ is cause
+        owner.engine.remove.assert_called_once_with(lease["containerId"])
+    finally:
+        owner.close()
 
 
 class Engine:

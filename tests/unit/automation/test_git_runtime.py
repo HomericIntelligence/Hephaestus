@@ -23,10 +23,6 @@ def _clear_runtime_caches() -> Generator[None]:
 
 
 @pytest.mark.requires_posix
-@pytest.mark.skipif(
-    __import__("sys").platform == "win32",
-    reason="POSIX coreutils are not guaranteed on win32 (#742)",
-)
 class TestRun:
     """Tests for subprocess delegation and redacted diagnostics."""
 

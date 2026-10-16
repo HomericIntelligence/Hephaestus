@@ -26,7 +26,8 @@ at the maintenance triggers below.
 
 Assuming audit remediation is complete:
 
-1. **Multi-platform CI Support** — Extend GitHub Actions test matrix to include macOS and Windows alongside Ubuntu, addressing the gap between pyproject.toml multi-platform claims and CI reality (#321 context).
+1. **Supported-platform CI** — Extend GitHub Actions coverage to macOS alongside
+   Ubuntu. Windows is unsupported and is not part of the planned CI matrix.
 
 2. **Cross-Repository Coverage** — Expand hephaestus utility adoption across other HomericIntelligence projects. Standardize configuration loading, logging setup, and subprocess execution patterns.
 

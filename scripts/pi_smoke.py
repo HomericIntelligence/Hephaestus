@@ -26,20 +26,8 @@ DEFAULT_LOG_DIR = Path("pi-smoke-logs")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _private_smoke_log_permissions_supported() -> bool:
-    """Return whether this platform can establish the required private log mode."""
-    return os.name != "nt"
-
-
-def _require_private_smoke_log_permissions() -> None:
-    """Fail closed where this script cannot establish a user-only log ACL."""
-    if not _private_smoke_log_permissions_supported():
-        raise OSError("Pi smoke requires user-only log permissions on this platform")
-
-
 def _prepare_private_log_dir(log_dir: Path) -> Path:
     """Create a unique private directory for this smoke run's artifact."""
-    _require_private_smoke_log_permissions()
     return prepare_pi_private_log_dir(log_dir)
 
 

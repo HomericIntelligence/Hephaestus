@@ -117,24 +117,15 @@ def test_content_hash_uses_the_remaining_operation_deadline(tmp_path: Path, bind
         getattr(worktree_snapshot, binding)(tmp_path, "file\0", timeout=30)
 
 
-@pytest.mark.parametrize("selector_supported", [True, False])
 @pytest.mark.parametrize("binding", ["run_bounded_git_output", "_run_bounded_git_output"])
-def test_snapshot_child_stops_during_cancellation(
-    tmp_path: Path, selector_supported: bool, binding: str
-) -> None:
-    """Both pipe readers must stop a cancelled capture child."""
+def test_snapshot_child_stops_during_cancellation(tmp_path: Path, binding: str) -> None:
+    """Both capture entry points stop a cancelled child."""
     shutdown = threading.Event()
     timer = threading.Timer(0.1, shutdown.set)
     started = time.monotonic()
     timer.start()
     try:
-        with (
-            patch(
-                "hephaestus.automation.worktree_snapshot._subprocess_pipe_selector_supported",
-                return_value=selector_supported,
-            ),
-            pytest.raises(InterruptedError),
-        ):
+        with pytest.raises(InterruptedError):
             getattr(worktree_snapshot, binding)(
                 (sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"),
                 cwd=tmp_path,

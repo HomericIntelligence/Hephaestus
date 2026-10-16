@@ -21,7 +21,6 @@ import importlib
 import os
 import shutil
 import subprocess
-import sys
 import tomllib
 from pathlib import Path
 
@@ -232,6 +231,4 @@ class TestRequireCliGate:
             _resolve_binary("hephaestus-definitely-not-a-real-binary", required=True)
 
     def test_present_binary_resolves(self) -> None:
-        # `python3` (POSIX) / `python` is always on PATH in the test env.
-        command = "python3" if sys.platform != "win32" else "python"
-        assert _resolve_binary(command, required=True)
+        assert _resolve_binary("python3", required=True)

@@ -128,7 +128,11 @@ def test_submit_fails_closed_without_user_only_log_permissions(
 ) -> None:
     """Slurm submission must not run when its scheduler logs cannot be protected."""
     alias_config = _alias_config(tmp_path)
-    monkeypatch.setattr(_mod, "_private_smoke_log_permissions_supported", lambda: False)
+    monkeypatch.setattr(
+        _mod,
+        "prepare_pi_private_log_dir",
+        Mock(side_effect=PermissionError("user-only log permissions unavailable")),
+    )
     run = Mock()
     monkeypatch.setattr(_mod.subprocess, "run", run)
 

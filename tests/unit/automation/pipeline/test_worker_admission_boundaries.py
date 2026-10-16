@@ -65,11 +65,10 @@ def test_agent_cancellation_after_validation_stops_provider(
         pool.shutdown(mark_interrupted=False)
 
 
-@pytest.mark.parametrize("selector_supported", [True, False])
 def test_capture_startup_does_not_renew_the_operation_deadline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selector_supported: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both capture readers must include child startup in the outer deadline."""
+    """Capture includes child startup in the outer deadline."""
     start_child = subprocess.Popen
 
     def delayed_start(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
@@ -78,9 +77,6 @@ def test_capture_startup_does_not_renew_the_operation_deadline(
         return child
 
     monkeypatch.setattr(subprocess, "Popen", delayed_start)
-    monkeypatch.setattr(
-        worktree_snapshot, "_subprocess_pipe_selector_supported", lambda: selector_supported
-    )
     with git_runtime.operation_deadline(time.monotonic() + 0.1):
         with pytest.raises(subprocess.TimeoutExpired):
             worktree_snapshot._run_bounded_git_output(
