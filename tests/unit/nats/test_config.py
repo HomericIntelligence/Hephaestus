@@ -211,3 +211,87 @@ class TestLoadNATSConfig:
 
     def test_environment_derived_constructor_was_removed(self) -> None:
         assert not hasattr(NATSConfig, "from_env")
+
+
+class TestFailureDeliveryConfig:
+    """Tests for the durable failure-delivery configuration fields (#2395)."""
+
+    def test_failure_delivery_defaults_are_bounded(self) -> None:
+        config = NATSConfig()
+        assert config.max_processing_attempts == 3
+        assert config.max_deliveries == 6
+        assert config.auto_provision_failure_resources is True
+        assert config.migrate_incompatible_consumers is False
+
+    def test_failure_delivery_timing_defaults(self) -> None:
+        config = NATSConfig()
+        assert config.redelivery_backoff_seconds == (1.0, 5.0)
+        assert config.ack_wait_seconds == 30.0
+        assert config.heartbeat_interval_seconds == 10.0
+        assert config.ledger_lease_seconds == 30.0
+        assert config.max_failure_payload_bytes == 1_048_576
+
+    def test_max_deliveries_must_exceed_processing_attempts(self) -> None:
+        with pytest.raises(ValueError, match="max_deliveries must exceed max_processing_attempts"):
+            NATSConfig(max_processing_attempts=3, max_deliveries=3)
+
+    def test_max_deliveries_one_above_attempts_is_allowed(self) -> None:
+        config = NATSConfig(max_processing_attempts=3, max_deliveries=4)
+        assert config.max_deliveries == 4
+
+    def test_heartbeat_at_third_of_ack_wait_is_allowed(self) -> None:
+        config = NATSConfig(ack_wait_seconds=30.0, heartbeat_interval_seconds=10.0)
+        assert config.heartbeat_interval_seconds == 10.0
+
+    def test_heartbeat_above_third_of_ack_wait_is_rejected(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"heartbeat_interval_seconds must be <= ack_wait_seconds / 3",
+        ):
+            NATSConfig(ack_wait_seconds=30.0, heartbeat_interval_seconds=10.1)
+
+    def test_lease_at_double_heartbeat_is_allowed(self) -> None:
+        config = NATSConfig(heartbeat_interval_seconds=10.0, ledger_lease_seconds=20.0)
+        assert config.ledger_lease_seconds == 20.0
+
+    def test_lease_below_double_heartbeat_is_rejected(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"ledger_lease_seconds must be >= 2 \* heartbeat_interval_seconds",
+        ):
+            NATSConfig(heartbeat_interval_seconds=10.0, ledger_lease_seconds=19.9)
+
+    def test_yaml_string_failure_fields_are_coerced(self) -> None:
+        config = load_nats_config(
+            {
+                "max_processing_attempts": "2",
+                "max_deliveries": "5",
+                "ack_wait_seconds": "45.5",
+                "heartbeat_interval_seconds": "5.0",
+                "ledger_lease_seconds": "40.0",
+                "max_failure_payload_bytes": "65536",
+                "auto_provision_failure_resources": "false",
+                "migrate_incompatible_consumers": "true",
+            },
+        )
+
+        assert config.max_processing_attempts == 2
+        assert config.max_deliveries == 5
+        assert config.ack_wait_seconds == 45.5
+        assert config.heartbeat_interval_seconds == 5.0
+        assert config.ledger_lease_seconds == 40.0
+        assert config.max_failure_payload_bytes == 65_536
+        assert config.auto_provision_failure_resources is False
+        assert config.migrate_incompatible_consumers is True
+
+    def test_yaml_backoff_sequence_is_coerced_to_tuple(self) -> None:
+        config = load_nats_config({"redelivery_backoff_seconds": [0.5, "2.5"]})
+        assert config.redelivery_backoff_seconds == (0.5, 2.5)
+
+    def test_yaml_backoff_csv_string_is_coerced_to_tuple(self) -> None:
+        config = load_nats_config({"redelivery_backoff_seconds": "0.5, 2.5"})
+        assert config.redelivery_backoff_seconds == (0.5, 2.5)
+
+    def test_yaml_invalid_int_names_the_field(self) -> None:
+        with pytest.raises(ValueError, match="max_deliveries"):
+            load_nats_config({"max_deliveries": "six"})
