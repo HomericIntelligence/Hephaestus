@@ -107,6 +107,38 @@ def test_boundary_main_reports_an_interrupt_as_130() -> None:
     assert stream.getvalue() == "Interrupted.\n"
 
 
+def test_boundary_main_passes_through_system_exit_code() -> None:
+    """Argparse exit 2 stays 2 instead of becoming a generic failure."""
+    stream = io.StringIO()
+
+    def boom() -> None:
+        raise SystemExit(2)
+
+    assert boundary_main(boom, stream=stream) == 2
+    assert stream.getvalue() == ""
+
+
+def test_boundary_main_treats_a_bare_system_exit_as_success() -> None:
+    """``sys.exit()`` with no code means success."""
+    stream = io.StringIO()
+
+    def boom() -> None:
+        raise SystemExit
+
+    assert boundary_main(boom, stream=stream) == int(ExitCode.OK)
+
+
+def test_boundary_main_reports_a_string_system_exit() -> None:
+    """A non-integer exit code becomes a reported failure."""
+    stream = io.StringIO()
+
+    def boom() -> None:
+        raise SystemExit("bad usage")
+
+    assert boundary_main(boom, stream=stream) == int(ExitCode.ERROR)
+    assert "bad usage" in stream.getvalue()
+
+
 def test_boundary_main_forwards_arguments() -> None:
     """Positional and keyword arguments reach the entry point."""
     seen: dict[str, object] = {}
@@ -135,8 +167,7 @@ def test_importing_the_library_does_not_load_automation() -> None:
             "python",
             "-c",
             "import sys, hephaestus.errors; "
-            "print(','.join(m for m in sys.modules "
-            "if m.startswith('hephaestus.automation')))",
+            "print(','.join(m for m in sys.modules if m.startswith('hephaestus.automation')))",
         ],
         capture_output=True,
         text=True,

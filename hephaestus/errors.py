@@ -190,10 +190,20 @@ def boundary_main(
     target = stream if stream is not None else sys.stderr
     try:
         result = entry(*args, **kwargs)
+    except SystemExit as exit_request:
+        # argparse and sys.exit raise SystemExit with the intended code. Pass
+        # it through unchanged instead of folding it into a generic failure.
+        code = exit_request.code
+        if code is None:
+            return int(ExitCode.OK)
+        if isinstance(code, int):
+            return code
+        target.write(f"{code}\n")
+        return int(ExitCode.ERROR)
     except KeyboardInterrupt:
         target.write("Interrupted.\n")
         return int(ExitCode.INTERRUPTED)
-    except BaseException as error:
+    except Exception as error:
         # A boundary reports the failure. It does not inspect the traceback and
         # it does not re-raise: the exit code is the contract.
         report = format_error(error)
