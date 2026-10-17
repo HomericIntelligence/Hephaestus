@@ -7704,7 +7704,16 @@ class WorkerPool:
         if receipt.detached:
             return False
         if job.kwargs.get("branch") and job.kwargs["branch"] != receipt.branch:
-            raise ValueError("The first-publication source branch changed.")
+            # A retained receipt from an older run carries a stale branch name.
+            # It cannot be reused for this run's publication, so treat it as
+            # "no retainable rebase" instead of failing the whole item.
+            logger.warning(
+                "first-publication source branch differs from the retained receipt "
+                "(%s != %s); ignoring the stale receipt",
+                job.kwargs["branch"],
+                receipt.branch,
+            )
+            return False
         if (
             receipt.path.is_symlink()
             or not manager._path_is_registered_to_repository(receipt.path, deadline=deadline)
