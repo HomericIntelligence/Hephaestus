@@ -544,16 +544,12 @@ Any of these failing means no `GO`. A demoted or reported finding is not a
 clean sign-off and prevents the label. Required CI/CD checks stay green as a
 separate merge gate; passing them never produces a `GO` by itself.
 
-`merge_wait` still performs its own conditional merge. It requires a reviewed-head
-proof or a verified retained rebase proof, complete passing required status
-evidence, and an exact-head admission route. It never mutates native
-auto-merge. **Target state, tracked in #3415:** once the GO label is present it
-will enable GitHub native auto-merge, will not revalidate the head, will not
-rebase first, and will rebase only on a real merge conflict. Until #3415 lands,
-read this paragraph, not the target, as the live merge contract. GitHub applies
-branch protection and the required CI/CD checks either way; those remain the
-merge contract. This single-maintainer repository intentionally keeps the
-GitHub required-approving-review count at zero.
+`merge_wait` enables GitHub native auto-merge once the GO label is present. It
+does not revalidate the head, does not gate on required status evidence, and
+does not rebase first. It rebases only when the merge reports a real conflict.
+GitHub applies branch protection, the required CI/CD checks, and any merge queue;
+those remain the merge contract. This single-maintainer repository
+intentionally keeps the GitHub required-approving-review count at zero.
 
 ```bash
 # 1. Create feature branch
@@ -824,7 +820,7 @@ no longer owns.
 | plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | PR-writer worktree, rebase, implementation, tests, commit/push, and PR creation |
 | pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Scope-dependency reconciliation, detached read-only review, informational finding validation, one batched inline review, and implementation labels |
-| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Conditionally merges the reviewed head and emits post-merge learning intent. Target state in #3415: enables auto-merge after GO approval and rebases only on a real conflict. |
+| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Enables native auto-merge after GO approval, waits for the merge, and emits post-merge learning intent |
 | learning | `hephaestus.automation.pipeline.stages.learning` | Claims durable intents and submits host-owned learning work |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and auxiliary worktree cleanup/preservation |
 
