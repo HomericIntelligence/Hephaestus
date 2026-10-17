@@ -223,6 +223,60 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
             return ConditionalMergeResult(status=None, body=None, transport_error=True)
         return ConditionalMergeResult(status=status, body=body, malformed=malformed)
 
+    def enable_auto_merge(
+        self,
+        pr_number: int,
+        *,
+        pull_request_id: str | None = None,
+        deadline_s: float | None = None,
+        cancellation: Event | None = None,
+    ) -> AutoMergeEnableResult:
+        """Enable GitHub native auto-merge for one pull request.
+
+        This is the whole merge contract after the implementation-GO label. The
+        caller owns the approval conditions; this adapter owns the single
+        mutation. GitHub applies branch protection, the required checks, and any
+        merge queue, and rebases on a real conflict on its own.
+        """
+        if pr_number <= 0:
+            return AutoMergeEnableResult(enabled=False, malformed=True)
+        if self._skip(f"enable auto-merge for PR #{pr_number}"):
+            return AutoMergeEnableResult(enabled=False, dry_run=True)
+        if cancellation is not None and cancellation.is_set():
+            return AutoMergeEnableResult(enabled=False, transport_error=True)
+        timeout = float(self._gh_timeout)
+        if deadline_s is not None:
+            timeout = min(timeout, deadline_s - time.monotonic())
+        if timeout <= 0:
+            return AutoMergeEnableResult(enabled=False, transport_error=True)
+        try:
+            result = self._deadline_gh_call(
+                [
+                    "pr",
+                    "merge",
+                    str(pr_number),
+                    "--squash",
+                    "--auto",
+                ],
+                check=False,
+                retry_on_rate_limit=False,
+                max_retries=1,
+                timeout=timeout,
+            )
+        except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
+            logger.warning("PR #%s: auto-merge enable failed: %s", pr_number, exc)
+            return AutoMergeEnableResult(enabled=False, transport_error=True)
+        text = result.stdout or ""
+        # `gh` reports success on stdout and already-enabled on stderr.
+        lowered = text.lower()
+        if "auto-merge" in lowered and "already" in lowered:
+            return AutoMergeEnableResult(enabled=True, already_enabled=True)
+        if "auto-merge" in lowered or "enabled" in lowered:
+            return AutoMergeEnableResult(enabled=True)
+        if not result.stderr and result.returncode == 0:
+            return AutoMergeEnableResult(enabled=True)
+        return AutoMergeEnableResult(enabled=False, malformed=True)
+
     def add_labels(self, issue_number: int, labels: list[str]) -> None:
         """Durably add labels (``gh_issue_add_labels``)."""
         if self._skip(f"add labels {labels} to #{issue_number}"):
