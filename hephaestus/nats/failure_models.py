@@ -40,6 +40,7 @@ import binascii
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from hephaestus.nats.events import NATSEvent
@@ -80,6 +81,15 @@ def canonical_json(value: Any) -> bytes:
 def sha256_hex(data: bytes) -> str:
     """Return the lowercase hexadecimal SHA-256 digest of *data*."""
     return hashlib.sha256(data).hexdigest()
+
+
+def utc_iso8601(epoch_seconds: float) -> str:
+    """Format Unix epoch seconds as an ISO-8601 UTC timestamp string."""
+    return (
+        datetime.fromtimestamp(epoch_seconds, tz=UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 @dataclass(frozen=True)
