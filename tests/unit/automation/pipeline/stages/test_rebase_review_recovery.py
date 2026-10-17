@@ -85,8 +85,6 @@ def test_restart_verifies_retained_record_before_merge_checks(
         pr=12,
         payload={
             "pending_review_rebase_record": record,
-            "merge_queue_admitted_head_sha": "a" * 40,
-            "merge_queue_admitted_proof_generation": 1,
             "merge_readiness_deadline_s": 1.0,
         },
     )
@@ -107,7 +105,7 @@ def test_restart_verifies_retained_record_before_merge_checks(
     assert isinstance(checks.job.request, RunMergeWaitCycleRequest)
     assert checks.job.request.reviewed_head_sha == "a" * 40
     assert checks.job.request.merge_head_sha == "d" * 40
-    assert not checks.job.request.queue_admitted
+    assert checks.job.request.pr_number == 12
     assert item.payload["review_audit"] == record.audit
     assert item.payload["reviewed_pr_head_sha"] == record.reviewed_head_sha
     assert item.payload["reviewed_pr_base_sha"] == record.reviewed_base_sha

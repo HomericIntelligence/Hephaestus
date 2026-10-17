@@ -24,7 +24,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     RunMergeWaitCycleRequest,
 )
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
-from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult, Stage
+from hephaestus.automation.pipeline.stages.base import AutoMergeEnableResult, Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
@@ -215,7 +215,7 @@ class TestRetryDelayConsumption:
     def test_merge_wait_readiness_timer_reentry_is_bounded_without_conditional_puts(
         self, clocked: tuple[Coordinator, FakeClock]
     ) -> None:
-        """A readiness wait reaches its deadline without spending a merge attempt."""
+        """A wait for GitHub to merge reaches its deadline and then fails closed."""
 
         class NotReadyGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -230,24 +230,9 @@ class TestRetryDelayConsumption:
                 )
                 self.puts = 0
 
-            def merge_pr_if_head(
-                self,
-                pr_number: int,
-                reviewed_sha: str,
-                **_kwargs: Any,
-            ) -> ConditionalMergeResult:
+            def enable_auto_merge(self, pr_number: int, **_kwargs: Any) -> AutoMergeEnableResult:
                 self.puts += 1
-                return ConditionalMergeResult(status=405, body={"message": "not ready"})
-
-            def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
-                return {
-                    "state": "OPEN",
-                    "headRefOid": "a" * 40,
-                    "baseRefName": "main",
-                    "autoMergeRequest": None,
-                    "mergeable": "MERGEABLE",
-                    "mergeStateStatus": "BLOCKED",
-                }
+                return AutoMergeEnableResult(enabled=True)
 
         coordinator, clock = clocked
         github = NotReadyGitHub()
@@ -293,20 +278,22 @@ class TestRetryDelayConsumption:
         coordinator._run_item(claim_test_item(coordinator, item))
         coordinator._drain_completions()
 
-        assert github.puts == 0
+        # One enablement, then a bounded wait. The enablement is not repeated.
+        assert github.puts == 1
+        assert item.result is None
         assert len(coordinator.timers) == 1
         clock.now += 2.0
         coordinator._wake_timers()
         coordinator._drain_queues()
         coordinator._drain_completions()
 
-        assert github.puts == 0
+        assert github.puts == 1
         assert item.result is not None
         assert item.result.reason == "merge_readiness_timeout"
         assert coordinator.timers == []
         coordinator._wake_timers()
         coordinator._drain_queues()
-        assert github.puts == 0
+        assert github.puts == 1
 
     def test_merge_wait_transport_ambiguity_timer_reentry_is_bounded(
         self, clocked: tuple[Coordinator, FakeClock]
@@ -326,14 +313,9 @@ class TestRetryDelayConsumption:
                 )
                 self.puts = 0
 
-            def merge_pr_if_head(
-                self,
-                pr_number: int,
-                reviewed_sha: str,
-                **_kwargs: Any,
-            ) -> ConditionalMergeResult:
+            def enable_auto_merge(self, pr_number: int, **_kwargs: Any) -> AutoMergeEnableResult:
                 self.puts += 1
-                return ConditionalMergeResult(status=None, body=None, transport_error=True)
+                return AutoMergeEnableResult(enabled=False, transport_error=True)
 
             def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
                 return {

@@ -342,8 +342,33 @@ def test_pipeline_stages_have_no_auto_merge_mutation_capability() -> None:
     assert callers == set()
 
 
-def test_conditional_merge_has_one_production_call_site() -> None:
-    """Only the closed merge-wait job may issue the conditional merge request."""
+def test_auto_merge_has_one_production_call_site() -> None:
+    """Only the closed merge-wait job may enable native auto-merge.
+
+    The approval label is the whole merge contract, so the enablement must stay
+    inside one audited call site rather than being spread across stages.
+    """
+    calls: list[tuple[str, int]] = []
+    for path in sorted(_AUTOMATION.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "enable_auto_merge"
+            ):
+                calls.append((str(path.relative_to(_AUTOMATION)), node.lineno))
+
+    assert len(calls) == 1, f"unexpected auto-merge call sites: {calls}"
+    assert calls[0][0] == "pipeline_github_jobs.py"
+
+
+def test_no_production_conditional_merge_call_sites() -> None:
+    """The SHA-conditional merge is no longer part of the merge contract.
+
+    GitHub merges whatever is current once the approval label is present, so a
+    direct conditional merge request would contradict that.
+    """
     calls: list[tuple[str, int]] = []
     for path in sorted(_AUTOMATION.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -355,8 +380,7 @@ def test_conditional_merge_has_one_production_call_site() -> None:
             ):
                 calls.append((str(path.relative_to(_AUTOMATION)), node.lineno))
 
-    assert len(calls) == 1, f"unexpected conditional merge call sites: {calls}"
-    assert calls[0][0] == "pipeline_github_jobs.py"
+    assert calls == [], f"conditional merge call sites must be gone: {calls}"
 
 
 def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:

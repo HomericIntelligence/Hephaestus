@@ -489,18 +489,19 @@ class RunMergeWaitCycleRequest:
 
     pr_number: int
     reviewed_head_sha: str
-    proof_generation: int
-    declined_readiness_fingerprint: tuple[str, ...] | None
     deadline_s: float
     cancellation: threading.Event
     issue_number: int | None = None
-    queue_admitted: bool = False
     rebase_proof: RebaseReviewProof | None = None
     rebase_record: RebaseReviewRecord | None = None
 
     @property
     def merge_head_sha(self) -> str:
-        """Return the head that requires fresh checks and conditional merge."""
+        """Return the head recorded with the merge receipt.
+
+        Observed context only. The merge never compares it against live state:
+        the approval label is the contract.
+        """
         return self.rebase_proof.resulting_head_sha if self.rebase_proof else self.reviewed_head_sha
 
     def _validate_rebase_evidence(self) -> None:
@@ -531,12 +532,6 @@ class RunMergeWaitCycleRequest:
         _positive_identifier(self.pr_number, "pr_number")
         _full_sha(self.reviewed_head_sha, "reviewed_head_sha")
         if (
-            isinstance(self.proof_generation, bool)
-            or not isinstance(self.proof_generation, int)
-            or self.proof_generation < 0
-        ):
-            raise ValueError("proof_generation must be a non-negative integer")
-        if (
             isinstance(self.deadline_s, bool)
             or not isinstance(self.deadline_s, (int, float))
             or not math.isfinite(self.deadline_s)
@@ -545,16 +540,8 @@ class RunMergeWaitCycleRequest:
             raise ValueError("deadline_s must be a finite positive monotonic deadline")
         if not isinstance(self.cancellation, threading.Event):
             raise ValueError("cancellation must be a threading.Event")
-        fingerprint = self.declined_readiness_fingerprint
-        if fingerprint is not None and (
-            not isinstance(fingerprint, tuple)
-            or not all(isinstance(part, str) for part in fingerprint)
-        ):
-            raise ValueError("declined_readiness_fingerprint must be a tuple of strings or None")
         if self.issue_number is not None:
             _positive_identifier(self.issue_number, "issue_number")
-        if not isinstance(self.queue_admitted, bool):
-            raise ValueError("queue_admitted must be a Boolean")
 
 
 @dataclass(frozen=True)
