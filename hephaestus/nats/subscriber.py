@@ -37,7 +37,26 @@ from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from hephaestus.nats.config import NATSConfig
+from hephaestus.nats.consumer import (
+    ConsumerManager,
+    DeliveryHeartbeat,
+    NatsConsumerAdmin,
+    resolve_bindings,
+)
+from hephaestus.nats.delivery_ledger import DeliveryAction, DeliveryClaim
 from hephaestus.nats.events import NATSEvent
+from hephaestus.nats.failure_models import (
+    FailureEnvelope,
+    FailureKind,
+    MessageSnapshot,
+    SnapshotFailure,
+    utc_iso8601,
+)
+from hephaestus.nats.failure_store import (
+    DlqOutcome,
+    FailureResources,
+    NatsJetStreamAdmin,
+)
 from hephaestus.resilience import (
     CircuitBreaker,
     CircuitBreakerOpenError,
@@ -140,18 +159,25 @@ class NATSSubscriberThread(threading.Thread):
 
     Delivery semantics
     ------------------
-    This subscriber provides best-effort, *at-most-once* handling for
-    non-critical events. Malformed UTF-8 or JSON payloads are warning-logged
-    and acked without invoking the handler. Handler exceptions are retained in
-    the in-process :attr:`last_error` property, classified in health responses,
-    and logged without exception text or tracebacks. They are acked without
-    updating :attr:`last_message_at`.
-
-    There is no built-in retry, replay store, or DLQ; neither failure class is
-    durably retained after acknowledgement. Workflows requiring durable or
-    auditable processing must use a consumer that persists failures before
-    acknowledging them. Acking failures here prevents poison-message
-    redelivery loops.
+    Every delivery runs under a CAS delivery-ledger claim
+    (:mod:`hephaestus.nats.delivery_ledger`). A successfully handled message
+    is recorded ``completed``, acked, then recorded ``acked``; a crash before
+    the ack replays the ledger and acks on redelivery without invoking the
+    handler again (at-least-once with duplicate suppression). A decode or
+    handler failure is recorded against the claimed event; below the
+    processing budget the message is NAKed with the configured redelivery
+    backoff, and at the budget it hands off: the failure record publishes to
+    the durable dead-letter store
+    (:mod:`hephaestus.nats.failure_store`) and the message is terminated so
+    the broker never redelivers it. A delivery whose metadata cannot be
+    captured receives no client disposition; the broker redelivers until its
+    own ``max_deliver`` advisory fires, and the advisory reconciler turns
+    that advisory into a durable dead-letter record. Slow synchronous
+    handlers run inside a bounded :class:`DeliveryHeartbeat` that keeps the
+    delivery in progress and renews the ledger lease. Handler exceptions are
+    retained in the in-process :attr:`last_error` property, classified in
+    health responses, and logged without exception text or tracebacks. See
+    issue #2395 for the failure-handling design.
 
     Configurable stop timeout
     -------------------------
@@ -181,6 +207,7 @@ class NATSSubscriberThread(threading.Thread):
         join_timeout: float = DEFAULT_JOIN_TIMEOUT,
         *,
         metrics_registry: MetricsRegistry | None = None,
+        admin_factory: Callable[[Any], tuple[Any, Any]] | None = None,
     ) -> None:
         """Initialize the subscriber thread.
 
@@ -195,6 +222,10 @@ class NATSSubscriberThread(threading.Thread):
             metrics_registry: Optional caller-owned registry that receives
                 subscriber state, message, and error metrics. The subscriber
                 does not create a global registry or start an HTTP server.
+            admin_factory: Optional factory that builds the JetStream and
+                consumer admin seam from the nats-py JetStream context.
+                Defaults to the production :class:`NatsJetStreamAdmin` /
+                :class:`NatsConsumerAdmin` pair.
 
         """
         super().__init__(daemon=True, name="NATSSubscriberThread")
@@ -202,6 +233,7 @@ class NATSSubscriberThread(threading.Thread):
         self._handler = handler
         self._join_timeout = join_timeout
         self._metrics_registry = metrics_registry
+        self._admin_factory = admin_factory
         self._stop_event = threading.Event()
         self._circuit_breaker = CircuitBreaker(
             NATS_CIRCUIT_BREAKER_NAME,
@@ -478,7 +510,6 @@ class NATSSubscriberThread(threading.Thread):
                     module="nats",
                 )
                 import nats as nats_client
-                from nats.js.api import DeliverPolicy
         except ImportError:
             logger.error(
                 "nats-py is not installed. "
@@ -491,93 +522,255 @@ class NATSSubscriberThread(threading.Thread):
         self._set_state(SubscriberState.CONNECTED)
         try:
             js = nc.jetstream()
-            subjects = self._config.subjects or ["hi.tasks.>"]
-            # The config carries deliver_policy as a plain string (e.g. "new")
-            # for YAML/env ergonomics; js.subscribe expects the DeliverPolicy
-            # enum. DeliverPolicy is a str-valued enum whose values match the
-            # config strings, so construct it directly.
-            deliver_policy = DeliverPolicy(self._config.deliver_policy)
-            subscriptions = []
-            for i, subject in enumerate(subjects):
-                durable = (
-                    self._config.durable_name
-                    if len(subjects) == 1
-                    else f"{self._config.durable_name}-{i}"
+            jetstream_admin, consumer_admin = self._build_admin(js)
+            bindings = resolve_bindings(self._config)
+            resources = await FailureResources.prepare(jetstream_admin, self._config, bindings)
+            consumer_manager = ConsumerManager(consumer_admin, self._config)
+            for binding in bindings:
+                await consumer_manager.ensure(binding)
+            await resources.advisory_reconciler.start(nc)
+
+            subscriptions = [
+                (
+                    await js.pull_subscribe(
+                        binding.subject,
+                        durable=binding.durable,
+                        stream=self._config.stream,
+                    ),
+                    binding,
                 )
-                sub = await js.subscribe(
-                    subject=subject,
-                    durable=durable,
-                    stream=self._config.stream,
-                    deliver_policy=deliver_policy,
-                )
-                subscriptions.append(sub)
+                for binding in bindings
+            ]
 
             logger.info(
-                "Subscribed to %d NATS JetStream subject(s) on stream=%s: %s",
+                "Subscribed to %d NATS JetStream pull subject(s) on stream=%s: %s",
                 len(subscriptions),
                 self._config.stream,
-                subjects,
+                [binding.subject for _, binding in subscriptions],
             )
 
-            while not self._stop_event.is_set():
-                for sub in subscriptions:
-                    try:
-                        msg = await sub.next_msg(timeout=0.5)
-                    except TimeoutError:
-                        # nats-py's next_msg raises nats.errors.TimeoutError (a
-                        # subclass of the builtin TimeoutError) on its own timeout,
-                        # but the underlying asyncio.wait_for can surface a bare
-                        # asyncio.TimeoutError too. On Python 3.10 these are TWO
-                        # DISTINCT classes (unified only in 3.11), so a single-name
-                        # except would let one alias escape and crash the poll loop
-                        # on the project's minimum version. Catch both to stay
-                        # correct across 3.10-3.13 (#753).
-                        continue
-
-                    try:
-                        data: dict[str, Any] = json.loads(msg.data.decode())
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        self._record_decode_error()
-                        logger.warning(
-                            "Failed to decode message on %s (seq=%d)",
-                            msg.subject,
-                            msg.metadata.sequence.stream if msg.metadata else 0,
-                        )
-                        await msg.ack()
-                        continue
-
-                    event = NATSEvent(
-                        subject=msg.subject,
-                        data=data,
-                        timestamp=(msg.headers.get("Nats-Time-Stamp", "") if msg.headers else ""),
-                        sequence=msg.metadata.sequence.stream if msg.metadata else 0,
-                    )
-
-                    try:
-                        self._handler(event)
-                    except Exception as exc:
-                        self._record_handler_error(exc)
-                        logger.error(
-                            "Handler raised on subject %s (seq=%d, kind=handler_error)",
-                            event.subject,
-                            event.sequence,
-                        )
-                    else:
-                        self._record_message()
-                    # Ack unconditionally — even when the handler raised. This is
-                    # AT-MOST-ONCE delivery by design: a handler that fails on a
-                    # given message will fail again on redelivery, so re-queuing it
-                    # would wedge the poll loop on a poison message forever. The
-                    # failure is NOT lost — it is recorded in `last_error` and
-                    # surfaced via the classified health/log diagnostics above. Do
-                    # NOT move this ack into
-                    # the `else:` branch (that switches to at-least-once and
-                    # reintroduces poison-message redelivery loops). (#1551)
-                    await msg.ack()
-
+            try:
+                while not self._stop_event.is_set():
+                    for sub, binding in subscriptions:
+                        try:
+                            messages = await sub.fetch(1, timeout=0.5)
+                        except TimeoutError:
+                            # nats-py's fetch raises nats.errors.FetchTimeoutError
+                            # (a subclass of the builtin TimeoutError) on its own
+                            # timeout, and the underlying asyncio.wait_for can
+                            # surface a bare asyncio.TimeoutError too. On Python
+                            # 3.10 these are TWO DISTINCT classes (unified only in
+                            # 3.11), so a single-name except would let one alias
+                            # escape and crash the poll loop on the project's
+                            # minimum version. Catch both to stay correct across
+                            # 3.10-3.13 (#753).
+                            continue
+                        for msg in messages:
+                            await self._process_message(msg, binding, resources)
+            finally:
+                await resources.advisory_reconciler.stop()
         finally:
             self._set_state(SubscriberState.DISCONNECTED)
             await nc.drain()
+
+    def _build_admin(self, js: Any) -> tuple[Any, Any]:
+        """Build the JetStream and consumer admin seams for one context."""
+        if self._admin_factory is not None:
+            pair: tuple[Any, Any] = self._admin_factory(js)
+            return pair
+        return NatsJetStreamAdmin(js), NatsConsumerAdmin(js)
+
+    # ------------------------------------------------------------------
+    # Durable message processing
+    # ------------------------------------------------------------------
+
+    async def _process_message(
+        self,
+        msg: Any,
+        binding: Any,
+        resources: FailureResources,
+    ) -> None:
+        """Process one fetched delivery under the durable claim contract.
+
+        The ledger claim decides the safe client disposition for this
+        worker; a lost or refused claim takes no disposition at all.
+        """
+        snapshot_result = MessageSnapshot.capture(msg, binding)
+        if isinstance(snapshot_result, SnapshotFailure):
+            self._record_decode_error()
+            logger.warning(
+                "cannot capture durable identity on %s (%s); leaving the message "
+                "undisposed for broker redelivery and advisory recovery",
+                snapshot_result.subject or "<unknown-subject>",
+                snapshot_result.reason,
+            )
+            return
+        snapshot = snapshot_result
+        claim = await resources.ledger.claim(snapshot.identity)
+        if claim.action is DeliveryAction.ABSTAIN:
+            logger.warning(
+                "delivery-ledger claim abstained for event %s; no disposition taken",
+                snapshot.identity.event_id,
+            )
+            return
+        if claim.action is DeliveryAction.ACK:
+            # The event completed earlier but crashed before the ack; replay
+            # the ack without re-invoking the handler.
+            try:
+                await msg.ack_sync()
+            except Exception as exc:
+                logger.warning(
+                    "duplicate-completion ack failed on %s (seq=%d): %s",
+                    snapshot.subject,
+                    snapshot.identity.stream_sequence,
+                    exc,
+                )
+            else:
+                if claim.record is not None:
+                    await resources.ledger.record_acked(claim)
+            return
+        if claim.action in (DeliveryAction.HANDOFF, DeliveryAction.TERM):
+            await self._handle_handoff(msg, snapshot, claim, resources)
+            return
+
+        # claim.action is PROCESS: this worker owns the delivery.
+        try:
+            event = snapshot.to_event()
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            self._record_decode_error()
+            logger.warning(
+                "Failed to decode message on %s (seq=%d)",
+                snapshot.subject,
+                snapshot.identity.stream_sequence,
+            )
+            await self._handle_known_failure(msg, snapshot, claim, resources, "decode")
+            return
+
+        heartbeat = DeliveryHeartbeat(
+            msg,
+            resources.ledger,
+            claim,
+            interval_seconds=self._config.heartbeat_interval_seconds,
+            max_duration_seconds=self._config.ack_wait_seconds,
+        )
+        try:
+            async with heartbeat:
+                await asyncio.to_thread(self._handler, event)
+        except Exception as exc:
+            self._record_handler_error(exc)
+            logger.error(
+                "Handler raised on subject %s (seq=%d, kind=handler_error)",
+                event.subject,
+                event.sequence,
+            )
+            await self._handle_known_failure(msg, snapshot, claim, resources, "handler")
+            return
+
+        completed = await resources.ledger.record_completed(claim)
+        if completed.action is not DeliveryAction.ACK:
+            logger.warning(
+                "lost delivery-ledger ownership before completion for event %s; "
+                "no disposition taken",
+                snapshot.identity.event_id,
+            )
+            return
+        try:
+            await msg.ack_sync()
+        except Exception as exc:
+            # The completed ledger record guarantees the redelivery acks
+            # without re-invoking the handler.
+            logger.warning(
+                "ack failed after completion on %s (seq=%d); the ledger acks "
+                "the redelivery without re-invoking the handler: %s",
+                snapshot.subject,
+                snapshot.identity.stream_sequence,
+                exc,
+            )
+            return
+        await resources.ledger.record_acked(completed)
+        self._record_message()
+
+    async def _handle_known_failure(
+        self,
+        msg: Any,
+        snapshot: MessageSnapshot,
+        claim: DeliveryClaim,
+        resources: FailureResources,
+        failure_kind: FailureKind,
+    ) -> None:
+        """Record one known decode/handler failure and apply the disposition."""
+        outcome = await resources.ledger.record_failure(claim, failure_kind)
+        if outcome.action is DeliveryAction.ABSTAIN:
+            logger.warning(
+                "lost delivery-ledger ownership while recording a %s failure for "
+                "event %s; no disposition taken",
+                failure_kind,
+                snapshot.identity.event_id,
+            )
+            return
+        if outcome.action is DeliveryAction.READY:
+            await msg.nak(delay=self._backoff_delay(outcome.record))
+            return
+        await self._handle_handoff(msg, snapshot, outcome, resources)
+
+    async def _handle_handoff(
+        self,
+        msg: Any,
+        snapshot: MessageSnapshot,
+        claim: DeliveryClaim,
+        resources: FailureResources,
+    ) -> None:
+        """Publish the dead-letter record and terminate the delivery."""
+        record = claim.record
+        failure_kind: FailureKind = (
+            record.failure_kind
+            if record is not None and record.failure_kind is not None
+            else "handler_outcome_unknown"
+        )
+        now = time.time()
+        envelope = FailureEnvelope.build(
+            snapshot,
+            failure_kind,
+            attempt_count=record.attempt_count if record is not None else snapshot.delivery_count,
+            first_failure_at=(
+                utc_iso8601(record.first_attempt_at) if record is not None else utc_iso8601(now)
+            ),
+            last_attempt_at=(
+                utc_iso8601(record.updated_at) if record is not None else utc_iso8601(now)
+            ),
+        )
+        try:
+            outcome = await resources.store.publish_failure(envelope)
+        except Exception as exc:
+            outcome = DlqOutcome.UNKNOWN
+            logger.warning(
+                "dead-letter publication failed for event %s: %s",
+                snapshot.identity.event_id,
+                exc,
+            )
+        if outcome is DlqOutcome.UNKNOWN:
+            # Publication is uncertain; redeliver instead of terminating so a
+            # later delivery can durably record the failure.
+            await msg.nak(delay=self._backoff_delay(record))
+            return
+        if record is not None:
+            await resources.ledger.record_terminal(claim)
+        await msg.term()
+        logger.error(
+            "message on %s (seq=%d) moved to the durable dead-letter store "
+            "(kind=%s, stream_published=%s)",
+            snapshot.subject,
+            snapshot.identity.stream_sequence,
+            failure_kind,
+            outcome is DlqOutcome.PUBLISHED,
+        )
+
+    def _backoff_delay(self, record: Any) -> float:
+        """Pick the NAK delay for the recorded attempt count."""
+        delays = self._config.redelivery_backoff_seconds
+        attempts = record.attempt_count if record is not None else 1
+        index = min(max(attempts - 1, 0), len(delays) - 1)
+        return delays[index]
 
     def stop(self, timeout: float | None = None) -> bool:
         """Signal the subscriber to stop and wait for the thread to finish.

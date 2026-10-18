@@ -15,7 +15,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from hephaestus.nats.config import NATSConfig
+from hephaestus.nats.consumer import ExplicitConsumerConfig
+from hephaestus.nats.delivery_ledger import StoredLedger
 from hephaestus.nats.events import NATSEvent
+from hephaestus.nats.failure_store import (
+    EXPECTED_LAST_SUBJECT_SEQUENCE_HEADER,
+    ExistingStream,
+    PubAckView,
+    SequenceConflictError,
+    StoredSourceMessage,
+    StreamTopology,
+)
 from hephaestus.nats.subscriber import NATSSubscriberThread, SubscriberState
 from hephaestus.resilience.circuit_breaker import (
     CircuitBreakerOpenError,
@@ -34,25 +44,98 @@ def _clean_breakers() -> None:
     reset_all_circuit_breakers()
 
 
+class _FakeBroker:
+    """In-memory JetStream and consumer admin seam for the NATS fault tests.
+
+    Every stream and consumer starts absent, so the subscriber provisions
+    the four failure-resource topologies and creates the explicit pull
+    consumer; the publish path applies the ledger CAS contract.
+    """
+
+    def __init__(self) -> None:
+        self.ledger_rows: dict[str, StoredLedger] = {}
+
+    async def stream_info(self, name: str) -> ExistingStream | None:
+        return None
+
+    async def add_stream(self, topology: StreamTopology) -> None:
+        return None
+
+    async def update_stream(self, name: str, *, subjects: frozenset[str]) -> None:
+        raise AssertionError("update_stream must not run in the fault harness")
+
+    async def publish(
+        self,
+        subject: str,
+        payload: bytes,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> PubAckView:
+        expected: int | None = None
+        if headers is not None:
+            raw = headers.get(EXPECTED_LAST_SUBJECT_SEQUENCE_HEADER)
+            if raw is not None:
+                expected = int(raw)
+        current = self.ledger_rows.get(subject)
+        sequence = 0 if current is None else current.sequence
+        if expected is not None and expected != sequence:
+            raise SequenceConflictError(f"stale publish for {subject}")
+        new_sequence = sequence + 1
+        self.ledger_rows[subject] = StoredLedger(sequence=new_sequence, payload=payload)
+        return PubAckView(
+            stream="HEPHAESTUS_NATS_DELIVERY_LEDGER", sequence=new_sequence, duplicate=False
+        )
+
+    async def get_message(self, stream: str, sequence: int) -> StoredSourceMessage | None:
+        return None
+
+    async def get_last_message(self, stream: str, subject: str) -> StoredLedger | None:
+        return self.ledger_rows.get(subject)
+
+    async def consumer_info(self, stream: str, durable: str) -> None:
+        return None
+
+    async def add_consumer(self, stream: str, config: ExplicitConsumerConfig) -> None:
+        return None
+
+    async def delete_consumer(self, stream: str, durable: str) -> None:
+        raise AssertionError("delete_consumer must not run in the fault harness")
+
+    async def restore_consumer(self, stream: str, snapshot: dict[str, Any]) -> None:
+        raise AssertionError("restore_consumer must not run in the fault harness")
+
+
 def _make_msg(payload: dict[str, Any]) -> MagicMock:
-    """Build a mock JetStream message carrying ``payload`` as JSON."""
+    """Build a mock JetStream message with valid durable metadata."""
     msg = MagicMock()
     msg.data = json.dumps(payload).encode()
     msg.subject = "hi.tasks.demo"
     msg.headers = None
-    msg.metadata = None
+    metadata = MagicMock()
+    metadata.stream = "TASKS"
+    metadata.consumer = "hephaestus-subscriber"
+    metadata.sequence.stream = 1
+    metadata.num_delivered = 1
+    msg.metadata = metadata
     msg.ack = AsyncMock()
+    msg.ack_sync = AsyncMock()
+    msg.nak = AsyncMock()
+    msg.term = AsyncMock()
+    msg.in_progress = AsyncMock()
     return msg
 
 
-def _make_connection(next_msg: AsyncMock) -> MagicMock:
-    """Build a fake NATS connection whose subscription yields from ``next_msg``."""
+def _make_connection(fetch: AsyncMock) -> MagicMock:
+    """Build a fake NATS connection whose pull subscription yields from ``fetch``."""
     sub = MagicMock()
-    sub.next_msg = next_msg
+    sub.fetch = fetch
     js = MagicMock()
-    js.subscribe = AsyncMock(return_value=sub)
+    js.pull_subscribe = AsyncMock(return_value=sub)
+    advisory_sub = MagicMock()
+    advisory_sub.unsubscribe = AsyncMock()
     nc = MagicMock()
     nc.jetstream = MagicMock(return_value=js)
+    nc.subscribe = AsyncMock(return_value=advisory_sub)
     nc.drain = AsyncMock()
     return nc
 
@@ -61,9 +144,7 @@ def _install_fake_nats(connect: AsyncMock) -> dict[str, object]:
     """Return ``sys.modules`` entries for running subscriber code without a broker."""
     nats_module = MagicMock()
     nats_module.connect = connect
-    api_module = MagicMock()
-    api_module.DeliverPolicy = MagicMock(return_value="new")
-    return {"nats": nats_module, "nats.js": MagicMock(), "nats.js.api": api_module}
+    return {"nats": nats_module}
 
 
 def test_network_partition_retries_opens_breaker_then_recovers(
@@ -128,6 +209,7 @@ def test_nats_subscriber_reconnects_after_connect_partition(
 ) -> None:
     """The subscriber retries after a connect partition and dispatches after recovery."""
     received: list[NATSEvent] = []
+    broker = _FakeBroker()
     thread = NATSSubscriberThread(
         config=NATSConfig(
             enabled=True,
@@ -136,15 +218,16 @@ def test_nats_subscriber_reconnects_after_connect_partition(
             max_backoff_seconds=0.02,
         ),
         handler=received.append,
+        admin_factory=lambda _js: (broker, broker),
     )
 
     msg = _make_msg({"kind": "recovered"})
 
-    async def next_msg(timeout: float = 0.0) -> MagicMock:
+    async def fetch(batch: int, timeout: float = 0.0) -> list[MagicMock]:
         thread._stop_event.set()
-        return msg
+        return [msg]
 
-    nc = _make_connection(AsyncMock(side_effect=next_msg))
+    nc = _make_connection(AsyncMock(side_effect=fetch))
     attempts = {"n": 0}
 
     async def connect(_url: str, **_kwargs: object) -> MagicMock:
@@ -168,34 +251,46 @@ def test_nats_subscriber_reconnects_after_connect_partition(
     assert attempts["n"] == 2
     assert waited == [0.01]
     assert [event.data for event in received] == [{"kind": "recovered"}]
-    msg.ack.assert_awaited_once()
+    msg.ack_sync.assert_awaited_once()
+    msg.nak.assert_not_awaited()
     nc.drain.assert_awaited_once()
     assert thread.state is SubscriberState.STOPPED
 
 
-def test_nats_subscriber_acks_and_surfaces_disk_full_handler_failure() -> None:
-    """A disk-full handler failure is surfaced without blocking the message ack."""
+def test_nats_subscriber_naks_and_surfaces_disk_full_handler_failure() -> None:
+    """A disk-full handler failure is ledger-recorded, NAKed, and surfaced.
+
+    The durable contract (#2395) redelivers below the processing budget
+    instead of discarding the event behind a fire-and-forget ack. The raw
+    failure object stays available on the in-process ``last_error``.
+    """
 
     def handler(_event: NATSEvent) -> None:
         raise OSError(errno.ENOSPC, "No space left on device")
 
+    broker = _FakeBroker()
     thread = NATSSubscriberThread(
         config=NATSConfig(enabled=True, subjects=["hi.tasks.>"]),
         handler=handler,
+        admin_factory=lambda _js: (broker, broker),
     )
 
     msg = _make_msg({"write": "event"})
 
-    async def next_msg(timeout: float = 0.0) -> MagicMock:
+    async def fetch(batch: int, timeout: float = 0.0) -> list[MagicMock]:
         thread._stop_event.set()
-        return msg
+        return [msg]
 
-    nc = _make_connection(AsyncMock(side_effect=next_msg))
+    nc = _make_connection(AsyncMock(side_effect=fetch))
 
     with patch.dict("sys.modules", _install_fake_nats(AsyncMock(return_value=nc))):
         asyncio.run(thread._subscribe_loop())
 
-    msg.ack.assert_awaited_once()
+    msg.nak.assert_awaited_once()
+    assert msg.nak.await_args.kwargs["delay"] == 1.0
+    msg.ack_sync.assert_not_awaited()
+    msg.ack.assert_not_awaited()
+    msg.term.assert_not_awaited()
     assert isinstance(thread.last_error, OSError)
     assert thread.last_error.errno == errno.ENOSPC
     assert thread.last_message_at is None

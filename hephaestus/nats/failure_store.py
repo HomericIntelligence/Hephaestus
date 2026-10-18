@@ -656,12 +656,34 @@ class AdvisoryReconciler:
         admin: JetStreamAdmin,
         *,
         max_failure_payload_bytes: int = MAX_FAILURE_PAYLOAD_BYTES,
+        source_stream: str = "",
+        bindings: tuple[Any, ...] = (),
         clock: Callable[[], float] = time.time,
     ) -> None:
-        """Bind the reconciler to the admin seam, payload bound, and clock."""
+        """Bind the reconciler to the admin seam, payload bound, and clock.
+
+        Args:
+            admin: JetStream admin seam.
+            max_failure_payload_bytes: Payload bound for replayable records.
+            source_stream: Source stream name; with ``bindings`` it derives
+                the live advisory subjects for :meth:`start`.
+            bindings: Consumer bindings whose durable names derive the live
+                advisory subjects for :meth:`start`.
+            clock: Wall-clock source; injectable for tests.
+
+        """
         self._admin = admin
         self._max_failure_payload_bytes = max_failure_payload_bytes
         self._clock = clock
+        self._advisory_subjects: tuple[str, ...] = (
+            tuple(
+                f"{ADVISORY_SUBJECT_PREFIX}.{source_stream}.{binding.durable}"
+                for binding in bindings
+            )
+            if source_stream
+            else ()
+        )
+        self._subscriptions: list[Any] = []
 
     async def reconcile_advisory(self, subject: str, payload: bytes) -> ReconcileOutcome:
         """Turn one advisory into one durable dead-letter publication.
@@ -726,6 +748,49 @@ class AdvisoryReconciler:
 
         outcome = await FailureStore(self._admin, clock=self._clock).publish_failure(envelope)
         return ReconcileOutcome(outcome.value)
+
+    # ------------------------------------------------------------------
+    # Live advisory subscription lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self, connector: Any) -> None:
+        """Subscribe to the live max-delivery advisories for every binding.
+
+        The subscriptions are ephemeral core subscriptions, so they never
+        compete with durable consumer state. Advisory payloads reconcile
+        into idempotent dead-letter records. A repeated ``start`` first
+        stops the previous subscriptions.
+
+        Args:
+            connector: Active NATS connection (``nc``) whose async
+                ``subscribe(subject, cb=...)`` creates a core subscription.
+
+        """
+        if self._subscriptions:
+            await self.stop()
+        for subject in self._advisory_subjects:
+
+            async def _on_advisory(msg: Any) -> None:
+                try:
+                    await self.reconcile_advisory(msg.subject, msg.data)
+                except Exception as exc:  # defensive: reconcile_advisory is total
+                    logger.warning("advisory reconciliation raised on %s: %s", msg.subject, exc)
+
+            self._subscriptions.append(await connector.subscribe(subject, cb=_on_advisory))
+        if self._advisory_subjects:
+            logger.info(
+                "subscribed to %d max-delivery advisory subject(s)",
+                len(self._advisory_subjects),
+            )
+
+    async def stop(self) -> None:
+        """Unsubscribe every live advisory subscription; tolerate errors."""
+        for subscription in self._subscriptions:
+            try:
+                await subscription.unsubscribe()
+            except Exception as exc:
+                logger.warning("advisory unsubscribe failed: %s", exc)
+        self._subscriptions.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -829,6 +894,8 @@ class FailureResources:
             advisory_reconciler=AdvisoryReconciler(
                 admin,
                 max_failure_payload_bytes=config.max_failure_payload_bytes,
+                source_stream=config.stream,
+                bindings=tuple(bindings),
                 clock=clock,
             ),
         )

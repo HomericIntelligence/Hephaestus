@@ -13,6 +13,7 @@ import asyncio
 import json
 from collections.abc import Coroutine
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -624,6 +625,66 @@ class TestAdvisoryReconciler:
 
         subjects = {subject for subject, _, _ in admin.published}
         assert len(subjects) == 1
+
+    def test_start_subscribes_and_reconciles_live_advisories(self) -> None:
+        admin = FakeJetStreamAdmin()
+        reconciler = AdvisoryReconciler(admin, source_stream="TASKS", bindings=(_BINDING_A,))
+        connector = MagicMock()
+        subscription = MagicMock()
+        subscription.unsubscribe = AsyncMock()
+        connector.subscribe = AsyncMock(return_value=subscription)
+
+        async def drive() -> None:
+            await reconciler.start(connector)
+            callback = connector.subscribe.await_args.kwargs["cb"]
+            advisory = MagicMock()
+            advisory.subject = self._advisory_subject()
+            advisory.data = self._advisory_payload()
+            await callback(advisory)
+            await reconciler.stop()
+
+        _run(drive())
+
+        connector.subscribe.assert_awaited_once()
+        subject_arg = connector.subscribe.await_args.args[0]
+        assert subject_arg == self._advisory_subject()
+        assert len(admin.published) == 1, "the live advisory reconciles into one record"
+        subscription.unsubscribe.assert_awaited_once()
+
+    def test_a_restart_replaces_the_previous_subscriptions(self) -> None:
+        admin = FakeJetStreamAdmin()
+        reconciler = AdvisoryReconciler(admin, source_stream="TASKS", bindings=(_BINDING_A,))
+        first = MagicMock()
+        first.unsubscribe = AsyncMock()
+        second = MagicMock()
+        second.unsubscribe = AsyncMock()
+        connector = MagicMock()
+        connector.subscribe = AsyncMock(side_effect=[first, second])
+
+        async def drive() -> None:
+            await reconciler.start(connector)
+            await reconciler.start(connector)
+            await reconciler.stop()
+
+        _run(drive())
+
+        assert connector.subscribe.await_count == 2
+        first.unsubscribe.assert_awaited_once()
+        second.unsubscribe.assert_awaited_once()
+
+    def test_start_without_bindings_subscribes_nothing(self) -> None:
+        admin = FakeJetStreamAdmin()
+        reconciler = AdvisoryReconciler(admin)
+        connector = MagicMock()
+        connector.subscribe = AsyncMock()
+
+        async def drive() -> None:
+            await reconciler.start(connector)
+            await reconciler.stop()
+
+        _run(drive())
+
+        connector.subscribe.assert_not_awaited()
 
 
 class TestFailureResourcesPrepare:

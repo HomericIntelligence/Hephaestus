@@ -17,24 +17,11 @@ from __future__ import annotations
 import ipaddress
 import ssl
 from dataclasses import dataclass, field as dataclass_field, fields as dataclass_fields
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import urlparse
 
 from hephaestus.nats.failure_models import MAX_FAILURE_PAYLOAD_BYTES
 
-# Valid JetStream first-subscription deliver policies. These string values match
-# nats.js.api.DeliverPolicy's enum values, so the subscriber can build the enum
-# directly from the configured string (see hephaestus/nats/subscriber.py).
-DeliverPolicyStr = Literal[
-    "all", "last", "new", "by_start_sequence", "by_start_time", "last_per_subject"
-]
-
-# Runtime allowlist mirroring DeliverPolicyStr. pydantic enforced the Literal at
-# construction; a stdlib dataclass does not, so __post_init__ checks membership
-# explicitly (subscriber.py builds a DeliverPolicy enum from this string).
-_DELIVER_POLICIES = frozenset(
-    {"all", "last", "new", "by_start_sequence", "by_start_time", "last_per_subject"}
-)
 _FLOAT_FIELDS = frozenset(
     {
         "initial_backoff_seconds",
@@ -74,7 +61,6 @@ class NATSConfig:
         stream: JetStream stream name.
         subjects: Subject patterns to subscribe to.
         durable_name: Durable consumer name for at-least-once delivery.
-        deliver_policy: JetStream deliver policy for first-time subscription.
         initial_backoff_seconds: Initial wait before the first reconnect attempt.
         max_backoff_seconds: Upper bound for exponential reconnect backoff.
         backoff_multiplier: Multiplier applied to backoff after each reconnect.
@@ -113,7 +99,6 @@ class NATSConfig:
     stream: str = "TASKS"
     subjects: list[str] = dataclass_field(default_factory=list)
     durable_name: str = "hephaestus-subscriber"
-    deliver_policy: DeliverPolicyStr = "new"
     initial_backoff_seconds: float = 1.0
     max_backoff_seconds: float = 60.0
     backoff_multiplier: float = 2.0
@@ -128,13 +113,12 @@ class NATSConfig:
     migrate_incompatible_consumers: bool = False
 
     def __post_init__(self) -> None:
-        """Validate deliver-policy membership and backoff/delivery bounds.
+        """Validate backoff, delivery, and failure-resource bounds.
 
         Raises:
-            ValueError: If ``deliver_policy`` is not a known policy, a backoff
-                field is out of range, ``max_backoff_seconds`` is below
-                ``initial_backoff_seconds``, or the durable failure-delivery
-                fields violate their bounds.
+            ValueError: If a backoff field is out of range,
+                ``max_backoff_seconds`` is below ``initial_backoff_seconds``,
+                or the durable failure-delivery fields violate their bounds.
 
         """
         self.tls = _coerce_config_bool("tls", self.tls)
@@ -162,11 +146,6 @@ class NATSConfig:
         )
         self.redelivery_backoff_seconds = _coerce_backoff_delays(self.redelivery_backoff_seconds)
 
-        if self.deliver_policy not in _DELIVER_POLICIES:
-            raise ValueError(
-                f"deliver_policy must be one of {sorted(_DELIVER_POLICIES)}, "
-                f"got {self.deliver_policy!r}"
-            )
         if self.initial_backoff_seconds <= 0.0:
             raise ValueError(
                 f"initial_backoff_seconds must be > 0, got {self.initial_backoff_seconds}"

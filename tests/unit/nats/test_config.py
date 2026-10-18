@@ -26,7 +26,6 @@ class TestNATSConfig:
         assert config.stream == "TASKS"
         assert config.subjects == []
         assert config.durable_name == "hephaestus-subscriber"
-        assert config.deliver_policy == "new"
 
     def test_custom_values(self) -> None:
         config = NATSConfig(
@@ -35,7 +34,6 @@ class TestNATSConfig:
             stream="EVENTS",
             subjects=["my.subject.>"],
             durable_name="my-consumer",
-            deliver_policy="all",
         )
         assert config.enabled is True
         assert config.url == "nats://remote:4222"

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import enum
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -342,3 +343,108 @@ class DeliveryHeartbeat:
             except Exception as exc:
                 logger.warning("delivery-ledger lease renewal failed: %s", exc)
             await self._sleep(self._interval)
+
+
+# ---------------------------------------------------------------------------
+# Production consumer admin seam
+# ---------------------------------------------------------------------------
+
+_CONSUMER_SNAPSHOT_FIELDS = (
+    "durable_name",
+    "filter_subject",
+    "ack_policy",
+    "ack_wait",
+    "max_deliver",
+    "idle_heartbeat",
+    "replay_policy",
+    "deliver_policy",
+    "opt_start_seq",
+)
+
+
+def _consumer_config_snapshot(config: Any) -> dict[str, Any]:
+    """Return a JSON-safe snapshot of one nats-py consumer configuration."""
+    raw: dict[str, Any] = {}
+    for name in _CONSUMER_SNAPSHOT_FIELDS:
+        value = getattr(config, name, None)
+        if isinstance(value, enum.Enum):
+            value = value.value
+        if value is not None:
+            raw[name] = value
+    return raw
+
+
+class NatsConsumerAdmin:
+    """Production consumer admin seam over a nats-py ``JetStreamContext``.
+
+    nats-py imports stay inside the methods so this module imports cleanly
+    without the optional ``nats`` extra installed.
+    """
+
+    def __init__(self, js: Any) -> None:
+        """Bind the seam to one nats-py JetStream context."""
+        self._js = js
+
+    async def consumer_info(self, stream: str, durable: str) -> ConsumerInfoView | None:
+        """Return the live consumer view, or ``None`` when absent."""
+        from nats.js.errors import APIError
+
+        try:
+            info = await self._js.consumer_info(stream, durable)
+        except APIError as exc:
+            if getattr(exc, "code", None) == 404:
+                return None
+            raise
+        config = info.config
+        ack_policy = getattr(config.ack_policy, "value", str(config.ack_policy))
+        ack_floor = getattr(info, "ack_floor", None)
+        return ConsumerInfoView(
+            durable_name=config.durable_name or durable,
+            ack_policy=str(ack_policy),
+            push_bound=bool(getattr(info, "push_bound", False)),
+            ack_floor_seq=int(getattr(ack_floor, "stream_seq", 0) or 0) if ack_floor else 0,
+            ack_wait=float(getattr(config, "ack_wait", 0) or 0),
+            max_deliver=int(getattr(config, "max_deliver", 0) or 0),
+            idle_heartbeat=float(getattr(config, "idle_heartbeat", 0) or 0),
+            filter_subject=str(getattr(config, "filter_subject", "") or ""),
+            snapshot=_consumer_config_snapshot(config),
+        )
+
+    async def add_consumer(self, stream: str, config: ExplicitConsumerConfig) -> None:
+        """Create or update one consumer from an explicit configuration."""
+        await self._js.add_consumer(stream, config=_to_nats_consumer_config(config))
+
+    async def delete_consumer(self, stream: str, durable: str) -> None:
+        """Delete one durable consumer."""
+        await self._js.delete_consumer(stream, durable)
+
+    async def restore_consumer(self, stream: str, snapshot: dict[str, Any]) -> None:
+        """Restore one consumer from its raw configuration snapshot."""
+        from nats.js.api import ConsumerConfig
+
+        raw = dict(snapshot)
+        config = ConsumerConfig(**raw)
+        await self._js.add_consumer(stream, config=config)
+
+
+def _to_nats_consumer_config(config: ExplicitConsumerConfig) -> Any:
+    """Build a nats-py ``ConsumerConfig`` from an explicit configuration.
+
+    The policy tokens are str-valued enum values; nats-py serializes them
+    verbatim, so no enum reconstruction is needed.
+    """
+    from nats.js.api import ConsumerConfig
+
+    kwargs: dict[str, Any] = {
+        "durable_name": config.durable_name,
+        "filter_subject": config.filter_subject,
+        "ack_policy": config.ack_policy,
+        "ack_wait": config.ack_wait,
+        "max_deliver": config.max_deliver,
+        "idle_heartbeat": config.idle_heartbeat,
+        "replay_policy": config.replay_policy,
+        "deliver_policy": config.deliver_policy,
+    }
+    if config.opt_start_seq is not None:
+        kwargs["opt_start_seq"] = config.opt_start_seq
+    return ConsumerConfig(**kwargs)
