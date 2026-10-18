@@ -140,13 +140,13 @@ def test_same_process_keyed_lock_serializes_threads(tmp_path: Path) -> None:
     """Concurrent threads on one store path claim disjoint durable cycles."""
     store = _store(tmp_path)
     results: list[int] = []
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def claim(index: int) -> None:
         try:
             record = store.claim_rebase_cycle(17, f"{index:040d}", BASE)
             results.append(record.index)
-        except BaseException as exc:
+        except Exception as exc:
             errors.append(exc)
 
     threads = [threading.Thread(target=claim, args=(index,)) for index in range(6)]

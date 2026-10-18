@@ -616,18 +616,13 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         because the PR is not ready, rather than treating CI/CD state as a
         separate source of merge authority.
         """
+        fields = (
+            "state,headRefOid,mergedAt,baseRefName,autoMergeRequest,mergeable,"
+            "mergeStateStatus,baseRefOid,headRefName,headRepository,"
+            "headRepositoryOwner"
+        )
         try:
-            result = self._gh(
-                [
-                    "pr",
-                    "view",
-                    str(pr_number),
-                    "--json",
-                    "state,headRefOid,mergedAt,baseRefName,autoMergeRequest,mergeable,"
-                    "mergeStateStatus,baseRefOid,headRefName,headRepository,"
-                    "headRepositoryOwner",
-                ]
-            )
+            result = self._gh(["pr", "view", str(pr_number), "--json", fields])
             data = json.loads(result.stdout or "{}")
             return data if isinstance(data, dict) else None
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
