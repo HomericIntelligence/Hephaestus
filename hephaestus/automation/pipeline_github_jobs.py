@@ -56,6 +56,7 @@ from hephaestus.automation.pipeline.github_jobs import (
 from hephaestus.automation.pipeline.merge_wait_admission import (
     MergeWaitAdmissionSnapshot,
     RequiredChecksDeferred,
+    VerifiedRepositoryDefaultBranch,
     validate_merge_wait_admission,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
@@ -69,10 +70,23 @@ from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
 from hephaestus.automation.pipeline_github_transport import rate_limit_remaining
+from hephaestus.automation.protected_merge_state import (
+    MergeAttemptKey,
+    ProtectedMergeStateError,
+    ProtectedMergeStateStore,
+)
+from hephaestus.automation.protected_rebase import (
+    MERGE_ATTEMPT_AMBIGUOUS,
+    MERGE_ATTEMPT_CONFLICT,
+    PROTECTED_REBASE_REQUIRED,
+    ProtectedRebaseTarget,
+    validate_protected_rebase_target,
+)
 from hephaestus.automation.remediation_prepublication import (
     remove_prepublication_receipt,
 )
 from hephaestus.automation.review_journal import CommentJournalReadError, PlanDiscoveryStatus
+from hephaestus.utils.git import _is_full_commit_sha
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +333,7 @@ class PipelineGitHubJobRunner:
             case RecoverPendingReviewFindingsRequest():
                 return self._recover_pending_review_findings(job.request, github)
             case RunMergeWaitCycleRequest():
-                return self._run_merge_wait_cycle(job.request, github)
+                return self._run_merge_wait_cycle(job, job.request, github)
             case EnsureScopeExpansionChildrenRequest():
                 return self._ensure_scope_expansion_children(job.request, github)
             case ReconcileScopeExpansionDependenciesRequest():
@@ -1514,7 +1528,18 @@ class PipelineGitHubJobRunner:
         )
 
     @staticmethod
+    def _protected_merge_store(
+        job: GitHubJob, snapshot: MergeWaitAdmissionSnapshot
+    ) -> ProtectedMergeStateStore | None:
+        """Build the repository-confined durable store, failing closed softly."""
+        try:
+            return ProtectedMergeStateStore(job.repo_root, snapshot.repository.name_with_owner)
+        except ProtectedMergeStateError:
+            return None
+
     def _run_merge_wait_cycle(  # noqa: C901
+        self,
+        job: GitHubJob,
         request: RunMergeWaitCycleRequest,
         github: Any,
     ) -> MergeWaitCycleCompleted:
@@ -1523,6 +1548,8 @@ class PipelineGitHubJobRunner:
         retryable = frozenset({"BEHIND", "BLOCKED", "UNKNOWN"})
         conflicting = frozenset({"CONFLICTING", "DIRTY"})
         terminal_merge_sha: str | None = None
+        protected_store: ProtectedMergeStateStore | None = None
+        protected_claim_key: MergeAttemptKey | None = None
 
         def complete(
             outcome: str,
@@ -1532,6 +1559,7 @@ class PipelineGitHubJobRunner:
             can_retry: bool = False,
             merge_sha: str | None = None,
             queue_residence_timeout_s: float | None = None,
+            protected_rebase_target: ProtectedRebaseTarget | None = None,
         ) -> MergeWaitCycleCompleted:
             return MergeWaitCycleCompleted(
                 request=request,
@@ -1541,6 +1569,7 @@ class PipelineGitHubJobRunner:
                 retryable=can_retry,
                 merge_sha=merge_sha,
                 queue_residence_timeout_s=queue_residence_timeout_s,
+                protected_rebase_target=protected_rebase_target,
             )
 
         def terminal(state: object) -> str | None:
@@ -1656,22 +1685,24 @@ class PipelineGitHubJobRunner:
                 return "merge_policy_not_strict"
             return conversation_safety(policy)
 
-        def readiness_outcome(
+        def readiness_outcome(  # noqa: C901
             state: object,
             *,
             park_if_ready: bool,
             merge_queue_required: bool = False,
-        ) -> tuple[str | None, tuple[str, ...] | None]:
+            protected_target: bool = False,
+            repository: VerifiedRepositoryDefaultBranch | None = None,
+        ) -> tuple[str | None, tuple[str, ...] | None, ProtectedRebaseTarget | None]:
             terminal_outcome = terminal(state)
             if terminal_outcome is not None:
-                return terminal_outcome, None
+                return terminal_outcome, None, None
             if state is None or not isinstance(state, dict):
-                return "merge_readiness_unavailable", None
+                return "merge_readiness_unavailable", None, None
             if state.get("autoMergeRequest") is not None:
-                return "auto_merge_already_armed", None
+                return "auto_merge_already_armed", None, None
             readiness_head = state.get("headRefOid")
             if not isinstance(readiness_head, str) or not readiness_head:
-                return "merge_readiness_unavailable", None
+                return "merge_readiness_unavailable", None, None
             status = str(state.get("mergeStateStatus") or "").upper()
             mergeable = str(state.get("mergeable") or "").upper()
             fingerprint = (
@@ -1681,20 +1712,55 @@ class PipelineGitHubJobRunner:
                 status,
             )
             if readiness_head != request.merge_head_sha:
-                return "readiness_wait", fingerprint
+                return "readiness_wait", fingerprint, None
             if status in requestable and mergeable == "MERGEABLE":
                 if park_if_ready or request.declined_readiness_fingerprint == fingerprint:
-                    return "readiness_wait", fingerprint
-                return None, fingerprint
+                    return "readiness_wait", fingerprint, None
+                return None, fingerprint, None
             if merge_queue_required and status == "BLOCKED" and mergeable == "MERGEABLE":
-                return None, fingerprint
+                return None, fingerprint, None
             if status in conflicting or mergeable == "CONFLICTING":
-                return "merge_conflicting", fingerprint
+                return "merge_conflicting", fingerprint, None
             if status == "BEHIND":
-                return "readiness_wait", fingerprint
+                if protected_target and repository is not None:
+                    target = validate_protected_rebase_target(
+                        state,
+                        repository=repository.name_with_owner,
+                        pr_number=request.pr_number,
+                        expected_head_sha=request.merge_head_sha,
+                        default_branch=repository.default_branch,
+                    )
+                    if isinstance(target, str):
+                        return target, fingerprint, None
+                    return PROTECTED_REBASE_REQUIRED, fingerprint, target
+                return "readiness_wait", fingerprint, None
             if status not in retryable and mergeable != "UNKNOWN":
-                return "merge_readiness_unknown", fingerprint
-            return "readiness_wait", fingerprint
+                return "merge_readiness_unknown", fingerprint, None
+            return "readiness_wait", fingerprint, None
+
+        def record_claim_response(status: int, classification: str) -> None:
+            """Record a conclusive merge response on the durable claim."""
+            if self.dry_run or protected_store is None or protected_claim_key is None:
+                return
+            try:
+                protected_store.record_claim_response(protected_claim_key, status, classification)
+            except ProtectedMergeStateError:
+                logger.warning(
+                    "PR #%s: protected merge claim response was not recorded",
+                    request.pr_number,
+                )
+
+        def record_claim_ambiguous() -> None:
+            """Permanently mark the durable claim for a lost or malformed response."""
+            if self.dry_run or protected_store is None or protected_claim_key is None:
+                return
+            try:
+                protected_store.mark_claim_ambiguous(protected_claim_key)
+            except ProtectedMergeStateError:
+                logger.warning(
+                    "PR #%s: protected merge claim was not marked ambiguous",
+                    request.pr_number,
+                )
 
         boundary = operation_boundary()
         if boundary is not None:
@@ -1765,13 +1831,17 @@ class PipelineGitHubJobRunner:
             readiness = github.gh_pr_merge_readiness(request.pr_number)
         except Exception:
             return complete("merge_readiness_unavailable")
-        readiness_status, fingerprint = readiness_outcome(
+        readiness_status, fingerprint, target = readiness_outcome(
             readiness,
             park_if_ready=False,
             merge_queue_required=policy.merge_queue_required,
+            protected_target=True,
+            repository=initial_snapshot.repository,
         )
         if readiness_status is not None:
-            return complete(readiness_status, fingerprint=fingerprint)
+            return complete(
+                readiness_status, fingerprint=fingerprint, protected_rebase_target=target
+            )
 
         try:
             checks_green = github.required_checks_pass_for_head(
@@ -1818,6 +1888,62 @@ class PipelineGitHubJobRunner:
             return complete(admitted, merge_sha=terminal_merge_sha)
         final_state, _ = admitted
 
+        # Barrier 2: reread readiness immediately before claiming the merge
+        # request.  A BEHIND classification at either barrier routes the pull
+        # request to a protected rebase without issuing any merge request.
+        try:
+            readiness = github.gh_pr_merge_readiness(request.pr_number)
+        except Exception:
+            return complete("merge_readiness_unavailable")
+        readiness_status, fingerprint, target = readiness_outcome(
+            readiness,
+            park_if_ready=False,
+            merge_queue_required=current_policy.merge_queue_required,
+            protected_target=True,
+            repository=initial_snapshot.repository,
+        )
+        if readiness_status is not None:
+            return complete(
+                readiness_status, fingerprint=fingerprint, protected_rebase_target=target
+            )
+
+        if not self.dry_run and not current_policy.merge_queue_required:
+            # The durable claim guards only the direct conditional merge:
+            # that PUT is the merge.  A merge queue serializes admission
+            # requests server-side, and its reconciliation already governs
+            # every repeated admission after a proven queue removal.
+            protected_store = self._protected_merge_store(job, initial_snapshot)
+            if protected_store is None:
+                return complete("protected_merge_state_unavailable")
+            base_sha = readiness.get("baseRefOid") if isinstance(readiness, dict) else None
+            mergeable_text = (
+                str(readiness.get("mergeable") or "").upper() if isinstance(readiness, dict) else ""
+            )
+            status_text = (
+                str(readiness.get("mergeStateStatus") or "").upper()
+                if isinstance(readiness, dict)
+                else ""
+            )
+            if not _is_full_commit_sha(base_sha) or not mergeable_text or not status_text:
+                return complete("protected_merge_state_unavailable")
+            protected_claim_key = MergeAttemptKey(
+                repository=initial_snapshot.repository.name_with_owner,
+                pr_number=request.pr_number,
+                reviewed_head_sha=request.merge_head_sha,
+                base_sha=base_sha,
+                proof_generation=request.proof_generation,
+                mergeable=mergeable_text,
+                readiness_status=status_text,
+            )
+            try:
+                grant = protected_store.claim_merge_attempt(protected_claim_key)
+            except ProtectedMergeStateError:
+                return complete("protected_merge_state_unavailable")
+            if grant.reconcile_only:
+                if grant.record.ambiguous:
+                    return complete(MERGE_ATTEMPT_AMBIGUOUS, fingerprint=fingerprint)
+                return complete(MERGE_ATTEMPT_CONFLICT, fingerprint=fingerprint)
+
         try:
             result = github.merge_pr_if_head(
                 request.pr_number,
@@ -1828,12 +1954,15 @@ class PipelineGitHubJobRunner:
                 cancellation=request.cancellation,
             )
         except Exception:
+            record_claim_ambiguous()
             return complete("merge_request_transport_error", attempted=True, can_retry=True)
         if result.dry_run:
             return complete("conditional_merge_dry_run", attempted=True)
         if result.malformed:
+            record_claim_ambiguous()
             return complete("merge_result_malformed", attempted=True)
         if result.transport_error or result.status is None:
+            record_claim_ambiguous()
             admitted = admit(initial_snapshot)
             if isinstance(admitted, str):
                 return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
@@ -1846,7 +1975,9 @@ class PipelineGitHubJobRunner:
             )
         if result.status == 200:
             if result.body is None or result.body.get("merged") is not True:
+                record_claim_response(200, "merge_not_merged")
                 return complete("merge_not_merged", attempted=True)
+            record_claim_response(200, "merged")
             merge_sha = result.body.get("sha")
             if not (
                 isinstance(merge_sha, str)
@@ -1867,11 +1998,13 @@ class PipelineGitHubJobRunner:
                 merge_sha=merge_sha,
             )
         if result.status == 409:
+            record_claim_response(409, "head_changed_or_conflict")
             admitted = admit(initial_snapshot)
             if isinstance(admitted, str):
                 return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
             return complete("merge_409_without_head_drift", attempted=True)
         if result.status == 405:
+            record_claim_response(405, "not_mergeable")
             try:
                 readiness = github.gh_pr_merge_readiness(request.pr_number)
             except Exception:
@@ -1886,12 +2019,20 @@ class PipelineGitHubJobRunner:
             admitted = admit(initial_snapshot)
             if isinstance(admitted, str):
                 return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
-            readiness_status, fingerprint = readiness_outcome(readiness, park_if_ready=True)
+            readiness_status, fingerprint, target = readiness_outcome(
+                readiness,
+                park_if_ready=True,
+                protected_target=True,
+                repository=initial_snapshot.repository,
+            )
             return complete(
                 readiness_status or "readiness_wait",
                 attempted=True,
                 fingerprint=fingerprint,
+                protected_rebase_target=target,
             )
+        # Any other status is not conclusive proof of rejection.
+        record_claim_ambiguous()
         return complete(f"merge_http_{result.status}", attempted=True)
 
 

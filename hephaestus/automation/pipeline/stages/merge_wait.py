@@ -34,6 +34,7 @@ from hephaestus.automation.issue_waves import (
     WaveLease,
 )
 from hephaestus.automation.learning_journal import LearningJournalStore
+from hephaestus.automation.protected_rebase import PROTECTED_REBASE_REQUIRED
 from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 
@@ -80,6 +81,7 @@ _QUEUE_ADMITTED_HEAD = "merge_queue_admitted_head_sha"
 _QUEUE_ADMITTED_PROOF_GENERATION = "merge_queue_admitted_proof_generation"
 _QUEUE_RESIDENCE_DEADLINE_S = "merge_queue_residence_deadline_s"
 _QUEUE_RESIDENCE_POLLS = "merge_queue_residence_polls"
+_PROTECTED_REBASE_TARGET = "protected_rebase_target"
 
 
 def _merge_head(item: WorkItem) -> object:
@@ -262,6 +264,25 @@ class MergeWaitStage(Stage):
             return self._route_merged(item, ctx)
         if outcome == "closed":
             return StageOutcome(Disposition.FINISH_FAIL, "closed")
+        if outcome == PROTECTED_REBASE_REQUIRED:
+            target = receipt.protected_rebase_target
+            if target is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_receipt_missing")
+            item.payload[_PROTECTED_REBASE_TARGET] = target
+            return StageOutcome(Disposition.FAIL_BACK, outcome)
+        if outcome in {"merge_attempt_conflict", "merge_attempt_ambiguous"}:
+            # The durable merge-attempt record proves a lost or prior response.
+            # This proof never gets merge authority again; it needs a new one.
+            return StageOutcome(Disposition.FAIL_BACK, outcome)
+        if outcome in {
+            "protected_rebase_target_unverified",
+            "protected_rebase_fork_head",
+            "protected_merge_state_unavailable",
+        }:
+            # A protected rebase cannot be built or the durable store is
+            # unusable.  A fresh review would observe the same state again,
+            # so stop here and require operator action.  No merge authority.
+            return StageOutcome(Disposition.FINISH_FAIL, outcome)
         if outcome == "auto_merge_already_armed":
             return StageOutcome(Disposition.BLOCKED, outcome)
         if outcome == "required_checks_not_green":

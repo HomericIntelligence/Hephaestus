@@ -61,7 +61,9 @@ runtime ownership and recovery follow this document and the live source.
 - **Durable journals.** GitHub labels, comments, and PR state are the normal
  crash-resistant truth. `LearningJournalStore` records auxiliary intent
  claims and terminal results. Source ownership and publication records retain
- exact workspaces and uncertain external effects. The repository-scoped issue-wave checkpoint
+ exact workspaces and uncertain external effects. The protected-merge store
+ retains merge-attempt claims and bounded rebase cycles for each pull
+ request. The repository-scoped issue-wave checkpoint
  records only immutable selected issue identifiers, pending or retired
  reviewed non-code intents, terminal outcomes, merge receipts, and verified
  main revisions. Restart reconstruction reads only the current supported
@@ -108,6 +110,30 @@ Repository and direct intake use the same row boundary. Intake does not write
  ([`pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py),
  [`worker_pool.py`](../hephaestus/automation/pipeline/worker_pool.py),
  [`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
+- **Protected rebase before conditional merge.** `merge_wait` classifies
+ readiness two times per cycle: after the effective policy is proven and
+ again after the final admission re-read. A `BEHIND` classification at either
+ barrier, against a rebase target proven from the extended readiness fields
+ (`baseRefOid`, `headRefName`, `headRepository`, `headRepositoryOwner`),
+ routes the item through IMPLEMENTATION; an unproven or fork target is
+ terminal. The durable
+ [`protected_merge_state.py`](../hephaestus/automation/protected_merge_state.py)
+ store grants at most one conditional merge request per readiness
+ fingerprint, records each conclusive response, and permanently blocks an
+ ambiguous attempt. The direct-merge path is the only guarded path; a
+ required merge queue serializes admission server-side and needs no claim.
+ The coordinator registers an opaque writer capability for each
+ coordinator-proven implementation writer worktree and removes it at the
+ terminal sink. The `protected_rebase` Git operation replays the reviewed
+ commits onto the fetched base with signed commits, proves ancestry, marks
+ the cycle prepared before any push, and publishes with one ordinary push. A
+ pull request may claim at most eight rebase cycles. A published bridge
+ clears every stale merge-wait proof payload, and one fresh review grants
+ new merge authority
+ ([ADR-0057](adr/0057-protected-rebase-before-conditional-merge.md),
+ [`protected_rebase.py`](../hephaestus/automation/protected_rebase.py),
+ [`worker_pool.py`](../hephaestus/automation/pipeline/worker_pool.py),
+ [`implementation.py`](../hephaestus/automation/pipeline/stages/implementation.py)).
 - **Globally bounded budgets.** Stages count retries on `_on_job_done` so
  `agent_error` retries consume the same per-item budget as ordinary
  attempts; cross-stage regression cycles terminate in finite steps

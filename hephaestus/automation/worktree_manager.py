@@ -39,6 +39,7 @@ from hephaestus.automation.git_runtime import (
     remaining_operation_timeout,
 )
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
+from hephaestus.automation.protected_rebase import WriterAllocationOrigin
 from hephaestus.config.child_environments import read_approved_parent_env
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import run_subprocess
@@ -135,6 +136,7 @@ class _ImplementationWriterAuthorityRecord:
     branch: str
     path: Path
     revision: str
+    origin: WriterAllocationOrigin
     predecessor_evidence: object | None = None
 
 
@@ -148,9 +150,12 @@ def _mint_implementation_writer_authority(
     branch: str,
     path: Path,
     revision: str,
+    origin: WriterAllocationOrigin,
     predecessor_evidence: object | None = None,
 ) -> ImplementationWriterAuthority:
     """Mint one opaque process-local authority after a verified writer create."""
+    if not isinstance(origin, WriterAllocationOrigin):
+        raise WorktreeCreationReceiptError("implementation writer allocation origin is invalid")
     if not _is_full_commit_sha(revision):
         raise WorktreeCreationReceiptError("implementation writer revision is invalid")
     authority = ImplementationWriterAuthority(secrets.token_urlsafe(32))
@@ -159,6 +164,7 @@ def _mint_implementation_writer_authority(
         branch=branch,
         path=path.resolve(),
         revision=revision,
+        origin=origin,
         predecessor_evidence=predecessor_evidence,
     )
     with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
@@ -167,6 +173,25 @@ def _mint_implementation_writer_authority(
                 del _IMPLEMENTATION_WRITER_AUTHORITIES[token]
         _IMPLEMENTATION_WRITER_AUTHORITIES[authority.token] = record
     return authority
+
+
+def implementation_writer_allocation_origin(
+    *,
+    issue_number: int,
+    branch: str,
+    path: Path,
+) -> WriterAllocationOrigin | None:
+    """Report the allocation-origin receipt for one proven writer identity."""
+    resolved = path.resolve()
+    with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
+        for record in _IMPLEMENTATION_WRITER_AUTHORITIES.values():
+            if (
+                record.issue_number == issue_number
+                and record.branch == branch
+                and record.path == resolved
+            ):
+                return record.origin
+    return None
 
 
 def consume_implementation_writer_authority(
@@ -297,6 +322,7 @@ class WorktreeManager:
         branch_name: str,
         worktree_path: Path,
         timeout: int | None,
+        origin: WriterAllocationOrigin = WriterAllocationOrigin.NEWLY_CREATED,
         predecessor_evidence: object | None = None,
     ) -> ImplementationWriterAuthority:
         """Mint authority only after Git proves the attached writer identity."""
@@ -319,6 +345,7 @@ class WorktreeManager:
             branch=branch_name,
             path=worktree_path,
             revision=revision,
+            origin=origin,
             predecessor_evidence=predecessor_evidence,
         )
         self._implementation_writer_authorities[worktree_path.resolve()] = authority
@@ -335,6 +362,23 @@ class WorktreeManager:
                 self._implementation_writer_authorities.pop(path, None)
                 raise WorktreeCreationReceiptError("implementation writer authority is unavailable")
         return authority
+
+    def writer_capability_for(self, worktree_path: Path) -> WriterAllocationOrigin | None:
+        """Return the allocation-origin receipt for a controlled writer path.
+
+        Only the coordinator uses this receipt to decide whether a proven
+        writer allocation may receive a protected rebase capability.  A
+        missing or stale authority reports ``None``.
+        """
+        path = worktree_path.resolve()
+        authority = self._implementation_writer_authorities.get(path)
+        if authority is None:
+            return None
+        with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
+            record = _IMPLEMENTATION_WRITER_AUTHORITIES.get(authority.token)
+        if record is None or record.path != path:
+            return None
+        return record.origin
 
     def mint_adopted_implementation_writer_authority(
         self,
@@ -363,6 +407,7 @@ class WorktreeManager:
             branch_name=branch_name,
             worktree_path=path,
             timeout=timeout,
+            origin=WriterAllocationOrigin.ADOPTED,
             predecessor_evidence=pending.predecessor_evidence if pending is not None else None,
         )
         with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
@@ -824,6 +869,12 @@ class WorktreeManager:
                                     branch_name=branch_name,
                                     worktree_path=worktree_path,
                                     timeout=timeout,
+                                    origin=(
+                                        WriterAllocationOrigin.DIRECT_ABSENT_RESERVED
+                                        if remote_branch_reserved
+                                        and direct_target_ref_revision is None
+                                        else WriterAllocationOrigin.NEWLY_CREATED
+                                    ),
                                     predecessor_evidence=predecessor_evidence,
                                 )
                                 if direct_predecessor:
@@ -1731,6 +1782,7 @@ class WorktreeManager:
                 branch=branch_name,
                 path=worktree_path.resolve(),
                 revision=expected_head,
+                origin=WriterAllocationOrigin.ADOPTED,
                 predecessor_evidence=predecessor_evidence,
             )
         )

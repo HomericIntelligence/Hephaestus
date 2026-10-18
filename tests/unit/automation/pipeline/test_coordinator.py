@@ -69,6 +69,13 @@ from hephaestus.automation.pipeline.stages.repo import (
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.protected_rebase import (
+    ProtectedRebaseCapabilityError,
+    WriterAllocationOrigin,
+    find_writer_capability_token,
+    pop_writer_capability,
+    validate_protected_writer_capability,
+)
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
@@ -78,6 +85,7 @@ from hephaestus.automation.review_journal import (
 )
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED, STATE_PLAN_GO
+from hephaestus.automation.worktree_manager import _mint_implementation_writer_authority
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -3950,6 +3958,276 @@ class TestImplementationAdmission:
 
         assert run_order == [21, 22]
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+
+
+class TestProtectedWriterCapability:
+    """Bind the durable protected-rebase capability to proven writers."""
+
+    @pytest.fixture(autouse=True)
+    def _capability_registry_isolation(self) -> Any:
+        """Remove every capability the test registered, even on failure."""
+        from hephaestus.automation import protected_rebase as protected_rebase_module
+
+        before = set(protected_rebase_module._WRITER_CAPABILITIES)
+        yield
+        with protected_rebase_module._WRITER_CAPABILITIES_LOCK:
+            for token in tuple(protected_rebase_module._WRITER_CAPABILITIES):
+                if token not in before:
+                    protected_rebase_module._WRITER_CAPABILITIES.pop(token, None)
+
+    def _register_writer(
+        self,
+        coordinator: Any,
+        *,
+        issue: int,
+        branch: str,
+        path: Path,
+        isolated: bool = False,
+    ) -> WorkItem:
+        """Complete one writer create-worktree registration for a proven item."""
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=issue,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=branch,
+            worktree=str(path),
+        )
+        job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={"issue_number": issue, "branch_name": branch, "isolated": isolated},
+        )
+        coordinator._register_pipeline_writer_worktree(
+            item,
+            job,
+            JobResult(ok=True, error=None, value={"path": str(path)}),
+        )
+        return item
+
+    def _registered_token(self, *, issue: int, branch: str, path: Path) -> str | None:
+        """Return the live token for one exact writer identity, if present."""
+        return find_writer_capability_token(
+            repository="repo-a",
+            issue_number=issue,
+            branch=branch,
+            worktree=str(path.resolve()),
+        )
+
+    def _mint_origin(
+        self, origin: WriterAllocationOrigin, *, issue: int, branch: str, path: Path
+    ) -> None:
+        """Mint one writer authority receipt for the exact writer identity."""
+        _mint_implementation_writer_authority(
+            issue_number=issue,
+            branch=branch,
+            path=path,
+            revision="a" * 40,
+            origin=origin,
+        )
+
+    def test_created_writer_allocation_registers_protected_capability(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A coordinator-proven new writer receives one 64-hex capability."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        branch = "issue-7101"
+        path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-7101"
+        path.mkdir(parents=True)
+        self._mint_origin(
+            WriterAllocationOrigin.NEWLY_CREATED, issue=7101, branch=branch, path=path
+        )
+
+        item = self._register_writer(coordinator, issue=7101, branch=branch, path=path)
+
+        record = coordinator._protected_writer_capabilities[("repo-a", branch)]
+        assert record.item is item
+        assert record.issue_number == 7101
+        assert record.origin is WriterAllocationOrigin.NEWLY_CREATED
+        assert record.worktree == str(path.resolve())
+        token = record.capability.token
+        assert len(token) == 64
+        assert self._registered_token(issue=7101, branch=branch, path=path) == token
+        # The capability proves the live identity exactly.
+        proven = validate_protected_writer_capability(
+            token,
+            repository="repo-a",
+            issue_number=7101,
+            branch=branch,
+            worktree=str(path.resolve()),
+        )
+        assert proven.item is item
+
+    def test_direct_absent_reserved_allocation_registers_protected_capability(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A direct absent-only-reserved allocation also receives a capability."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        branch = "issue-7102"
+        path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-7102"
+        path.mkdir(parents=True)
+        self._mint_origin(
+            WriterAllocationOrigin.DIRECT_ABSENT_RESERVED, issue=7102, branch=branch, path=path
+        )
+
+        self._register_writer(coordinator, issue=7102, branch=branch, path=path)
+
+        token = self._registered_token(issue=7102, branch=branch, path=path)
+        assert token is not None
+        record = coordinator._protected_writer_capabilities[("repo-a", branch)]
+        assert record.capability.token == token
+
+    @pytest.mark.parametrize(
+        "origin",
+        [WriterAllocationOrigin.ADOPTED, WriterAllocationOrigin.REUSED],
+    )
+    def test_unproven_origins_receive_no_capability(
+        self,
+        origin: WriterAllocationOrigin,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Adopted and reused allocations never receive a protected capability."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        branch = f"issue-7103-{origin}"
+        path = tmp_path / "repo-a" / "build" / ".worktrees" / branch
+        path.mkdir(parents=True)
+        self._mint_origin(origin, issue=7103, branch=branch, path=path)
+
+        self._register_writer(coordinator, issue=7103, branch=branch, path=path)
+
+        assert coordinator._protected_writer_capabilities == {}
+        assert self._registered_token(issue=7103, branch=branch, path=path) is None
+
+    def test_missing_allocation_origin_receives_no_capability(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A registration without a writer-authority receipt stays unproven."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        branch = "issue-7104"
+        path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-7104"
+        path.mkdir(parents=True)
+
+        self._register_writer(coordinator, issue=7104, branch=branch, path=path)
+
+        assert coordinator._protected_writer_capabilities == {}
+        assert self._registered_token(issue=7104, branch=branch, path=path) is None
+
+    def test_isolated_writer_allocation_receives_no_capability(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An isolated create-worktree job is not a shared writer registration."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        branch = "issue-7105"
+        path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-7105"
+        path.mkdir(parents=True)
+        self._mint_origin(
+            WriterAllocationOrigin.NEWLY_CREATED, issue=7105, branch=branch, path=path
+        )
+
+        self._register_writer(coordinator, issue=7105, branch=branch, path=path, isolated=True)
+
+        assert coordinator._protected_writer_capabilities == {}
+        assert self._registered_token(issue=7105, branch=branch, path=path) is None
+
+    def test_replacement_writer_pops_the_previous_capability(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A replacement registration invalidates the previous live capability."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        branch = "issue-7106-head"
+        path_a = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-7106"
+        path_b = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-7107"
+        path_a.mkdir(parents=True)
+        path_b.mkdir(parents=True)
+        self._mint_origin(
+            WriterAllocationOrigin.NEWLY_CREATED, issue=7106, branch=branch, path=path_a
+        )
+        self._mint_origin(
+            WriterAllocationOrigin.NEWLY_CREATED, issue=7107, branch=branch, path=path_b
+        )
+
+        self._register_writer(coordinator, issue=7106, branch=branch, path=path_a)
+        old_token = self._registered_token(issue=7106, branch=branch, path=path_a)
+        assert old_token is not None
+        item_b = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=7107,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=branch,
+            worktree=str(path_b),
+        )
+        coordinator._register_protected_writer_capability(item_b)
+
+        record = coordinator._protected_writer_capabilities[("repo-a", branch)]
+        assert record.item is item_b
+        assert record.capability.token != old_token
+        # The popped capability fails closed for every later mutation.
+        with pytest.raises(ProtectedRebaseCapabilityError):
+            validate_protected_writer_capability(
+                old_token,
+                repository="repo-a",
+                issue_number=7106,
+                branch=branch,
+                worktree=str(path_a.resolve()),
+            )
+        assert self._registered_token(issue=7106, branch=branch, path=path_a) is None
+        assert self._registered_token(issue=7107, branch=branch, path=path_b) == (
+            record.capability.token
+        )
+
+    def test_finish_pops_the_bound_capability(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Terminal routing removes the finished writer's capability."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        branch = "issue-7108"
+        path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-7108"
+        path.mkdir(parents=True)
+        self._mint_origin(
+            WriterAllocationOrigin.NEWLY_CREATED, issue=7108, branch=branch, path=path
+        )
+
+        item = self._register_writer(coordinator, issue=7108, branch=branch, path=path)
+        token = self._registered_token(issue=7108, branch=branch, path=path)
+        assert token is not None
+        claim_test_item(coordinator, item)
+
+        coordinator._finish(item, passed=True, reason="done")
+
+        assert coordinator._protected_writer_capabilities == {}
+        assert self._registered_token(issue=7108, branch=branch, path=path) is None
+        assert pop_writer_capability(token) is None
+
+    def test_finish_keeps_a_capability_bound_to_another_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Finishing an unrelated item never removes the bound capability."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        branch = "issue-7109-head"
+        path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-7109"
+        path.mkdir(parents=True)
+        self._mint_origin(
+            WriterAllocationOrigin.NEWLY_CREATED, issue=7109, branch=branch, path=path
+        )
+
+        self._register_writer(coordinator, issue=7109, branch=branch, path=path)
+        token = self._registered_token(issue=7109, branch=branch, path=path)
+        assert token is not None
+        other = _issue_item(7110, StageName.IMPLEMENTATION, repo="repo-b")
+        other.branch = "other-branch"
+        claim_test_item(coordinator, other)
+
+        coordinator._finish(other, passed=False, reason="unrelated")
+
+        assert coordinator._protected_writer_capabilities[("repo-a", branch)].capability.token == (
+            token
+        )
+        assert self._registered_token(issue=7109, branch=branch, path=path) == token
 
 
 class TestDurableEventLog:

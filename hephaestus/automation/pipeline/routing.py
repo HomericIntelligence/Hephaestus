@@ -142,6 +142,13 @@ ROUTES: dict[StageName, Route] = {
             "reviewed_head_missing": StageName.PR_REVIEW,
             "reviewed_head_drift": StageName.PR_REVIEW,
             "merge_conflicting": StageName.IMPLEMENTATION,
+            "protected_rebase_required": StageName.IMPLEMENTATION,
+            # A durable merge-attempt conflict or ambiguity permanently bars
+            # another merge for that readiness fingerprint. A fresh review
+            # produces a new proof; it never grants merge authority on its
+            # own.
+            "merge_attempt_conflict": StageName.PR_REVIEW,
+            "merge_attempt_ambiguous": StageName.PR_REVIEW,
             "*": StageName.FINISHED,
         },
         budgets={"merge": DEFAULT_MERGE_ATTEMPTS},

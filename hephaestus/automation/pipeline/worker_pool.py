@@ -218,6 +218,32 @@ from hephaestus.automation.pipeline.tool_scopes import (
 from hephaestus.automation.pipeline_github_review_validation import validation_plan_for_workspace
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
+from hephaestus.automation.protected_merge_state import (
+    ProtectedMergeStateError,
+    ProtectedMergeStateStore,
+    ProtectedRebaseCyclesExhausted,
+)
+from hephaestus.automation.protected_rebase import (
+    BRIDGE_SLOT,
+    MERGE_BASE_SLOT,
+    MESSAGE_FILE_SLOT,
+    NEW_TIP_SLOT,
+    PROTECTED_REBASE_BRIDGE_INVALID,
+    PROTECTED_REBASE_CAPABILITY_MISMATCH,
+    PROTECTED_REBASE_COMMIT_INVALID,
+    PROTECTED_REBASE_CONFLICT,
+    PROTECTED_REBASE_CYCLES_EXHAUSTED,
+    PROTECTED_REBASE_DRIFT,
+    PROTECTED_REBASE_WORKTREE_MISSING,
+    BridgeMetadata,
+    ProtectedRebaseCapabilityError,
+    ProtectedRebaseError,
+    logical_head_for_cycle,
+    protected_rebase_git_plan,
+    render_bridge_message,
+    substitute_plan_slots,
+    validate_protected_writer_capability,
+)
 from hephaestus.automation.pyxis_artifact_io import (
     CrossNodePathBinding,
     bind_cross_node_root,
@@ -4196,6 +4222,56 @@ def _git_environment_failure_result(
         else "remote_authentication"
     )
     return JobResult(ok=False, error=str(exc), value={"failure_kind": failure_kind})
+
+
+def _protected_rebase_is_conflict(exc: Exception) -> bool:
+    """Classify a failed protected replay as a content conflict."""
+    text = str(exc).lower()
+    return "conflict" in text or "could not apply" in text or "patch failed" in text
+
+
+def _protected_rebase_abort_quietly(checkout: Path, timeout_s: int | float | None) -> None:
+    """Best-effort abort of a paused replay inside a temporary worktree."""
+    try:
+        git_utils.run(
+            ["git", "rebase", "--abort"],
+            cwd=checkout,
+            timeout=timeout_s,
+            log_errors=False,
+        )
+    except Exception:
+        logger.debug("protected rebase: rebase --abort was not applicable", exc_info=True)
+
+
+def _protected_worktree_remove_quietly(
+    repo_root: Path, checkout: Path, timeout_s: int | float | None
+) -> None:
+    """Best-effort removal of one temporary protected rebase worktree."""
+    try:
+        git_utils.run(
+            ["git", "worktree", "remove", "--force", str(checkout)],
+            cwd=repo_root,
+            timeout=timeout_s,
+            log_errors=False,
+        )
+    except Exception:
+        logger.warning("protected rebase: temporary worktree removal failed for %s", checkout)
+
+
+def _protected_rebase_config_value(
+    repo_root: Path, key: str, timeout_s: int | float | None
+) -> str | None:
+    """Read one Git identity value from the repository configuration."""
+    try:
+        value = git_utils.run(
+            ["git", "config", "--get", key],
+            cwd=repo_root,
+            timeout=timeout_s,
+            log_errors=False,
+        ).stdout.strip()
+    except Exception:
+        return None
+    return value or None
 
 
 @contextmanager
@@ -8427,6 +8503,9 @@ class WorkerPool:
         elif job.op == "validate_rebase_conflict":
             return self._git_validate_rebase_conflict(job)
 
+        elif job.op == "protected_rebase":
+            return self._git_protected_rebase(job)
+
         elif job.op == "commit_push" or job.op == "prepare_remediation_recovery":
             return self._git_commit_push(job)
 
@@ -8725,6 +8804,354 @@ class WorkerPool:
         if not _is_full_commit_sha(head):
             return JobResult(ok=False, error="fetched main head is invalid")
         return JobResult(ok=True, value={"head_sha": head})
+
+    def _git_protected_rebase(self, job: GitJob) -> JobResult:  # noqa: C901
+        """Run one durable protected rebase cycle with ordinary Git only.
+
+        The queue orders the work; the durable store owns the claim and the
+        cycle bound.  Every step re-reads its protected refs, signs its
+        commits, proves ancestry, and publishes with one ordinary push.  A
+        lost race leaves a durable failed or prepared cycle and grants no
+        merge authority.
+        """
+        kwargs = job.kwargs
+        repo_root = Path(str(kwargs["repo_root"]))
+        pr_number = int(cast(int, kwargs["pr_number"]))
+        issue_number = int(cast(int, kwargs["issue_number"]))
+        branch = str(kwargs["branch"])
+        base_branch = str(kwargs["base_branch"])
+        head_sha = str(kwargs["head_sha"])
+        base_sha = str(kwargs["base_sha"])
+        writer_worktree = str(kwargs["writer_worktree"])
+
+        try:
+            validate_protected_writer_capability(
+                str(kwargs["writer_capability_token"]),
+                repository=job.repo,
+                issue_number=issue_number,
+                branch=branch,
+                worktree=writer_worktree,
+            )
+        except ProtectedRebaseCapabilityError:
+            return JobResult(ok=False, error=PROTECTED_REBASE_CAPABILITY_MISMATCH)
+        if not Path(writer_worktree).is_dir():
+            return JobResult(ok=False, error=PROTECTED_REBASE_WORKTREE_MISSING)
+
+        try:
+            store = ProtectedMergeStateStore(repo_root, job.transport_repository)
+        except ProtectedMergeStateError:
+            return JobResult(ok=False, error="protected_merge_state_unavailable")
+        try:
+            cycle = store.claim_rebase_cycle(pr_number, head_sha, base_sha)
+        except ProtectedRebaseCyclesExhausted:
+            return JobResult(ok=False, error=PROTECTED_REBASE_CYCLES_EXHAUSTED)
+        except ProtectedMergeStateError:
+            return JobResult(ok=False, error="protected_merge_state_unavailable")
+
+        def fail_cycle(reason: str) -> None:
+            try:
+                store.mark_cycle_failed(pr_number, cycle.index, reason)
+            except ProtectedMergeStateError:
+                logger.warning(
+                    "protected rebase: could not mark cycle %s failed for PR #%s",
+                    cycle.index,
+                    pr_number,
+                )
+
+        def fail(reason: str, error: str) -> JobResult:
+            fail_cycle(reason)
+            return JobResult(ok=False, error=error)
+
+        if cycle.state == "published":
+            return JobResult(
+                ok=True,
+                value={
+                    "protected_rebase": "published",
+                    "pr_number": pr_number,
+                    "head_sha": cycle.published_head_sha,
+                    "base_sha": base_sha,
+                    "branch": branch,
+                },
+            )
+
+        try:
+            remote_env, remote_config = self._authenticated_remote_git_configuration(
+                cwd=repo_root, expected_repo=job.transport_repository, timeout=job.timeout_s
+            )
+        except Exception as exc:
+            return fail("remote_authentication", f"protected rebase remote setup failed: {exc}")
+
+        def remote_tip(ref: str) -> str | None:
+            out = git_utils.run(
+                ["git", "rev-parse", "--verify", ref],
+                cwd=repo_root,
+                timeout=job.timeout_s,
+            ).stdout.strip()
+            return out if _is_full_commit_sha(out) else None
+
+        try:
+            git_utils.run(
+                [
+                    "git",
+                    *remote_config,
+                    "fetch",
+                    "origin",
+                    f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
+                    f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+                ],
+                cwd=repo_root,
+                timeout=job.timeout_s,
+                env=remote_env,
+            )
+        except Exception as exc:
+            return fail("fetch_failed", f"protected rebase fetch failed: {exc}")
+        if (
+            remote_tip(f"refs/remotes/origin/{base_branch}") != base_sha
+            or remote_tip(f"refs/remotes/origin/{branch}") != head_sha
+        ):
+            return fail("drift", PROTECTED_REBASE_DRIFT)
+
+        bridge: str | None = None
+        if cycle.state == "prepared":
+            bridge = cycle.bridge_sha
+        elif cycle.state == "requested":
+            prepared = self._protected_rebase_build_bridge(
+                job,
+                store=store,
+                cycle_index=cycle.index,
+                repo_root=repo_root,
+                pr_number=pr_number,
+                issue_number=issue_number,
+                branch=branch,
+                base_branch=base_branch,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                remote_env=remote_env,
+                remote_config=remote_config,
+            )
+            if isinstance(prepared, JobResult):
+                return fail("build_failed", prepared.error or "protected rebase build failed")
+            bridge = prepared
+        if not bridge or not _is_full_commit_sha(bridge):
+            return fail("bridge_invalid", PROTECTED_REBASE_COMMIT_INVALID)
+        try:
+            git_utils.run(
+                ["git", "merge-base", "--is-ancestor", head_sha, bridge],
+                cwd=repo_root,
+                timeout=job.timeout_s,
+            )
+            git_utils.run(
+                ["git", "merge-base", "--is-ancestor", base_sha, bridge],
+                cwd=repo_root,
+                timeout=job.timeout_s,
+            )
+        except Exception:
+            return fail("ancestry_invalid", PROTECTED_REBASE_COMMIT_INVALID)
+        if cycle.state == "requested":
+            try:
+                store.mark_cycle_prepared(pr_number, cycle.index, bridge)
+            except ProtectedMergeStateError:
+                return fail("state_unavailable", "protected_merge_state_unavailable")
+        try:
+            git_utils.run(
+                ["git", *remote_config, "push", "origin", f"{bridge}:refs/heads/{branch}"],
+                cwd=repo_root,
+                timeout=job.timeout_s,
+                env=remote_env,
+            )
+        except Exception as exc:
+            return fail("push_failed", f"protected rebase push failed: {exc}")
+        try:
+            store.mark_cycle_published(pr_number, cycle.index, bridge)
+        except ProtectedMergeStateError:
+            # The push already happened; reconcile_on_open recovers this
+            # record.  Fail closed and grant no authority from this result.
+            return JobResult(ok=False, error="protected_merge_state_unavailable")
+        return JobResult(
+            ok=True,
+            value={
+                "protected_rebase": "published",
+                "pr_number": pr_number,
+                "head_sha": bridge,
+                "base_sha": base_sha,
+                "branch": branch,
+            },
+        )
+
+    def _protected_rebase_build_bridge(  # noqa: C901
+        self,
+        job: GitJob,
+        *,
+        store: ProtectedMergeStateStore,
+        cycle_index: int,
+        repo_root: Path,
+        pr_number: int,
+        issue_number: int,
+        branch: str,
+        base_branch: str,
+        head_sha: str,
+        base_sha: str,
+        remote_env: dict[str, str],
+        remote_config: tuple[str, ...],
+    ) -> str | JobResult:
+        """Build and return the verified bridge SHA for a requested cycle.
+
+        A temporary detached worktree replays the exact reviewed range onto
+        the proven base with signed commits and signs the fast-forward
+        bridge.  Return the bridge SHA, or one closed failure result.
+        """
+        prior_bridge_message: str | None = None
+        if cycle_index > 0:
+            try:
+                state = store.load()
+            except ProtectedMergeStateError:
+                return JobResult(ok=False, error="protected_merge_state_unavailable")
+            family = dict(state.rebase_cycles).get(pr_number, ()) if state is not None else ()
+            if cycle_index - 1 >= len(family):
+                return JobResult(ok=False, error=PROTECTED_REBASE_BRIDGE_INVALID)
+            prior = family[cycle_index - 1]
+            if prior.bridge_sha is None:
+                return JobResult(ok=False, error=PROTECTED_REBASE_BRIDGE_INVALID)
+            try:
+                prior_bridge_message = git_utils.run(
+                    ["git", "log", "-1", "--format=%B", prior.bridge_sha],
+                    cwd=repo_root,
+                    timeout=job.timeout_s,
+                ).stdout
+            except Exception:
+                return JobResult(ok=False, error=PROTECTED_REBASE_BRIDGE_INVALID)
+        try:
+            logical_head = logical_head_for_cycle(
+                cycle_index + 1,
+                previous_head_sha=head_sha,
+                prior_bridge_message=prior_bridge_message,
+            )
+        except ProtectedRebaseError as exc:
+            return JobResult(ok=False, error=f"{PROTECTED_REBASE_BRIDGE_INVALID}: {exc}")
+        try:
+            plan = protected_rebase_git_plan(
+                logical_head_sha=logical_head,
+                new_base_sha=base_sha,
+                previous_head_sha=head_sha,
+                branch=branch,
+                default_branch=base_branch,
+            )
+        except ProtectedRebaseError as exc:
+            return JobResult(ok=False, error=f"{PROTECTED_REBASE_COMMIT_INVALID}: {exc}")
+
+        with tempfile.TemporaryDirectory(prefix="hephaestus-protected-rebase-") as temporary:
+            temporary_root = Path(temporary)
+            checkout = temporary_root / "checkout"
+            try:
+                git_utils.run(
+                    ["git", "worktree", "add", "--detach", str(checkout), head_sha],
+                    cwd=repo_root,
+                    timeout=job.timeout_s,
+                )
+            except Exception:
+                return JobResult(ok=False, error=PROTECTED_REBASE_WORKTREE_MISSING)
+            slots: dict[str, str] = {}
+            try:
+                for command in plan:
+                    argv = substitute_plan_slots(command, slots)
+                    label = " ".join(argv[:3])
+                    if argv[1] == "merge-base" and argv[2] == "--is-ancestor":
+                        continue  # Verified against the final bridge below.
+                    if argv[1] == "ls-remote":
+                        # Re-read both protected refs after the build to catch
+                        # drift in the exact window before publication.
+                        listing = git_utils.run(
+                            ["git", *remote_config, *argv[2:]],
+                            cwd=checkout,
+                            timeout=job.timeout_s,
+                            env=remote_env,
+                        ).stdout
+                        observed: dict[str, str] = {}
+                        for line in listing.splitlines():
+                            parts = line.split()
+                            if len(parts) == 2 and _is_full_commit_sha(parts[0]):
+                                observed[parts[1]] = parts[0]
+                        if (
+                            observed.get(f"refs/heads/{base_branch}") != base_sha
+                            or observed.get(f"refs/heads/{branch}") != head_sha
+                        ):
+                            return JobResult(ok=False, error=PROTECTED_REBASE_DRIFT)
+                        continue
+                    if argv[1] == "push":
+                        continue  # The caller publishes after the durable prepared mark.
+                    if argv[1] == "rebase":
+                        try:
+                            git_utils.run(
+                                list(argv),
+                                cwd=checkout,
+                                timeout=job.timeout_s,
+                            )
+                        except Exception as exc:
+                            _protected_rebase_abort_quietly(checkout, job.timeout_s)
+                            if _protected_rebase_is_conflict(exc):
+                                return JobResult(ok=False, error=PROTECTED_REBASE_CONFLICT)
+                            return JobResult(ok=False, error=f"{label} failed: {exc}")
+                        continue
+                    result = git_utils.run(list(argv), cwd=checkout, timeout=job.timeout_s)
+                    if argv[1] == "merge-base":
+                        candidate = result.stdout.strip()
+                        if not _is_full_commit_sha(candidate):
+                            return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+                        slots[MERGE_BASE_SLOT] = candidate
+                        continue
+                    if argv[1] == "rev-list":
+                        lines = [line for line in result.stdout.splitlines() if line.strip()]
+                        if argv[2] == "--merges" and lines:
+                            return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+                        if argv[2] != "--merges" and not lines:
+                            return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+                        continue
+                    if argv[1] == "rev-parse":
+                        candidate = result.stdout.strip()
+                        if not _is_full_commit_sha(candidate):
+                            return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+                        slots[NEW_TIP_SLOT] = candidate
+                        continue
+                    if argv[1] == "commit-tree":
+                        new_tip = slots.get(NEW_TIP_SLOT)
+                        if not new_tip:
+                            return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+                        name = _protected_rebase_config_value(repo_root, "user.name", job.timeout_s)
+                        email = _protected_rebase_config_value(
+                            repo_root, "user.email", job.timeout_s
+                        )
+                        if not name or not email:
+                            return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+                        message = render_bridge_message(
+                            BridgeMetadata(
+                                issue_number=issue_number,
+                                pr_number=pr_number,
+                                cycle=cycle_index + 1,
+                                base_sha=base_sha,
+                                previous_head_sha=head_sha,
+                                logical_tip_sha=new_tip,
+                                signoff=f"Signed-off-by: {name} <{email}>",
+                            )
+                        )
+                        message_file = temporary_root / "bridge-message"
+                        message_file.write_text(message, encoding="utf-8")
+                        argv = substitute_plan_slots(
+                            command, {**slots, MESSAGE_FILE_SLOT: str(message_file)}
+                        )
+                        built = git_utils.run(
+                            list(argv), cwd=checkout, timeout=job.timeout_s
+                        ).stdout.strip()
+                        if not _is_full_commit_sha(built):
+                            return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+                        slots[BRIDGE_SLOT] = built
+                        continue
+                    return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+            finally:
+                _protected_worktree_remove_quietly(repo_root, checkout, job.timeout_s)
+        bridge = slots.get(BRIDGE_SLOT)
+        if not bridge:
+            return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+        return bridge
 
     def _initial_start_identity(self, job: GitJob) -> tuple[Path, dict[str, object]]:
         """Bind a first-start record to host Git state and one issue branch."""

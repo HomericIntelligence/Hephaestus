@@ -11,6 +11,7 @@ import pytest
 
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import worktree_manager as worktree_manager_module
+from hephaestus.automation.protected_rebase import WriterAllocationOrigin
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
@@ -851,6 +852,7 @@ class TestWorktreeManager:
                 branch="35-adopted",
                 path=path,
                 revision=expected_head,
+                origin=WriterAllocationOrigin.ADOPTED,
             )
         )
 

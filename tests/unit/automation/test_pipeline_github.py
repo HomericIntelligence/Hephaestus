@@ -169,10 +169,25 @@ def _verified_default_branch(name: str = "main") -> VerifiedRepositoryDefaultBra
     )
 
 
-def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
+def _run_merge_cycle(request: Any, github: Any, repo_root: Path) -> Any:
+    """Run one merge-wait cycle through a closed job with a real store root."""
+    from hephaestus.automation.pipeline.github_jobs import GitHubJob
+    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+
+    job = GitHubJob(
+        repo="test-repo",
+        repo_root=repo_root,
+        request=request,
+        descr="merge-wait cycle",
+    )
+    return PipelineGitHubJobRunner(org="test-org", dry_run=False)._run_merge_wait_cycle(
+        job, request, github
+    )
+
+
+def test_merge_cycle_reads_checks_before_final_admission_and_put(tmp_path: Path) -> None:
     """The final admission directly follows all mutable policy reads."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
-    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
     head = "a" * 40
     events: list[str] = []
@@ -227,7 +242,12 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
 
         def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
             events.append("readiness")
-            return {"headRefOid": head, "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"}
+            return {
+                "headRefOid": head,
+                "baseRefOid": "b" * 40,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            }
 
         def required_checks_pass_for_head(
             self,
@@ -262,7 +282,7 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
         cancellation=threading.Event(),
     )
 
-    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, OrderedGitHub())
+    receipt = _run_merge_cycle(request, OrderedGitHub(), tmp_path)
 
     assert receipt.outcome == "merged"
     assert events == [
@@ -278,6 +298,7 @@ def test_merge_cycle_reads_checks_before_final_admission_and_put() -> None:
         "state:2",
         "label",
         "repository",
+        "readiness",
         f"merge:{head}",
         "state:3",
     ]
@@ -345,6 +366,7 @@ class _RulesetBypassGitHub:
         self.events.append("readiness")
         return {
             "headRefOid": "a" * 40,
+            "baseRefOid": "b" * 40,
             "mergeStateStatus": "CLEAN",
             "mergeable": "MERGEABLE",
         }
@@ -368,12 +390,11 @@ class _RulesetBypassGitHub:
         )
 
 
-def _run_ruleset_bypass_cycle(github: _RulesetBypassGitHub) -> Any:
+def _run_ruleset_bypass_cycle(github: _RulesetBypassGitHub, repo_root: Path) -> Any:
     """Run one exact-head merge cycle with a selected effective policy."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
-    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
-    return PipelineGitHubJobRunner._run_merge_wait_cycle(
+    return _run_merge_cycle(
         RunMergeWaitCycleRequest(
             pr_number=7,
             reviewed_head_sha="a" * 40,
@@ -383,11 +404,12 @@ def _run_ruleset_bypass_cycle(github: _RulesetBypassGitHub) -> Any:
             cancellation=threading.Event(),
         ),
         github,
+        repo_root,
     )
 
 
 def _assert_ruleset_bypass_stops_before_mutable_merge_reads(
-    *, conversation_resolution_enforced: bool
+    *, conversation_resolution_enforced: bool, repo_root: Path
 ) -> None:
     """Assert that a bypassable policy stops before readiness and merge reads."""
     github = _RulesetBypassGitHub(
@@ -395,26 +417,34 @@ def _assert_ruleset_bypass_stops_before_mutable_merge_reads(
         conversation_resolution_enforced=conversation_resolution_enforced,
     )
 
-    receipt = _run_ruleset_bypass_cycle(github)
+    receipt = _run_ruleset_bypass_cycle(github, repo_root)
 
     assert receipt.outcome == "merge_policy_bypassable"
     assert receipt.attempted is False
     assert github.events == ["state", "label", "repository", "policy"]
 
 
-def test_merge_wait_rejects_bypassable_effective_policy_before_readiness() -> None:
+def test_merge_wait_rejects_bypassable_effective_policy_before_readiness(
+    tmp_path: Path,
+) -> None:
     """A bypassable-only ruleset cannot authorize mutable merge reads."""
-    _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=False)
+    _assert_ruleset_bypass_stops_before_mutable_merge_reads(
+        conversation_resolution_enforced=False, repo_root=tmp_path
+    )
 
 
-def test_bypassable_ruleset_with_required_signatures_cannot_reach_merge_put() -> None:
+def test_bypassable_ruleset_with_required_signatures_cannot_reach_merge_put(
+    tmp_path: Path,
+) -> None:
     """Classic conversation enforcement cannot make a bypass identity safe."""
-    _assert_ruleset_bypass_stops_before_mutable_merge_reads(conversation_resolution_enforced=True)
+    _assert_ruleset_bypass_stops_before_mutable_merge_reads(
+        conversation_resolution_enforced=True, repo_root=tmp_path
+    )
 
 
 @pytest.mark.parametrize("bypassable", [(), (15556494,)], ids=("subject", "bypass-actor"))
 def test_required_merge_queue_uses_exact_head_queue_admission(
-    bypassable: tuple[int, ...],
+    bypassable: tuple[int, ...], tmp_path: Path
 ) -> None:
     """Both actor types use queue admission when server policy requires it."""
     github = _RulesetBypassGitHub(
@@ -424,7 +454,7 @@ def test_required_merge_queue_uses_exact_head_queue_admission(
         strict_update_enforced=False,
     )
 
-    receipt = _run_ruleset_bypass_cycle(github)
+    receipt = _run_ruleset_bypass_cycle(github, tmp_path)
 
     assert receipt.outcome == "merge_queued"
     assert receipt.attempted is True
@@ -442,11 +472,12 @@ def test_required_merge_queue_uses_exact_head_queue_admission(
         "state",
         "label",
         "repository",
+        "readiness",
         "merge",
     ]
 
 
-def test_non_strict_direct_mode_stops_before_merge_request() -> None:
+def test_non_strict_direct_mode_stops_before_merge_request(tmp_path: Path) -> None:
     """A direct merge needs server-enforced protection from base advances."""
     github = _RulesetBypassGitHub(
         bypassable_ruleset_ids=(),
@@ -454,14 +485,16 @@ def test_non_strict_direct_mode_stops_before_merge_request() -> None:
         strict_update_enforced=False,
     )
 
-    receipt = _run_ruleset_bypass_cycle(github)
+    receipt = _run_ruleset_bypass_cycle(github, tmp_path)
 
     assert receipt.outcome == "merge_policy_not_strict"
     assert receipt.attempted is False
     assert github.events == ["state", "label", "repository", "policy"]
 
 
-def test_base_advance_before_request_remains_safe_with_required_queue() -> None:
+def test_base_advance_before_request_remains_safe_with_required_queue(
+    tmp_path: Path,
+) -> None:
     """Queue admission lets the server test the reviewed head on the new base."""
 
     class AdvancingBaseGitHub(_RulesetBypassGitHub):
@@ -481,17 +514,16 @@ def test_base_advance_before_request_remains_safe_with_required_queue() -> None:
         strict_update_enforced=False,
     )
 
-    receipt = _run_ruleset_bypass_cycle(github)
+    receipt = _run_ruleset_bypass_cycle(github, tmp_path)
 
     assert receipt.outcome == "merge_queued"
     assert github.state_reads == 2
     assert github.events[-1] == "merge"
 
 
-def test_admitted_queue_completion_returns_the_server_merge_receipt() -> None:
+def test_admitted_queue_completion_returns_the_server_merge_receipt(tmp_path: Path) -> None:
     """A later queue lifecycle read supplies the merge SHA for wave durability."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
-    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
     class MergedQueueGitHub:
         def gh_pr_state(self, _pr_number: int) -> dict[str, object]:
@@ -501,7 +533,7 @@ def test_admitted_queue_completion_returns_the_server_merge_receipt() -> None:
                 "mergeCommit": {"oid": "d" * 40},
             }
 
-    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+    receipt = _run_merge_cycle(
         RunMergeWaitCycleRequest(
             pr_number=7,
             reviewed_head_sha="a" * 40,
@@ -512,20 +544,23 @@ def test_admitted_queue_completion_returns_the_server_merge_receipt() -> None:
             queue_admitted=True,
         ),
         MergedQueueGitHub(),
+        tmp_path,
     )
 
     assert receipt.outcome == "merged"
     assert receipt.merge_sha == "d" * 40
 
 
-def test_non_bypassable_effective_policy_preserves_successful_merge_path() -> None:
+def test_non_bypassable_effective_policy_preserves_successful_merge_path(
+    tmp_path: Path,
+) -> None:
     """A complete policy with no bypass identity keeps the direct merge path."""
     github = _RulesetBypassGitHub(
         bypassable_ruleset_ids=(),
         conversation_resolution_enforced=True,
     )
 
-    receipt = _run_ruleset_bypass_cycle(github)
+    receipt = _run_ruleset_bypass_cycle(github, tmp_path)
 
     assert receipt.outcome == "merged"
     assert receipt.attempted is True
@@ -542,6 +577,7 @@ def test_non_bypassable_effective_policy_preserves_successful_merge_path() -> No
         "state",
         "label",
         "repository",
+        "readiness",
         "merge",
         "state",
     ]
@@ -554,7 +590,7 @@ def test_non_bypassable_effective_policy_preserves_successful_merge_path() -> No
         pytest.param("required-checks", id="required-check-inventory"),
     ],
 )
-def test_policy_drift_after_status_evidence_blocks_merge(drift: str) -> None:
+def test_policy_drift_after_status_evidence_blocks_merge(drift: str, tmp_path: Path) -> None:
     """A changed policy after status validation prevents the merge request."""
 
     class PolicyDriftGitHub(_RulesetBypassGitHub):
@@ -577,7 +613,7 @@ def test_policy_drift_after_status_evidence_blocks_merge(drift: str) -> None:
         conversation_resolution_enforced=True,
     )
 
-    receipt = _run_ruleset_bypass_cycle(github)
+    receipt = _run_ruleset_bypass_cycle(github, tmp_path)
 
     assert receipt.outcome == "merge_policy_unavailable"
     assert receipt.attempted is False
@@ -606,11 +642,10 @@ def test_policy_drift_after_status_evidence_blocks_merge(drift: str) -> None:
     ],
 )
 def test_failed_checks_before_final_admission_block_conditional_merge(
-    check_result: object, expected: str
+    check_result: object, expected: str, tmp_path: Path
 ) -> None:
     """A failed complete Check Runs traversal prevents final admission."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
-    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
     head = "a" * 40
     events: list[str] = []
@@ -704,7 +739,7 @@ def test_failed_checks_before_final_admission_block_conditional_merge(
         cancellation=threading.Event(),
     )
 
-    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, ChangedChecksGitHub())
+    receipt = _run_merge_cycle(request, ChangedChecksGitHub(), tmp_path)
 
     assert receipt.outcome == expected
     assert receipt.attempted is False
@@ -725,10 +760,10 @@ def test_failed_checks_before_final_admission_block_conditional_merge(
 def test_merge_cycle_rechecks_final_admission_after_check_traversal(
     revocation: str,
     expected: str,
+    tmp_path: Path,
 ) -> None:
     """A revocation during Check Runs traversal prevents the PUT."""
     from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
-    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
     head = "a" * 40
 
@@ -798,7 +833,7 @@ def test_merge_cycle_rechecks_final_admission_after_check_traversal(
         cancellation=threading.Event(),
     )
 
-    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, RevokedGitHub())
+    receipt = _run_merge_cycle(request, RevokedGitHub(), tmp_path)
 
     assert receipt.outcome == expected
     assert receipt.attempted is False
@@ -4081,11 +4116,14 @@ class TestExactHeadChecks:
         assert self._passes(adapter, head, self._policy("required-ci", app_id=1)) is False
 
     def test_ruleset_only_failed_required_run_blocks_merge(
-        self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch, command_runner: MagicMock
+        self,
+        adapter: PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        command_runner: MagicMock,
+        tmp_path: Path,
     ) -> None:
         """A failed active-rules requirement prevents the merge request."""
         from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
-        from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
         adapter.repo = "repo"
         head = "a" * 40
@@ -4168,7 +4206,7 @@ class TestExactHeadChecks:
         monkeypatch.setattr(adapter, "effective_merge_policy", lambda *_args, **_kwargs: policy)
         command_runner.side_effect = gh_call
 
-        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+        receipt = _run_merge_cycle(
             RunMergeWaitCycleRequest(
                 pr_number=7,
                 reviewed_head_sha=head,
@@ -4178,6 +4216,7 @@ class TestExactHeadChecks:
                 cancellation=threading.Event(),
             ),
             adapter,
+            tmp_path,
         )
 
         assert receipt.outcome == "required_checks_not_green"
@@ -4204,10 +4243,10 @@ class TestExactHeadChecks:
         adapter: PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
         command_runner: MagicMock,
+        tmp_path: Path,
     ) -> None:
         """A same-name Check Run from another GitHub App cannot cause a merge."""
         from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
-        from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
         adapter.repo = "repo"
         head = "a" * 40
@@ -4277,7 +4316,7 @@ class TestExactHeadChecks:
 
         command_runner.side_effect = gh_call
 
-        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+        receipt = _run_merge_cycle(
             RunMergeWaitCycleRequest(
                 pr_number=7,
                 reviewed_head_sha=head,
@@ -4287,6 +4326,7 @@ class TestExactHeadChecks:
                 cancellation=threading.Event(),
             ),
             adapter,
+            tmp_path,
         )
 
         assert receipt.outcome == "required_checks_not_green"

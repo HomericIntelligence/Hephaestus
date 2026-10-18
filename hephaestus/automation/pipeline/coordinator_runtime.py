@@ -21,6 +21,12 @@ from hephaestus.automation.issue_waves import IssueWaveError, IssueWaveStore
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, Route
+from hephaestus.automation.protected_rebase import (
+    ProtectedRebaseCapabilityError,
+    pop_writer_capability,
+    register_writer_capability,
+)
+from hephaestus.automation.worktree_manager import implementation_writer_allocation_origin
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
@@ -1199,6 +1205,45 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             )
             return
         self._pipeline_writer_worktrees[key] = item
+        self._register_protected_writer_capability(item)
+
+    def _register_protected_writer_capability(self, item: ct.WorkItem) -> None:
+        """Register one opaque capability for a coordinator-proven writer.
+
+        The capability binds the exact live work item, repository, issue,
+        branch, and resolved writer path.  Only a newly created or direct
+        absent-only-reserved allocation receives one; adopted and reused
+        allocations never do.
+        """
+        if item.issue is None or not item.worktree:
+            return
+        origin = implementation_writer_allocation_origin(
+            issue_number=item.issue,
+            branch=item.branch,
+            path=Path(item.worktree),
+        )
+        if origin is None:
+            return
+        try:
+            record = register_writer_capability(
+                repository=item.repo,
+                issue_number=item.issue,
+                branch=item.branch,
+                worktree=str(Path(item.worktree).resolve()),
+                origin=origin,
+                item=item,
+            )
+        except ProtectedRebaseCapabilityError:
+            logger.info(
+                "coordinator: writer allocation origin %s receives no protected capability",
+                origin,
+            )
+            return
+        key = (item.repo, item.branch)
+        existing = self._protected_writer_capabilities.get(key)
+        if existing is not None and existing.item is not item:
+            pop_writer_capability(existing.capability.token)
+        self._protected_writer_capabilities[key] = record
 
     def _branch_worktree_owner_status(
         self, item: ct.WorkItem, branch: str, owner_path: str
@@ -1284,6 +1329,10 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         writer_key = (item.repo, item.branch)
         if self._pipeline_writer_worktrees.get(writer_key) is item:
             self._pipeline_writer_worktrees.pop(writer_key, None)
+        capability = self._protected_writer_capabilities.get(writer_key)
+        if capability is not None and capability.item is item:
+            self._protected_writer_capabilities.pop(writer_key, None)
+            pop_writer_capability(capability.capability.token)
         if item.stage is ct.StageName.REPO and item.payload.get(_DIRECT_SCOPE_BOOTSTRAP_KEY, False):
             self._direct_scope_bootstrap_pending = False
         if item.stage is ct.StageName.FINISHED:

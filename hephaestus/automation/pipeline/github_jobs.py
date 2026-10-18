@@ -27,6 +27,7 @@ from hephaestus.automation.pipeline.scope_retraction import (
     is_safe_scope_retraction_path,
     scope_retraction_paths_from_body,
 )
+from hephaestus.automation.protected_rebase import ProtectedRebaseTarget
 from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.scope_expansion_domain import (
     ScopeExpansion,
@@ -1188,6 +1189,7 @@ class MergeWaitCycleCompleted:
     retryable: bool = False
     merge_sha: str | None = None
     queue_residence_timeout_s: float | None = None
+    protected_rebase_target: ProtectedRebaseTarget | None = None
 
     def __post_init__(self) -> None:
         """Validate merge-cycle outcome metadata."""
@@ -1195,6 +1197,10 @@ class MergeWaitCycleCompleted:
             raise ValueError("outcome must be a non-empty string")
         if not isinstance(self.attempted, bool) or not isinstance(self.retryable, bool):
             raise ValueError("attempted and retryable must be booleans")
+        if self.protected_rebase_target is not None and not isinstance(
+            self.protected_rebase_target, ProtectedRebaseTarget
+        ):
+            raise ValueError("protected_rebase_target must be a ProtectedRebaseTarget or None")
         if self.readiness_fingerprint is not None and (
             not isinstance(self.readiness_fingerprint, tuple)
             or not all(isinstance(part, str) for part in self.readiness_fingerprint)

@@ -141,6 +141,18 @@ from hephaestus.automation.pipeline.worker_pool import (
     _verifier_owned_runtime_environment,
 )
 from hephaestus.automation.prompts.pr_review import PrReviewPromptSizeError
+from hephaestus.automation.protected_merge_state import (
+    MAX_REBASE_CYCLES,
+    ProtectedMergeStateStore,
+)
+from hephaestus.automation.protected_rebase import (
+    PROTECTED_REBASE_CAPABILITY_MISMATCH,
+    PROTECTED_REBASE_CYCLES_EXHAUSTED,
+    PROTECTED_REBASE_DRIFT,
+    PROTECTED_REBASE_WORKTREE_MISSING,
+    WriterAllocationOrigin,
+    register_writer_capability,
+)
 from hephaestus.automation.remediation_recovery import (
     RemediationRecoveryReceipt,
     RemediationReplyResult,
@@ -26421,3 +26433,327 @@ def test_rebase_receipts_bind_resulting_source_before_publication(
             assert retained.phase == "pending_validation"
             execute.assert_not_called()
             push.assert_not_called()
+
+
+_PROTECTED_REBASE_TRANSPORT = "HomericIntelligence/Hephaestus"
+
+
+@pytest.fixture
+def protected_capability_isolation() -> Iterator[None]:
+    """Remove every protected capability the test registered, even on failure."""
+    from hephaestus.automation import protected_rebase as protected_rebase_module
+
+    before = set(protected_rebase_module._WRITER_CAPABILITIES)
+    yield
+    with protected_rebase_module._WRITER_CAPABILITIES_LOCK:
+        for token in tuple(protected_rebase_module._WRITER_CAPABILITIES):
+            if token not in before:
+                protected_rebase_module._WRITER_CAPABILITIES.pop(token, None)
+
+
+def _protected_rebase_job(
+    tmp_path: Path,
+    *,
+    token: str,
+    issue: int = 4101,
+    pr: int = 4201,
+    branch: str = "12-auto-impl",
+    head: str = "a" * 40,
+    base: str = "b" * 40,
+    repo_root: Path | None = None,
+    writer: Path | None = None,
+) -> GitJob:
+    """Build one closed protected rebase job for the durable worker seam."""
+    repo_root = repo_root if repo_root is not None else tmp_path / "repo"
+    writer = writer if writer is not None else tmp_path / "writer"
+    return GitJob(
+        repo="example",
+        op="protected_rebase",
+        timeout_s=60,
+        expected_repository=_PROTECTED_REBASE_TRANSPORT,
+        kwargs={
+            "repo_root": str(repo_root),
+            "pr_number": pr,
+            "head_sha": head,
+            "base_sha": base,
+            "base_branch": "main",
+            "branch": branch,
+            "remote": "origin",
+            "issue_number": issue,
+            "writer_worktree": str(writer),
+            "writer_capability_token": token,
+        },
+        descr="protected_rebase_cycle",
+    )
+
+
+def _register_cycle_capability(
+    tmp_path: Path, *, issue: int = 4101, branch: str = "12-auto-impl"
+) -> str:
+    """Register the exact writer identity one protected job carries."""
+    record = register_writer_capability(
+        repository="example",
+        issue_number=issue,
+        branch=branch,
+        worktree=str(tmp_path / "writer"),
+        origin=WriterAllocationOrigin.NEWLY_CREATED,
+        item=object(),
+    )
+    return record.capability.token
+
+
+def _protected_cycle_git(
+    *,
+    base: str,
+    head: str,
+    recorded: list[list[str]],
+    on_push: Callable[[], None] | None = None,
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Replay the fetch, rev-parse, merge-base, and push command sequence."""
+
+    def run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        recorded.append(cmd)
+        if "rev-parse" in cmd:
+            ref = cmd[cmd.index("--verify") + 1]
+            tip = base if ref.endswith("/main") else head
+            return subprocess.CompletedProcess(cmd, 0, tip + "\n", "")
+        if "push" in cmd and on_push is not None:
+            on_push()
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    return run
+
+
+def _bounded_remote_configuration(pool: WorkerPool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip live host authentication and return a fixed remote config."""
+    monkeypatch.setattr(
+        pool,
+        "_authenticated_remote_git_configuration",
+        lambda **_kwargs: ({}, ("-c", "http.https://github.com/.extraHeader=AUTH")),
+    )
+
+
+def _record_failed_cycles(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int, str]]:
+    """Observe every durable failed-cycle transition the worker writes."""
+    failed_marks: list[tuple[int, int, str]] = []
+    original = ProtectedMergeStateStore.mark_cycle_failed
+
+    def record(self: ProtectedMergeStateStore, pr_number: int, index: int, reason: str) -> Any:
+        failed_marks.append((pr_number, index, reason))
+        return original(self, pr_number, index, reason)
+
+    monkeypatch.setattr(ProtectedMergeStateStore, "mark_cycle_failed", record)
+    return failed_marks
+
+
+def test_protected_rebase_rejects_an_unregistered_capability(
+    pool: WorkerPool, tmp_path: Path, protected_capability_isolation: None
+) -> None:
+    """A protected mutation without a coordinator capability fails closed."""
+    job = _protected_rebase_job(tmp_path, token="0" * 64)
+
+    result = pool._git_protected_rebase(job)
+
+    assert not result.ok
+    assert result.error == PROTECTED_REBASE_CAPABILITY_MISMATCH
+
+
+def test_protected_rebase_rejects_a_missing_writer_worktree(
+    pool: WorkerPool, tmp_path: Path, protected_capability_isolation: None
+) -> None:
+    """A proven capability without a live writer directory fails closed."""
+    token = _register_cycle_capability(tmp_path)
+    job = _protected_rebase_job(tmp_path, token=token)
+
+    result = pool._git_protected_rebase(job)
+
+    assert not result.ok
+    assert result.error == PROTECTED_REBASE_WORKTREE_MISSING
+
+
+def test_protected_rebase_reports_cycles_exhausted(
+    pool: WorkerPool, tmp_path: Path, protected_capability_isolation: None
+) -> None:
+    """A ninth distinct cycle for one pull request grants no work."""
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "writer").mkdir()
+    token = _register_cycle_capability(tmp_path)
+    job = _protected_rebase_job(tmp_path, token=token)
+    head = str(job.kwargs["head_sha"])
+    base = str(job.kwargs["base_sha"])
+    store = ProtectedMergeStateStore(tmp_path / "repo", _PROTECTED_REBASE_TRANSPORT)
+    for index in range(MAX_REBASE_CYCLES):
+        cycle = store.claim_rebase_cycle(4201, head, base)
+        assert cycle.index == index
+        store.mark_cycle_failed(4201, index, f"failure {index}")
+
+    result = pool._git_protected_rebase(job)
+
+    assert not result.ok
+    assert result.error == PROTECTED_REBASE_CYCLES_EXHAUSTED
+
+
+def test_protected_rebase_aborts_on_remote_drift(
+    pool: WorkerPool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_capability_isolation: None,
+) -> None:
+    """A moved remote ref fails the cycle durably before any push."""
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "writer").mkdir()
+    token = _register_cycle_capability(tmp_path)
+    job = _protected_rebase_job(tmp_path, token=token)
+    _bounded_remote_configuration(pool, monkeypatch)
+    failed_marks = _record_failed_cycles(monkeypatch)
+    recorded: list[list[str]] = []
+    monkeypatch.setattr(
+        git_utils,
+        "run",
+        _protected_cycle_git(base=str(job.kwargs["base_sha"]), head="d" * 40, recorded=recorded),
+    )
+
+    result = pool._git_protected_rebase(job)
+
+    assert not result.ok
+    assert result.error == PROTECTED_REBASE_DRIFT
+    assert not any("push" in cmd for cmd in recorded)
+    # The worker failed the claimed cycle durably before any push.
+    assert failed_marks == [(4201, 0, "drift")]
+
+
+def test_protected_rebase_publishes_and_defers_push_until_prepared(
+    pool: WorkerPool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_capability_isolation: None,
+) -> None:
+    """The ordinary push runs only after the durable prepared transition."""
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "writer").mkdir()
+    bridge = "d" * 40
+    token = _register_cycle_capability(tmp_path)
+    job = _protected_rebase_job(tmp_path, token=token)
+    _bounded_remote_configuration(pool, monkeypatch)
+    monkeypatch.setattr(pool, "_protected_rebase_build_bridge", lambda *args, **kwargs: bridge)
+    recorded: list[list[str]] = []
+    prepared_at_push: list[bool] = []
+
+    def on_push() -> None:
+        reader = ProtectedMergeStateStore(tmp_path / "repo", _PROTECTED_REBASE_TRANSPORT)
+        cycle = reader.claim_rebase_cycle(
+            4201, str(job.kwargs["head_sha"]), str(job.kwargs["base_sha"])
+        )
+        prepared_at_push.append(cycle.state == "prepared")
+
+    monkeypatch.setattr(
+        git_utils,
+        "run",
+        _protected_cycle_git(
+            base=str(job.kwargs["base_sha"]),
+            head=str(job.kwargs["head_sha"]),
+            recorded=recorded,
+            on_push=on_push,
+        ),
+    )
+
+    result = pool._git_protected_rebase(job)
+
+    assert result.ok
+    assert result.value == {
+        "protected_rebase": "published",
+        "pr_number": 4201,
+        "head_sha": bridge,
+        "base_sha": str(job.kwargs["base_sha"]),
+        "branch": "12-auto-impl",
+    }
+    pushes = [cmd for cmd in recorded if "push" in cmd]
+    assert len(pushes) == 1
+    assert prepared_at_push == [True]
+    store = ProtectedMergeStateStore(tmp_path / "repo", _PROTECTED_REBASE_TRANSPORT)
+    cycle = store.claim_rebase_cycle(4201, str(job.kwargs["head_sha"]), str(job.kwargs["base_sha"]))
+    assert cycle.state == "published"
+    assert cycle.published_head_sha == bridge
+
+
+def test_protected_rebase_replays_an_already_published_cycle(
+    pool: WorkerPool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_capability_isolation: None,
+) -> None:
+    """A resumed worker replays the durable publication without new Git work."""
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "writer").mkdir()
+    bridge = "d" * 40
+    store = ProtectedMergeStateStore(tmp_path / "repo", _PROTECTED_REBASE_TRANSPORT)
+    cycle = store.claim_rebase_cycle(4201, "a" * 40, "b" * 40)
+    store.mark_cycle_prepared(4201, cycle.index, bridge)
+    store.mark_cycle_published(4201, cycle.index, bridge)
+    token = _register_cycle_capability(tmp_path)
+    job = _protected_rebase_job(tmp_path, token=token)
+    monkeypatch.setattr(
+        pool,
+        "_authenticated_remote_git_configuration",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a published cycle touches no remote configuration")
+        ),
+    )
+    monkeypatch.setattr(
+        git_utils,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("a published cycle runs no Git command")
+        ),
+    )
+
+    result = pool._git_protected_rebase(job)
+
+    assert result.ok
+    assert result.value == {
+        "protected_rebase": "published",
+        "pr_number": 4201,
+        "head_sha": bridge,
+        "base_sha": "b" * 40,
+        "branch": "12-auto-impl",
+    }
+
+
+def test_protected_rebase_marks_push_failures_failed(
+    pool: WorkerPool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_capability_isolation: None,
+) -> None:
+    """A rejected ordinary push leaves a durable failed cycle."""
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "writer").mkdir()
+    bridge = "d" * 40
+    token = _register_cycle_capability(tmp_path)
+    job = _protected_rebase_job(tmp_path, token=token)
+    _bounded_remote_configuration(pool, monkeypatch)
+    monkeypatch.setattr(pool, "_protected_rebase_build_bridge", lambda *args, **kwargs: bridge)
+
+    def run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "push" in cmd:
+            raise RuntimeError("remote ref changed")
+        if "rev-parse" in cmd:
+            ref = cmd[cmd.index("--verify") + 1]
+            tip = (
+                str(job.kwargs["base_sha"])
+                if ref.endswith("/main")
+                else str(job.kwargs["head_sha"])
+            )
+            return subprocess.CompletedProcess(cmd, 0, tip + "\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(git_utils, "run", run)
+    failed_marks = _record_failed_cycles(monkeypatch)
+
+    result = pool._git_protected_rebase(job)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.startswith("protected rebase push failed")
+    # The worker failed the prepared cycle durably after the push rejection.
+    assert failed_marks == [(4201, 0, "push_failed")]

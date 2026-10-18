@@ -623,7 +623,9 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                     "view",
                     str(pr_number),
                     "--json",
-                    "state,headRefOid,mergedAt,baseRefName,autoMergeRequest,mergeable,mergeStateStatus",
+                    "state,headRefOid,mergedAt,baseRefName,autoMergeRequest,mergeable,"
+                    "mergeStateStatus,baseRefOid,headRefName,headRepository,"
+                    "headRepositoryOwner",
                 ]
             )
             data = json.loads(result.stdout or "{}")

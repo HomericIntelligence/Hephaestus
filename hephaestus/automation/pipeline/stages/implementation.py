@@ -97,6 +97,10 @@ from hephaestus.automation.prompts.implementation import (
     get_rebase_conflict_prompt,
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
+from hephaestus.automation.protected_rebase import (
+    ProtectedRebaseTarget,
+    find_writer_capability_token,
+)
 from hephaestus.automation.remediation_prepublication import (
     canonical_source_receipt_json,
     source_receipt_digest,
@@ -341,6 +345,7 @@ REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
 REBASE_CONFLICT_REFRESH_WAIT = "REBASE_CONFLICT_REFRESH_WAIT"
 REBASE_CONFLICT_VALIDATE_WAIT = "REBASE_CONFLICT_VALIDATE_WAIT"
 REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
+PROTECTED_REBASE_WAIT = "PROTECTED_REBASE_WAIT"
 _REBASE_RESUME_STATES = frozenset(
     {
         REBASE_WAIT,
@@ -394,6 +399,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     REBASE_CONFLICT_REFRESH_WAIT: "_rebase_conflict_refresh_wait",
     REBASE_CONFLICT_VALIDATE_WAIT: "_rebase_conflict_validate_wait",
     REBASE_CONTINUE_WAIT: "_rebase_continue_wait",
+    PROTECTED_REBASE_WAIT: "_protected_rebase_wait",
     ADOPTED: "_adopted",
     ADVISE_WAIT: "_advise_wait",
     IMPLEMENT_WAIT: "_implement_wait",
@@ -411,6 +417,8 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
 _DEPENDENCY_RETRY_DELAY_S = 1.0
 
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
+_PROTECTED_REBASE_TARGET = "protected_rebase_target"
+_PROTECTED_REBASE_RECEIPT = "_protected_rebase_receipt"
 _PLAN_SCOPE_RECEIPT = "_implementation_plan_scope_receipt"
 _PLAN_SCOPE_STATE = "_implementation_plan_scope_state"
 _PLAN_SCOPE_FAILURE = "_implementation_plan_scope_failure"
@@ -1702,6 +1710,9 @@ class ImplementationStage(Stage):
     def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """WORKTREE_WAIT submits the create-worktree git job."""
         issue = _issue_number(item)
+        # A stale merge-wait rebase request never survives a fresh writer
+        # worktree; the protected flow re-admits through GATE instead.
+        item.payload.pop(_PROTECTED_REBASE_TARGET, None)
         if (
             item.pr is None
             and not item.payload.get("existing_pr")
@@ -4489,6 +4500,10 @@ class ImplementationStage(Stage):
             self._on_reply_handoff_done(item, result)
             return
 
+        if item.state == PROTECTED_REBASE_WAIT:
+            item.payload[_PROTECTED_REBASE_RECEIPT] = {"_ok": result.ok, "value": result.value}
+            return
+
         if item.state == COMMIT_PUSH_WAIT:
             self._on_commit_push_done(item, result)
 
@@ -5570,6 +5585,9 @@ class ImplementationStage(Stage):
                 return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
         # Adopt the PR's REAL head branch — never assume {issue}-auto-impl.
         item.payload["existing_pr"] = True
+        # Ordinary adoption never reuses a merge-wait rebase request.  The
+        # protected flow clears the exact target before it advances.
+        item.payload.pop(_PROTECTED_REBASE_TARGET, None)
         adopted_head = self._fresh_adopted_pr_head(item, ctx)
         if adopted_head is None:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_head_revision_unavailable")
@@ -5590,6 +5608,122 @@ class ImplementationStage(Stage):
         state = ctx.github.gh_pr_state(item.pr)
         head = state.get("headRefOid") if isinstance(state, dict) else None
         return head if is_full_commit_sha(head) else None
+
+    @staticmethod
+    def _protected_rebase_gate_entry(item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Route a merge-wait protected rebase request to its wait state.
+
+        The gate placement keeps operator labels (state:skip and the blocked
+        family) authoritative for the request.  Success clears the target, so
+        GATE never dispatches the same request twice.
+        """
+        target = item.payload.get(_PROTECTED_REBASE_TARGET)
+        if target is None:
+            return None
+        if (
+            item.pr is None
+            or item.issue is None
+            or not isinstance(target, ProtectedRebaseTarget)
+            or target.repository != f"{ctx.org}/{item.repo}"
+            or target.pr_number != item.pr
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_target_invalid")
+        logger.info(
+            "implementation:%d: merge wait requested a protected rebase for PR #%d",
+            item.issue,
+            item.pr,
+        )
+        return Continue(next_state=PROTECTED_REBASE_WAIT)
+
+    def _protected_rebase_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit or apply one durable protected rebase cycle.
+
+        The job re-enters the same state when it completes.  A published
+        bridge clears every merge-wait proof payload: the stale review, the
+        durable claim, and the durable cycle all bound the old base.  Only a
+        fresh review of the new head grants new merge authority.
+        """
+        receipt = item.payload.pop(_PROTECTED_REBASE_RECEIPT, None)
+        if receipt is not None:
+            return self._apply_protected_rebase(item, receipt)
+        target = item.payload.get(_PROTECTED_REBASE_TARGET)
+        if (
+            item.pr is None
+            or item.issue is None
+            or not isinstance(target, ProtectedRebaseTarget)
+            or target.repository != f"{ctx.org}/{item.repo}"
+            or target.pr_number != item.pr
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_target_invalid")
+        if not item.worktree or not item.branch:
+            return StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_worktree_missing")
+        writer_worktree = str(Path(item.worktree).resolve())
+        token = find_writer_capability_token(
+            repository=item.repo,
+            issue_number=item.issue,
+            branch=item.branch,
+            worktree=writer_worktree,
+        )
+        if token is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_writer_unproven")
+        try:
+            base_branch = ctx.github.verified_repository_default_branch().default_branch
+        except Exception:
+            return StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_base_unverified")
+        if not isinstance(base_branch, str) or not base_branch or base_branch == target.branch:
+            return StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_base_unverified")
+        return JobRequest(
+            GitJob(
+                repo=item.repo,
+                op="protected_rebase",
+                timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "pr_number": item.pr,
+                    "head_sha": target.head_sha,
+                    "base_sha": target.base_sha,
+                    "base_branch": base_branch,
+                    "branch": target.branch,
+                    "remote": "origin",
+                    "issue_number": item.issue,
+                    "writer_worktree": writer_worktree,
+                    "writer_capability_token": token,
+                },
+                descr="protected_rebase_cycle",
+            ),
+            on_done_state=PROTECTED_REBASE_WAIT,
+        )
+
+    @staticmethod
+    def _apply_protected_rebase(item: WorkItem, receipt: object) -> StepResult:
+        """Apply one correlated protected rebase receipt locally."""
+        value = receipt.get("value") if isinstance(receipt, dict) else None
+        if not isinstance(receipt, dict) or receipt.get("_ok") is not True:
+            return StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_failed")
+        if (
+            not isinstance(value, dict)
+            or value.get("protected_rebase") != "published"
+            or value.get("pr_number") != item.pr
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_receipt_invalid")
+        for key in (
+            _PROTECTED_REBASE_TARGET,
+            "reviewed_pr_head_sha",
+            "reviewed_pr_proof_generation",
+            "merge_readiness_declined_fingerprint",
+            "merge_readiness_head_sha",
+            "merge_readiness_proof_generation",
+            "merge_readiness_deadline_s",
+            "merge_readiness_polls",
+        ):
+            item.payload.pop(key, None)
+        logger.info(
+            "implementation:%d: protected rebase published for PR #%s; fresh review required",
+            item.issue,
+            item.pr,
+        )
+        return StageOutcome(Disposition.ADVANCE, "protected_rebase_published")
 
     def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
@@ -5633,6 +5767,10 @@ class ImplementationStage(Stage):
                 Disposition.BLOCKED,
                 "issue is blocked pending external intervention",
             )
+
+        protected_entry = self._protected_rebase_gate_entry(item, ctx)
+        if protected_entry is not None:
+            return protected_entry
 
         existing_pr = item.pr or ctx.github.find_pr_for_issue(item.issue)
         if existing_pr:

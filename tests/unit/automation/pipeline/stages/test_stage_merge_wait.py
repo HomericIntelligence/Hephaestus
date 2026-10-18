@@ -96,8 +96,12 @@ class _ConditionalGitHub(FakeStageGitHub):
         default_readiness = {
             "state": "OPEN",
             "headRefOid": "a" * 40,
+            "baseRefOid": "b" * 40,
             "autoMergeRequest": None,
             "baseRefName": "main",
+            "headRefName": "12-auto-impl",
+            "headRepository": {"name": "Hephaestus"},
+            "headRepositoryOwner": {"login": "HomericIntelligence"},
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "CLEAN",
         }
@@ -227,7 +231,9 @@ def _complete_merge_cycle(stage: MergeWaitStage, item: Any, ctx: Any) -> Any:
         return request
     assert isinstance(request.job.request, RunMergeWaitCycleRequest)
     try:
-        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+        runner = PipelineGitHubJobRunner(org="test-org", dry_run=False)
+        receipt = runner._run_merge_wait_cycle(
+            request.job,
             request.job.request,
             ctx.github,
         )
@@ -242,12 +248,14 @@ def _complete_merge_cycle(stage: MergeWaitStage, item: Any, ctx: Any) -> Any:
     return applied
 
 
-def test_missing_implementation_go_label_is_blocked(make_ctx: Any, make_work_item: Any) -> None:
+def test_missing_implementation_go_label_is_blocked(
+    make_real_ctx: Any, make_work_item: Any
+) -> None:
     """A missing implementation-go label routes back to review."""
     github = _ConditionalGitHub(labels=(False, False))
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
@@ -255,14 +263,14 @@ def test_missing_implementation_go_label_is_blocked(make_ctx: Any, make_work_ite
 
 
 def test_green_exact_head_checks_allow_merge_without_operator_review(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A current GO label and green exact-head checks can reach the merge."""
     head = "a" * 40
     github = _ConditionalGitHub(
         states=[_open_pr(head), _open_pr(head), {"state": "MERGED"}],
     )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+    ctx = make_real_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item, head=head), ctx)
 
@@ -273,7 +281,7 @@ def test_green_exact_head_checks_allow_merge_without_operator_review(
 
 
 def test_verified_master_default_branch_reaches_one_conditional_merge(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A PR on the verified non-main default branch can merge."""
     head = "a" * 40
@@ -281,7 +289,7 @@ def test_verified_master_default_branch_reaches_one_conditional_merge(
         states=[_open_pr(head, base="master"), _open_pr(head, base="master"), {"state": "MERGED"}],
         default_branches=["master", "master"],
     )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+    ctx = make_real_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
@@ -292,7 +300,7 @@ def test_verified_master_default_branch_reaches_one_conditional_merge(
 
 @pytest.mark.parametrize("base", ["main", "release"])
 def test_non_default_base_fails_without_conditional_merge(
-    make_ctx: Any, make_work_item: Any, base: str
+    make_real_ctx: Any, make_work_item: Any, base: str
 ) -> None:
     """A PR on a non-default branch cannot reach a merge request."""
     github = _ConditionalGitHub(
@@ -301,7 +309,7 @@ def test_non_default_base_fails_without_conditional_merge(
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "non_default_base")
@@ -309,7 +317,7 @@ def test_non_default_base_fails_without_conditional_merge(
 
 
 def test_missing_default_branch_metadata_fails_closed_without_mutation(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Missing repository metadata prevents all merge mutations."""
     github = _ConditionalGitHub(
@@ -318,7 +326,7 @@ def test_missing_default_branch_metadata_fails_closed_without_mutation(
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "default_branch_unavailable")
@@ -342,7 +350,7 @@ def test_missing_default_branch_metadata_fails_closed_without_mutation(
     ],
 )
 def test_branch_drift_blocks_the_final_conditional_merge(
-    make_ctx: Any,
+    make_real_ctx: Any,
     make_work_item: Any,
     states: list[dict[str, object]],
     default_branches: list[str],
@@ -352,7 +360,7 @@ def test_branch_drift_blocks_the_final_conditional_merge(
     github = _ConditionalGitHub(states=states, default_branches=default_branches)
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, outcome)
@@ -361,7 +369,7 @@ def test_branch_drift_blocks_the_final_conditional_merge(
 
 
 def test_reconstructed_item_accepts_reconciled_queue_admission_without_replay(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A reconstructed reviewed item accepts readback and then only polls."""
     queued = ConditionalMergeResult(
@@ -375,7 +383,7 @@ def test_reconstructed_item_accepts_reconciled_queue_admission_without_replay(
         merge_queue_method="SQUASH",
         strict_update_enforced=False,
     )
-    ctx = make_ctx(github=github)
+    ctx = make_real_ctx(github=github)
     item = _reviewed_item(make_work_item)
     assert "merge_queue_admitted_head_sha" not in item.payload
     stage = MergeWaitStage()
@@ -390,7 +398,7 @@ def test_reconstructed_item_accepts_reconciled_queue_admission_without_replay(
 
 
 def test_removed_queue_entry_permits_one_new_exact_head_admission(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A GitHub-proven queue removal clears admission proof before a new request."""
     queued = ConditionalMergeResult(
@@ -405,7 +413,7 @@ def test_removed_queue_entry_permits_one_new_exact_head_admission(
         strict_update_enforced=False,
         queue_reconciliations=[MergeQueueReconciliation.REMOVED],
     )
-    ctx = make_ctx(github=github)
+    ctx = make_real_ctx(github=github)
     item = _reviewed_item(make_work_item)
     item.payload["merge_queue_admitted_head_sha"] = "a" * 40
     item.payload["merge_queue_admitted_proof_generation"] = 0
@@ -421,7 +429,7 @@ def test_removed_queue_entry_permits_one_new_exact_head_admission(
 
 
 def test_unavailable_queue_reconciliation_preserves_proof_without_replay(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Ambiguous live queue state ends the item without another admission."""
     github = _ConditionalGitHub(
@@ -434,7 +442,7 @@ def test_unavailable_queue_reconciliation_preserves_proof_without_replay(
     item.payload["merge_queue_admitted_head_sha"] = "a" * 40
     item.payload["merge_queue_admitted_proof_generation"] = 0
 
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_queue_reconciliation_unavailable")
     assert item.payload["merge_queue_admitted_head_sha"] == "a" * 40
@@ -459,7 +467,7 @@ def test_canonical_stage_fake_defaults_queue_reconciliation_to_unavailable() -> 
 
 
 def test_present_queue_entry_uses_the_complete_policy_wait_window(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A live queue entry can outlast the shorter generic readiness wait."""
     queued = ConditionalMergeResult(
@@ -474,7 +482,7 @@ def test_present_queue_entry_uses_the_complete_policy_wait_window(
         merge_queue_method="SQUASH",
         strict_update_enforced=False,
     )
-    ctx = make_ctx(
+    ctx = make_real_ctx(
         github=github,
         now_fn=lambda: now[0],
         config_overrides={"poll_max_wait": 1200},
@@ -497,7 +505,7 @@ def test_present_queue_entry_uses_the_complete_policy_wait_window(
 
 
 def test_repeated_queue_removals_cannot_exceed_the_merge_attempt_budget(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Two queue admissions at budget two cannot issue a third admission."""
     queued = ConditionalMergeResult(
@@ -515,7 +523,7 @@ def test_repeated_queue_removals_cannot_exceed_the_merge_attempt_budget(
             MergeQueueReconciliation.REMOVED,
         ],
     )
-    ctx = make_ctx(github=github, budget_fn=lambda name: 2 if name == "merge" else 1)
+    ctx = make_real_ctx(github=github, budget_fn=lambda name: 2 if name == "merge" else 1)
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
 
@@ -529,7 +537,7 @@ def test_repeated_queue_removals_cannot_exceed_the_merge_attempt_budget(
 
 
 def test_failed_queue_reconciliation_is_terminal_without_mutation_replay(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A malformed readback cannot enter the retry route or record admission."""
     github = _ConditionalGitHub(
@@ -540,7 +548,7 @@ def test_failed_queue_reconciliation_is_terminal_without_mutation_replay(
     )
     item = _reviewed_item(make_work_item)
 
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_result_malformed")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -549,14 +557,14 @@ def test_failed_queue_reconciliation_is_terminal_without_mutation_replay(
 
 
 def test_failed_exact_head_checks_block_merge_without_operator_review(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Failed current-head checks stop merge admission without a review."""
     head = "a" * 40
     github = _ConditionalGitHub(required_checks_green=False)
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item, head=head), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item, head=head), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.BLOCKED, "required_checks_not_green")
@@ -565,7 +573,7 @@ def test_failed_exact_head_checks_block_merge_without_operator_review(
 
 
 def test_merge_cycle_dispatches_without_inline_github_calls(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """MERGE freezes its exact proof before any admission or mutation call."""
 
@@ -584,7 +592,7 @@ def test_merge_cycle_dispatches_without_inline_github_calls(
 
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(github=InlineGitHubForbidden())
+    ctx = make_real_ctx(github=InlineGitHubForbidden())
 
     started = time.monotonic()
     result = stage.step(item, ctx)
@@ -600,11 +608,11 @@ def test_merge_cycle_dispatches_without_inline_github_calls(
 
 
 def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A 200 response is insufficient until the terminal lifecycle read is merged."""
     github = _ConditionalGitHub(states=[_open_pr(), _open_pr(), {"state": "MERGED"}])
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+    ctx = make_real_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
@@ -614,7 +622,7 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
 
 @pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS"])
 def test_mergeable_requestable_readiness_merges_successfully(
-    make_ctx: Any, make_work_item: Any, merge_state_status: str
+    make_real_ctx: Any, make_work_item: Any, merge_state_status: str
 ) -> None:
     """Initially-ready requestable states reach the PUT without seeding a wait."""
     github = _ConditionalGitHub(
@@ -625,7 +633,7 @@ def test_mergeable_requestable_readiness_merges_successfully(
             "mergeStateStatus": merge_state_status,
         },
     )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+    ctx = make_real_ctx(github=github, config_overrides={"enable_learn": False})
     item = _reviewed_item(make_work_item)
 
     result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
@@ -637,7 +645,7 @@ def test_mergeable_requestable_readiness_merges_successfully(
 
 
 def test_optional_failure_unstable_readiness_attempts_conditional_merge(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """An optional failing status lets server protection classify the first PUT."""
     github = _ConditionalGitHub(
@@ -648,7 +656,7 @@ def test_optional_failure_unstable_readiness_attempts_conditional_merge(
             "mergeStateStatus": "UNSTABLE",
         },
     )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+    ctx = make_real_ctx(github=github, config_overrides={"enable_learn": False})
     item = _reviewed_item(make_work_item)
 
     result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
@@ -660,7 +668,7 @@ def test_optional_failure_unstable_readiness_attempts_conditional_merge(
 
 
 def test_blocked_readiness_waits_before_the_first_conditional_merge(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Pending readiness is polled without burning a conditional PUT."""
     not_ready = {
@@ -677,7 +685,7 @@ def test_blocked_readiness_waits_before_the_first_conditional_merge(
         states=[_open_pr(), _open_pr(), _open_pr(), {"state": "MERGED"}],
         readiness=[not_ready, ready],
     )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+    ctx = make_real_ctx(github=github, config_overrides={"enable_learn": False})
     item = _reviewed_item(make_work_item)
 
     first = _complete_merge_cycle(MergeWaitStage(), item, ctx)
@@ -693,7 +701,7 @@ def test_blocked_readiness_waits_before_the_first_conditional_merge(
 
 
 def test_readiness_wake_rechecks_the_head_before_a_conditional_merge(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A head change during the timer wait returns to fresh review without a PUT."""
     blocked = {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED"}
@@ -704,7 +712,7 @@ def test_readiness_wake_rechecks_the_head_before_a_conditional_merge(
     )
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(github=github)
+    ctx = make_real_ctx(github=github)
 
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.RETRY, "merge_readiness_wait"
@@ -717,7 +725,7 @@ def test_readiness_wake_rechecks_the_head_before_a_conditional_merge(
 
 
 def test_readiness_wake_fails_closed_when_a_thread_appears_while_ci_is_pending(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A timer wake rejects a newly unresolved thread before re-parking."""
 
@@ -742,7 +750,7 @@ def test_readiness_wake_fails_closed_when_a_thread_appears_while_ci_is_pending(
     github = ThreadAppearsDuringReadinessWaitGitHub()
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(github=github)
+    ctx = make_real_ctx(github=github)
 
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.RETRY, "merge_readiness_wait"
@@ -755,7 +763,7 @@ def test_readiness_wake_fails_closed_when_a_thread_appears_while_ci_is_pending(
 
 
 def test_readiness_wake_fails_closed_when_conversation_protection_is_removed(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A timer wake rejects a branch-policy change before re-parking."""
 
@@ -788,7 +796,7 @@ def test_readiness_wake_fails_closed_when_conversation_protection_is_removed(
     github = ProtectionRemovedDuringReadinessWaitGitHub()
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(github=github)
+    ctx = make_real_ctx(github=github)
 
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.RETRY, "merge_readiness_wait"
@@ -801,7 +809,7 @@ def test_readiness_wake_fails_closed_when_conversation_protection_is_removed(
 
 
 def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Normal CI-duration readiness does not burn conditional merge attempts."""
     now = [0.0]
@@ -837,7 +845,7 @@ def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
             )
 
     github = DelayedReadyGitHub()
-    ctx = make_ctx(
+    ctx = make_real_ctx(
         github=github,
         now_fn=lambda: now[0],
         config_overrides={"enable_learn": False},
@@ -859,7 +867,7 @@ def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
 
 
 def test_open_thread_immediately_before_merge_fails_back_without_put(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Merge wait independently rejects a thread that appears after review GO."""
 
@@ -871,7 +879,7 @@ def test_open_thread_immediately_before_merge_fails_back_without_put(
     github = LateThreadGitHub(states=[_open_pr()])
 
     item = _reviewed_item(make_work_item)
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "unresolved_review_threads")
     assert github.merge_attempts == []
@@ -879,7 +887,7 @@ def test_open_thread_immediately_before_merge_fails_back_without_put(
 
 @pytest.mark.parametrize("conversation_resolution", [False])
 def test_missing_conversation_resolution_policy_blocks_merge_put(
-    make_ctx: Any,
+    make_real_ctx: Any,
     make_work_item: Any,
     conversation_resolution: bool,
 ) -> None:
@@ -887,7 +895,7 @@ def test_missing_conversation_resolution_policy_blocks_merge_put(
     github = _ConditionalGitHub(conversation_resolution=conversation_resolution)
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
@@ -895,7 +903,7 @@ def test_missing_conversation_resolution_policy_blocks_merge_put(
 
 
 def test_missing_admin_enforcement_policy_blocks_merge_put(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """The combined server-policy admission also rejects an admin bypass risk."""
 
@@ -917,7 +925,7 @@ def test_missing_admin_enforcement_policy_blocks_merge_put(
     github = NoAdminEnforcementGitHub()
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
@@ -925,7 +933,7 @@ def test_missing_admin_enforcement_policy_blocks_merge_put(
 
 
 def test_unreadable_conversation_resolution_policy_blocks_merge_put(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """An unavailable server gate fails closed before the conditional PUT."""
 
@@ -939,7 +947,7 @@ def test_unreadable_conversation_resolution_policy_blocks_merge_put(
     github = UnreadablePolicyGitHub()
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_policy_unavailable")
@@ -947,7 +955,7 @@ def test_unreadable_conversation_resolution_policy_blocks_merge_put(
 
 
 def test_bypassable_effective_policy_is_a_terminal_fail_closed_outcome(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A bypass-capable actor cannot enter readiness or use a merge request."""
 
@@ -967,7 +975,7 @@ def test_bypassable_effective_policy_is_a_terminal_fail_closed_outcome(
     github = BypassableRulesetGitHub(required_checks_green=True)
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_policy_bypassable")
@@ -976,7 +984,7 @@ def test_bypassable_effective_policy_is_a_terminal_fail_closed_outcome(
 
 
 def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Server protection, not the local read, prevents a late-thread merge."""
 
@@ -984,6 +992,9 @@ def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
         def __init__(self) -> None:
             super().__init__(
                 readiness=[
+                    # Barrier 1 and barrier 2 both read ready state before the
+                    # server classifies the request with a 405 below.
+                    {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
                     {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
                     {**_open_pr(), "mergeable": "BLOCKED", "mergeStateStatus": "BLOCKED"},
                 ]
@@ -1017,7 +1028,7 @@ def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
     github = ServerRejectsLateThreadGitHub()
     item = _reviewed_item(make_work_item)
 
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 5.0
@@ -1025,13 +1036,13 @@ def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
 
 
 def test_external_arm_blocks_conditional_merge_without_any_mutation(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """An arm observed at final admission belongs to an external actor."""
     github = _ConditionalGitHub(states=[_open_pr(auto_merge_request={"enabledAt": "elsewhere"})])
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
@@ -1040,13 +1051,13 @@ def test_external_arm_blocks_conditional_merge_without_any_mutation(
 
 
 def test_stale_proof_fails_back_without_revoking_a_label(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A stale process owns no later label and must only request fresh review."""
     github = _ConditionalGitHub(states=[_open_pr("b" * 40)])
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
@@ -1055,11 +1066,11 @@ def test_stale_proof_fails_back_without_revoking_a_label(
 
 
 def test_already_merged_retry_never_attempts_a_second_merge(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A retry that observes terminal merged state is a success without a PUT."""
     github = _ConditionalGitHub(states=[{"state": "MERGED"}])
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+    ctx = make_real_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
@@ -1068,7 +1079,7 @@ def test_already_merged_retry_never_attempts_a_second_merge(
 
 
 def test_merged_emits_post_merge_intent_without_job(
-    tmp_path: Path, make_ctx: Any, make_work_item: Any
+    tmp_path: Path, make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A confirmed merge records auxiliary work without blocking merge success."""
     from hephaestus.automation.learning_journal import LearningJournalStore
@@ -1078,7 +1089,7 @@ def test_merged_emits_post_merge_intent_without_job(
     journal = LearningJournalStore(lambda: tmp_path)
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, learning_journal=journal)
+        MergeWaitStage(), item, make_real_ctx(github=github, learning_journal=journal)
     )
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
@@ -1088,7 +1099,7 @@ def test_merged_emits_post_merge_intent_without_job(
     assert github.merge_attempts == []
 
 
-def test_post_merge_journal_failure_is_ancillary(make_ctx: Any, make_work_item: Any) -> None:
+def test_post_merge_journal_failure_is_ancillary(make_real_ctx: Any, make_work_item: Any) -> None:
     """A journal failure after merge confirmation cannot change merge success."""
     from hephaestus.automation.learning_journal import LearningJournalStore
 
@@ -1108,7 +1119,7 @@ def test_post_merge_journal_failure_is_ancillary(make_ctx: Any, make_work_item: 
     result = _complete_merge_cycle(
         MergeWaitStage(),
         item,
-        make_ctx(github=github, learning_journal=BrokenJournal(lambda: Path("."))),
+        make_real_ctx(github=github, learning_journal=BrokenJournal(lambda: Path("."))),
     )
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
@@ -1116,7 +1127,7 @@ def test_post_merge_journal_failure_is_ancillary(make_ctx: Any, make_work_item: 
 
 
 def test_ambiguous_transport_reconciles_a_merged_pr_without_duplicate_put(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """An unknown transport outcome is reconciled before any retry is considered."""
     github = _ConditionalGitHub(
@@ -1131,7 +1142,7 @@ def test_ambiguous_transport_reconciles_a_merged_pr_without_duplicate_put(
             )
         ],
     )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
+    ctx = make_real_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
@@ -1140,7 +1151,7 @@ def test_ambiguous_transport_reconciles_a_merged_pr_without_duplicate_put(
 
 
 def test_ambiguous_transport_head_drift_fails_back_without_label_mutation(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A transport retry cannot carry a review proof across a changed head."""
     github = _ConditionalGitHub(
@@ -1157,7 +1168,7 @@ def test_ambiguous_transport_head_drift_fails_back_without_label_mutation(
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
@@ -1166,7 +1177,7 @@ def test_ambiguous_transport_head_drift_fails_back_without_label_mutation(
 
 
 def test_ambiguous_transport_retries_only_after_delayed_same_head_read(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A same-head ambiguity earns one timer retry, never an in-step re-PUT."""
     github = _ConditionalGitHub(
@@ -1184,7 +1195,7 @@ def test_ambiguous_transport_retries_only_after_delayed_same_head_read(
     item = _reviewed_item(make_work_item)
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, budget_fn=lambda _route: 2)
+        MergeWaitStage(), item, make_real_ctx(github=github, budget_fn=lambda _route: 2)
     )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_not_ready")
@@ -1195,7 +1206,7 @@ def test_ambiguous_transport_retries_only_after_delayed_same_head_read(
 
 
 def test_ambiguous_transport_with_unreadable_reconciliation_is_terminal(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A transport ambiguity cannot retry when the confirming read is unavailable."""
     github = _ConditionalGitHub(
@@ -1212,7 +1223,7 @@ def test_ambiguous_transport_with_unreadable_reconciliation_is_terminal(
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
@@ -1221,13 +1232,13 @@ def test_ambiguous_transport_with_unreadable_reconciliation_is_terminal(
 
 
 def test_restarted_merge_without_process_local_proof_fails_back_without_put(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A restarted process never reconstructs authority from durable labels alone."""
     github = _ConditionalGitHub(states=[_open_pr()])
     item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=MERGE)
 
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
     assert github.merge_attempts == []
@@ -1235,7 +1246,7 @@ def test_restarted_merge_without_process_local_proof_fails_back_without_put(
 
 
 def test_409_head_drift_fails_back_without_label_mutation(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """The conditional SHA conflict cannot revoke an actor-owned later label."""
     github = _ConditionalGitHub(
@@ -1252,7 +1263,7 @@ def test_409_head_drift_fails_back_without_label_mutation(
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
@@ -1261,7 +1272,7 @@ def test_409_head_drift_fails_back_without_label_mutation(
 
 
 def test_405_reenters_readiness_wait_without_a_second_conditional_put(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Not-ready protections retry later instead of issuing a second PUT in-step."""
     github = _ConditionalGitHub(
@@ -1276,15 +1287,17 @@ def test_405_reenters_readiness_wait_without_a_second_conditional_put(
             )
         ],
         readiness=[
+            # Barriers 1 and 2 pass on CLEAN before the 405; the post-405
+            # reconciliation read then observes BLOCKED.
+            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
             {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
             {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED"},
-            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
         ],
     )
     item = _reviewed_item(make_work_item)
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, budget_fn=lambda _route: 2)
+        MergeWaitStage(), item, make_real_ctx(github=github, budget_fn=lambda _route: 2)
     )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
@@ -1294,7 +1307,7 @@ def test_405_reenters_readiness_wait_without_a_second_conditional_put(
 
 @pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS", "UNSTABLE"])
 def test_persistent_405_unchanged_readiness_does_not_duplicate_the_put(
-    make_ctx: Any, make_work_item: Any, merge_state_status: str
+    make_real_ctx: Any, make_work_item: Any, merge_state_status: str
 ) -> None:
     """A 405 parks while readiness is unchanged instead of retrying the same PUT."""
     readiness = {
@@ -1317,7 +1330,7 @@ def test_persistent_405_unchanged_readiness_does_not_duplicate_the_put(
     )
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
+    ctx = make_real_ctx(github=github, budget_fn=lambda _route: 2)
 
     first = _complete_merge_cycle(stage, item, ctx)
 
@@ -1335,7 +1348,7 @@ def test_persistent_405_unchanged_readiness_does_not_duplicate_the_put(
 
 
 def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Unchanged HAS_HOOKS after 405 parks across wakes until readiness changes."""
     has_hooks = {
@@ -1368,11 +1381,11 @@ def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
                 dry_run=False,
             ),
         ],
-        readiness=[has_hooks, has_hooks, has_hooks, has_hooks, clean],
+        readiness=[has_hooks, has_hooks, has_hooks, has_hooks, has_hooks, clean],
     )
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(
+    ctx = make_real_ctx(
         github=github,
         budget_fn=lambda _route: 2,
         config_overrides={"enable_learn": False},
@@ -1406,7 +1419,7 @@ def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
 
 
 def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A re-review of unchanged code gets its own permitted conditional request."""
     unstable = {
@@ -1441,7 +1454,7 @@ def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
     )
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(
+    ctx = make_real_ctx(
         github=github,
         budget_fn=lambda _route: 2,
         config_overrides={"enable_learn": False},
@@ -1461,20 +1474,11 @@ def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
 
 @pytest.mark.parametrize("merge_state_status", ["CONFLICTING", "DIRTY"])
 def test_405_conflicting_or_dirty_readiness_returns_to_implementer(
-    make_ctx: Any, make_work_item: Any, merge_state_status: str
+    make_real_ctx: Any, make_work_item: Any, merge_state_status: str
 ) -> None:
     """A reviewed conflict is handed to the implementation agent to resolve."""
     github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr()],
-        merge_results=[
-            ConditionalMergeResult(
-                status=405,
-                body={"message": "not ready"},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
+        states=[_open_pr(), _open_pr()],
         readiness=[
             {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
             {
@@ -1486,34 +1490,193 @@ def test_405_conflicting_or_dirty_readiness_returns_to_implementer(
     )
 
     item = _reviewed_item(make_work_item)
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
 
+    # The barrier-2 readiness re-read classifies the conflict before any
+    # merge request is issued, so no conditional PUT is burned.
     assert result == StageOutcome(Disposition.FAIL_BACK, "merge_conflicting")
     assert item.payload["post_review_rebase_required"] is True
-    assert github.merge_attempts == [(12, "a" * 40)]
+    assert github.merge_attempts == []
     assert github.mutation_log == []
 
 
-def test_reviewed_behind_head_waits_without_rebase(make_ctx: Any, make_work_item: Any) -> None:
-    """A branch that is only behind main waits without a rebase."""
+def test_reviewed_behind_head_routes_to_protected_rebase(
+    make_real_ctx: Any, make_work_item: Any
+) -> None:
+    """A proven BEHIND target routes to a protected rebase before any merge."""
     github = _ConditionalGitHub(
         readiness={
             **_open_pr(),
+            "headRefName": "12-auto-impl",
+            "headRepository": {"name": "Hephaestus"},
+            "headRepositoryOwner": {"login": "HomericIntelligence"},
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "BEHIND",
         }
     )
     item = _reviewed_item(make_work_item)
 
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert result == StageOutcome(Disposition.FAIL_BACK, "protected_rebase_required")
+    target = item.payload["protected_rebase_target"]
+    assert target.branch == "12-auto-impl"
+    assert target.head_sha == "a" * 40
+    assert target.base_sha == "b" * 40
     assert "post_review_rebase_required" not in item.payload
     assert github.merge_attempts == []
 
 
+@pytest.mark.parametrize("missing", ["headRefName", "headRepository", "headRepositoryOwner"])
+def test_reviewed_behind_head_with_unproven_target_is_terminal(
+    make_real_ctx: Any, make_work_item: Any, missing: str
+) -> None:
+    """An unproven BEHIND target grants no review or merge authority."""
+    readiness = {
+        **_open_pr(),
+        "headRefName": "12-auto-impl",
+        "headRepository": {"name": "Hephaestus"},
+        "headRepositoryOwner": {"login": "HomericIntelligence"},
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "BEHIND",
+    }
+    del readiness[missing]
+    github = _ConditionalGitHub(readiness=readiness)
+    item = _reviewed_item(make_work_item)
+
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_target_unverified")
+    assert "protected_rebase_target" not in item.payload
+    assert github.merge_attempts == []
+
+
+def test_reviewed_behind_fork_head_is_terminal(make_real_ctx: Any, make_work_item: Any) -> None:
+    """A foreign head repository never receives a push through this loop."""
+    github = _ConditionalGitHub(
+        readiness={
+            **_open_pr(),
+            "headRefName": "12-auto-impl",
+            "headRepository": {"name": "Hephaestus"},
+            "headRepositoryOwner": {"login": "ExternalUser"},
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+        }
+    )
+    item = _reviewed_item(make_work_item)
+
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_fork_head")
+    assert "protected_rebase_target" not in item.payload
+    assert github.merge_attempts == []
+
+
+def test_reviewed_head_that_falls_behind_between_barriers_routes_to_protected_rebase(
+    make_real_ctx: Any, make_work_item: Any
+) -> None:
+    """Barrier 2 catches a head that falls behind during check traversal."""
+    behind = {
+        **_open_pr(),
+        "headRefName": "12-auto-impl",
+        "headRepository": {"name": "Hephaestus"},
+        "headRepositoryOwner": {"login": "HomericIntelligence"},
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "BEHIND",
+    }
+    github = _ConditionalGitHub(
+        readiness=[
+            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
+            behind,
+        ],
+    )
+    item = _reviewed_item(make_work_item)
+
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "protected_rebase_required")
+    target = item.payload["protected_rebase_target"]
+    assert target.head_sha == "a" * 40
+    assert github.checked_heads == ["a" * 40]
+    assert github.merge_attempts == []
+
+
+def test_conclusive_405_dedupes_an_identical_represented_fingerprint(
+    make_real_ctx: Any, make_work_item: Any
+) -> None:
+    """A conclusive durable response never issues a second identical PUT."""
+    github = _ConditionalGitHub(
+        states=[_open_pr() for _ in range(5)],
+        merge_results=[
+            ConditionalMergeResult(
+                status=405,
+                body={"message": "not ready"},
+                transport_error=False,
+                malformed=False,
+                dry_run=False,
+            )
+        ],
+        readiness=[
+            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
+            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
+            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED"},
+            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
+        ],
+    )
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+    ctx = make_real_ctx(github=github, budget_fn=lambda _route: 2)
+
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_readiness_wait"
+    )
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+    # The 405 was conclusively recorded; an identical readiness fingerprint
+    # that returns later can never claim another merge request.
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.FAIL_BACK,
+        "merge_attempt_conflict",
+    )
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert item.attempts["merge"] == 1
+
+
+def test_transport_ambiguity_dedupes_an_identical_represented_fingerprint(
+    make_real_ctx: Any, make_work_item: Any
+) -> None:
+    """A lost merge response is permanently non-repeatable for the proof."""
+    github = _ConditionalGitHub(
+        states=[_open_pr() for _ in range(5)],
+        merge_results=[
+            ConditionalMergeResult(
+                status=None,
+                body=None,
+                transport_error=True,
+                malformed=False,
+                dry_run=False,
+            )
+        ],
+    )
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+    ctx = make_real_ctx(github=github, budget_fn=lambda _route: 2)
+
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_not_ready"
+    )
+    assert github.merge_attempts == [(12, "a" * 40)]
+
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.FAIL_BACK,
+        "merge_attempt_ambiguous",
+    )
+    assert github.merge_attempts == [(12, "a" * 40)]
+    assert item.attempts["merge"] == 1
+
+
 def test_409_reconciliation_external_arm_blocks_without_label_mutation(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A fresh external arm after a 409 blocks the run without trying to revoke it."""
     github = _ConditionalGitHub(
@@ -1530,7 +1693,7 @@ def test_409_reconciliation_external_arm_blocks_without_label_mutation(
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
@@ -1539,30 +1702,30 @@ def test_409_reconciliation_external_arm_blocks_without_label_mutation(
 
 
 def test_label_loss_or_non_default_base_prevents_the_conditional_request(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Final admission facts are all required immediately before the PUT."""
     label_lost = _ConditionalGitHub(labels=(False, False), states=[_open_pr()])
     wrong_base = _ConditionalGitHub(states=[_open_pr(base="release")])
 
     assert _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=label_lost)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=label_lost)
     ) == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
     assert _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=wrong_base)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=wrong_base)
     ) == StageOutcome(Disposition.FINISH_FAIL, "non_default_base")
     assert label_lost.merge_attempts == []
     assert wrong_base.merge_attempts == []
 
 
 def test_contradictory_implementation_labels_prevent_the_conditional_request(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A contradictory durable state is not an exclusive implementation approval."""
     github = _ConditionalGitHub(labels=(True, True), states=[_open_pr()])
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
@@ -1571,21 +1734,21 @@ def test_contradictory_implementation_labels_prevent_the_conditional_request(
 
 
 def test_review_prose_cannot_replace_a_missing_implementation_go_label(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Decision-shaped review text is never an admission fact."""
     github = _ConditionalGitHub(labels=(False, False), states=[_open_pr()])
     item = _reviewed_item(make_work_item)
     item.payload["review_feedback"] = "Verdict: GO"
 
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
     assert github.merge_attempts == []
     assert github.mutation_log == []
 
 
-def test_200_without_merged_true_is_terminal(make_ctx: Any, make_work_item: Any) -> None:
+def test_200_without_merged_true_is_terminal(make_real_ctx: Any, make_work_item: Any) -> None:
     """A successful transport does not imply the PR was merged."""
     github = _ConditionalGitHub(
         merge_results=[
@@ -1600,14 +1763,14 @@ def test_200_without_merged_true_is_terminal(make_ctx: Any, make_work_item: Any)
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_not_merged")
 
 
 def test_blocked_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadline(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A normal CI restart fits while readiness waiting remains bounded."""
     github = _ConditionalGitHub(
@@ -1624,7 +1787,7 @@ def test_blocked_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadli
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
     now = [1000.0]
-    ctx = make_ctx(
+    ctx = make_real_ctx(
         github=github,
         budget_fn=lambda _route: 2,
         now_fn=lambda: now[0],
@@ -1646,7 +1809,7 @@ def test_blocked_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadli
 
 @pytest.mark.parametrize("now", [1900.0, 1901.0])
 def test_requestable_readiness_honors_an_existing_matching_deadline_without_puts(
-    make_ctx: Any, make_work_item: Any, now: float
+    make_real_ctx: Any, make_work_item: Any, now: float
 ) -> None:
     """A ready PR cannot outlive an already-established matching wait deadline."""
     github = _ConditionalGitHub(
@@ -1667,7 +1830,7 @@ def test_requestable_readiness_honors_an_existing_matching_deadline_without_puts
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, now_fn=lambda: now)
+        MergeWaitStage(), item, make_real_ctx(github=github, now_fn=lambda: now)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
@@ -1677,7 +1840,7 @@ def test_requestable_readiness_honors_an_existing_matching_deadline_without_puts
 
 
 def test_readiness_wait_resets_its_deadline_for_a_fresh_reviewed_head(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A new review proof cannot inherit an earlier head's waiting budget."""
     fresh_head = "b" * 40
@@ -1699,7 +1862,7 @@ def test_readiness_wait_resets_its_deadline_for_a_fresh_reviewed_head(
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, now_fn=lambda: 100.0)
+        MergeWaitStage(), item, make_real_ctx(github=github, now_fn=lambda: 100.0)
     )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
@@ -1710,7 +1873,7 @@ def test_readiness_wait_resets_its_deadline_for_a_fresh_reviewed_head(
 
 
 def test_readiness_wait_resets_for_a_fresh_proof_of_the_same_head(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Fresh review of unchanged code receives a fresh bounded wait window."""
     github = _ConditionalGitHub(
@@ -1732,7 +1895,7 @@ def test_readiness_wait_resets_for_a_fresh_proof_of_the_same_head(
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, now_fn=lambda: 100.0)
+        MergeWaitStage(), item, make_real_ctx(github=github, now_fn=lambda: 100.0)
     )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
@@ -1743,7 +1906,7 @@ def test_readiness_wait_resets_for_a_fresh_proof_of_the_same_head(
 
 
 def test_unknown_mergeability_waits_without_a_conditional_put(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """GitHub's transient mergeability calculation is operationally pending."""
     github = _ConditionalGitHub(
@@ -1755,7 +1918,7 @@ def test_unknown_mergeability_waits_without_a_conditional_put(
     )
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), _reviewed_item(make_work_item), make_real_ctx(github=github)
     )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
@@ -1763,26 +1926,26 @@ def test_unknown_mergeability_waits_without_a_conditional_put(
 
 
 def test_exhausted_merge_budget_does_not_enter_readiness_wait(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """No wait is useful once the next conditional request is forbidden."""
     github = _ConditionalGitHub()
     item = _reviewed_item(make_work_item)
     item.attempts["merge"] = 2
 
-    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _route: 2))
+    result = MergeWaitStage().step(item, make_real_ctx(github=github, budget_fn=lambda _route: 2))
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
     assert github.merge_attempts == []
 
 
-def test_stage_github_exposes_a_conditional_merge_adapter(make_ctx: Any) -> None:
+def test_stage_github_exposes_a_conditional_merge_adapter(make_real_ctx: Any) -> None:
     """The stage contract has an explicit adapter rather than a CLI merge escape hatch."""
-    assert callable(getattr(make_ctx().github, "merge_pr_if_head", None))
+    assert callable(getattr(make_real_ctx().github, "merge_pr_if_head", None))
 
 
 def test_retained_review_checks_the_resulting_rebase_head(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Required checks use the new head while the initial review stays fixed."""
     item, record = _retained_review_item(make_work_item)
@@ -1792,7 +1955,9 @@ def test_retained_review_checks_the_resulting_rebase_head(
         required_checks_green=False,
     )
     github.review_rebase_records[item.pr] = record
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github, org="test-org"))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), item, make_real_ctx(github=github, org="test-org")
+    )
     assert result == StageOutcome(Disposition.BLOCKED, "required_checks_not_green")
     assert github.checked_heads == ["c" * 40]
     assert github.merge_attempts == []
@@ -1832,7 +1997,7 @@ def _retained_review_item(make_work_item: Any) -> tuple[Any, Any]:
 @pytest.mark.parametrize("change", ["missing", "revoked", "record", "audit", "unavailable"])
 @pytest.mark.parametrize("queue_method", [None, "SQUASH"])
 def test_rebase_record_change_blocks_merge_after_host_proof(
-    make_ctx: Any, make_work_item: Any, moment: str, change: str, queue_method: str | None
+    make_real_ctx: Any, make_work_item: Any, moment: str, change: str, queue_method: str | None
 ) -> None:
     """A changed record or initial audit cannot use an earlier host proof."""
     from dataclasses import replace
@@ -1881,7 +2046,9 @@ def test_rebase_record_change_blocks_merge_after_host_proof(
             return result
 
     github = ChangedRecordGitHub()
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github, org="test-org"))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), item, make_real_ctx(github=github, org="test-org")
+    )
     assert result == StageOutcome(Disposition.FINISH_FAIL, "rebase_review_record_changed")
     assert github.merge_attempts == []
     assert item.payload["review_audit"] == initial.audit
@@ -1889,7 +2056,7 @@ def test_rebase_record_change_blocks_merge_after_host_proof(
 
 
 def test_unchanged_rebase_record_is_read_before_final_head_admission(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A record read must not follow the final head check before merge."""
     item, record = _retained_review_item(make_work_item)
@@ -1918,7 +2085,7 @@ def test_unchanged_rebase_record_is_read_before_final_head_admission(
     result = _complete_merge_cycle(
         MergeWaitStage(),
         item,
-        make_ctx(
+        make_real_ctx(
             github=github,
             org="test-org",
             config_overrides={"enable_learn": False},
@@ -1931,7 +2098,7 @@ def test_unchanged_rebase_record_is_read_before_final_head_admission(
 
 
 def test_rebase_record_is_rechecked_after_a_readiness_wait(
-    make_ctx: Any, make_work_item: Any
+    make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A later merge cycle cannot use a record that was deleted during a wait."""
     item, record = _retained_review_item(make_work_item)
@@ -1940,7 +2107,7 @@ def test_rebase_record_is_rechecked_after_a_readiness_wait(
         readiness={**_open_pr("c" * 40), "mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"},
     )
     github.review_rebase_records[item.pr] = record
-    ctx = make_ctx(github=github, org="test-org")
+    ctx = make_real_ctx(github=github, org="test-org")
     stage = MergeWaitStage()
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.RETRY, "merge_readiness_wait"

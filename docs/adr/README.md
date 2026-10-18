@@ -69,3 +69,4 @@ confirm all three.
 | [0053](0053-focused-local-ci-full-validation.md) | Focused local checks and CI-owned full validation | Manual rebase trigger superseded by 0055 |
 | [0055](0055-conditional-manual-rebases.md) | Conditional manual rebases | Accepted |
 | [0056](0056-explicit-host-capabilities-and-operation-recovery.md) | Explicit host capabilities and durable operation recovery | Draft |
+| [0057](0057-protected-rebase-before-conditional-merge.md) | Protected rebase before conditional merge | Accepted |

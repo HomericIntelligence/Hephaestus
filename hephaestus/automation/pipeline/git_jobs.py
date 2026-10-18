@@ -332,6 +332,7 @@ GIT_OPS: frozenset[str] = frozenset(
         "remove_worktree",
         "fetch_main",
         "rebase",
+        "protected_rebase",
         "validate_rebase_conflict",
         "continue_rebase",
         "discover_pending_rebase",
@@ -424,11 +425,69 @@ class GitJob:
             raise ValueError(
                 "repository_lock_wait_timeout_s is valid only for repository checkout jobs"
             )
+        if self.op == "protected_rebase":
+            _validate_protected_rebase_job(self)
 
     @property
     def transport_repository(self) -> str:
         """Return the canonical identity required for authenticated Git transport."""
         return self.expected_repository or self.repo
+
+
+_PROTECTED_REBASE_KWARG_KEYS = frozenset(
+    {
+        "repo_root",
+        "pr_number",
+        "head_sha",
+        "base_sha",
+        "base_branch",
+        "branch",
+        "remote",
+        "issue_number",
+        "writer_worktree",
+        "writer_capability_token",
+    }
+)
+
+_FULL_SHA_PATTERN = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+
+
+def _validate_protected_rebase_job(job: GitJob) -> None:
+    """Reject a protected rebase job outside its closed kwargs contract.
+
+    The operation admits no workspace binding, no capability target, and no
+    deadline/lock extra.  The durable writer capability revalidation happens
+    in the worker against the coordinator registry.
+    """
+    kwargs = job.kwargs
+    if (
+        set(kwargs) != _PROTECTED_REBASE_KWARG_KEYS
+        or type(kwargs.get("repo_root")) is not str
+        or type(kwargs.get("base_branch")) is not str
+        or not kwargs["base_branch"]
+        or type(kwargs.get("branch")) is not str
+        or not kwargs["branch"]
+        or kwargs["branch"] == kwargs["base_branch"]
+        or kwargs.get("remote") != "origin"
+        or type(kwargs.get("pr_number")) is not int
+        or kwargs["pr_number"] <= 0
+        or type(kwargs.get("issue_number")) is not int
+        or kwargs["issue_number"] <= 0
+        or type(kwargs.get("writer_worktree")) is not str
+        or not kwargs["writer_worktree"]
+        or type(kwargs.get("writer_capability_token")) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", kwargs["writer_capability_token"]) is None
+        or type(kwargs.get("head_sha")) is not str
+        or _FULL_SHA_PATTERN.fullmatch(kwargs["head_sha"]) is None
+        or type(kwargs.get("base_sha")) is not str
+        or _FULL_SHA_PATTERN.fullmatch(kwargs["base_sha"]) is None
+        or job.workspace is not None
+        or job.capability_target is not None
+        or job.rebase_recovery_candidate is not None
+        or job.repository_lock_wait_timeout_s is not None
+        or job.repository_validation_preparation is not None
+    ):
+        raise ValueError("The protected rebase job does not match its closed contract.")
 
 
 def validate_git_repository_validation(job: GitJob) -> None:

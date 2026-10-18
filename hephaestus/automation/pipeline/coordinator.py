@@ -34,6 +34,7 @@ from hephaestus.automation.pipeline.work_item import (
     PreservedWorktree,
     WorkItem,
 )
+from hephaestus.automation.protected_rebase import ProtectedWriterCapabilityRecord
 from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED
 
 from .athena_skill_jobs import AthenaSkillExecutor
@@ -231,6 +232,13 @@ class Coordinator(
         # here.  Paths discovered from Git alone can belong to a human or a
         # different automation process and must fail closed.
         self._pipeline_writer_worktrees: dict[tuple[str, str], WorkItem] = {}
+        # Opaque protected-rebase capabilities registered against the exact
+        # live work item, repository, issue, branch, and resolved writer path.
+        # Entries live through implementation, pr_review, and merge_wait and
+        # are cleared only at the terminal _finish() sink.
+        self._protected_writer_capabilities: dict[
+            tuple[str, str], ProtectedWriterCapabilityRecord
+        ] = {}
         self.inflight_per_repo: Counter[str] = Counter()
         # A normal (non-implementation) drain claims instead of popping.  The
         # active lease reserves its source capacity while an item executes or

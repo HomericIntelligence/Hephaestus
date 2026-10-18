@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,7 +64,7 @@ from hephaestus.automation.pipeline.reply_handoff import (
     journaled_implementation_remediation_reply_handoff,
     journaled_implementation_reply_handoff,
 )
-from hephaestus.automation.pipeline.routing import Disposition
+from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import (
     Continue,
     ImplementationThreadReplyResult,
@@ -77,6 +77,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     GIT_ERROR_RETRY_CAP,
     HEPHAESTUS_REQUIRED_CHECK_ARGV,
     PRE_PR_TEST_ARGV,
+    PROTECTED_REBASE_WAIT,
     ImplementationStage,
     build_implementation_prompt,
     build_test_fix_prompt,
@@ -89,6 +90,11 @@ from hephaestus.automation.pipeline.worker_pool import (
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.implementation import get_rebase_conflict_prompt
+from hephaestus.automation.protected_rebase import (
+    ProtectedRebaseTarget,
+    WriterAllocationOrigin,
+    register_writer_capability,
+)
 from hephaestus.automation.remediation_recovery import (
     RemediationRecoveryReceipt,
     RemediationReplyResult,
@@ -9611,3 +9617,286 @@ def test_rebase_runner_failure_blocks_without_a_source_verdict(
         assert diagnostic["cleanup_state"] == "retained"
         assert diagnostic["retained_root"] == "/tmp/repo/build/.host-verification/retained"
         assert diagnostic["source_head_sha"] == result_head
+
+
+@pytest.fixture
+def protected_capability_isolation() -> Iterator[None]:
+    """Remove every protected capability the test registered, even on failure."""
+    from hephaestus.automation import protected_rebase as protected_rebase_module
+
+    before = set(protected_rebase_module._WRITER_CAPABILITIES)
+    yield
+    with protected_rebase_module._WRITER_CAPABILITIES_LOCK:
+        for token in tuple(protected_rebase_module._WRITER_CAPABILITIES):
+            if token not in before:
+                protected_rebase_module._WRITER_CAPABILITIES.pop(token, None)
+
+
+class TestProtectedRebaseWait:
+    """Protect the PROTECTED_REBASE_WAIT admission and receipt application."""
+
+    def _target(
+        self,
+        *,
+        repository: str = "test-org/test-repo",
+        pr: int = 4201,
+        branch: str = "12-auto-impl",
+        head: str = "a" * 40,
+        base: str = "b" * 40,
+    ) -> ProtectedRebaseTarget:
+        """Return one valid protected rebase target for the default identities."""
+        return ProtectedRebaseTarget(
+            repository=repository,
+            pr_number=pr,
+            branch=branch,
+            head_sha=head,
+            base_sha=base,
+        )
+
+    def _item(
+        self,
+        make_work_item: Any,
+        tmp_path: Path,
+        *,
+        target: ProtectedRebaseTarget | None,
+    ) -> Any:
+        """Build an implementation item carrying one protected rebase request."""
+        item = make_work_item(
+            issue=4101,
+            pr=4201,
+            stage=StageName.IMPLEMENTATION,
+            state=PROTECTED_REBASE_WAIT,
+            payload=({"protected_rebase_target": target} if target is not None else None),
+        )
+        item.branch = "12-auto-impl"
+        item.worktree = str(tmp_path / "writer")
+        return item
+
+    def _register_capability(self, item: Any) -> str:
+        """Register the exact writer identity the item carries."""
+        record = register_writer_capability(
+            repository=item.repo,
+            issue_number=int(item.issue or 0),
+            branch=item.branch,
+            worktree=str(Path(item.worktree).resolve()),
+            origin=WriterAllocationOrigin.NEWLY_CREATED,
+            item=item,
+        )
+        return record.capability.token
+
+    def test_gate_entry_routes_a_valid_target_to_the_wait_state(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A proven merge-wait request routes to the durable wait state once."""
+        item = self._item(make_work_item, tmp_path, target=self._target())
+        item.state = "GATE"
+
+        result = ImplementationStage._protected_rebase_gate_entry(item, make_ctx())
+
+        assert isinstance(result, Continue)
+        assert result.next_state == PROTECTED_REBASE_WAIT
+
+    def test_gate_entry_rejects_a_foreign_target(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A target outside the repository or pull request grants nothing."""
+        item = self._item(
+            make_work_item,
+            tmp_path,
+            target=self._target(repository="test-org/other-repo"),
+        )
+        item.state = "GATE"
+
+        result = ImplementationStage._protected_rebase_gate_entry(item, make_ctx())
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_target_invalid")
+
+    def test_gate_entry_ignores_an_absent_request(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """Operator labels keep authority when no rebase was requested."""
+        item = self._item(make_work_item, tmp_path, target=None)
+
+        assert ImplementationStage._protected_rebase_gate_entry(item, make_ctx()) is None
+
+    def test_wait_submits_one_closed_cycle_job(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+        protected_capability_isolation: None,
+    ) -> None:
+        """A proven writer admits one durable rebase cycle against its base."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        target = self._target()
+        item = self._item(make_work_item, tmp_path, target=target)
+        token = self._register_capability(item)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert result.on_done_state == PROTECTED_REBASE_WAIT
+        job = result.job
+        assert job.op == "protected_rebase"
+        assert job.repo == "test-repo"
+        assert job.expected_repository == "test-org/test-repo"
+        assert job.kwargs == {
+            "repo_root": str(ctx.paths.repo_root),
+            "pr_number": 4201,
+            "head_sha": target.head_sha,
+            "base_sha": target.base_sha,
+            "base_branch": "main",
+            "branch": "12-auto-impl",
+            "remote": "origin",
+            "issue_number": 4101,
+            "writer_worktree": str(tmp_path / "writer"),
+            "writer_capability_token": token,
+        }
+
+    def test_wait_rejects_an_unproven_writer(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A missing coordinator capability never submits a cycle job."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = self._item(make_work_item, tmp_path, target=self._target())
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_writer_unproven")
+
+    def test_wait_rejects_a_missing_writer_worktree(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A proven capability without a writer worktree grants no cycle."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = self._item(make_work_item, tmp_path, target=self._target())
+        item.worktree = ""
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_worktree_missing")
+
+    def test_wait_rejects_a_writer_on_the_default_branch(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+        protected_capability_isolation: None,
+    ) -> None:
+        """A base equal to the writer branch proves no valid protected base."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        target = self._target(branch="main")
+        item = self._item(make_work_item, tmp_path, target=target)
+        item.branch = "main"
+        self._register_capability(item)
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_base_unverified")
+
+    def test_wait_rejects_an_unverifiable_base_branch(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+        protected_capability_isolation: None,
+    ) -> None:
+        """A failed default-branch read never borrows the writer's base."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = self._item(make_work_item, tmp_path, target=self._target())
+        self._register_capability(item)
+
+        def fail() -> Any:
+            raise RuntimeError("default branch unavailable")
+
+        ctx.github.verified_repository_default_branch = fail
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_base_unverified")
+
+    def test_published_receipt_clears_every_stale_merge_proof(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A published bridge parks the item behind a fresh review proof."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = self._item(make_work_item, tmp_path, target=self._target())
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        item.payload["reviewed_pr_proof_generation"] = 3
+        item.payload["merge_readiness_declined_fingerprint"] = ("a" * 40, "3")
+        item.payload["merge_readiness_head_sha"] = "a" * 40
+        item.payload["merge_readiness_proof_generation"] = 3
+        item.payload["merge_readiness_deadline_s"] = 1.0
+        item.payload["merge_readiness_polls"] = 2
+        value = {
+            "protected_rebase": "published",
+            "pr_number": 4201,
+            "head_sha": "d" * 40,
+            "base_sha": "b" * 40,
+            "branch": "12-auto-impl",
+        }
+        stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+        item.state = PROTECTED_REBASE_WAIT
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.ADVANCE, "protected_rebase_published")
+        for key in (
+            "protected_rebase_target",
+            "_protected_rebase_receipt",
+            "reviewed_pr_head_sha",
+            "reviewed_pr_proof_generation",
+            "merge_readiness_declined_fingerprint",
+            "merge_readiness_head_sha",
+            "merge_readiness_proof_generation",
+            "merge_readiness_deadline_s",
+            "merge_readiness_polls",
+        ):
+            assert key not in item.payload
+
+    def test_failed_receipt_is_terminal(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A failed cycle receipt grants no merge authority."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = self._item(make_work_item, tmp_path, target=self._target())
+        stage.on_job_done(item, JobResult(ok=False, error="protected_rebase_drift"), ctx)
+        item.state = PROTECTED_REBASE_WAIT
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_failed")
+
+    def test_mismatched_receipt_is_terminal(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A publication for another pull request grants no authority."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = self._item(make_work_item, tmp_path, target=self._target())
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "protected_rebase": "published",
+                    "pr_number": 9999,
+                    "head_sha": "d" * 40,
+                    "base_sha": "b" * 40,
+                    "branch": "12-auto-impl",
+                },
+            ),
+            ctx,
+        )
+        item.state = PROTECTED_REBASE_WAIT
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "protected_rebase_receipt_invalid")

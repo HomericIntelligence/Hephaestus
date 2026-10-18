@@ -1022,6 +1022,39 @@ def make_ctx() -> Callable[..., StageContext]:
 
 
 @pytest.fixture
+def make_real_ctx(
+    make_ctx: Callable[..., StageContext], tmp_path: Path
+) -> Callable[..., StageContext]:
+    """Build StageContext instances bound to a unique real repository root.
+
+    The durable protected merge-state store rejects a repository root that
+    is not an existing directory.  Merge-wait stage tests use this fixture
+    so durable merge claims stay inside one test and never cross a test
+    boundary.
+    """
+    counter = 0
+
+    class _RealPaths:
+        """Mirror ``_Paths`` against one fresh temporary repository root."""
+
+        def __init__(self, root: Path) -> None:
+            self.repo_root = str(root)
+            self.worktree = str(root / "worktree")
+            self.source_workspaces = FakeSourceWorkspaceManager(root)
+
+    def _make_real_ctx(**kwargs: Any) -> StageContext:
+        nonlocal counter
+        if "paths" in kwargs:
+            raise ValueError("make_real_ctx owns the paths binding")
+        counter += 1
+        root = tmp_path / f"repo-{counter}"
+        root.mkdir()
+        return make_ctx(paths=_RealPaths(root), **kwargs)
+
+    return _make_real_ctx
+
+
+@pytest.fixture
 def make_work_item() -> Callable[..., WorkItem]:
     """Build WorkItem instances parked in a plan-side stage."""
 

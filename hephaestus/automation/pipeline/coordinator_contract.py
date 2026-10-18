@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from typing import Any, Protocol
 
     from hephaestus.automation.learning_journal import LearningClaimRegistry, LearningJournalStore
+    from hephaestus.automation.protected_rebase import ProtectedWriterCapabilityRecord
     from hephaestus.automation.review_journal import CommentJournalReadError
 
     from . import (
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
         _completion_wakeup: Event
         _completion_saturation: Event
         _pipeline_writer_worktrees: dict[tuple[str, str], WorkItem]
+        _protected_writer_capabilities: dict[tuple[str, str], ProtectedWriterCapabilityRecord]
         _leases: dict[int, StageQueueLease]
         _pending_handoffs: dict[int, _PendingHandoff]
         _direct_issue_source: _DirectIssueSource | None

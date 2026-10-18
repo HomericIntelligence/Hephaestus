@@ -62,7 +62,15 @@ from hephaestus.automation.pipeline.scope_expansion_records import (
     render_scope_expansion_lifecycle_comment,
 )
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.pipeline_github_merge_policy import EffectiveMergePolicy
 from hephaestus.automation.pipeline_github_reviews import ReviewPublicationResult
+from hephaestus.automation.protected_merge_state import MergeAttemptKey, ProtectedMergeStateStore
+from hephaestus.automation.protected_rebase import (
+    MERGE_ATTEMPT_AMBIGUOUS,
+    MERGE_ATTEMPT_CONFLICT,
+    PROTECTED_REBASE_REQUIRED,
+    ProtectedRebaseTarget,
+)
 from hephaestus.automation.remediation_recovery import (
     RemediationReplyResult,
     RemediationReviewInput,
@@ -2443,10 +2451,13 @@ def test_runner_dispatches_merge_cycle_as_a_typed_receipt(
 
 
 @pytest.mark.parametrize("revoke_at", [1, 2, 0])
-def test_merge_rechecks_approval_and_preserves_required_gates(revoke_at: int) -> None:
+def test_merge_rechecks_approval_and_preserves_required_gates(
+    revoke_at: int, tmp_path: Path
+) -> None:
     """Revoked implementation approval stops either merge admission read."""
     from unittest.mock import MagicMock
 
+    from hephaestus.automation.pipeline.github_jobs import GitHubJob
     from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
@@ -2465,6 +2476,7 @@ def test_merge_rechecks_approval_and_preserves_required_gates(revoke_at: int) ->
         "state": "OPEN",
         "id": "PR_3006",
         "headRefOid": "a" * 40,
+        "baseRefOid": "b" * 40,
         "autoMergeRequest": None,
         "baseRefName": "main",
     }
@@ -2499,7 +2511,14 @@ def test_merge_rechecks_approval_and_preserves_required_gates(revoke_at: int) ->
     }
     github.required_checks_pass_for_head.return_value = True
     github.merge_pr_if_head.return_value = SimpleNamespace(dry_run=True)
-    result = PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
+    job = GitHubJob(
+        repo="test-repo",
+        repo_root=tmp_path,
+        request=request,
+        descr="merge-wait approval recheck",
+    )
+    runner = PipelineGitHubJobRunner(org="HomericIntelligence", dry_run=False)
+    result = runner._run_merge_wait_cycle(job, request, github)
     if revoke_at:
         assert result.outcome == "not_implementation_go"
         github.merge_pr_if_head.assert_not_called()
@@ -2509,6 +2528,307 @@ def test_merge_rechecks_approval_and_preserves_required_gates(revoke_at: int) ->
         github.merge_pr_if_head.assert_called_once()
     assert reads == (revoke_at or 2)
     github.mark_pr_implementation_no_go.assert_not_called()
+
+
+_PROTECTED_CLAIM_REPOSITORY = "HomericIntelligence/Hephaestus"
+
+
+def _protected_claim_github(
+    *,
+    head: str = "a" * 40,
+    base: str = "b" * 40,
+    readiness_script: list[dict[str, Any]] | None = None,
+    merge_result: Any = None,
+    policy: EffectiveMergePolicy | None = None,
+) -> Any:
+    """Build a scripted merge-wait GitHub double for durable-claim cycles."""
+    from unittest.mock import MagicMock
+
+    state = {
+        "state": "OPEN",
+        "id": "PR_3107",
+        "headRefOid": head,
+        "baseRefOid": base,
+        "autoMergeRequest": None,
+        "baseRefName": "main",
+    }
+    clean = {
+        **state,
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "headRefName": "12-auto-impl",
+        "headRepository": {"name": "Hephaestus"},
+        "headRepositoryOwner": {"login": "HomericIntelligence"},
+    }
+    script = list(readiness_script) if readiness_script is not None else [clean]
+
+    github = MagicMock()
+    github.gh_pr_state.return_value = state
+    github.verified_repository_default_branch.return_value = VerifiedRepositoryDefaultBranch(
+        "HomericIntelligence",
+        "Hephaestus",
+        _PROTECTED_CLAIM_REPOSITORY,
+        "main",
+    )
+    github.pr_has_implementation_state_label.return_value = (True, False)
+    github.list_unresolved_review_threads.return_value = []
+    github.effective_merge_policy.return_value = policy or EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(),
+        strict_update_enforced=True,
+    )
+    github.gh_pr_merge_readiness.side_effect = lambda _pr: (
+        script.pop(0) if len(script) > 1 else script[0]
+    )
+    github.required_checks_pass_for_head.return_value = True
+    github.merge_pr_if_head.return_value = merge_result
+    return github, clean
+
+
+def _protected_claim_request(head: str = "a" * 40) -> RunMergeWaitCycleRequest:
+    """Return the fixed merge-cycle request for durable-claim cycles."""
+    return RunMergeWaitCycleRequest(
+        pr_number=3107,
+        issue_number=2701,
+        reviewed_head_sha=head,
+        proof_generation=1,
+        declined_readiness_fingerprint=None,
+        deadline_s=time.monotonic() + 30,
+        cancellation=threading.Event(),
+    )
+
+
+def _protected_claim_key(
+    head: str = "a" * 40,
+    base: str = "b" * 40,
+    *,
+    proof_generation: int = 1,
+) -> MergeAttemptKey:
+    """Rebuild the exact claim key the runner derives for one CLEAN read."""
+    return MergeAttemptKey(
+        repository=_PROTECTED_CLAIM_REPOSITORY,
+        pr_number=3107,
+        reviewed_head_sha=head,
+        base_sha=base,
+        proof_generation=proof_generation,
+        mergeable="MERGEABLE",
+        readiness_status="CLEAN",
+    )
+
+
+def _run_protected_claim_cycle(
+    github: Any, request: RunMergeWaitCycleRequest, tmp_path: Path
+) -> Any:
+    """Run one merge cycle against a real durable store under ``tmp_path``."""
+    job = GitHubJob(
+        repo="test-repo",
+        repo_root=tmp_path,
+        request=request,
+        descr="merge-wait durable claim cycle",
+    )
+    return PipelineGitHubJobRunner(org="HomericIntelligence", dry_run=False)._run_merge_wait_cycle(
+        job, request, github
+    )
+
+
+def test_barrier_one_behind_routes_to_protected_rebase_before_any_claim(tmp_path: Path) -> None:
+    """A BEHIND classification at the first barrier grants no merge claim."""
+    head = "a" * 40
+    base = "b" * 40
+    behind = {
+        "state": "OPEN",
+        "id": "PR_3107",
+        "headRefOid": head,
+        "baseRefOid": base,
+        "autoMergeRequest": None,
+        "baseRefName": "main",
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "BEHIND",
+        "headRefName": "12-auto-impl",
+        "headRepository": {"name": "Hephaestus"},
+        "headRepositoryOwner": {"login": "HomericIntelligence"},
+    }
+    github, _clean = _protected_claim_github(readiness_script=[behind])
+    request = _protected_claim_request()
+
+    result = _run_protected_claim_cycle(github, request, tmp_path)
+
+    assert result.outcome == PROTECTED_REBASE_REQUIRED
+    assert result.protected_rebase_target == ProtectedRebaseTarget(
+        repository=_PROTECTED_CLAIM_REPOSITORY,
+        pr_number=3107,
+        branch="12-auto-impl",
+        head_sha=head,
+        base_sha=base,
+    )
+    github.merge_pr_if_head.assert_not_called()
+    # A fresh claim on the same fingerprint proves nothing was recorded.
+    store = ProtectedMergeStateStore(tmp_path, _PROTECTED_CLAIM_REPOSITORY)
+    assert store.claim_merge_attempt(_protected_claim_key()).granted
+
+
+def test_barrier_two_behind_aborts_the_merge_without_a_claim(tmp_path: Path) -> None:
+    """A base advance between the barriers stops the merge request entirely."""
+    github, clean = _protected_claim_github()
+    behind = {**clean, "mergeStateStatus": "BEHIND", "mergeable": "MERGEABLE"}
+    github.gh_pr_merge_readiness.side_effect = [clean, behind]
+    request = _protected_claim_request()
+
+    result = _run_protected_claim_cycle(github, request, tmp_path)
+
+    assert result.outcome == PROTECTED_REBASE_REQUIRED
+    assert result.protected_rebase_target is not None
+    github.merge_pr_if_head.assert_not_called()
+    github.required_checks_pass_for_head.assert_called_once()
+    store = ProtectedMergeStateStore(tmp_path, _PROTECTED_CLAIM_REPOSITORY)
+    assert store.claim_merge_attempt(_protected_claim_key()).granted
+
+
+def test_granted_claim_requests_one_merge_and_records_the_conclusive_result(
+    tmp_path: Path,
+) -> None:
+    """A fresh claim permits one PUT, and its success dedupes every retry."""
+    github, _clean = _protected_claim_github(
+        merge_result=SimpleNamespace(
+            dry_run=False,
+            malformed=False,
+            transport_error=False,
+            status=200,
+            body={"merged": True, "sha": "c" * 40},
+            queued=False,
+        )
+    )
+    merged_state = {
+        "state": "MERGED",
+        "mergedAt": "2026-10-16T00:00:00Z",
+        "mergeCommit": {"oid": "c" * 40},
+    }
+    # Two admission reads stay OPEN and the post-merge read reports the merge.
+    # Every later admission read stays OPEN so the durable claim decides.
+    open_state = github.gh_pr_state.return_value
+    states = iter([open_state, open_state, merged_state])
+    github.gh_pr_state.side_effect = lambda _pr: next(states, open_state)
+    request = _protected_claim_request()
+
+    result = _run_protected_claim_cycle(github, request, tmp_path)
+
+    assert result.outcome == "merged"
+    assert result.attempted
+    assert github.merge_pr_if_head.call_count == 1
+    store = ProtectedMergeStateStore(tmp_path, _PROTECTED_CLAIM_REPOSITORY)
+    grant = store.claim_merge_attempt(_protected_claim_key())
+    assert grant.reconcile_only
+    assert grant.record.state == "conclusive"
+    assert grant.record.http_status == 200
+    assert grant.record.classification == "merged"
+    assert not grant.record.ambiguous
+
+    retry = _run_protected_claim_cycle(github, _protected_claim_request(), tmp_path)
+
+    assert retry.outcome == MERGE_ATTEMPT_CONFLICT
+    assert not retry.attempted
+    assert github.merge_pr_if_head.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "classification"),
+    [(405, "not_mergeable"), (409, "head_changed_or_conflict")],
+)
+def test_conclusive_rejection_is_recorded_and_dedupes_the_retry(
+    status: int, classification: str, tmp_path: Path
+) -> None:
+    """A conclusive server rejection is durable and suppresses a re-claim."""
+    github, _clean = _protected_claim_github(
+        merge_result=SimpleNamespace(
+            dry_run=False,
+            malformed=False,
+            transport_error=False,
+            status=status,
+            body={"merged": False},
+            queued=False,
+        )
+    )
+    request = _protected_claim_request()
+
+    first = _run_protected_claim_cycle(github, request, tmp_path)
+
+    assert first.attempted
+    assert github.merge_pr_if_head.call_count == 1
+    store = ProtectedMergeStateStore(tmp_path, _PROTECTED_CLAIM_REPOSITORY)
+    grant = store.claim_merge_attempt(_protected_claim_key())
+    assert grant.reconcile_only
+    assert grant.record.state == "conclusive"
+    assert grant.record.http_status == status
+    assert grant.record.classification == classification
+
+    retry = _run_protected_claim_cycle(github, _protected_claim_request(), tmp_path)
+
+    assert retry.outcome == MERGE_ATTEMPT_CONFLICT
+    assert not retry.attempted
+    assert github.merge_pr_if_head.call_count == 1
+
+
+def test_transport_error_marks_the_claim_ambiguous_forever(tmp_path: Path) -> None:
+    """A lost merge response permanently blocks every identical re-claim."""
+    github, _clean = _protected_claim_github()
+    github.merge_pr_if_head.side_effect = RuntimeError("lost transport")
+    request = _protected_claim_request()
+
+    first = _run_protected_claim_cycle(github, request, tmp_path)
+
+    assert first.outcome == "merge_request_transport_error"
+    assert first.attempted
+    assert github.merge_pr_if_head.call_count == 1
+    store = ProtectedMergeStateStore(tmp_path, _PROTECTED_CLAIM_REPOSITORY)
+    grant = store.claim_merge_attempt(_protected_claim_key())
+    assert grant.reconcile_only
+    assert grant.record.state == "ambiguous"
+    assert grant.record.ambiguous
+
+    retry = _run_protected_claim_cycle(github, _protected_claim_request(), tmp_path)
+
+    assert retry.outcome == MERGE_ATTEMPT_AMBIGUOUS
+    assert not retry.attempted
+    assert github.merge_pr_if_head.call_count == 1
+
+
+def test_merge_queue_admission_uses_no_durable_claim(tmp_path: Path) -> None:
+    """The queue path serializes admission server-side without a claim."""
+    queue_policy = EffectiveMergePolicy(
+        base_branch="main",
+        default_branch="main",
+        required_checks=(),
+        conversation_resolution_enforced=True,
+        bypassable_ruleset_ids=(),
+        strict_update_enforced=True,
+        merge_queue_method="MERGE",
+        check_response_timeout_minutes=5,
+        min_entries_to_merge_wait_minutes=1,
+    )
+    github, _clean = _protected_claim_github(
+        policy=queue_policy,
+        merge_result=SimpleNamespace(
+            dry_run=False,
+            malformed=False,
+            transport_error=False,
+            status=200,
+            body={"merged": False},
+            queued=True,
+        ),
+    )
+    request = _protected_claim_request()
+
+    result = _run_protected_claim_cycle(github, request, tmp_path)
+
+    assert result.outcome == "merge_queued"
+    assert result.attempted
+    assert github.merge_pr_if_head.call_count == 1
+    store = ProtectedMergeStateStore(tmp_path, _PROTECTED_CLAIM_REPOSITORY)
+    # Nothing was recorded: a re-admission after a queue removal stays free.
+    assert store.claim_merge_attempt(_protected_claim_key()).granted
 
 
 @pytest.mark.parametrize(

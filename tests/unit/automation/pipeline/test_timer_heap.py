@@ -269,7 +269,9 @@ class TestRetryDelayConsumption:
                 del shutdown, deadline_s
                 assert isinstance(job, GitHubJob)
                 assert isinstance(job.request, RunMergeWaitCycleRequest)
-                return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
+                return PipelineGitHubJobRunner(org="org", dry_run=False)._run_merge_wait_cycle(
+                    job, job.request, github
+                )
 
         pool.github_job_runner = Runner()
         coordinator.config.budget_overrides["merge"] = 2
@@ -308,10 +310,10 @@ class TestRetryDelayConsumption:
         coordinator._drain_queues()
         assert github.puts == 0
 
-    def test_merge_wait_transport_ambiguity_timer_reentry_is_bounded(
-        self, clocked: tuple[Coordinator, FakeClock]
+    def test_merge_wait_transport_ambiguity_dedupes_after_timer_reentry(
+        self, clocked: tuple[Coordinator, FakeClock], tmp_path: Path
     ) -> None:
-        """An unknown PUT result gets delayed retries and exactly consumes the budget."""
+        """A lost PUT response is claimed once and never issued again."""
 
         class AmbiguousGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -320,6 +322,7 @@ class TestRetryDelayConsumption:
                     pr_state={
                         "state": "OPEN",
                         "headRefOid": "a" * 40,
+                        "baseRefOid": "b" * 40,
                         "baseRefName": "main",
                         "autoMergeRequest": None,
                     },
@@ -339,12 +342,15 @@ class TestRetryDelayConsumption:
                 return {
                     "state": "OPEN",
                     "headRefOid": "a" * 40,
+                    "baseRefOid": "b" * 40,
                     "baseRefName": "main",
                     "autoMergeRequest": None,
                     "mergeable": "MERGEABLE",
                     "mergeStateStatus": "CLEAN",
                 }
 
+        store_root = tmp_path / "protected-merge-root"
+        store_root.mkdir()
         coordinator, clock = clocked
         github = AmbiguousGitHub()
         coordinator.github = github
@@ -365,7 +371,15 @@ class TestRetryDelayConsumption:
                 del shutdown, deadline_s
                 assert isinstance(job, GitHubJob)
                 assert isinstance(job.request, RunMergeWaitCycleRequest)
-                return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
+                rooted = GitHubJob(
+                    repo=job.repo,
+                    repo_root=store_root,
+                    request=job.request,
+                    descr=job.descr,
+                )
+                return PipelineGitHubJobRunner(org="org", dry_run=False)._run_merge_wait_cycle(
+                    rooted, rooted.request, github
+                )
 
         pool.github_job_runner = Runner()
         coordinator.config.budget_overrides["merge"] = 2
@@ -382,6 +396,8 @@ class TestRetryDelayConsumption:
         coordinator._run_item(claim_test_item(coordinator, item))
         coordinator._drain_completions()
 
+        # The first cycle claims the fingerprint, issues one PUT, loses the
+        # response, and parks a timer retry.
         assert github.puts == 1
         assert item.attempts["merge"] == 1
         assert len(coordinator.timers) == 1
@@ -390,14 +406,15 @@ class TestRetryDelayConsumption:
         coordinator._drain_queues()
         coordinator._drain_completions()
 
-        assert github.puts == 2
-        assert item.attempts["merge"] == 2
-        assert item.result is not None
-        assert item.result.reason == "merge_attempts_exhausted"
+        # Reentry finds the permanent ambiguous mark and fails back for a
+        # fresh review proof without issuing another PUT or consuming budget.
+        assert github.puts == 1
+        assert item.attempts["merge"] == 1
+        assert item.stage == StageName.PR_REVIEW
         assert coordinator.timers == []
         coordinator._wake_timers()
         coordinator._drain_queues()
-        assert github.puts == 2
+        assert github.puts == 1
 
 
 class TestStepWatchdog:
