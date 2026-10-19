@@ -219,6 +219,53 @@ def test_installed_service_returns_authenticated_retained_log_pages(
         }
 
 
+def test_ipv6_configuration_selects_ipv6_listener_without_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accept a `::1` configuration, select the IPv6 listener class, and bind no socket."""
+    config, _ = service_config(tmp_path, "::1")
+    real_base = fleet_build_artifact_server._ArtifactHTTPServer
+    real_ipv6 = fleet_build_artifact_server._IPv6ArtifactHTTPServer
+    recorded: list[tuple[str, tuple[str, int]]] = []
+
+    class FakeRecordingServer:
+        label = "unknown"
+
+        def __init__(self, address: tuple[str, int], *_args: Any) -> None:
+            recorded.append((self.label, address))
+            self.server_address = address
+
+        def serve_forever(self, poll_interval: float = 0.5) -> None:
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+        def server_close(self) -> None:
+            pass
+
+        def stop_connections(self) -> list[threading.Thread]:
+            return []
+
+    class FakeIPv4Server(FakeRecordingServer):
+        label = "ipv4"
+
+    class FakeIPv6Server(FakeRecordingServer):
+        label = "ipv6"
+
+    monkeypatch.setattr(fleet_build_artifact_server, "_ArtifactHTTPServer", FakeIPv4Server)
+    monkeypatch.setattr(fleet_build_artifact_server, "_IPv6ArtifactHTTPServer", FakeIPv6Server)
+    service = BuildArtifactServer(config)
+    assert service.host == "::1"
+    try:
+        service.start()
+        assert recorded == [("ipv6", ("::1", 0))]
+    finally:
+        service.stop()
+    assert real_ipv6.address_family is socket.AF_INET6
+    assert real_base.address_family is socket.AF_INET
+
+
 def trusted_socket(ready: dict[str, Any], certificate: Path) -> ssl.SSLSocket:
     """Connect to the test-owned listener with its explicit trust certificate."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
