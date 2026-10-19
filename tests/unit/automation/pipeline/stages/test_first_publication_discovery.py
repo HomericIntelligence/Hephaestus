@@ -514,3 +514,42 @@ def test_restart_refreshes_failed_or_pending_scope_before_recovery(
     assert request.job.request != old_request
     assert item.state == "GATE"
     assert ctx.github.mutation_log == []
+
+
+def test_failed_discovery_logs_the_redacted_detail_once(
+    make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed discovery reports its redacted detail once per item."""
+    stage = ImplementationStage()
+    ctx = make_ctx(github=FakeStageGitHub(labels=[STATE_PLAN_GO]))
+    item = make_work_item(issue=7, state="GATE")
+    request = stage.step(item, ctx)
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, GitJob)
+    result = JobResult(
+        ok=False,
+        value={
+            "publication_discovery_request_id": request.job.kwargs[
+                "publication_discovery_request_id"
+            ],
+            "repository": request.job.transport_repository,
+            "issue_number": request.job.kwargs["issue_number"],
+        },
+        error="The pending rebase directory permissions are unsafe: /tmp/x (mode 0775).",
+    )
+
+    with caplog.at_level("WARNING", logger="hephaestus.automation.pipeline.stages.implementation"):
+        stage.on_job_done(item, result, ctx)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "mode 0775" in messages[0]
+    assert stage.step(item, ctx) == StageOutcome(
+        Disposition.BLOCKED, "first_publication_discovery_failed"
+    )
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="hephaestus.automation.pipeline.stages.implementation"):
+        stage.on_job_done(item, result, ctx)
+
+    assert caplog.records == []

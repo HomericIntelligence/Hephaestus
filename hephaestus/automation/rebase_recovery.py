@@ -25,7 +25,7 @@ _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _Identity = tuple[tuple[int, int], ...]
 
 
-def _owned_directory(info: os.stat_result, *, private: bool) -> None:
+def _owned_directory(info: os.stat_result, path: Path, *, private: bool) -> None:
     """Distinguish protected shared parents from private recovery state."""
     if (
         not stat.S_ISDIR(info.st_mode)
@@ -33,7 +33,10 @@ def _owned_directory(info: os.stat_result, *, private: bool) -> None:
         or info.st_mode & 0o022
         or (private and stat.S_IMODE(info.st_mode) != 0o700)
     ):
-        raise ValueError("The pending rebase directory permissions are unsafe.")
+        raise ValueError(
+            "The pending rebase directory permissions are unsafe: "
+            f"{path} (mode {stat.S_IMODE(info.st_mode):04o})."
+        )
 
 
 @contextmanager
@@ -50,15 +53,17 @@ def _namespace(
     path = common_dir
     try:
         info = os.fstat(descriptor)
-        _owned_directory(info, private=False)
+        _owned_directory(info, common_dir, private=False)
         identities.append((info.st_dev, info.st_ino))
         for component in ("hephaestus-source-workspaces", namespace_name):
+            created = False
             if create:
                 try:
                     os.mkdir(component, 0o700, dir_fd=descriptor)
                 except FileExistsError:
                     pass
                 else:
+                    created = True
                     os.fsync(descriptor)
             try:
                 child = os.open(component, _DIRECTORY_FLAGS, dir_fd=descriptor)
@@ -67,11 +72,15 @@ def _namespace(
                     raise
                 yield None
                 return
+            if created:
+                # The call created this component, so it owns it. A filesystem
+                # that ignores the requested mode still ends at 0700.
+                os.fchmod(child, 0o700)
             os.close(descriptor)
             descriptor = child
             path /= component
             info = os.fstat(descriptor)
-            _owned_directory(info, private=component == namespace_name)
+            _owned_directory(info, path, private=component == namespace_name)
             identities.append((info.st_dev, info.st_ino))
         yield path, descriptor, tuple(identities)
     finally:

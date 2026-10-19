@@ -8589,6 +8589,17 @@ class WorkerPool:
                     error="clone requires non-empty 'repo' and 'dest' kwargs",
                 )
             git_utils.run(["gh", "repo", "clone", repo, dest], cwd=None, timeout=job.timeout_s)
+            git_dir = Path(dest) / ".git"
+            if git_dir.is_dir() and not git_dir.is_symlink():
+                try:
+                    # The clone created this directory, so the loop owns it. A
+                    # group-writable Git directory blocks the recovery layer.
+                    os.chmod(git_dir, 0o755)
+                except OSError as error:
+                    return JobResult(
+                        ok=False,
+                        error=f"clone cannot chmod the Git directory: {error}",
+                    )
             return JobResult(ok=True)
 
         elif job.op == "sync_checkout":

@@ -2545,10 +2545,19 @@ class SourceWorkspaceManager:
 
     def _fsync_state_dir(self) -> None:
         """Flush the state directory after a journal rename or removal."""
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.state_dir.mkdir(mode=0o700, parents=True)
+        except FileExistsError:
+            created = False
+        else:
+            created = True
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         descriptor = os.open(self.state_dir, flags)
         try:
+            if created:
+                # The call created the directory, so it owns it. A filesystem
+                # that ignores the requested mode still ends at 0700.
+                os.fchmod(descriptor, 0o700)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)

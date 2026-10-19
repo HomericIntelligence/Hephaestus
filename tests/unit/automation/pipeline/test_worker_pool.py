@@ -18801,6 +18801,66 @@ class TestGitOps:
         )
         assert result.ok is True
 
+    def test_clone_job_normalizes_the_git_directory_mode(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A clone leaves its own Git directory at a mode the recovery layer accepts."""
+        dest = tmp_path / "dest"
+
+        def fake_run(command: list[str], **_kwargs: object) -> None:
+            assert command[:3] == ["gh", "repo", "clone"]
+            (dest / ".git").mkdir(parents=True)
+            (dest / ".git").chmod(0o775)
+
+        job = GitJob(
+            repo="test/repo",
+            op="clone",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(dest)},
+        )
+        with patch("hephaestus.automation.git_utils.run", side_effect=fake_run):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert stat.S_IMODE((dest / ".git").stat().st_mode) == 0o755
+
+    def test_clone_job_reports_a_failed_mode_normalization(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A clone that cannot normalize its Git directory mode reports the failure."""
+        dest = tmp_path / "dest"
+
+        def fake_run(command: list[str], **_kwargs: object) -> None:
+            assert command[:3] == ["gh", "repo", "clone"]
+            (dest / ".git").mkdir(parents=True)
+
+        job = GitJob(
+            repo="test/repo",
+            op="clone",
+            timeout_s=120,
+            kwargs={"repo": "owner/name", "dest": str(dest)},
+        )
+        with (
+            patch("hephaestus.automation.git_utils.run", side_effect=fake_run),
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.os.chmod",
+                side_effect=OSError("mode is fixed"),
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error is not None
+        assert "chmod" in result.error
+
     def test_sync_checkout_fast_forwards_clean_expected_default_branch(
         self,
         pool: WorkerPool,

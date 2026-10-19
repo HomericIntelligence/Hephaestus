@@ -8,6 +8,7 @@ import os
 import queue
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -3762,3 +3763,47 @@ def test_authorize_writer_transition_ignores_a_receipt_for_a_removed_worktree(
         )
 
     assert armed is False
+
+def test_fsync_state_dir_requests_private_mode_on_create(tmp_path: Path) -> None:
+    """A newly created state directory ends at 0700."""
+    repo, _first, _second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    state_dir = manager.state_dir
+    assert not state_dir.exists()
+
+    manager._fsync_state_dir()
+
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+
+
+def test_fsync_state_dir_normalizes_a_created_directory_ignoring_the_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A created state directory ends at 0700 even when the filesystem ignores the mode."""
+    repo, _first, _second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    state_dir = manager.state_dir
+    real_mkdir = Path.mkdir
+
+    def fake_mkdir(
+        self: Path, mode: int = 0o777, parents: bool = False, exist_ok: bool = False
+    ) -> None:
+        real_mkdir(self, 0o757, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", fake_mkdir)
+    manager._fsync_state_dir()
+
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+
+
+def test_fsync_state_dir_preserves_an_existing_mode(tmp_path: Path) -> None:
+    """An existing state directory keeps its mode."""
+    repo, _first, _second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    state_dir = manager.state_dir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.chmod(0o775)
+
+    manager._fsync_state_dir()
+
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o775
