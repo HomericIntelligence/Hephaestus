@@ -1963,3 +1963,18 @@ def test_intake_lock_interruption_preserves_shutdown_signal(
 
     with pytest.raises(InterruptedError, match="stop"):
         manager.prepare()
+
+
+def test_a_dirty_managed_source_lane_does_not_block_intake(tmp_path: Path) -> None:
+    """A dirty managed source lane is the automation's own work, not a fault."""
+    caller, remote = _make_repository(tmp_path)
+    lane = caller / "build" / ".worktrees" / "auto-7-impl"
+    lane.parent.mkdir(parents=True, exist_ok=True)
+    _run_git(caller, "worktree", "add", "--detach", str(lane), "HEAD")
+    (lane / "tracked.txt").write_text("writer work\n", encoding="utf-8")
+    manager = _manager(caller, remote)
+
+    receipt = manager.prepare()
+
+    assert receipt.path.exists()
+    assert (lane / "tracked.txt").read_text(encoding="utf-8") == "writer work\n"

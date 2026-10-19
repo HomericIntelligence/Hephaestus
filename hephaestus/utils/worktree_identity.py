@@ -16,6 +16,26 @@ def source_worktree_name(item_number: int, lane: str) -> str:
     return f"auto-{item_number}-{lane}"
 
 
+def is_managed_source_lane_path(path: Path) -> bool:
+    """Return whether ``path`` names a managed source lane worktree.
+
+    A managed source lane is the automation's own writer worktree for one
+    issue and lane. It holds uncommitted work while an implementation runs,
+    so a caller must not read its state as a fault.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    if resolved.parent.name != ".worktrees":
+        return False
+    name = resolved.name
+    if not name.startswith("auto-"):
+        return False
+    number, separator, lane = name.removeprefix("auto-").rpartition("-")
+    return bool(separator) and number.isdecimal() and lane in SOURCE_WORKTREE_LANES
+
+
 def is_expected_managed_worktree_path(
     path: Path,
     *,
