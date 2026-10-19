@@ -73,7 +73,11 @@ dev = [
     # advertises.
     "pytest>=9.0,<10",
     "pytest-cov>=7.0,<8",
-    "pre-commit>=3.0,<5",
+    # pre-commit 4.6.1 through 4.6.2 pass the inherited GIT_DIR and
+    # GIT_INDEX_FILE to the npm install of a Node hook during git commit,
+    # which replaces the contribution index with hook-repository entries
+    # (issue #3266). pre-commit 4.7.0 removes the variables at that boundary.
+    "pre-commit>=4.7,<5",
     "ruff>=0.15,<1",
     "mypy>=1.8.0,<3",
     "build>=1.0,<2",
