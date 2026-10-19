@@ -70,3 +70,4 @@ confirm all three.
 | [0055](0055-conditional-manual-rebases.md) | Conditional manual rebases | Accepted |
 | [0056](0056-explicit-host-capabilities-and-operation-recovery.md) | Explicit host capabilities and durable operation recovery | Draft; unconfigured-host blocking superseded by 0057 |
 | [0057](0057-operator-direct-host-verification.md) | Operator-direct host verification without a configured Linux backend | Accepted |
+| [0058](0058-durable-nats-failure-delivery.md) | Durable NATS failure delivery and replay | Accepted |

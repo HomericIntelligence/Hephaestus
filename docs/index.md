@@ -58,7 +58,7 @@ See the [README](../README.md) for installation and development setup instructio
 - [Queue Architecture](architecture.md) — Stage ownership, source proof, journals, and bounded recovery
 - [Queue Cutover](adr/0050-queue-owned-automation-cutover.md) — Current commands and stopped-owner migration
 - [MCP Integration Posture](mcp.md) — Capability boundary, alternative integration contracts, and project-scoped `.mcp.json` change control
-- [NATS JetStream Configuration](nats.md) — TLS defaults, certificate file paths, local plaintext exceptions, and the at-most-once failed-message retention policy for `hephaestus.nats`
+- [NATS JetStream Configuration](nats.md) — TLS, bounded redelivery, durable failure storage, consumer migration, and replay for `hephaestus.nats`
 - [Observability: metrics, alerts, and SLOs](observability.md) — Automation pipeline metric catalog, alert ownership, and SLOs
 - [Operations Runbooks](runbooks/index.md) — Operator recovery procedures for the automation pipeline (loop crash, corrupted worktree, queue merge stall, quota exhaustion)
 - [Performance Testing](performance-testing.md) — Status of the removed bounded worker-pool load lane, the surviving `performance` marker, and how to reintroduce a lane
