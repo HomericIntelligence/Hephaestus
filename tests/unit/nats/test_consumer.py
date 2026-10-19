@@ -70,7 +70,6 @@ def _info(
     ack_floor_seq: int = 0,
     ack_wait: float = 30.0,
     max_deliver: int = 6,
-    idle_heartbeat: float = 10.0,
     filter_subject: str = "hi.tasks.>",
 ) -> ConsumerInfoView:
     return ConsumerInfoView(
@@ -80,7 +79,6 @@ def _info(
         ack_floor_seq=ack_floor_seq,
         ack_wait=ack_wait,
         max_deliver=max_deliver,
-        idle_heartbeat=idle_heartbeat,
         filter_subject=filter_subject,
         snapshot=dict(_SNAPSHOT),
     )
@@ -115,7 +113,7 @@ class TestExplicitConsumerConfig:
     """Tests for the explicit consumer configuration map."""
 
     def test_config_maps_the_bounded_delivery_fields(self) -> None:
-        config = _config(ack_wait_seconds=45.0, max_deliveries=7, heartbeat_interval_seconds=15.0)
+        config = _config(ack_wait_seconds=45.0, max_deliveries=7)
         explicit = explicit_consumer_config(_BINDING, config=config)
         assert explicit == ExplicitConsumerConfig(
             durable_name="durable-a",
@@ -123,7 +121,6 @@ class TestExplicitConsumerConfig:
             ack_policy="explicit",
             ack_wait=45.0,
             max_deliver=7,
-            idle_heartbeat=15.0,
             replay_policy="instant",
             deliver_policy="all",
             opt_start_seq=None,
@@ -170,7 +167,7 @@ class TestConsumerManagerEnsure:
         assert admin.deleted == []
 
     def test_a_compatible_consumer_is_updated_in_place(self) -> None:
-        admin = FakeConsumerAdmin(_info(ack_wait=99.0, max_deliver=99, idle_heartbeat=99.0))
+        admin = FakeConsumerAdmin(_info(ack_wait=99.0, max_deliver=99))
         manager = _manager(admin)
 
         _run(manager.ensure(_BINDING))
@@ -179,7 +176,6 @@ class TestConsumerManagerEnsure:
         _, explicit = admin.added[0]
         assert explicit.ack_wait == 30.0
         assert explicit.max_deliver == 6
-        assert explicit.idle_heartbeat == 10.0
         assert admin.deleted == []
 
     def test_an_incompatible_admission_mode_fails_closed_by_default(self) -> None:

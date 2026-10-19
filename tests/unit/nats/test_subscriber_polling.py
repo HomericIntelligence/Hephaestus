@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -174,6 +175,7 @@ def _install_fake_nats(
     """
     sub = MagicMock()
     sub.fetch = fetch
+    sub.unsubscribe = AsyncMock()
 
     js = MagicMock()
     js.pull_subscribe = AsyncMock(return_value=sub)
@@ -185,6 +187,7 @@ def _install_fake_nats(
     nc.jetstream = MagicMock(return_value=js)
     nc.subscribe = AsyncMock(return_value=advisory_sub)
     nc.drain = AsyncMock()
+    nc.close = AsyncMock()
 
     nats_module = MagicMock()
     nats_module.connect = AsyncMock(return_value=nc)
@@ -455,3 +458,43 @@ def test_handler_failure_is_recorded_naked_and_not_dispatched(
     assert "kind=handler_error" in caplog.text
     assert sensitive_text not in caplog.text
     nc.drain.assert_awaited_once()  # clean drain on loop exit
+
+
+def test_close_connection_unsubscribes_and_drains() -> None:
+    """The graceful shutdown unsubscribes pull subs then drains once."""
+    broker = _FakeBroker()
+    thread = _make_thread(lambda _event: None, broker)
+    sub = MagicMock()
+    sub.unsubscribe = AsyncMock()
+    nc = MagicMock()
+    nc.drain = AsyncMock()
+    nc.close = AsyncMock()
+
+    asyncio.run(thread._close_connection(nc, [(sub, MagicMock())]))
+
+    sub.unsubscribe.assert_awaited_once()
+    nc.drain.assert_awaited_once()
+    nc.close.assert_not_awaited()
+
+
+def test_close_connection_falls_back_to_close_when_drain_stalls() -> None:
+    """A stalled drain falls back to an explicit close (no 30s hang)."""
+    broker = _FakeBroker()
+    thread = _make_thread(lambda _event: None, broker)
+    sub = MagicMock()
+    sub.unsubscribe = AsyncMock()
+
+    async def _stalled_drain() -> None:
+        await asyncio.sleep(60)
+
+    nc = MagicMock()
+    nc.drain = _stalled_drain
+    nc.close = AsyncMock()
+
+    started_at = time.monotonic()
+    asyncio.run(thread._close_connection(nc, [(sub, MagicMock())]))
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 15.0, "the bounded drain never waits out drain_timeout"
+    sub.unsubscribe.assert_awaited_once()
+    nc.close.assert_awaited_once()

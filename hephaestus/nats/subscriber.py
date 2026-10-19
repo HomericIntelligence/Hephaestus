@@ -522,6 +522,7 @@ class NATSSubscriberThread(threading.Thread):
         self._set_state(SubscriberState.CONNECTED)
         try:
             js = nc.jetstream()
+            subscriptions: list[Any] = []
             jetstream_admin, consumer_admin = self._build_admin(js)
             bindings = resolve_bindings(self._config)
             resources = await FailureResources.prepare(jetstream_admin, self._config, bindings)
@@ -571,7 +572,33 @@ class NATSSubscriberThread(threading.Thread):
                 await resources.advisory_reconciler.stop()
         finally:
             self._set_state(SubscriberState.DISCONNECTED)
-            await nc.drain()
+            await self._close_connection(nc, subscriptions)
+
+    async def _close_connection(self, nc: Any, subscriptions: Any) -> None:
+        """Close the connection promptly during shutdown.
+
+        ``nc.drain()`` waits for each subscription's pending queue to
+        join until ``drain_timeout`` (30s by default). A pull
+        subscription holding undelivered messages never finishes that
+        join after the fetch loop exits, so the drain outlives any sane
+        stop deadline. Unsubscribe the pull subscriptions first, drain
+        with a bounded wait, and fall back to ``close()`` when the
+        graceful path fails.
+        """
+        for sub, _binding in subscriptions:
+            try:
+                await sub.unsubscribe()
+            except Exception as exc:
+                logger.debug("pull unsubscribe during shutdown failed: %s", exc)
+                break
+        try:
+            await asyncio.wait_for(nc.drain(), timeout=5.0)
+        except Exception as exc:
+            logger.debug("bounded drain failed; closing the connection: %s", exc)
+            try:
+                await nc.close()
+            except Exception as close_exc:
+                logger.debug("connection close failed: %s", close_exc)
 
     def _build_admin(self, js: Any) -> tuple[Any, Any]:
         """Build the JetStream and consumer admin seams for one context."""

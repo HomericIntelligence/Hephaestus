@@ -1,9 +1,11 @@
 """Explicit pull consumers for the NATS subscriber (#2395).
 
 Durable failure handling needs explicit ``AckPolicy.EXPLICIT`` pull
-consumers with bounded ``ack_wait``, ``max_deliver``, and
-``idle_heartbeat`` values. ``ConsumerManager.ensure`` validates existing
-consumers against that contract:
+consumers with bounded ``ack_wait`` and ``max_deliver`` values.
+(``idle_heartbeat`` is a push-consumer keepalive; real brokers reject it on
+pull consumers, so delivery liveness comes from the bounded
+:class:`DeliveryHeartbeat` instead.) ``ConsumerManager.ensure`` validates
+existing consumers against that contract:
 
 - An absent consumer is created with the explicit configuration.
 - A compatible consumer is reused; tunable drift is updated in place.
@@ -57,7 +59,6 @@ class ExplicitConsumerConfig:
         ack_policy: Acknowledgement policy token (``explicit``).
         ack_wait: Seconds before redelivery without acknowledgement.
         max_deliver: Physical delivery budget before advisories fire.
-        idle_heartbeat: Inactivity heartbeat of the pull consumer.
         replay_policy: Replay policy token (``instant``).
         deliver_policy: Deliver policy token (``all`` or
             ``by_start_sequence``).
@@ -70,7 +71,6 @@ class ExplicitConsumerConfig:
     ack_policy: str
     ack_wait: float
     max_deliver: int
-    idle_heartbeat: float
     replay_policy: str
     deliver_policy: str
     opt_start_seq: int | None
@@ -115,7 +115,6 @@ def explicit_consumer_config(
         ack_policy="explicit",
         ack_wait=config.ack_wait_seconds,
         max_deliver=config.max_deliveries,
-        idle_heartbeat=config.heartbeat_interval_seconds,
         replay_policy="instant",
         deliver_policy=deliver_policy,
         opt_start_seq=opt_start_seq,
@@ -133,7 +132,6 @@ class ConsumerInfoView:
         ack_floor_seq: ``ack_floor.stream_seq`` (0 when unknown).
         ack_wait: Live ``ack_wait`` seconds.
         max_deliver: Live delivery budget.
-        idle_heartbeat: Live inactivity heartbeat seconds.
         filter_subject: Live filter subject.
         snapshot: Complete raw configuration for transparent restore.
 
@@ -145,7 +143,6 @@ class ConsumerInfoView:
     ack_floor_seq: int
     ack_wait: float
     max_deliver: int
-    idle_heartbeat: float
     filter_subject: str
     snapshot: dict[str, Any]
 
@@ -208,12 +205,8 @@ class ConsumerManager:
         return info.ack_policy == "explicit" and info.filter_subject == desired.filter_subject
 
     def _tunables_differ(self, desired: ExplicitConsumerConfig, info: ConsumerInfoView) -> bool:
-        """Detect ack_wait/max_deliver/idle_heartbeat drift (editable)."""
-        return (
-            desired.ack_wait != info.ack_wait
-            or desired.max_deliver != info.max_deliver
-            or desired.idle_heartbeat != info.idle_heartbeat
-        )
+        """Detect ack_wait/max_deliver drift (editable in place)."""
+        return desired.ack_wait != info.ack_wait or desired.max_deliver != info.max_deliver
 
     async def _migrate(self, binding: ConsumerBinding, info: ConsumerInfoView) -> None:
         """Perform the opt-in snapshot/delete/recreate migration.
@@ -405,7 +398,6 @@ class NatsConsumerAdmin:
             ack_floor_seq=int(getattr(ack_floor, "stream_seq", 0) or 0) if ack_floor else 0,
             ack_wait=float(getattr(config, "ack_wait", 0) or 0),
             max_deliver=int(getattr(config, "max_deliver", 0) or 0),
-            idle_heartbeat=float(getattr(config, "idle_heartbeat", 0) or 0),
             filter_subject=str(getattr(config, "filter_subject", "") or ""),
             snapshot=_consumer_config_snapshot(config),
         )
@@ -441,7 +433,6 @@ def _to_nats_consumer_config(config: ExplicitConsumerConfig) -> Any:
         "ack_policy": config.ack_policy,
         "ack_wait": config.ack_wait,
         "max_deliver": config.max_deliver,
-        "idle_heartbeat": config.idle_heartbeat,
         "replay_policy": config.replay_policy,
         "deliver_policy": config.deliver_policy,
     }
