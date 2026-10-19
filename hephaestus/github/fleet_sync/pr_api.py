@@ -51,19 +51,27 @@ def _gh(
 
 
 def _ci_state(checks: list[dict[str, Any]]) -> str:
-    """Reduce a statusCheckRollup list to a single state string."""
+    """Reduce a statusCheckRollup list to a single state string.
+
+    Only recognized conclusions count. An absent or null conclusion means the
+    check still runs. An unrecognized or empty conclusion is UNKNOWN; it never
+    falls back to the check state.
+    """
     if not checks:
         return "UNKNOWN"
     bad = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR", "failure", "error"}
     pending = {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "pending"}
-    conclusions = {c.get("conclusion") or c.get("state", "PENDING") for c in checks}
-    if any(c is None for c in (c.get("conclusion") for c in checks)):
+    success = {"SUCCESS", "NEUTRAL", "SKIPPED", "success"}
+    if any(c.get("conclusion") is None for c in checks):
         return "PENDING"
+    conclusions = {c.get("conclusion") for c in checks}
     if conclusions & bad:
         return "FAILURE"
     if conclusions & pending:
         return "PENDING"
-    return "SUCCESS"
+    if conclusions <= success:
+        return "SUCCESS"
+    return "UNKNOWN"
 
 
 def _fetch_pr_ci_state(
@@ -131,16 +139,16 @@ def list_prs(
 
         if mergeable == "CONFLICTING":
             status = PRStatus.CONFLICTED
-        elif merge_state == "BEHIND":
+        elif mergeable != "MERGEABLE":
+            # Unknown mergeability is not permission to touch the branch.
             status = PRStatus.WAITING
-        elif ci == "FAILURE" and merge_state == "CLEAN":
-            status = PRStatus.FAILING
         elif merge_state == "CLEAN" and ci == "SUCCESS":
             status = PRStatus.READY
-        elif merge_state in ("BLOCKED", "DIRTY"):
-            status = PRStatus.CONFLICTED if mergeable == "CONFLICTING" else PRStatus.OUTDATED
+        elif merge_state == "CLEAN" and ci == "FAILURE":
+            status = PRStatus.FAILING
         else:
-            status = PRStatus.OUTDATED
+            # Ambiguous, blocked, pending, or unknown readiness waits.
+            status = PRStatus.WAITING
 
         out.append(
             PRInfo(

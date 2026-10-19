@@ -97,6 +97,42 @@ class TestCiState:
         ]
         assert _ci_state(checks) == "FAILURE"
 
+    def test_neutral_and_skipped_are_success(self) -> None:
+        """NEUTRAL and SKIPPED conclusions are recognized successes."""
+        checks = [
+            {"conclusion": "NEUTRAL", "state": "COMPLETED"},
+            {"conclusion": "SKIPPED", "state": "COMPLETED"},
+        ]
+        assert _ci_state(checks) == "SUCCESS"
+
+    def test_legacy_lowercase_success_is_success(self) -> None:
+        """The legacy lowercase success conclusion is a recognized success."""
+        checks = [{"conclusion": "success", "state": "success"}]
+        assert _ci_state(checks) == "SUCCESS"
+
+    def test_future_conclusion_is_unknown(self) -> None:
+        """An unrecognized conclusion reduces to UNKNOWN, never SUCCESS."""
+        checks = [{"conclusion": "FUTURE_CONCLUSION", "state": "COMPLETED"}]
+        assert _ci_state(checks) == "UNKNOWN"
+
+    def test_empty_conclusion_does_not_use_state(self) -> None:
+        """An empty conclusion must not fall back to a successful state value."""
+        checks = [{"conclusion": "", "state": "SUCCESS"}]
+        assert _ci_state(checks) == "UNKNOWN"
+
+    def test_failure_with_unrecognized_conclusion_stays_failure(self) -> None:
+        """A recognized failure beats an unrecognized non-null conclusion."""
+        checks = [
+            {"conclusion": "FAILURE", "state": "COMPLETED"},
+            {"conclusion": "FUTURE_CONCLUSION", "state": "COMPLETED"},
+        ]
+        assert _ci_state(checks) == "FAILURE"
+
+    def test_state_only_record_stays_pending(self) -> None:
+        """A record without a conclusion key keeps waiting."""
+        checks = [{"state": "SUCCESS"}]
+        assert _ci_state(checks) == "PENDING"
+
 
 class TestPRStatus:
     """Tests for PRStatus enum values."""
@@ -839,6 +875,49 @@ _ORIGIN_URLS = (
     ("https://github.com/example/RepoA.git",),
     ("https://github.com/example/RepoA.git",),
 )
+
+
+_ROLLUP_SUCCESS: list[dict[str, Any]] = [{"conclusion": "SUCCESS", "state": "SUCCESS"}]
+_ROLLUP_FAILURE: list[dict[str, Any]] = [{"conclusion": "FAILURE", "state": "FAILURE"}]
+_ROLLUP_PENDING: list[dict[str, Any]] = [{"conclusion": "IN_PROGRESS", "state": "IN_PROGRESS"}]
+_ROLLUP_NEUTRAL_SKIPPED: list[dict[str, Any]] = [
+    {"conclusion": "NEUTRAL", "state": "COMPLETED"},
+    {"conclusion": "SKIPPED", "state": "COMPLETED"},
+]
+_ROLLUP_LEGACY_SUCCESS: list[dict[str, Any]] = [{"conclusion": "success", "state": "success"}]
+_ROLLUP_FUTURE: list[dict[str, Any]] = [{"conclusion": "FUTURE_CONCLUSION", "state": "FUTURE"}]
+_ROLLUP_NO_CHECKS: list[dict[str, Any]] = []
+
+
+def _gh_pr_payload(number: int, *, mergeable: str, merge_state: str) -> dict[str, Any]:
+    """Build the `gh pr list` JSON record for one pull request."""
+    return {
+        "number": number,
+        "title": "t",
+        "headRefName": "feat",
+        "baseRefName": "main",
+        "headRefOid": "deadbeef",
+        "mergeable": mergeable,
+        "mergeStateStatus": merge_state,
+    }
+
+
+def _readonly_gh(prs_payload: list[dict[str, Any]], rollup: list[dict[str, Any]]) -> Any:
+    """Fake the GitHub adapter and permit only the list and CI-view reads."""
+
+    def fake_gh(args: list[str], repo: str | None = None, **kwargs: Any) -> MagicMock:
+        if args[:2] == ["pr", "list"]:
+            return MagicMock(stdout=json.dumps(prs_payload))
+        if args[:2] == ["pr", "view"] and "statusCheckRollup" in args:
+            return MagicMock(stdout=json.dumps({"statusCheckRollup": rollup}))
+        raise AssertionError(f"unexpected GitHub command: {args!r}")
+
+    return fake_gh
+
+
+def _fail_on_call(name: str) -> MagicMock:
+    """Return a seam mock that fails the test when it runs."""
+    return MagicMock(side_effect=AssertionError(f"{name} must not run"))
 
 
 class TestResolveConflictWithAgent:
@@ -2049,6 +2128,154 @@ class TestProcessRepoRoutes:
         ensure.assert_not_called()
         rebase.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("mergeable", "merge_state", "rollup"),
+        [
+            pytest.param("MERGEABLE", "BLOCKED", _ROLLUP_SUCCESS, id="blocked-success"),
+            pytest.param("MERGEABLE", "BLOCKED", _ROLLUP_FAILURE, id="blocked-failure"),
+            pytest.param("MERGEABLE", "DIRTY", _ROLLUP_SUCCESS, id="dirty-success"),
+            pytest.param("MERGEABLE", "UNSTABLE", _ROLLUP_FAILURE, id="unstable-failure"),
+            pytest.param("MERGEABLE", "HAS_HOOKS", _ROLLUP_PENDING, id="has-hooks-pending"),
+            pytest.param("MERGEABLE", "DRAFT", _ROLLUP_NO_CHECKS, id="draft-no-checks"),
+            pytest.param("MERGEABLE", "UNKNOWN", _ROLLUP_SUCCESS, id="unknown-state"),
+            pytest.param("MERGEABLE", "FUTURE_STATE", _ROLLUP_SUCCESS, id="future-state"),
+            pytest.param("UNKNOWN", "CLEAN", _ROLLUP_SUCCESS, id="unknown-mergeable-success"),
+            pytest.param("UNKNOWN", "CLEAN", _ROLLUP_FAILURE, id="unknown-mergeable-failure"),
+            pytest.param("MERGEABLE", "CLEAN", _ROLLUP_PENDING, id="clean-pending"),
+            pytest.param("MERGEABLE", "CLEAN", _ROLLUP_NO_CHECKS, id="clean-no-checks"),
+            pytest.param("MERGEABLE", "CLEAN", _ROLLUP_FUTURE, id="clean-future-ci"),
+        ],
+    )
+    def test_process_repo_waits_without_mutations(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mergeable: str,
+        merge_state: str,
+        rollup: list[dict[str, Any]],
+    ) -> None:
+        """An ambiguous non-conflicting PR records one skip and no mutation.
+
+        The real list_prs() classifier runs against a read-only GitHub adapter.
+        A clone, rebase, conflict agent, or any other GitHub or Git call fails
+        the test.
+        """
+        payload = [_gh_pr_payload(7, mergeable=mergeable, merge_state=merge_state)]
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
+        monkeypatch.setattr(fleet_pr_api, "_gh", _readonly_gh(payload, rollup))
+
+        with (
+            patch.object(fleet_coordinator, "ensure_repo_clone", _fail_on_call("clone")),
+            patch.object(fleet_coordinator, "rebase_and_resign", _fail_on_call("rebase")),
+            patch.object(
+                fleet_coordinator,
+                "resolve_conflict_with_agent",
+                _fail_on_call("conflict agent"),
+            ),
+        ):
+            counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
+
+        assert counts == {
+            "merged": 0,
+            "rebased": 0,
+            "conflict_resolved": 0,
+            "skipped": 1,
+            "failed": 0,
+        }
+
+    def test_process_repo_conflict_dispatch_uses_live_classifier(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CONFLICTING response keeps conflict dispatch through real list_prs()."""
+        payload = [_gh_pr_payload(7, mergeable="CONFLICTING", merge_state="DIRTY")]
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
+        monkeypatch.setattr(fleet_pr_api, "_gh", _readonly_gh(payload, _ROLLUP_FAILURE))
+
+        with (
+            patch.object(
+                fleet_coordinator, "ensure_repo_clone", return_value=tmp_path / "RepoA"
+            ) as ensure,
+            patch.object(
+                fleet_coordinator, "resolve_conflict_with_agent", return_value=True
+            ) as resolve,
+            patch.object(fleet_coordinator, "rebase_and_resign") as rebase,
+        ):
+            counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
+
+        assert counts["conflict_resolved"] == 1
+        assert counts["rebased"] == 0
+        assert counts["failed"] == 0
+        ensure.assert_called_once()
+        resolve.assert_called_once()
+        rebase.assert_not_called()
+
+    def test_process_repo_conflict_skip_uses_live_classifier(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--skip-conflict-resolution still avoids clone and agent dispatch."""
+        payload = [_gh_pr_payload(7, mergeable="CONFLICTING", merge_state="DIRTY")]
+        args = MagicMock(dry_run=False, skip_conflict_resolution=True, agent="codex")
+        monkeypatch.setattr(fleet_pr_api, "_gh", _readonly_gh(payload, _ROLLUP_SUCCESS))
+
+        with (
+            patch.object(fleet_coordinator, "ensure_repo_clone", _fail_on_call("clone")),
+            patch.object(
+                fleet_coordinator,
+                "resolve_conflict_with_agent",
+                _fail_on_call("conflict agent"),
+            ),
+        ):
+            counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
+
+        assert counts["skipped"] == 1
+        assert counts["failed"] == 0
+
+    def test_process_repo_ready_control_uses_live_classifier(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MERGEABLE+CLEAN with green CI stays READY and is left for the queue."""
+        payload = [_gh_pr_payload(7, mergeable="MERGEABLE", merge_state="CLEAN")]
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
+        monkeypatch.setattr(fleet_pr_api, "_gh", _readonly_gh(payload, _ROLLUP_SUCCESS))
+
+        with (
+            patch.object(fleet_coordinator, "ensure_repo_clone", _fail_on_call("clone")),
+            patch.object(fleet_coordinator, "rebase_and_resign", _fail_on_call("rebase")),
+            patch.object(
+                fleet_coordinator,
+                "resolve_conflict_with_agent",
+                _fail_on_call("conflict agent"),
+            ),
+        ):
+            counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
+
+        assert counts["skipped"] == 1
+        assert counts["rebased"] == 0
+        assert counts["failed"] == 0
+
+    def test_process_repo_failing_control_uses_live_classifier(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MERGEABLE+CLEAN with red CI stays FAILING and is skipped untouched."""
+        payload = [_gh_pr_payload(7, mergeable="MERGEABLE", merge_state="CLEAN")]
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
+        monkeypatch.setattr(fleet_pr_api, "_gh", _readonly_gh(payload, _ROLLUP_FAILURE))
+
+        with (
+            patch.object(fleet_coordinator, "ensure_repo_clone", _fail_on_call("clone")),
+            patch.object(fleet_coordinator, "rebase_and_resign", _fail_on_call("rebase")),
+            patch.object(
+                fleet_coordinator,
+                "resolve_conflict_with_agent",
+                _fail_on_call("conflict agent"),
+            ),
+        ):
+            counts = fleet_coordinator.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
+
+        assert counts["skipped"] == 1
+        assert counts["rebased"] == 0
+        assert counts["failed"] == 0
+
     def test_process_repo_records_list_prs_failure(self, tmp_path: Path) -> None:
         """Repository listing failures are surfaced in the failed count."""
         args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="codex", model="")
@@ -2443,74 +2670,276 @@ class TestListPrs:
 
 
 class TestPrClassification:
-    """Regression tests for pull-request readiness classification."""
+    """Ordered readiness classification through the public list_prs()."""
 
-    def _classify(self, monkeypatch, *, mergeable: str, state: str, ci: str):
+    def _classify(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        mergeable: str,
+        state: str,
+        rollup: list[dict[str, Any]],
+        omit: frozenset[str] = frozenset(),
+    ) -> PRStatus:
         """Run list_prs with a single stubbed PR and return its PRStatus."""
-
-        def fake_gh(args, repo=None, **kwargs):
-            if args[:2] == ["pr", "list"]:
-                return MagicMock(
-                    stdout=json.dumps(
-                        [
-                            {
-                                "number": 1,
-                                "title": "t",
-                                "headRefName": "h",
-                                "baseRefName": "main",
-                                "headRefOid": "sha",
-                                "mergeable": mergeable,
-                                "mergeStateStatus": state,
-                            }
-                        ]
-                    )
-                )
-            # per-PR CI fetch: map desired ci_state to a rollup
-            rollup = []
-            if ci == "FAILURE":
-                rollup = [{"conclusion": "FAILURE", "state": "FAILURE"}]
-            elif ci == "SUCCESS":
-                rollup = [{"conclusion": "SUCCESS", "state": "SUCCESS"}]
-            elif ci == "PENDING":
-                rollup = [{"conclusion": "IN_PROGRESS", "state": "IN_PROGRESS"}]
-            return MagicMock(stdout=json.dumps({"statusCheckRollup": rollup}))
-
-        monkeypatch.setattr(fleet_pr_api, "_gh", fake_gh)
+        payload = _gh_pr_payload(1, mergeable=mergeable, merge_state=state)
+        for key in omit:
+            del payload[key]
+        monkeypatch.setattr(fleet_pr_api, "_gh", _readonly_gh([payload], rollup))
         return fleet_pr_api.list_prs("Hephaestus", "HomericIntelligence")[0].status
 
-    def test_blocked_mergeable_failing_is_outdated(self, monkeypatch) -> None:
-        """BLOCKED+MERGEABLE with red CI = stale failure → rebase (OUTDATED)."""
-        assert (
-            self._classify(monkeypatch, mergeable="MERGEABLE", state="BLOCKED", ci="FAILURE")
-            == PRStatus.OUTDATED
-        )
+    @pytest.mark.parametrize(
+        ("mergeable", "state", "rollup", "expected"),
+        [
+            pytest.param(
+                "CONFLICTING",
+                "CLEAN",
+                _ROLLUP_SUCCESS,
+                PRStatus.CONFLICTED,
+                id="conflicting-clean-success",
+            ),
+            pytest.param(
+                "CONFLICTING",
+                "CLEAN",
+                _ROLLUP_FAILURE,
+                PRStatus.CONFLICTED,
+                id="conflicting-clean-failure",
+            ),
+            pytest.param(
+                "CONFLICTING",
+                "DIRTY",
+                _ROLLUP_SUCCESS,
+                PRStatus.CONFLICTED,
+                id="conflicting-dirty-success",
+            ),
+            pytest.param(
+                "CONFLICTING",
+                "BLOCKED",
+                _ROLLUP_PENDING,
+                PRStatus.CONFLICTED,
+                id="conflicting-blocked-pending",
+            ),
+            pytest.param(
+                "CONFLICTING",
+                "BEHIND",
+                _ROLLUP_NO_CHECKS,
+                PRStatus.CONFLICTED,
+                id="conflicting-behind-no-checks",
+            ),
+            pytest.param(
+                "CONFLICTING",
+                "UNSTABLE",
+                _ROLLUP_FAILURE,
+                PRStatus.CONFLICTED,
+                id="conflicting-unstable-failure",
+            ),
+            pytest.param(
+                "UNKNOWN",
+                "CLEAN",
+                _ROLLUP_SUCCESS,
+                PRStatus.WAITING,
+                id="unknown-mergeable-clean-success",
+            ),
+            pytest.param(
+                "UNKNOWN",
+                "CLEAN",
+                _ROLLUP_FAILURE,
+                PRStatus.WAITING,
+                id="unknown-mergeable-clean-failure",
+            ),
+            pytest.param(
+                "UNKNOWN",
+                "BEHIND",
+                _ROLLUP_PENDING,
+                PRStatus.WAITING,
+                id="unknown-mergeable-behind-pending",
+            ),
+            pytest.param(
+                "", "CLEAN", _ROLLUP_SUCCESS, PRStatus.WAITING, id="empty-mergeable-waits"
+            ),
+            pytest.param(
+                "FUTURE_MERGEABLE",
+                "CLEAN",
+                _ROLLUP_SUCCESS,
+                PRStatus.WAITING,
+                id="future-mergeable-waits",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "CLEAN",
+                _ROLLUP_NEUTRAL_SKIPPED,
+                PRStatus.READY,
+                id="clean-neutral-skipped-ready",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "CLEAN",
+                _ROLLUP_LEGACY_SUCCESS,
+                PRStatus.READY,
+                id="clean-legacy-success-ready",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "CLEAN",
+                _ROLLUP_PENDING,
+                PRStatus.WAITING,
+                id="clean-pending-waits",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "CLEAN",
+                _ROLLUP_NO_CHECKS,
+                PRStatus.WAITING,
+                id="clean-no-checks-waits",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "CLEAN",
+                _ROLLUP_FUTURE,
+                PRStatus.WAITING,
+                id="clean-future-ci-waits",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "BLOCKED",
+                _ROLLUP_SUCCESS,
+                PRStatus.WAITING,
+                id="blocked-success-waits",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "DIRTY",
+                _ROLLUP_SUCCESS,
+                PRStatus.WAITING,
+                id="dirty-success-waits",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "DIRTY",
+                _ROLLUP_FAILURE,
+                PRStatus.WAITING,
+                id="dirty-failure-waits",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "UNSTABLE",
+                _ROLLUP_SUCCESS,
+                PRStatus.WAITING,
+                id="unstable-waits",
+            ),
+            pytest.param("MERGEABLE", "DRAFT", _ROLLUP_SUCCESS, PRStatus.WAITING, id="draft-waits"),
+            pytest.param(
+                "MERGEABLE",
+                "HAS_HOOKS",
+                _ROLLUP_SUCCESS,
+                PRStatus.WAITING,
+                id="has-hooks-waits",
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "UNKNOWN",
+                _ROLLUP_SUCCESS,
+                PRStatus.WAITING,
+                id="unknown-state-waits",
+            ),
+            pytest.param(
+                "MERGEABLE", "", _ROLLUP_SUCCESS, PRStatus.WAITING, id="empty-state-waits"
+            ),
+            pytest.param(
+                "MERGEABLE",
+                "FUTURE_STATE",
+                _ROLLUP_SUCCESS,
+                PRStatus.WAITING,
+                id="future-state-waits",
+            ),
+        ],
+    )
+    def test_ordered_classification_matrix(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mergeable: str,
+        state: str,
+        rollup: list[dict[str, Any]],
+        expected: PRStatus,
+    ) -> None:
+        """Only explicit MERGEABLE readiness can leave the WAITING state."""
+        status = self._classify(monkeypatch, mergeable=mergeable, state=state, rollup=rollup)
+        assert status == expected
 
-    @pytest.mark.parametrize("ci", ["FAILURE", "SUCCESS", "PENDING", "UNKNOWN"])
-    def test_behind_is_waiting(self, monkeypatch: pytest.MonkeyPatch, ci: str) -> None:
-        """A BEHIND result waits and does not depend on the CI result."""
+    @pytest.mark.parametrize(
+        "omit",
+        [
+            pytest.param(frozenset({"mergeable"}), id="absent-mergeable"),
+            pytest.param(frozenset({"mergeStateStatus"}), id="absent-merge-state"),
+            pytest.param(frozenset({"mergeable", "mergeStateStatus"}), id="absent-both"),
+        ],
+    )
+    def test_absent_merge_fields_wait(
+        self, monkeypatch: pytest.MonkeyPatch, omit: frozenset[str]
+    ) -> None:
+        """Absent GitHub readiness fields are ambiguous, so the PR waits."""
         assert (
-            self._classify(monkeypatch, mergeable="MERGEABLE", state="BEHIND", ci=ci)
+            self._classify(
+                monkeypatch,
+                mergeable="MERGEABLE",
+                state="CLEAN",
+                rollup=_ROLLUP_SUCCESS,
+                omit=omit,
+            )
             == PRStatus.WAITING
         )
 
-    def test_clean_failing_is_failing(self, monkeypatch) -> None:
+    def test_blocked_mergeable_failing_waits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """BLOCKED with red CI is ambiguous, not a rebase permission (#3218)."""
+        assert (
+            self._classify(
+                monkeypatch, mergeable="MERGEABLE", state="BLOCKED", rollup=_ROLLUP_FAILURE
+            )
+            == PRStatus.WAITING
+        )
+
+    @pytest.mark.parametrize(
+        "rollup",
+        [
+            pytest.param(_ROLLUP_FAILURE, id="ci-failure"),
+            pytest.param(_ROLLUP_SUCCESS, id="ci-success"),
+            pytest.param(_ROLLUP_PENDING, id="ci-pending"),
+            pytest.param(_ROLLUP_NO_CHECKS, id="ci-unknown"),
+        ],
+    )
+    def test_behind_is_waiting(
+        self, monkeypatch: pytest.MonkeyPatch, rollup: list[dict[str, Any]]
+    ) -> None:
+        """A BEHIND result waits and does not depend on the CI result."""
+        assert (
+            self._classify(monkeypatch, mergeable="MERGEABLE", state="BEHIND", rollup=rollup)
+            == PRStatus.WAITING
+        )
+
+    def test_clean_failing_is_failing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """CLEAN (up to date) with red CI = genuine PR failure → skip (FAILING)."""
         assert (
-            self._classify(monkeypatch, mergeable="MERGEABLE", state="CLEAN", ci="FAILURE")
+            self._classify(
+                monkeypatch, mergeable="MERGEABLE", state="CLEAN", rollup=_ROLLUP_FAILURE
+            )
             == PRStatus.FAILING
         )
 
-    def test_conflicting_is_conflicted(self, monkeypatch) -> None:
+    def test_conflicting_is_conflicted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """CONFLICTING always classifies as CONFLICTED regardless of CI."""
         assert (
-            self._classify(monkeypatch, mergeable="CONFLICTING", state="DIRTY", ci="FAILURE")
+            self._classify(
+                monkeypatch, mergeable="CONFLICTING", state="DIRTY", rollup=_ROLLUP_FAILURE
+            )
             == PRStatus.CONFLICTED
         )
 
-    def test_clean_success_is_ready(self, monkeypatch) -> None:
+    def test_clean_success_is_ready(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """CLEAN + green CI = READY."""
         assert (
-            self._classify(monkeypatch, mergeable="MERGEABLE", state="CLEAN", ci="SUCCESS")
+            self._classify(
+                monkeypatch, mergeable="MERGEABLE", state="CLEAN", rollup=_ROLLUP_SUCCESS
+            )
             == PRStatus.READY
         )
 
