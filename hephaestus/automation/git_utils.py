@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,74 @@ class SigningEnvironmentUnavailableError(RuntimeError):
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
     """Return a ``run`` kwargs fragment only when a timeout was provided."""
     return {} if timeout is None else {"timeout": timeout}
+
+
+_REBASE_STATE_DIRS = ("rebase-merge", "rebase-apply")
+_MAX_GIT_REF_LENGTH = 1024
+
+
+def _detached_rebase_branch_ref(
+    worktree_path: Path,
+    *,
+    common_git_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = run,
+    timeout: int | None = None,
+    shutdown: threading.Event | None = None,
+) -> str | None:
+    """Return a worktree's active rebase branch, if present.
+
+    The probe is deliberate and read-only: it reads the ``head-name``
+    metadata of a rebase in progress and refuses symlinked, escaping, or
+    invalid metadata. ``runner`` defaults to the module ``run`` helper so a
+    caller with its own controlled Git environment can inject its pathway.
+    """
+    if not worktree_path.is_dir():
+        raise RuntimeError(f"Detached worktree path is unavailable: {worktree_path}")
+    discovered: set[str] = set()
+    execution_options = _timeout_kw(timeout)
+    if shutdown is not None:
+        execution_options["shutdown"] = shutdown
+    for state_dir in _REBASE_STATE_DIRS:
+        result = runner(
+            [
+                "git",
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                f"{state_dir}/head-name",
+            ],
+            cwd=worktree_path,
+            capture_output=True,
+            check=False,
+            log_errors=False,
+            **execution_options,
+        )
+        raw_path = (result.stdout or "").strip()
+        if result.returncode != 0 or not raw_path or "\n" in raw_path:
+            raise RuntimeError(f"Cannot inspect detached worktree metadata: {worktree_path}")
+        metadata_path = Path(raw_path)
+        if metadata_path.is_symlink():
+            raise RuntimeError(f"Rebase metadata path is a symlink: {metadata_path}")
+        resolved_path = metadata_path.resolve(strict=False)
+        if not resolved_path.is_relative_to(common_git_dir):
+            raise RuntimeError(f"Rebase metadata escapes common Git directory: {metadata_path}")
+        if not resolved_path.exists():
+            continue
+        if not resolved_path.is_file() or resolved_path.stat().st_size > _MAX_GIT_REF_LENGTH:
+            raise RuntimeError(f"Rebase branch metadata is invalid: {metadata_path}")
+        raw_ref = resolved_path.read_text(encoding="utf-8")
+        ref = raw_ref.removesuffix("\n")
+        if (
+            not ref.startswith("refs/heads/")
+            or not ref.removeprefix("refs/heads/")
+            or len(ref) > _MAX_GIT_REF_LENGTH
+            or any(ord(character) < 32 or ord(character) == 127 for character in ref)
+        ):
+            raise RuntimeError(f"Rebase branch metadata is invalid: {metadata_path}")
+        discovered.add(ref)
+    if len(discovered) > 1:
+        raise RuntimeError(f"Detached worktree has conflicting rebase metadata: {worktree_path}")
+    return next(iter(discovered), None)
 
 
 def issue_auto_impl_branch_name(issue_number: int | str) -> str:

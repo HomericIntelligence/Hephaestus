@@ -44,7 +44,7 @@ from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
 
-from .git_utils import get_repo_root, is_clean_working_tree, run
+from .git_utils import _detached_rebase_branch_ref, get_repo_root, is_clean_working_tree, run
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +54,6 @@ _AUTOMATION_PROMPT_PREFIXES = (
     ".claude-prompt-",
     ".claude-followup-",
 )
-_REBASE_STATE_DIRS = ("rebase-merge", "rebase-apply")
-_MAX_GIT_REF_LENGTH = 1024
 
 
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
@@ -2383,55 +2381,12 @@ class WorktreeManager:
         shutdown: threading.Event | None = None,
     ) -> str | None:
         """Return a detached worktree's active rebase branch, if present."""
-        if not worktree_path.is_dir():
-            raise RuntimeError(f"Detached worktree path is unavailable: {worktree_path}")
-        discovered: set[str] = set()
-        execution_options = _timeout_kw(timeout)
-        if shutdown is not None:
-            execution_options["shutdown"] = shutdown
-        for state_dir in _REBASE_STATE_DIRS:
-            result = run(
-                [
-                    "git",
-                    "rev-parse",
-                    "--path-format=absolute",
-                    "--git-path",
-                    f"{state_dir}/head-name",
-                ],
-                cwd=worktree_path,
-                capture_output=True,
-                check=False,
-                log_errors=False,
-                **execution_options,
-            )
-            raw_path = (result.stdout or "").strip()
-            if result.returncode != 0 or not raw_path or "\n" in raw_path:
-                raise RuntimeError(f"Cannot inspect detached worktree metadata: {worktree_path}")
-            metadata_path = Path(raw_path)
-            if metadata_path.is_symlink():
-                raise RuntimeError(f"Rebase metadata path is a symlink: {metadata_path}")
-            resolved_path = metadata_path.resolve(strict=False)
-            if not resolved_path.is_relative_to(common_git_dir):
-                raise RuntimeError(f"Rebase metadata escapes common Git directory: {metadata_path}")
-            if not resolved_path.exists():
-                continue
-            if not resolved_path.is_file() or resolved_path.stat().st_size > _MAX_GIT_REF_LENGTH:
-                raise RuntimeError(f"Rebase branch metadata is invalid: {metadata_path}")
-            raw_ref = resolved_path.read_text(encoding="utf-8")
-            ref = raw_ref.removesuffix("\n")
-            if (
-                not ref.startswith("refs/heads/")
-                or not ref.removeprefix("refs/heads/")
-                or len(ref) > _MAX_GIT_REF_LENGTH
-                or any(ord(character) < 32 or ord(character) == 127 for character in ref)
-            ):
-                raise RuntimeError(f"Rebase branch metadata is invalid: {metadata_path}")
-            discovered.add(ref)
-        if len(discovered) > 1:
-            raise RuntimeError(
-                f"Detached worktree has conflicting rebase metadata: {worktree_path}"
-            )
-        return next(iter(discovered), None)
+        return _detached_rebase_branch_ref(
+            worktree_path,
+            common_git_dir=common_git_dir,
+            timeout=timeout,
+            shutdown=shutdown,
+        )
 
     def list_worktrees(
         self,
