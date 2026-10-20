@@ -125,6 +125,7 @@ __all__ = [
     "athena_advise_failure_reason",
     "planning_source_revision",
     "planning_source_workspace_binding",
+    "source_job_cwd",
     "source_workspace_binding",
     "stage_model",
     "stage_timeout",
@@ -774,8 +775,17 @@ def source_workspace_binding(
     revision: str | None = None,
     branch: str | None = None,
     preparation_timeout_s: float | None = None,
-) -> WorkspaceBinding:
-    """Prepare the required source lane within a bounded operation."""
+) -> WorkspaceBinding | None:
+    """Prepare the required source lane within a bounded operation.
+
+    In a dry run, return ``None`` at once. A dry run previews a job and does
+    not submit it, so it does not resolve or prepare a source workspace and
+    it does not need revision evidence. A normal run keeps the full-revision
+    gate: a source-reading job without a captured full revision still raises
+    ``RuntimeError`` after this branch.
+    """
+    if ctx.dry_run:
+        return None
     manager = ctx.paths.source_workspaces
     if callable(manager):
         manager = manager()
@@ -850,8 +860,15 @@ def planning_source_workspace_binding(
     ctx: StageContext,
     *,
     preparation_timeout_s: float | None = None,
-) -> WorkspaceBinding:
-    """Prepare the detached review lane for the captured planning source."""
+) -> WorkspaceBinding | None:
+    """Prepare the detached review lane for the captured planning source.
+
+    In a dry run, return ``None`` at once, before the planning revision is
+    resolved. A dry run previews the job and does not submit it, and the repo
+    stage does not capture a full revision in a dry run.
+    """
+    if ctx.dry_run:
+        return None
     return source_workspace_binding(
         item,
         ctx,
@@ -860,6 +877,19 @@ def planning_source_workspace_binding(
         branch=None,
         preparation_timeout_s=preparation_timeout_s,
     )
+
+
+def source_job_cwd(workspace: WorkspaceBinding | None, ctx: StageContext) -> Path:
+    """Return the working directory for one previewed or prepared source job.
+
+    A prepared source workspace supplies its own working directory. In a dry
+    run there is no prepared workspace, so return the configured worktree
+    path. Production runs use one path for both the worktree and the
+    repository root, and a dry run never executes the previewed job.
+    """
+    if workspace is not None:
+        return workspace.cwd
+    return Path(str(ctx.paths.worktree))
 
 
 def _require_issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:

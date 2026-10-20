@@ -1108,8 +1108,12 @@ def _source_workspace_preparation_failure(
 def _prepare_planning_workspace(
     item: WorkItem,
     ctx: StageContext,
-) -> WorkspaceBinding | StageOutcome:
-    """Prepare a planning source lane and classify bounded preparation failures."""
+) -> WorkspaceBinding | StageOutcome | None:
+    """Prepare a planning source lane and classify bounded preparation failures.
+
+    Returns ``None`` in a dry run: the coordinator previews the job and does
+    not submit it, so no source workspace is prepared.
+    """
     try:
         return planning_source_workspace_binding(
             item,
@@ -1127,6 +1131,13 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
         workspace = _prepare_planning_workspace(item, ctx)
         if isinstance(workspace, StageOutcome):
             return workspace
+        if workspace is None:
+            # A dry-run preview cannot compute an evidence digest: the repo
+            # stage does not capture a revision in a dry run.
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "[dry-run] requirements recovery requires a prepared source workspace",
+            )
         revision = workspace.revision
         assert revision is not None  # noqa: S101 - the captured source has a full revision
         binding = evidence_digest(
@@ -1180,6 +1191,13 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
         workspace = _prepare_planning_workspace(item, ctx)
         if isinstance(workspace, StageOutcome):
             return workspace
+        if workspace is None:
+            # A dry-run preview has no captured revision for the review
+            # prompt, and no job runs in a dry run.
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "[dry-run] requirements recovery review requires a prepared source workspace",
+            )
         revision = workspace.revision
         assert revision is not None  # noqa: S101 - the captured source has a full revision
         binding = str(item.payload.get("requirements_evidence_digest") or "")
@@ -2165,7 +2183,7 @@ class PlanningStage(Stage):
                     issue=item.issue,
                     agent=agent_provider(ctx),
                     model=stage_model(ctx, "advise", advise_model),
-                    cwd=workspace.cwd,
+                    cwd=source_job_cwd(workspace, ctx),
                     timeout_s=stage_timeout(ctx, "advise", advise_claude_timeout),
                     workspace=workspace,
                     payload={
@@ -2194,7 +2212,7 @@ class PlanningStage(Stage):
                 agent=agent_provider(ctx, "planner"),
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_plan_prompt,
-                cwd=workspace.cwd,
+                cwd=source_job_cwd(workspace, ctx),
                 timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",
