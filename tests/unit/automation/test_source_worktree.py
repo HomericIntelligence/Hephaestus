@@ -3764,6 +3764,7 @@ def test_authorize_writer_transition_ignores_a_receipt_for_a_removed_worktree(
 
     assert armed is False
 
+
 def test_fsync_state_dir_requests_private_mode_on_create(tmp_path: Path) -> None:
     """A newly created state directory ends at 0700."""
     repo, _first, _second = _repository(tmp_path)
