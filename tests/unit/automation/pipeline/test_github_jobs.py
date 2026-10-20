@@ -2855,6 +2855,7 @@ def test_adopted_read_request_rejects_invalid_pins(
         ("", "! Pull request owner/repo#7 is already queued to merge\n", 1, True, True),
         ("", "auto-merge already enabled\n", 1, True, True),
         ("✓ auto-merge enabled\n", "", 0, True, False),
+        ("", "! The merge strategy for main is set by the merge queue\n", 0, True, False),
         ("", "fatal: auto-merge is not supported\n", 1, False, False),
     ],
 )
