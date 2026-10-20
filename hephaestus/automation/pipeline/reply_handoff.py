@@ -17,6 +17,10 @@ from hashlib import sha256
 from typing import Any, Literal
 
 from hephaestus.automation.address_review_core import parse_addressed_replies
+from hephaestus.automation.issue_comment_body import (
+    METADATA_RECORD_SUMMARY,
+    visible_issue_comment_text,
+)
 from hephaestus.automation.pipeline.github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
@@ -269,28 +273,114 @@ def implementation_reply_handoff_journal_entry(
     thread_snapshot_sha256 = _thread_snapshot_fingerprint(normalized["threads"])
     if thread_snapshot_sha256 is None:
         return None
+    # Derive confirmed replies from the handoff when present.
+    confirmed_replies = handoff.get("confirmed_replies", []) if isinstance(handoff, dict) else []
+    if not isinstance(confirmed_replies, list):
+        confirmed_replies = []
+    review_id = handoff.get("review_id") if isinstance(handoff, dict) else None
+    payload_data = {
+        "format": 3,
+        "armed": True,
+        "pr_number": pr_number,
+        "head_sha": normalized["head_sha"],
+        "batch_nonce": normalized["batch_nonce"],
+        "thread_snapshot_sha256": thread_snapshot_sha256,
+        "replies": normalized["replies"],
+        "review_id": review_id,
+        "confirmed_replies": confirmed_replies,
+        **(
+            {"progress": normalized["progress"]}
+            if isinstance(normalized.get("progress"), dict)
+            else {}
+        ),
+    }
     payload = json.dumps(
-        {
-            "format": 2,
-            "armed": True,
-            "pr_number": pr_number,
-            "head_sha": normalized["head_sha"],
-            "batch_nonce": normalized["batch_nonce"],
-            "thread_snapshot_sha256": thread_snapshot_sha256,
-            "replies": normalized["replies"],
-            **(
-                {"progress": normalized["progress"]}
-                if isinstance(normalized.get("progress"), dict)
-                else {}
-            ),
-        },
+        payload_data,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
+        ensure_ascii=True,
     )
-    # Keep the machine journal invisible in the issue timeline. The actual
-    # implementation prose is only rendered as its source-attached response.
-    body = f"{marker}\n<!-- {payload} -->"
+    # Render the visible summary from confirmed replies. A metadata-only
+    # comment uses a generic summary. Confirmed replies render with links.
+    visible_summary = render_reply_handoff_summary(confirmed_replies)
+    # Body layout: marker, hidden JSON comment, visible summary.
+    # The marker starts at byte zero. No trailing line feed.
+    body = f"{marker}\n<!-- {payload} -->\n\n{visible_summary}"
+    # The body must have a nonempty visible text after HTML comment removal.
+    try:
+        visible_issue_comment_text(body)
+    except ValueError:
+        return None
     return marker, body
+
+
+def render_reply_handoff_summary(confirmed_replies: object) -> str:
+    """Render the visible body summary for one reply-handoff journal.
+
+    A metadata-only record (no confirmed replies) uses the generic
+    ``Hephaestus metadata record.`` text. A record with confirmed replies
+    renders a short visible summary with links to each posted inline reply.
+    Missing or invalid URLs are reported as explicit metadata; no link is
+    invented.
+
+    Args:
+        confirmed_replies: A list of confirmed-reply dicts. Each dict has
+            ``thread_id``, ``comment_id``, ``database_id``, and ``url``.
+
+    Returns:
+        The canonical visible summary string.
+    """
+    if (
+        not isinstance(confirmed_replies, list)
+        or not confirmed_replies
+    ):
+        return METADATA_RECORD_SUMMARY
+
+    # Number comments by the sorted confirmed_replies sequence.
+    sorted_entries = sorted(
+        confirmed_replies,
+        key=lambda e: str(e.get("thread_id", "")) if isinstance(e, dict) else "",
+    )
+    verified: list[tuple[str, str]] = []
+    missing_count = 0
+    for entry in sorted_entries:
+        if not isinstance(entry, dict):
+            missing_count += 1
+            continue
+        url = entry.get("url")
+        if isinstance(url, str) and url.startswith("https://"):
+            verified.append(("", url))
+        else:
+            missing_count += 1
+
+    if not verified and missing_count:
+        count_text = str(missing_count)
+        plural = "s" if missing_count != 1 else ""
+        return (
+            f"{METADATA_RECORD_SUMMARY.rstrip('.')}: {count_text} review response"
+            f"{plural} have no verified links."
+        )
+
+    # Build the verified-link text.
+    link_parts = [f"[comment {i + 1}]({url})" for i, (_, url) in enumerate(verified)]
+    if len(link_parts) == 1:
+        text = f"Review response was posted inline: {link_parts[0]}."
+    else:
+        joined = ", ".join(link_parts)
+        text = f"Review responses were posted inline: {joined}."
+
+    if missing_count:
+        count_text = str(missing_count)
+        plural = "s" if missing_count != 1 else ""
+        additional = (
+            f" {count_text} additional review response{plural} has no verified link"
+            if missing_count == 1
+            else f" {count_text} additional review responses have no verified links"
+        )
+        text = f"{text}{additional}."
+
+    return text
 
 
 def _journal_handoff_from_comment(
@@ -305,17 +395,27 @@ def _journal_handoff_from_comment(
     all-or-nothing because a partly read journal comment would recover a reply
     batch for a head or a source snapshot that it does not prove. The caller
     quarantines this comment instead of raising.
+
+    Legacy formats 1 and 2 remain readable for recovery. Format 3 adds
+    confirmed-reply identities and a visible summary.
     """
-    marker, separator, payload = comment.body.lstrip().partition("\n")
+    marker, separator, rest = comment.body.lstrip().partition("\n")
     match = _HANDOFF_JOURNAL_RE.fullmatch(marker)
     if match is None or int(match.group("pr")) != pr_number:
         return None
-    if not (separator and payload.startswith("<!-- ") and payload.endswith(" -->")):
+    if not separator or not rest.startswith("<!-- "):
         raise ValueError("implementation reply handoff journal is malformed")
-    raw = _strict_json_loads(payload.removeprefix("<!-- ").removesuffix(" -->"))
+    # The hidden JSON is bounded by <!-- and -->. For format 3, trailing
+    # visible text after the --> is expected and ignored.
+    json_end = rest.find(" -->")
+    if json_end == -1:
+        raise ValueError("implementation reply handoff journal is malformed")
+    hidden_json = rest[len("<!-- ") : json_end]
+    raw = _strict_json_loads(hidden_json)
+    fmt = raw.get("format") if isinstance(raw, dict) else None
     if (
         not isinstance(raw, dict)
-        or raw.get("format") != 2
+        or fmt not in (1, 2, 3)
         or raw.get("pr_number") != pr_number
         or raw.get("armed") is not True
     ):
@@ -344,6 +444,11 @@ def _journal_handoff_from_comment(
     ):
         raise ValueError("implementation reply handoff journal payload is invalid")
     handoff["reconciliation_only"] = True
+    # Carry format-3 confirmed replies through recovery.
+    if fmt == 3:
+        handoff["format"] = 3
+        handoff["review_id"] = raw.get("review_id")
+        handoff["confirmed_replies"] = raw.get("confirmed_replies", [])
     return handoff
 
 
