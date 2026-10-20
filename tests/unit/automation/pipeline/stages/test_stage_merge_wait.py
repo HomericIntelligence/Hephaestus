@@ -18,6 +18,7 @@ from hephaestus.automation.pipeline.github_jobs import (
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
     AutoMergeEnableResult,
+    JobRequest,
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
@@ -319,3 +320,20 @@ def test_stage_finishes_once_github_reports_merged(make_ctx: Any, make_work_item
 
     assert isinstance(outcome, StageOutcome)
     assert outcome.disposition is Disposition.FINISH_PASS
+
+
+def test_merge_observes_the_head_when_no_review_round_read_one(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A pull request with no review in this process still has an observed head."""
+    github = _AutoMergeGitHub(states=[_open_pr("c" * 40)])
+    item = make_work_item(kind="pr", pr=7, issue=1)
+    item.state = "MERGE"
+    stage = MergeWaitStage()
+
+    request = stage._merge(item, make_ctx(github=github))
+
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, GitHubJob)
+    assert isinstance(request.job.request, RunMergeWaitCycleRequest)
+    assert request.job.request.reviewed_head_sha == "c" * 40
