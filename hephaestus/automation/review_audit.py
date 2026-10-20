@@ -23,6 +23,7 @@ from hephaestus.automation.review_finding_history import (
     normalize_review_finding_collection,
     review_finding_collection_payload,
 )
+from hephaestus.automation.review_json_blocks import json_block_bodies, json_block_spans
 from hephaestus.automation.review_warnings import (
     MalformedReviewFindingReason,
     ReviewWarning,
@@ -34,10 +35,6 @@ from hephaestus.automation.scope_expansion_domain import (
     normalize_scope_expansions,
 )
 
-_JSON_BLOCK_RE = re.compile(
-    r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*$",
-    re.DOTALL | re.MULTILINE | re.IGNORECASE,
-)
 _VALID_GRADES = frozenset("ABCDEF")
 _VALID_VERDICTS = frozenset({"GO", "NOGO", "BLOCKED"})
 _VALID_SEVERITIES = frozenset({"critical", "major", "minor", "nitpick"})
@@ -324,7 +321,7 @@ def _response_payload(response: str | Mapping[str, object]) -> tuple[str, dict[s
     if not isinstance(response, str):
         return "", None
 
-    matches = _JSON_BLOCK_RE.findall(response)
+    matches = json_block_bodies(response)
     if len(matches) > 1:
         return response, None
     if matches:
@@ -459,12 +456,11 @@ def _bounded_feedback(source: str, payload: dict[str, object] | None) -> str:
         return ""
     if not source:
         return ""
-    match = _JSON_BLOCK_RE.search(source) if payload is not None else None
-    if match:
+    spans = json_block_spans(source) if payload is not None else []
+    if spans:
+        start, end, _ = spans[0]
         feedback = "\n\n".join(
-            piece
-            for piece in (source[: match.start()].strip(), source[match.end() :].strip())
-            if piece
+            piece for piece in (source[:start].strip(), source[end:].strip()) if piece
         )
     else:
         feedback = source.strip()

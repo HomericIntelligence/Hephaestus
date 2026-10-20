@@ -26,14 +26,11 @@ from hephaestus.prompts import add_prompt_dir_argument
 from .git_utils import issue_auto_impl_branch_name
 from .github_api import _gh_call
 from .models import DEFAULT_STATE_DIR as DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
+from .review_json_blocks import json_block_bodies
 
 logger = logging.getLogger(__name__)
 
 
-_JSON_BLOCK_RE = re.compile(
-    r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*\r?$",
-    re.DOTALL | re.MULTILINE,
-)
 _REVIEW_PARSE_MISSING = {"comments": [], "summary": "No structured output from analysis"}
 _REVIEW_PARSE_FAILED = {
     "comments": [],
@@ -223,12 +220,18 @@ def parse_json_block(text: str, *, default: Mapping[str, Any] | None = None) -> 
 
     Return a copy of the supplied default when the object is absent or
     malformed. Without a supplied default, return the review error shape.
+
+    The reader accepts a fenced object, a fenced object whose text starts on
+    the fence line, and a bare object. A model writes all three.
     """
-    matches = _JSON_BLOCK_RE.findall(text)
-    if not matches:
+    bodies = json_block_bodies(text)
+    if not bodies:
+        stripped = text.strip()
+        bodies = [stripped] if stripped.startswith("{") and stripped.endswith("}") else []
+    if not bodies:
         return _copy_default(_REVIEW_PARSE_MISSING if default is None else default)
     try:
-        return dict(json.loads(matches[-1]))
+        return dict(json.loads(bodies[-1]))
     except (json.JSONDecodeError, TypeError, ValueError):
         return _copy_default(_REVIEW_PARSE_FAILED if default is None else default)
 
