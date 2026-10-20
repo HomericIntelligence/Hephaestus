@@ -31,14 +31,6 @@ from .review_json_blocks import json_block_bodies
 logger = logging.getLogger(__name__)
 
 
-_JSON_BLOCK_RE = re.compile(
-    r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*\r?$",
-    re.DOTALL | re.MULTILINE,
-)
-_JSON_INLINE_BLOCK_RE = re.compile(
-    r"^[ \t]*```json[ \t]*([^\n]*?)[ \t]*```[ \t]*\r?$",
-    re.MULTILINE,
-)
 _REVIEW_PARSE_MISSING = {"comments": [], "summary": "No structured output from analysis"}
 _REVIEW_PARSE_FAILED = {
     "comments": [],
