@@ -1995,3 +1995,48 @@ def test_a_dirty_source_lane_beside_the_caller_does_not_block_intake(tmp_path: P
 
     assert receipt.path.exists()
     assert (lane / "tracked.txt").read_text(encoding="utf-8") == "writer work\n"
+
+
+def test_prepare_rejects_a_group_writable_common_directory(tmp_path: Path) -> None:
+    """A group-writable Git common directory fails fast with an actionable message."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    common_dir = manager.common_dir
+    common_dir.chmod(0o775)
+
+    with pytest.raises(RepoIntakeError) as caught:
+        manager.prepare()
+
+    message = str(caught.value)
+    assert str(common_dir) in message
+    assert "0775" in message
+    assert "chmod 755" in message
+
+
+def test_prepare_accepts_a_group_readable_common_directory(tmp_path: Path) -> None:
+    """A group-readable Git common directory passes the permission preflight."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    manager.common_dir.chmod(0o755)
+
+    receipt = manager.prepare()
+
+    assert receipt.common_dir == manager.common_dir
+
+
+def test_prepare_rejects_a_common_directory_owned_by_another_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A foreign-owned common directory reports the remedy that applies to it."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    monkeypatch.setattr("hephaestus.automation.repo_intake.os.geteuid", lambda: 0)
+
+    with pytest.raises(RepoIntakeError) as caught:
+        manager.prepare()
+
+    message = str(caught.value)
+    assert str(manager.common_dir) in message
+    assert "owned by another user" in message
+    assert "re-clone" in message
+    assert "chmod" not in message

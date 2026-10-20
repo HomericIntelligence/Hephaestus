@@ -2628,6 +2628,11 @@ class ImplementationStage(Stage):
         item.payload.pop(_PUBLICATION_DISCOVERY_PENDING)
         try:
             if not result.ok or result.interrupted:
+                logger.warning(
+                    "implementation:%d: first-publication discovery failed: %s",
+                    item.issue,
+                    result.error or "no diagnostic available",
+                )
                 raise ValueError("First-publication discovery did not complete.")
             if (
                 value.get("repository") != pending.transport_repository

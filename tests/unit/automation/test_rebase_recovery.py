@@ -4467,6 +4467,68 @@ def test_pending_store_rejects_writable_common_directory(tmp_path: Path) -> None
     assert list(common.iterdir()) == []
 
 
+def test_owned_directory_error_reports_path_and_mode(tmp_path: Path) -> None:
+    """An unsafe directory names its path and its observed mode."""
+    common = tmp_path / "git-common"
+    common.mkdir(mode=0o700)
+    common.chmod(0o775)
+    with pytest.raises(ValueError) as error:
+        _store(common).write(_record(tmp_path), expected=None)
+    message = str(error.value)
+    assert str(common) in message
+    assert "0775" in message
+
+
+def test_owned_directory_error_reports_state_parent_path_and_mode(tmp_path: Path) -> None:
+    """An unsafe state parent names its path and its observed mode on a read."""
+    common = tmp_path / "git-common"
+    common.mkdir(mode=0o700)
+    parent = common / "hephaestus-source-workspaces"
+    parent.mkdir(mode=0o775)
+    parent.chmod(0o775)
+    with pytest.raises(ValueError) as error:
+        _store(common).candidate(1)
+    message = str(error.value)
+    assert str(parent) in message
+    assert "0775" in message
+
+
+def test_owned_directory_error_reports_private_namespace_mode(tmp_path: Path) -> None:
+    """A private namespace with the wrong mode names its path and its observed mode."""
+    common = tmp_path / "git-common"
+    common.mkdir(mode=0o700)
+    parent = common / "hephaestus-source-workspaces"
+    parent.mkdir(mode=0o700)
+    namespace = parent / "pending-rebases"
+    namespace.mkdir(mode=0o755)
+    namespace.chmod(0o755)
+    with pytest.raises(ValueError) as error:
+        _store(common).write(_record(tmp_path), expected=None)
+    message = str(error.value)
+    assert str(namespace) in message
+    assert "0755" in message
+
+
+def test_namespace_create_normalizes_mkdir_mode_ignoring_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A created component ends at 0700 even when the filesystem ignores the mode."""
+    module = import_module("hephaestus.automation.rebase_recovery")
+    common = tmp_path / "git-common"
+    common.mkdir(mode=0o700)
+    real_mkdir = os.mkdir
+
+    def fake_mkdir(path: Any, mode: int = 0o777, *, dir_fd: Any = None) -> None:
+        real_mkdir(path, 0o757, dir_fd=dir_fd)
+
+    monkeypatch.setattr(module.os, "mkdir", fake_mkdir)
+    record = _record(tmp_path)
+    written = _store(common).write(record, expected=None)
+    assert written == record
+    created = common / "hephaestus-source-workspaces" / "pending-rebases"
+    assert stat.S_IMODE(created.stat().st_mode) == 0o700
+
+
 def test_pending_store_rejects_live_namespace_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

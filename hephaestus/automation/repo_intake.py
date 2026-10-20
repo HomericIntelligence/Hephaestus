@@ -524,6 +524,7 @@ class RepoIntakeManager:
         frozenset[Path],
     ]:
         """Return validated preparation state without a Git mutation."""
+        self._require_safe_common_dir()
         self._validate_origin()
         records = self._worktree_records()
         self._validate_state_paths(records)
@@ -636,6 +637,30 @@ class RepoIntakeManager:
                 if not Path(path).name.endswith((".owner.lock", ".owner.json"))
             )
         )
+
+    def _require_safe_common_dir(self) -> None:
+        """Reject a common directory that another user can change.
+
+        The caller owns the checkout, so the loop does not change its mode.
+        It reports the path, the observed mode, and the operator remedy. A
+        foreign owner and a writable mode need different remedies, so each
+        condition reports its own.
+        """
+        info = self.common_dir.stat()
+        mode = f"{stat.S_IMODE(info.st_mode):04o}"
+        if info.st_uid != os.geteuid():
+            raise RepoIntakeError(
+                "repository-intake Git common directory is owned by another user: "
+                f"{self.common_dir} (mode {mode}); "
+                "re-clone the checkout as the current user, then rerun"
+            )
+        if info.st_mode & 0o022:
+            raise RepoIntakeError(
+                "repository-intake Git common directory permissions are unsafe: "
+                f"{self.common_dir} (mode {mode}); "
+                f"run: chmod 755 {self.common_dir}, or re-clone with umask 022, then rerun. "
+                "A mode of 0755 is enough for the intake check."
+            )
 
     def _resolve_common_dir(self) -> Path:
         """Resolve the Git common directory without changing the checkout."""
