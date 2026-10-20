@@ -18,6 +18,10 @@ from hephaestus.automation.direct_review_recovery import _write_receipt
 from hephaestus.automation.host_capabilities import _private_entry
 from hephaestus.automation.pipeline.git_jobs import PendingRebaseRecord
 from hephaestus.automation.pipeline.host_capabilities import CapabilityDeadline
+from hephaestus.utils.directory_mode import (
+    create_private_directory,
+    normalize_private_directory,
+)
 
 _MAX_BYTES = 64 * 1024
 _MAX_ENTRIES = 4096
@@ -58,12 +62,8 @@ def _namespace(
         for component in ("hephaestus-source-workspaces", namespace_name):
             created = False
             if create:
-                try:
-                    os.mkdir(component, 0o700, dir_fd=descriptor)
-                except FileExistsError:
-                    pass
-                else:
-                    created = True
+                created = create_private_directory(component, dir_fd=descriptor)
+                if created:
                     os.fsync(descriptor)
             try:
                 child = os.open(component, _DIRECTORY_FLAGS, dir_fd=descriptor)
@@ -75,7 +75,7 @@ def _namespace(
             if created:
                 # The call created this component, so it owns it. A filesystem
                 # that ignores the requested mode still ends at 0700.
-                os.fchmod(child, 0o700)
+                normalize_private_directory(child)
             os.close(descriptor)
             descriptor = child
             path /= component

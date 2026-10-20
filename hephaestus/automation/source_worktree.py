@@ -48,6 +48,10 @@ from hephaestus.automation.worktree_snapshot import (
 )
 from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.io.utils import write_secure
+from hephaestus.utils.directory_mode import (
+    create_private_directory,
+    normalize_private_directory,
+)
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
@@ -2545,19 +2549,14 @@ class SourceWorkspaceManager:
 
     def _fsync_state_dir(self) -> None:
         """Flush the state directory after a journal rename or removal."""
-        try:
-            self.state_dir.mkdir(mode=0o700, parents=True)
-        except FileExistsError:
-            created = False
-        else:
-            created = True
+        created = create_private_directory(self.state_dir, parents=True)
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         descriptor = os.open(self.state_dir, flags)
         try:
             if created:
                 # The call created the directory, so it owns it. A filesystem
                 # that ignores the requested mode still ends at 0700.
-                os.fchmod(descriptor, 0o700)
+                normalize_private_directory(descriptor)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
