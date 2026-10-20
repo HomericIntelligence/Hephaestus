@@ -90,6 +90,7 @@ def test_wait_fails_closed_when_its_deadline_expires(make_ctx: Any, make_work_it
     # a prior proof's deadline, so the deadline is set on the first poll. The
     # next cycle re-enters MERGE, which is where expiry is enforced.
     first = stage._merge_apply(item, make_ctx(now_fn=lambda: 1_000.0))
+    assert isinstance(first, StageOutcome)
     assert first.disposition is Disposition.RETRY
     deadline = item.payload["merge_readiness_deadline_s"]
 

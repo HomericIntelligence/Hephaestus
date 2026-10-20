@@ -262,8 +262,6 @@ def _run_ruleset_bypass_cycle(github: _RulesetBypassGitHub) -> Any:
         RunMergeWaitCycleRequest(
             pr_number=7,
             reviewed_head_sha="a" * 40,
-            proof_generation=2,
-            declined_readiness_fingerprint=None,
             deadline_s=time.monotonic() + 30.0,
             cancellation=threading.Event(),
         ),

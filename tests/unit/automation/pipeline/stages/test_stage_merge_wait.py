@@ -101,7 +101,9 @@ class _AutoMergeGitHub(FakeStageGitHub):
 
 def _run_cycle(github: _AutoMergeGitHub, job: GitHubJob) -> Any:
     """Run one merge-wait GitHub cycle against the fake accessor."""
-    return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
+    request = job.request
+    assert isinstance(request, RunMergeWaitCycleRequest)
+    return PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
 
 
 def _job(repo_root: Any) -> GitHubJob:
