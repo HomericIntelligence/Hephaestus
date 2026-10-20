@@ -7457,6 +7457,291 @@ class TestCommitPushAndPrCreate:
         assert result.disposition == Disposition.FINISH_FAIL
 
 
+class TestDirectPublicationRace:
+    """A direct writer tracks the remote base it published itself (issue #3379)."""
+
+    def test_initial_rebase_reservation_advances_direct_publication_base(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The writer's own published head becomes the recorded direct base."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        original = "a" * 40
+        rebased = "b" * 40
+        item = make_work_item(issue=1, state="REBASE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = original
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "1-auto-impl",
+            "base_sha": original,
+        }
+        item.payload["rebase_reason"] = "implementation_start"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "head_sha": rebased,
+                    "rebased": True,
+                    "published": True,
+                    "implementation_started": True,
+                    "direct_scope_reservation": {
+                        "branch": "1-auto-impl",
+                        "base_sha": rebased,
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        assert original != rebased
+        assert item.payload["_direct_scope_base_sha"] == rebased
+        assert item.payload["_direct_scope_reservation"] == {
+            "branch": "1-auto-impl",
+            "base_sha": rebased,
+        }
+        assert item.payload["rebase_complete"] is True
+
+    def test_initial_rebase_reservation_receipt_mismatch_keeps_original_base(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An invalid start receipt never advances the recorded direct base."""
+        stage = ImplementationStage()
+        original = "a" * 40
+        item = make_work_item(issue=1, state="REBASE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = original
+        reservation = {"branch": "1-auto-impl", "base_sha": original}
+        item.payload["_direct_scope_reservation"] = reservation
+        item.payload["rebase_reason"] = "implementation_start"
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "head_sha": "c" * 40,
+                    "rebased": True,
+                    "published": True,
+                    "direct_scope_reservation": {
+                        "branch": "1-auto-impl",
+                        "base_sha": "b" * 40,
+                    },
+                },
+            ),
+            make_ctx(),
+        )
+
+        assert item.payload["_direct_scope_base_sha"] == original
+        assert item.payload["_direct_scope_reservation"] == reservation
+        assert "rebase_complete" not in item.payload
+        assert item.payload["rebase_error"] is True
+
+    def test_commit_push_pins_the_advanced_direct_publication_base(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The publish job leases against the base the writer published."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        original = "a" * 40
+        rebased = "b" * 40
+        item = make_work_item(issue=1, state="REBASE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = original
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "1-auto-impl",
+            "base_sha": original,
+        }
+        item.payload["rebase_reason"] = "implementation_start"
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "head_sha": rebased,
+                    "rebased": True,
+                    "published": True,
+                    "implementation_started": True,
+                    "direct_scope_reservation": {
+                        "branch": "1-auto-impl",
+                        "base_sha": rebased,
+                    },
+                },
+            ),
+            ctx,
+        )
+
+        item.state = "COMMIT_PUSH_WAIT"
+        item.payload.update({"issue_title": "A task", "issue_body": ""})
+        binding = _prepared_writer(item, revision=rebased)
+        request = stage.step(item, ctx)
+
+        assert original != rebased
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        assert request.job.workspace == binding
+        assert request.job.kwargs["expected_remote_sha"] == rebased
+
+    def test_direct_implement_error_resets_dirty_direct_probe_latch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A hard-failed direct writer re-attempts lane adoption before re-reserving."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="TEST_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "b" * 40
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "1-auto-impl",
+            "base_sha": "b" * 40,
+        }
+        item.payload["dirty_direct_checked"] = True
+        item.payload["implement_error"] = True
+
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(Disposition.RETRY, "agent_error")
+        assert item.state == "WORKTREE_WAIT"
+        assert item.payload["dirty_direct_checked"] is False
+
+    @pytest.mark.parametrize("shape", ["non_direct", "active"])
+    def test_implement_error_keeps_probe_latch_outside_a_plain_direct_retry(
+        self, make_ctx: Any, make_work_item: Any, shape: str
+    ) -> None:
+        """Non-direct items and adopted lanes never re-run the adoption probe."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="TEST_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["dirty_direct_checked"] = True
+        item.payload["implement_error"] = True
+        if shape == "non_direct":
+            item.payload.pop("_direct_scope_base_sha", None)
+        else:
+            item.payload["dirty_direct_active"] = True
+
+        outcome = stage.step(item, ctx)
+
+        if shape == "active":
+            # An adopted lane fails terminally before its retry branch runs.
+            assert outcome == StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_turn_failed")
+        else:
+            assert outcome == StageOutcome(Disposition.RETRY, "agent_error")
+            assert item.state == "WORKTREE_WAIT"
+        assert item.payload["dirty_direct_checked"] is True
+
+    def test_worktree_reentry_after_implement_failure_emits_dirty_direct_probe(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Re-entry probes the lane the writer published instead of re-reserving it."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "b" * 40
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "1-auto-impl",
+            "base_sha": "b" * 40,
+        }
+        item.payload["implementation_started"] = True
+        item.payload["dirty_direct_checked"] = False
+
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        assert request.job.op == "claim_dirty_direct_continuation"
+        assert request.job.kwargs["probe"] is True
+        assert request.on_done_state == "DIRTY_DIRECT_CLAIM_WAIT"
+
+    def test_dirty_direct_claim_adoption_routes_to_implement(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The armed claim from a completed start resumes the preserved lane."""
+        from dataclasses import replace
+
+        from hephaestus.agents.workspace import DirtyDirectClaim
+        from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
+
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        published = "b" * 40
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl-direct-" + "c" * 32
+        item.payload["_direct_scope_base_sha"] = published
+        item.payload["implementation_started"] = True
+        claim = DirtyDirectClaim(
+            branch=item.branch,
+            reservation_base_sha=published,
+            plan_revision=5,
+            plan_fingerprint="4" * 64,
+            review_fingerprint="5" * 64,
+            allowed_paths=("tracked.txt",),
+            index_sha256="6" * 64,
+            worktree_sha256="7" * 64,
+            untracked_sha256="8" * 64,
+            nonce="9" * 32,
+            state="armed",
+        )
+        binding = replace(
+            _writer_binding(item, revision=published),
+            schema_version=2,
+            dirty_claim=claim,
+        )
+        plan = DirtyDirectPlanInput(
+            5,
+            "## Files to Modify\n- `tracked.txt`\n",
+            5,
+            "state:plan-go",
+            ("tracked.txt",),
+        )
+        value = {
+            "branch": claim.branch,
+            "implementation_started": True,
+            "source_workspace": binding.to_dict(),
+            "dirty_plan": {**plan.__dict__, "allowed_paths": ["tracked.txt"]},
+            "direct_scope_reservation": {"branch": claim.branch, "base_sha": published},
+            "preserved_worktree": str(binding.cwd),
+        }
+        item.payload["dirty_direct_claim_inflight"] = True
+
+        stage.on_job_done(item, JobResult(ok=True, value=value), ctx)
+        item.state = "DIRTY_DIRECT_CLAIM_WAIT"
+        route = stage.step(item, ctx)
+
+        assert route == Continue(next_state="IMPLEMENT_WAIT")
+        assert item.payload["dirty_direct_active"] is True
+        assert item.payload["_direct_scope_base_sha"] == published
+        assert item.payload["_direct_scope_reservation"] == {
+            "branch": claim.branch,
+            "base_sha": published,
+        }
+        assert "direct_scope_reservation_collision" not in item.payload
+
+    def test_dirty_direct_probe_failure_after_timeout_is_terminal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A changed remote reservation on the timed-out lane fails closed."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload["_direct_scope_base_sha"] = "b" * 40
+        item.payload["implementation_started"] = True
+        item.payload["dirty_direct_claim_inflight"] = True
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, error="dirty direct reservation changed"),
+            ctx,
+        )
+        item.state = "DIRTY_DIRECT_CLAIM_WAIT"
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_failed")
+
+
 class TestFullWalks:
     """Full pool-driven walks of the whole stage (canonical FakeWorkerPool)."""
 

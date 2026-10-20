@@ -1499,7 +1499,13 @@ def _remediation_reply_head(
 
 
 def _consume_initial_rebase_reservation(item: WorkItem, result: JobResult) -> JobResult:
-    """Retain the exact remote reservation returned by initial preparation."""
+    """Retain the exact remote reservation returned by initial preparation.
+
+    The recorded direct base also advances to the base the writer itself
+    published during the implementation-start rebase. The later
+    commit+push lease then pins the current remote state instead of the
+    superseded original reservation base.
+    """
     if (
         not result.ok
         or item.payload.get("rebase_reason") != "implementation_start"
@@ -1517,7 +1523,23 @@ def _consume_initial_rebase_reservation(item: WorkItem, result: JobResult) -> Jo
     ):
         return JobResult(ok=False, error="initial rebase reservation receipt is invalid")
     item.payload[DIRECT_SCOPE_RESERVATION_KEY] = dict(reservation)
+    item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = reservation["base_sha"]
     return result
+
+
+def _reset_dirty_direct_probe_for_retry(item: WorkItem) -> None:
+    """Re-arm the adoption probe for one hard-failed direct writer.
+
+    The lane's own implementation-start publish makes a fresh absent-only
+    reservation deterministic-fail, so a direct writer that hard-failed
+    must re-attempt lane adoption before the create-worktree path runs
+    again. An adopted lane never re-runs the probe.
+    """
+    if (
+        DIRECT_SCOPE_BASE_SHA_KEY in item.payload
+        and item.payload.get("dirty_direct_active") is not True
+    ):
+        item.payload["dirty_direct_checked"] = False
 
 
 def build_rebase_preparation_prompt() -> str:
@@ -3735,6 +3757,7 @@ class ImplementationStage(Stage):
             # The implement job hard-failed. The attempt was counted in
             # on_job_done (doc: agent_error consumes the implement
             # budget); RETRY re-enters the stage for the next attempt.
+            _reset_dirty_direct_probe_for_retry(item)
             item.state = WORKTREE_WAIT
             return StageOutcome(Disposition.RETRY, "agent_error")
         if (
