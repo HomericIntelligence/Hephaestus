@@ -534,3 +534,32 @@ class TestCloseIssueAsCovered:
             result = close_issue_as_covered(1357, 1358)
 
         assert result is False
+
+
+class TestJsonBlockLayouts:
+    """Tests for the JSON fence layouts that agents write."""
+
+    def test_reads_a_fence_with_the_object_on_the_fence_line(self) -> None:
+        """A model that writes the fence and the object on one line is read."""
+        payload = {"addressed": ["thread-1"], "replies": {"thread-1": "fixed"}}
+        text = "```json " + json.dumps(payload) + " ```"
+
+        result = parse_json_block(text)
+
+        assert result["addressed"] == ["thread-1"]
+
+    def test_reads_a_bare_object(self) -> None:
+        """A model that writes the object without a fence is read."""
+        payload = {"addressed": ["thread-1"], "replies": {"thread-1": "fixed"}}
+
+        result = parse_json_block(json.dumps(payload))
+
+        assert result["replies"] == {"thread-1": "fixed"}
+
+    def test_a_prose_brace_does_not_hide_a_fenced_object(self) -> None:
+        """Prose with braces does not replace a fenced object."""
+        text = 'Use the {placeholder} form.\n```json\n{"summary": "ok"}\n```'
+
+        result = parse_json_block(text)
+
+        assert result["summary"] == "ok"

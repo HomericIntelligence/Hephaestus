@@ -94,3 +94,44 @@ def test_pretest_input_uses_exact_frozen_receipt_without_live_io(
         inputs = implementation._new_pretest_input(item, ctx)
         assert inputs.source_receipt_json == canonical_source_receipt_json(receipt)
     live.assert_not_called()
+
+
+def test_pretest_input_covers_only_the_threads_the_address_job_was_given(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply target set is the set that the address job received."""
+    root, _, revision = _repository(tmp_path)
+    manager = SourceWorkspaceManager(root, repository="repo")
+    binding = manager.prepare(42, SourceLane.IMPLEMENTATION, revision, branch="writer")
+    receipt = manager._require_receipt(42, SourceLane.IMPLEMENTATION)
+    item = make_work_item(repo="repo", issue=42, pr=43, state="IMPLEMENT_WAIT")
+    item.worktree = str(binding.cwd)
+    item.branch = "writer"
+    item.payload.update(
+        _impl_source_workspace=binding.to_dict(),
+        _impl_source_revision=revision,
+        _impl_source_receipt=receipt,
+        remediation_threads=[{"thread_id": "thread-2"}],
+        remediation_thread_snapshots=[
+            {
+                "id": "thread-1",
+                "comments": [{"id": "comment-1", "author": "reviewer", "body": "Fix."}],
+            },
+            {
+                "id": "thread-2",
+                "comments": [{"id": "comment-2", "author": "reviewer", "body": "Fix."}],
+            },
+        ],
+    )
+    ctx = make_ctx(paths=SimpleNamespace(repo_root=root, source_workspaces=manager))
+    monkeypatch.setattr(
+        implementation, "_pretest_scope", lambda *args: (("tracked.txt",), "b" * 64)
+    )
+
+    inputs = implementation._new_pretest_input(item, ctx)
+
+    assert "thread-2" in inputs.thread_snapshot_json
+    assert "thread-1" not in inputs.thread_snapshot_json

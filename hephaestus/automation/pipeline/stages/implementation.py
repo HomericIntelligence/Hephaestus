@@ -825,13 +825,12 @@ def _remediation_commit_push_kwargs(
     """Return the immutable remediation inputs for one commit-and-push job."""
     if not item.payload.get("implementation_remediation"):
         return {}
-    snapshots = item.payload.get("remediation_thread_snapshots")
-    replies = (
-        parse_addressed_replies(item.payload.get("remediation_output"), snapshots)
-        if isinstance(snapshots, list)
-        else None
-    )
-    if item.pr is None or not isinstance(snapshots, list) or replies is None:
+    try:
+        targets = _reply_target_threads(item)
+    except ValueError:
+        return None
+    replies = parse_addressed_replies(item.payload.get("remediation_output"), targets)
+    if item.pr is None or replies is None:
         return None
     batch_nonce = item.payload.get("remediation_batch_nonce")
     if batch_nonce is None:
@@ -847,7 +846,7 @@ def _remediation_commit_push_kwargs(
     return {
         "remediation_repository": f"{ctx.org}/{item.repo}".casefold(),
         "remediation_pr_number": item.pr,
-        "remediation_thread_snapshots": snapshots,
+        "remediation_thread_snapshots": targets,
         "remediation_replies": replies,
         "remediation_batch_nonce": batch_nonce,
         "remediation_failure_diagnostic": diagnostic,
@@ -1012,6 +1011,42 @@ def _require_plan_scope(item: WorkItem, ctx: StageContext) -> JobRequest | Stage
     )
 
 
+def _reply_target_threads(item: WorkItem) -> list[dict[str, Any]]:
+    """Return the snapshot threads that the address job must answer.
+
+    The address job receives the remediation threads. The host validates the
+    agent's replies against the same set, and the reply journal records one
+    reply for every thread in it. The snapshot is therefore the subset of the
+    live threads that the job was given, not every live thread.
+
+    Raises:
+        ValueError: If the snapshot does not cover every reply target.
+
+    """
+    snapshots = item.payload.get("remediation_thread_snapshots")
+    remediation = item.payload.get("remediation_threads")
+    if not isinstance(snapshots, list):
+        raise ValueError("remediation thread snapshot is unavailable")
+    if not isinstance(remediation, list):
+        # No address job was given a target set, so every snapshot thread is
+        # the target.
+        return snapshots
+    targets = {
+        str(thread.get("thread_id") or thread.get("id") or "").strip()
+        for thread in remediation
+        if isinstance(thread, dict)
+    }
+    selected = [
+        thread
+        for thread in snapshots
+        if isinstance(thread, dict)
+        and str(thread.get("thread_id") or thread.get("id") or "").strip() in targets
+    ]
+    if len(selected) != len(targets) or not targets:
+        raise ValueError("remediation thread snapshot does not cover the reply targets")
+    return selected
+
+
 def _new_pretest_input(item: WorkItem, ctx: StageContext) -> RemediationPretestInput:
     """Freeze exact source and review pins before the successful job exists."""
     if item.issue is None or item.pr is None:
@@ -1026,9 +1061,7 @@ def _new_pretest_input(item: WorkItem, ctx: StageContext) -> RemediationPretestI
         receipt.revision,
         canonical_source_receipt_json(receipt),
         source_receipt_digest(receipt),
-        RemediationReviewInput.canonical_thread_snapshot(
-            item.payload.get("remediation_thread_snapshots")
-        ),
+        RemediationReviewInput.canonical_thread_snapshot(_reply_target_threads(item)),
         uuid.uuid4().hex,
         paths,
         scope_digest,
