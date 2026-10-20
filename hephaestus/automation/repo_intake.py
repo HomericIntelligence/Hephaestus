@@ -38,7 +38,10 @@ from hephaestus.utils.file_lock import (
     LockUnavailableError,
     file_lock,
 )
-from hephaestus.utils.worktree_identity import source_worktree_name
+from hephaestus.utils.worktree_identity import (
+    is_managed_source_lane_path,
+    source_worktree_name,
+)
 
 _MAX_SOURCE_WORKSPACE_RECEIPT_BYTES = 65536
 
@@ -772,6 +775,10 @@ class RepoIntakeManager:
         checkout is unrelated local work, and intake uses its own worktree, so
         it never blocks. Untracked and ignored content never blocks either.
 
+        A managed source lane is the automation's own writer worktree. It
+        holds uncommitted work while an implementation runs, so it never
+        blocks either.
+
         A modified tracked file inside a registered legacy worktree is
         different: it means another agent wrote source there and automation
         must not adopt or overwrite that work. A root left mid-rebase is
@@ -786,6 +793,8 @@ class RepoIntakeManager:
         """
         for root in self._legacy_worktree_roots(records):
             if self._same_path(root, self.caller_root) or not root.exists():
+                continue
+            if is_managed_source_lane_path(root):
                 continue
             result = self._run(
                 ["git", "status", "--porcelain", "--untracked-files=no"],

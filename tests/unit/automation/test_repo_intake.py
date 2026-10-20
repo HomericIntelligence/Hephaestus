@@ -1963,3 +1963,35 @@ def test_intake_lock_interruption_preserves_shutdown_signal(
 
     with pytest.raises(InterruptedError, match="stop"):
         manager.prepare()
+
+
+def test_a_dirty_managed_source_lane_does_not_block_intake(tmp_path: Path) -> None:
+    """A dirty managed source lane is the automation's own work, not a fault."""
+    caller, remote = _make_repository(tmp_path)
+    manager = _manager(caller, remote)
+    manager.state_parent.mkdir(mode=0o700, exist_ok=True)
+    manager.state_dir.mkdir(mode=0o700, exist_ok=True)
+    lane = manager.state_dir / "build" / ".worktrees" / "auto-7-impl"
+    lane.parent.mkdir(mode=0o700, parents=True)
+    _run_git(caller, "worktree", "add", "--detach", str(lane), "HEAD")
+    (lane / "tracked.txt").write_text("writer work\n", encoding="utf-8")
+
+    receipt = manager.prepare()
+
+    assert receipt.path.exists()
+    assert (lane / "tracked.txt").read_text(encoding="utf-8") == "writer work\n"
+
+
+def test_a_dirty_source_lane_beside_the_caller_does_not_block_intake(tmp_path: Path) -> None:
+    """A dirty source lane under the caller worker base is the automation's own work."""
+    caller, remote = _make_repository(tmp_path)
+    lane = caller / "build" / ".worktrees" / "auto-7-impl"
+    lane.parent.mkdir(parents=True, exist_ok=True)
+    _run_git(caller, "worktree", "add", "--detach", str(lane), "HEAD")
+    (lane / "tracked.txt").write_text("writer work\n", encoding="utf-8")
+    manager = _manager(caller, remote)
+
+    receipt = manager.prepare()
+
+    assert receipt.path.exists()
+    assert (lane / "tracked.txt").read_text(encoding="utf-8") == "writer work\n"
