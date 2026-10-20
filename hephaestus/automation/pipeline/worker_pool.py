@@ -8591,15 +8591,27 @@ class WorkerPool:
             git_utils.run(["gh", "repo", "clone", repo, dest], cwd=None, timeout=job.timeout_s)
             git_dir = Path(dest) / ".git"
             if git_dir.is_dir() and not git_dir.is_symlink():
+                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                try:
+                    descriptor = os.open(git_dir, flags)
+                except OSError as error:
+                    return JobResult(
+                        ok=False,
+                        error=f"clone cannot open the Git directory: {error}",
+                    )
                 try:
                     # The clone created this directory, so the loop owns it. A
                     # group-writable Git directory blocks the recovery layer.
-                    os.chmod(git_dir, 0o700)
+                    # The mode is set on the live descriptor, so a replaced
+                    # path cannot change what is set.
+                    os.fchmod(descriptor, 0o700)
                 except OSError as error:
                     return JobResult(
                         ok=False,
                         error=f"clone cannot chmod the Git directory: {error}",
                     )
+                finally:
+                    os.close(descriptor)
             return JobResult(ok=True)
 
         elif job.op == "sync_checkout":

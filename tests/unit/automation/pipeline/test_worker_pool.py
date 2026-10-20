@@ -18840,6 +18840,7 @@ class TestGitOps:
         def fake_run(command: list[str], **_kwargs: object) -> None:
             assert command[:3] == ["gh", "repo", "clone"]
             (dest / ".git").mkdir(parents=True)
+            git_inode.append((dest / ".git").stat().st_ino)
 
         job = GitJob(
             repo="test/repo",
@@ -18847,12 +18848,17 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": str(dest)},
         )
+        real_fchmod = os.fchmod
+        git_inode: list[int] = []
+
+        def fake_fchmod(descriptor: int, mode: int) -> None:
+            if os.fstat(descriptor).st_ino in git_inode:
+                raise OSError("mode is fixed")
+            real_fchmod(descriptor, mode)
+
         with (
             patch("hephaestus.automation.git_utils.run", side_effect=fake_run),
-            patch(
-                "hephaestus.automation.pipeline.worker_pool.os.chmod",
-                side_effect=OSError("mode is fixed"),
-            ),
+            patch("hephaestus.automation.pipeline.worker_pool.os.fchmod", side_effect=fake_fchmod),
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)

@@ -658,7 +658,8 @@ class RepoIntakeManager:
             raise RepoIntakeError(
                 "repository-intake Git common directory permissions are unsafe: "
                 f"{self.common_dir} (mode {mode}); "
-                f"run: chmod 755 {self.common_dir}, or re-clone with umask 022, then rerun"
+                f"run: chmod 755 {self.common_dir}, or re-clone with umask 022, then rerun. "
+                "A mode of 0755 is enough for the intake check."
             )
 
     def _resolve_common_dir(self) -> Path:
