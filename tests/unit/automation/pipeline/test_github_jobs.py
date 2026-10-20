@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import math
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -47,9 +48,6 @@ from hephaestus.automation.pipeline.github_jobs import (
     ScopeExpansionDependenciesReconciled,
     bind_delivery_request,
 )
-from hephaestus.automation.pipeline.merge_wait_admission import (
-    VerifiedRepositoryDefaultBranch,
-)
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_remediation_reply_handoff,
     implementation_remediation_reply_handoff_journal_entry,
@@ -61,6 +59,7 @@ from hephaestus.automation.pipeline.scope_expansion_records import (
     render_scope_expansion_child_body,
     render_scope_expansion_lifecycle_comment,
 )
+from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.pipeline_github_reviews import ReviewPublicationResult
 from hephaestus.automation.remediation_recovery import (
@@ -2419,8 +2418,6 @@ def test_runner_dispatches_merge_cycle_as_a_typed_receipt(
     request = RunMergeWaitCycleRequest(
         pr_number=7,
         reviewed_head_sha="a" * 40,
-        proof_generation=2,
-        declined_readiness_fingerprint=None,
         deadline_s=time.monotonic() + 30.0,
         cancellation=threading.Event(),
     )
@@ -2442,20 +2439,18 @@ def test_runner_dispatches_merge_cycle_as_a_typed_receipt(
     assert state_reads == [7]
 
 
-@pytest.mark.parametrize("revoke_at", [1, 2, 0])
-def test_merge_rechecks_approval_and_preserves_required_gates(revoke_at: int) -> None:
-    """Revoked implementation approval stops either merge admission read."""
+@pytest.mark.parametrize("revoke_at", [1, 0])
+def test_merge_rechecks_approval_before_enabling_auto_merge(revoke_at: int) -> None:
+    """Revoked implementation approval stops the auto-merge enablement."""
     from unittest.mock import MagicMock
 
-    from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
+    from hephaestus.automation.pipeline.stages import AutoMergeEnableResult
     from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
     request = RunMergeWaitCycleRequest(
         pr_number=3006,
         issue_number=2701,
         reviewed_head_sha="a" * 40,
-        proof_generation=1,
-        declined_readiness_fingerprint=None,
         deadline_s=time.monotonic() + 30,
         cancellation=threading.Event(),
     )
@@ -2469,12 +2464,6 @@ def test_merge_rechecks_approval_and_preserves_required_gates(revoke_at: int) ->
         "baseRefName": "main",
     }
     github.gh_pr_state.return_value = state
-    github.verified_repository_default_branch.return_value = VerifiedRepositoryDefaultBranch(
-        "HomericIntelligence",
-        "Hephaestus",
-        "HomericIntelligence/Hephaestus",
-        "main",
-    )
     reads = 0
 
     def implementation_state(_: int) -> tuple[bool, bool]:
@@ -2483,31 +2472,16 @@ def test_merge_rechecks_approval_and_preserves_required_gates(revoke_at: int) ->
         return (False, True) if revoke_at and reads >= revoke_at else (True, False)
 
     github.pr_has_implementation_state_label.side_effect = implementation_state
-    github.list_unresolved_review_threads.return_value = []
-    github.effective_merge_policy.return_value = EffectiveMergePolicy(
-        base_branch="main",
-        default_branch="main",
-        required_checks=(),
-        conversation_resolution_enforced=True,
-        bypassable_ruleset_ids=(),
-        strict_update_enforced=True,
-    )
-    github.gh_pr_merge_readiness.return_value = {
-        **state,
-        "mergeable": "MERGEABLE",
-        "mergeStateStatus": "CLEAN",
-    }
-    github.required_checks_pass_for_head.return_value = True
-    github.merge_pr_if_head.return_value = SimpleNamespace(dry_run=True)
+    github.enable_auto_merge.return_value = AutoMergeEnableResult(enabled=True)
+
     result = PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
+
     if revoke_at:
         assert result.outcome == "not_implementation_go"
-        github.merge_pr_if_head.assert_not_called()
+        github.enable_auto_merge.assert_not_called()
     else:
-        assert result.outcome == "conditional_merge_dry_run"
-        github.required_checks_pass_for_head.assert_called_once()
-        github.merge_pr_if_head.assert_called_once()
-    assert reads == (revoke_at or 2)
+        assert result.outcome == "auto_merge_enabled"
+        github.enable_auto_merge.assert_called_once()
     github.mark_pr_implementation_no_go.assert_not_called()
 
 
@@ -2873,3 +2847,32 @@ def test_adopted_read_request_rejects_invalid_pins(
 
     with pytest.raises(ValueError):
         replace(cast(Any, _adopted_read_job(tmp_path).request), **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "returncode", "enabled", "already"),
+    [
+        ("", "! Pull request owner/repo#7 is already queued to merge\n", 1, True, True),
+        ("", "auto-merge already enabled\n", 1, True, True),
+        ("✓ auto-merge enabled\n", "", 0, True, False),
+        ("", "! The merge strategy for main is set by the merge queue\n", 0, True, False),
+        ("", "fatal: auto-merge is not supported\n", 1, False, False),
+    ],
+)
+def test_enable_auto_merge_reads_the_gh_report(
+    stdout: str, stderr: str, returncode: int, enabled: bool, already: bool
+) -> None:
+    """The auto-merge adapter reads the report that GitHub actually writes."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr=stderr)
+
+    github = PipelineGitHub("acme", repo="repo", command_runner=run)
+
+    result = github.enable_auto_merge(7)
+
+    assert result.enabled is enabled
+    assert result.already_enabled is already
+    assert calls == [["pr", "merge", "7", "--squash", "--auto"]]

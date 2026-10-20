@@ -1631,9 +1631,11 @@ class TestReviewedHeadRestart:
         restarted._drain_queues()
         restarted._drain_completions()
 
-        assert github.merge_attempts == [(12, "a" * 40)]
-        assert reviewed.result is not None
-        assert reviewed.result.passed is True
+        assert github.auto_merge_attempts == [12]
+        # The stage parks and waits for GitHub to report the merge. It does not
+        # declare success in the same step that enables auto-merge.
+        assert reviewed.result is None
+        assert reviewed.payload["merge_readiness_polls"] == 1
 
     def test_reviewed_head_merges_without_native_approval(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1670,9 +1672,9 @@ class TestReviewedHeadRestart:
         coordinator._drain_queues()
         coordinator._drain_completions()
 
-        assert github.merge_attempts == [(12, "b" * 40)]
-        assert item.result is not None
-        assert item.result.passed is True
+        assert github.auto_merge_attempts == [12]
+        assert item.result is None
+        assert item.payload["merge_readiness_polls"] == 1
 
 
 class TestDryRun:

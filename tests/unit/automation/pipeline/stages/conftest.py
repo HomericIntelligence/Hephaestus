@@ -39,6 +39,7 @@ from hephaestus.automation.pipeline.merge_wait_admission import (
 )
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
+    AutoMergeEnableResult,
     ConditionalMergeResult,
     ImplementationThreadReplyResult,
     ReviewerThreadReconciliationResult,
@@ -195,6 +196,7 @@ class FakeStageGitHub(FakeGitHub):
             else pr_state
         )
         self.merge_attempts: list[tuple[int, str]] = []
+        self.auto_merge_attempts: list[int] = []
         self._conversation_resolution = conversation_resolution
         self._pr_review_context = (
             pr_review_context
@@ -874,6 +876,16 @@ class FakeStageGitHub(FakeGitHub):
     def _viewer_login(self) -> str:
         """Return the fake authenticated automation actor."""
         return "hephaestus[bot]"
+
+    def enable_auto_merge(
+        self,
+        pr_number: int,
+        **_kwargs: Any,
+    ) -> AutoMergeEnableResult:
+        """Record one native auto-merge enablement."""
+        self.auto_merge_attempts.append(pr_number)
+        self.merge_attempts.append((pr_number, ""))
+        return AutoMergeEnableResult(enabled=True)
 
     def merge_pr_if_head(
         self,

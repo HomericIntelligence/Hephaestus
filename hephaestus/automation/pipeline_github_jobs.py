@@ -29,7 +29,6 @@ from hephaestus.automation.pipeline.github_jobs import (
     InspectDirtyDirectPrStateRequest,
     InspectRebaseConflictRequest,
     InspectRebaseReviewRequest,
-    MergeQueueReconciliation,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
     PublishRebaseReviewRequest,
@@ -53,11 +52,6 @@ from hephaestus.automation.pipeline.github_jobs import (
     ScopeExpansionChildrenEnsured,
     ScopeExpansionDependenciesReconciled,
 )
-from hephaestus.automation.pipeline.merge_wait_admission import (
-    MergeWaitAdmissionSnapshot,
-    RequiredChecksDeferred,
-    validate_merge_wait_admission,
-)
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
     journaled_implementation_remediation_reply_handoff,
@@ -67,7 +61,6 @@ from hephaestus.automation.pipeline.repository_validation import RepositoryValid
 from hephaestus.automation.pipeline.scope_retraction import normalize_scope_retraction_paths
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
-from hephaestus.automation.pipeline_github_check_policy import EffectiveMergePolicy
 from hephaestus.automation.pipeline_github_transport import rate_limit_remaining
 from hephaestus.automation.remediation_prepublication import (
     remove_prepublication_receipt,
@@ -1518,10 +1511,7 @@ class PipelineGitHubJobRunner:
         request: RunMergeWaitCycleRequest,
         github: Any,
     ) -> MergeWaitCycleCompleted:
-        """Run admission, readiness, one conditional merge, and reconciliation."""
-        requestable = frozenset({"CLEAN", "HAS_HOOKS", "UNSTABLE"})
-        retryable = frozenset({"BEHIND", "BLOCKED", "UNKNOWN"})
-        conflicting = frozenset({"CONFLICTING", "DIRTY"})
+        """Admit an open, GO-labelled pull request and enable native auto-merge."""
         terminal_merge_sha: str | None = None
 
         def complete(
@@ -1571,19 +1561,12 @@ class PipelineGitHubJobRunner:
                 return "merge_cycle_cancelled"
             return None
 
-        def rebase_record_outcome() -> str | None:
-            """Reject a changed record or initial audit before merge admission."""
-            if request.rebase_record is None:
-                return None
-            try:
-                live_record = github.read_review_rebase_record(request.pr_number)
-            except Exception:
-                return "rebase_review_record_changed"
-            return None if live_record == request.rebase_record else "rebase_review_record_changed"
+        def admit() -> dict[str, object] | str:
+            """Admit an open pull request carrying the exclusive GO label.
 
-        def admit(
-            initial: MergeWaitAdmissionSnapshot | None = None,
-        ) -> tuple[dict[str, object], MergeWaitAdmissionSnapshot] | str:
+            The head is deliberately not compared. The approval label is the
+            contract, and GitHub merges whatever is current.
+            """
             nonlocal terminal_merge_sha
             try:
                 state = github.gh_pr_state(request.pr_number)
@@ -1597,8 +1580,6 @@ class PipelineGitHubJobRunner:
                 return "pr_state_unavailable"
             if not isinstance(state, dict):
                 return "pr_state_unverified"
-            if state.get("autoMergeRequest") is not None:
-                return "auto_merge_already_armed"
             if state.get("state") != "OPEN" or "autoMergeRequest" not in state:
                 return "pr_state_unverified"
             try:
@@ -1607,292 +1588,37 @@ class PipelineGitHubJobRunner:
                 return "implementation_state_unavailable"
             if not has_go or has_no_go:
                 return "not_implementation_go"
-            try:
-                repository = github.verified_repository_default_branch()
-            except Exception:
-                return "default_branch_unavailable"
-            snapshot = validate_merge_wait_admission(
-                state,
-                repository,
-                request.merge_head_sha,
-                initial=initial,
-            )
-            if isinstance(snapshot, str):
-                return snapshot
-            return state, snapshot
-
-        def conversation_safety(policy: object) -> str | None:
-            try:
-                threads = github.list_unresolved_review_threads(request.pr_number)
-            except Exception:
-                return "review_threads_unavailable"
-            if threads:
-                return "unresolved_review_threads"
-            protected = getattr(policy, "conversation_resolution_enforced", None)
-            return None if protected is True else "conversation_resolution_required"
-
-        def policy_safety(
-            policy: object,
-            snapshot: MergeWaitAdmissionSnapshot,
-        ) -> str | None:
-            """Require one server-enforced merge route before mutable reads."""
-            if not isinstance(policy, EffectiveMergePolicy):
-                return "merge_policy_unavailable"
-            if (
-                policy.base_branch != snapshot.base_branch
-                or policy.default_branch != snapshot.repository.default_branch
-            ):
-                return "merge_policy_unavailable"
-            if any(
-                isinstance(ruleset_id, bool) or not isinstance(ruleset_id, int) or ruleset_id <= 0
-                for ruleset_id in policy.bypassable_ruleset_ids
-            ):
-                return "merge_policy_unavailable"
-            if policy.bypassable_ruleset_ids and not policy.merge_queue_required:
-                return "merge_policy_bypassable"
-            if policy.merge_queue_required and policy.merge_queue_residence_timeout_s is None:
-                return "merge_policy_unavailable"
-            if not policy.merge_queue_required and not policy.strict_update_enforced:
-                return "merge_policy_not_strict"
-            return conversation_safety(policy)
-
-        def readiness_outcome(
-            state: object,
-            *,
-            park_if_ready: bool,
-            merge_queue_required: bool = False,
-        ) -> tuple[str | None, tuple[str, ...] | None]:
-            terminal_outcome = terminal(state)
-            if terminal_outcome is not None:
-                return terminal_outcome, None
-            if state is None or not isinstance(state, dict):
-                return "merge_readiness_unavailable", None
-            if state.get("autoMergeRequest") is not None:
-                return "auto_merge_already_armed", None
-            readiness_head = state.get("headRefOid")
-            if not isinstance(readiness_head, str) or not readiness_head:
-                return "merge_readiness_unavailable", None
-            status = str(state.get("mergeStateStatus") or "").upper()
-            mergeable = str(state.get("mergeable") or "").upper()
-            fingerprint = (
-                readiness_head,
-                str(request.proof_generation),
-                mergeable,
-                status,
-            )
-            if readiness_head != request.merge_head_sha:
-                return "readiness_wait", fingerprint
-            if status in requestable and mergeable == "MERGEABLE":
-                if park_if_ready or request.declined_readiness_fingerprint == fingerprint:
-                    return "readiness_wait", fingerprint
-                return None, fingerprint
-            if merge_queue_required and status == "BLOCKED" and mergeable == "MERGEABLE":
-                return None, fingerprint
-            if status in conflicting or mergeable == "CONFLICTING":
-                return "merge_conflicting", fingerprint
-            if status == "BEHIND":
-                return "readiness_wait", fingerprint
-            if status not in retryable and mergeable != "UNKNOWN":
-                return "merge_readiness_unknown", fingerprint
-            return "readiness_wait", fingerprint
+            return state
 
         boundary = operation_boundary()
         if boundary is not None:
             return complete(boundary)
-        admitted = admit()
-        if isinstance(admitted, str):
-            return complete(admitted, merge_sha=terminal_merge_sha)
-        record_status = rebase_record_outcome()
-        if record_status is not None:
-            return complete(record_status)
-        state, initial_snapshot = admitted
-        if request.queue_admitted:
-            pull_request_id = state.get("id")
-            if not isinstance(pull_request_id, str) or not pull_request_id:
-                return complete("merge_queue_reconciliation_unavailable")
-            try:
-                reconciliation = github.reconcile_merge_queue_entry(
-                    request.pr_number,
-                    pull_request_id,
-                    request.merge_head_sha,
-                    deadline_s=request.deadline_s,
-                    cancellation=request.cancellation,
-                )
-            except Exception:
-                reconciliation = MergeQueueReconciliation.UNAVAILABLE
-            if reconciliation is MergeQueueReconciliation.PRESENT:
-                base_branch = initial_snapshot.base_branch
-                try:
-                    policy = github.effective_merge_policy(
-                        request.pr_number,
-                        base_branch,
-                        deadline_s=request.deadline_s,
-                        cancellation=request.cancellation,
-                    )
-                except Exception:
-                    policy = None
-                unsafe = policy_safety(policy, initial_snapshot)
-                if (
-                    unsafe is not None
-                    or not isinstance(policy, EffectiveMergePolicy)
-                    or not policy.merge_queue_required
-                ):
-                    return complete("merge_queue_reconciliation_unavailable")
-                return complete(
-                    "merge_queue_wait",
-                    queue_residence_timeout_s=policy.merge_queue_residence_timeout_s,
-                )
-            if reconciliation is MergeQueueReconciliation.REMOVED:
-                return complete("merge_queue_removed")
-            return complete("merge_queue_reconciliation_unavailable")
-        base_branch = initial_snapshot.base_branch
+        state = admit()
+        if isinstance(state, str):
+            return complete(state, merge_sha=terminal_merge_sha)
+        # The implementation-GO label is the whole merge contract. GitHub owns
+        # everything after this: branch protection, the required checks, any merge
+        # queue, and a rebase when the merge reports a real conflict. A
+        # conflicting pull request is not a failure here; GitHub surfaces it.
+        node_id = state.get("id")
         try:
-            policy = github.effective_merge_policy(
+            result = github.enable_auto_merge(
                 request.pr_number,
-                base_branch,
+                pull_request_id=node_id if isinstance(node_id, str) else None,
                 deadline_s=request.deadline_s,
                 cancellation=request.cancellation,
             )
         except Exception:
-            policy = None
-        if policy is None:
-            return complete("merge_policy_unavailable")
-        unsafe = policy_safety(policy, initial_snapshot)
-        if unsafe is not None:
-            return complete(unsafe)
-
-        try:
-            readiness = github.gh_pr_merge_readiness(request.pr_number)
-        except Exception:
-            return complete("merge_readiness_unavailable")
-        readiness_status, fingerprint = readiness_outcome(
-            readiness,
-            park_if_ready=False,
-            merge_queue_required=policy.merge_queue_required,
-        )
-        if readiness_status is not None:
-            return complete(readiness_status, fingerprint=fingerprint)
-
-        try:
-            checks_green = github.required_checks_pass_for_head(
-                request.merge_head_sha,
-                policy,
-                deadline_s=request.deadline_s,
-                cancellation=request.cancellation,
-            )
-        except Exception:
-            checks_green = False
-        if checks_green is RequiredChecksDeferred.PENDING:
-            return complete("required_checks_pending")
-        if checks_green is RequiredChecksDeferred.UNSTABLE:
-            return complete("required_checks_unstable")
-        if checks_green is not True:
-            return complete("required_checks_not_green")
-
-        # Complete all mutable GitHub traversals before final admission. The
-        # returned admission binds the immediate policy-selected request.
-        try:
-            current_policy = github.effective_merge_policy(
-                request.pr_number,
-                base_branch,
-                deadline_s=request.deadline_s,
-                cancellation=request.cancellation,
-            )
-        except Exception:
-            current_policy = None
-        if not isinstance(current_policy, EffectiveMergePolicy) or current_policy != policy:
-            return complete("merge_policy_unavailable")
-        unsafe = policy_safety(current_policy, initial_snapshot)
-        if unsafe is not None:
-            return complete(unsafe)
-
-        record_status = rebase_record_outcome()
-        if record_status is not None:
-            return complete(record_status)
-
-        boundary = operation_boundary()
-        if boundary is not None:
-            return complete(boundary)
-        admitted = admit(initial_snapshot)
-        if isinstance(admitted, str):
-            return complete(admitted, merge_sha=terminal_merge_sha)
-        final_state, _ = admitted
-
-        try:
-            result = github.merge_pr_if_head(
-                request.pr_number,
-                request.merge_head_sha,
-                policy=current_policy,
-                pull_request_id=final_state.get("id"),
-                deadline_s=request.deadline_s,
-                cancellation=request.cancellation,
-            )
-        except Exception:
-            return complete("merge_request_transport_error", attempted=True, can_retry=True)
+            return complete("auto_merge_transport_error", attempted=True, can_retry=True)
         if result.dry_run:
-            return complete("conditional_merge_dry_run", attempted=True)
+            return complete("auto_merge_dry_run", attempted=True)
+        if result.enabled:
+            return complete("auto_merge_enabled", attempted=True)
+        if result.transport_error:
+            return complete("auto_merge_transport_error", attempted=True, can_retry=True)
         if result.malformed:
-            return complete("merge_result_malformed", attempted=True)
-        if result.transport_error or result.status is None:
-            admitted = admit(initial_snapshot)
-            if isinstance(admitted, str):
-                return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
-            return complete("merge_not_ready", attempted=True, can_retry=True)
-        if getattr(result, "queued", False):
-            return complete(
-                "merge_queued",
-                attempted=True,
-                queue_residence_timeout_s=current_policy.merge_queue_residence_timeout_s,
-            )
-        if result.status == 200:
-            if result.body is None or result.body.get("merged") is not True:
-                return complete("merge_not_merged", attempted=True)
-            merge_sha = result.body.get("sha")
-            if not (
-                isinstance(merge_sha, str)
-                and len(merge_sha) in (40, 64)
-                and all(character in "0123456789abcdef" for character in merge_sha)
-            ):
-                # Older GitHub-compatible transports omit the merge SHA. The
-                # non-wave path remains compatible; MergeWaitStage rejects
-                # this result when a durable wave receipt requires the proof.
-                merge_sha = None
-            try:
-                final_state = github.gh_pr_state(request.pr_number)
-            except Exception:
-                return complete("merge_reconciliation_unavailable", attempted=True)
-            return complete(
-                terminal(final_state) or "merge_not_merged",
-                attempted=True,
-                merge_sha=merge_sha,
-            )
-        if result.status == 409:
-            admitted = admit(initial_snapshot)
-            if isinstance(admitted, str):
-                return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
-            return complete("merge_409_without_head_drift", attempted=True)
-        if result.status == 405:
-            try:
-                readiness = github.gh_pr_merge_readiness(request.pr_number)
-            except Exception:
-                return complete("merge_readiness_unavailable", attempted=True)
-            terminal_outcome = terminal(readiness)
-            if terminal_outcome is not None:
-                return complete(terminal_outcome, attempted=True)
-            if not isinstance(readiness, dict):
-                return complete("merge_readiness_unavailable", attempted=True)
-            if readiness.get("autoMergeRequest") is not None:
-                return complete("auto_merge_already_armed", attempted=True)
-            admitted = admit(initial_snapshot)
-            if isinstance(admitted, str):
-                return complete(admitted, attempted=True, merge_sha=terminal_merge_sha)
-            readiness_status, fingerprint = readiness_outcome(readiness, park_if_ready=True)
-            return complete(
-                readiness_status or "readiness_wait",
-                attempted=True,
-                fingerprint=fingerprint,
-            )
-        return complete(f"merge_http_{result.status}", attempted=True)
+            return complete("auto_merge_malformed", attempted=True)
+        return complete("auto_merge_not_enabled", attempted=True, can_retry=True)
 
 
 def _read_dirty_direct_state(

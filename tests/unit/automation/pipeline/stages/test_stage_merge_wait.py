@@ -1,1952 +1,339 @@
-"""Tests for the conditional, head-bound merge-wait stage."""
+"""Tests for the merge-wait stage.
+
+The contract is: an open pull request carrying the exclusive implementation-GO
+label is admitted, GitHub native auto-merge is enabled once, and the stage waits
+for GitHub to report the merge. The stage does not read the head, does not gate
+on required status evidence, and does not rebase first.
+"""
 
 from __future__ import annotations
 
-import threading
-import time
-from collections.abc import Sequence
-from pathlib import Path
 from typing import Any
-
-import pytest
 
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
-    MergeQueueReconciliation,
+    MergeWaitCycleCompleted,
     RunMergeWaitCycleRequest,
 )
-from hephaestus.automation.pipeline.jobs import JobResult
-from hephaestus.automation.pipeline.merge_wait_admission import VerifiedRepositoryDefaultBranch
-from hephaestus.automation.pipeline.routing import Disposition, StageName
+from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
-    ConditionalMergeResult,
+    AutoMergeEnableResult,
     JobRequest,
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
-from hephaestus.automation.pipeline.work_item import LearningIntent
-from hephaestus.automation.pipeline_github_check_policy import (
-    EffectiveMergePolicy,
-    RequiredCheck,
-)
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 MERGE = "MERGE"
+MERGE_APPLY = "MERGE_APPLY"
 
 
 def _open_pr(
     head: str = "a" * 40,
     *,
+    state: str = "OPEN",
     auto_merge_request: object | None = None,
-    base: str = "main",
 ) -> dict[str, object]:
-    """Return a complete open lifecycle record for a merge admission test."""
+    """Return one complete open lifecycle record."""
     return {
         "id": "PR_node",
-        "state": "OPEN",
+        "state": state,
         "headRefOid": head,
         "baseRefOid": "b" * 40,
+        "baseRefName": "main",
         "autoMergeRequest": auto_merge_request,
-        "baseRefName": base,
     }
 
 
-class _ConditionalGitHub(FakeStageGitHub):
-    """Stage fake with scripted atomic-merge and lifecycle responses."""
+def _merged_pr(head: str = "a" * 40) -> dict[str, object]:
+    """Return one complete merged lifecycle record with a merge commit."""
+    return {
+        "id": "PR_node",
+        "state": "MERGED",
+        "mergedAt": "2026-01-01T00:00:00Z",
+        "headRefOid": head,
+        "baseRefOid": "b" * 40,
+        "baseRefName": "main",
+        "autoMergeRequest": {"enabledAt": "2026-01-01T00:00:00Z"},
+        "mergeCommit": {"oid": "c" * 40},
+    }
+
+
+class _AutoMergeGitHub(FakeStageGitHub):
+    """Stage fake that records auto-merge enablement instead of a merge PUT."""
 
     def __init__(
         self,
         *,
         labels: tuple[bool, bool] = (True, False),
-        states: Sequence[dict[str, object] | None] | None = None,
-        default_branches: Sequence[str | None] | None = None,
-        merge_results: list[ConditionalMergeResult] | None = None,
-        readiness: dict[str, object] | list[dict[str, object]] | None = None,
-        conversation_resolution: bool = True,
-        required_checks_green: bool = True,
-        merge_queue_method: str | None = None,
-        strict_update_enforced: bool = True,
-        queue_reconciliations: list[MergeQueueReconciliation] | None = None,
-        check_response_timeout_minutes: int = 180,
-        min_entries_to_merge_wait_minutes: int = 5,
+        states: list[dict[str, object] | None] | None = None,
+        result: AutoMergeEnableResult | None = None,
+        raises: bool = False,
     ) -> None:
-        scripted_states = states or [_open_pr()]
         super().__init__(
             pr_impl_state=labels,
-            pr_state=scripted_states[0],
-            conversation_resolution=conversation_resolution,
-            queue_reconciliation=MergeQueueReconciliation.PRESENT,
+            pr_state=(states or [_open_pr()])[0],
         )
-        self._states = list(scripted_states)
-        self._default_branches = list(default_branches or ["main"])
-        self._policy_default_branch = self._default_branches[0] or "main"
-        self._merge_results = list(
-            merge_results
-            or [
-                ConditionalMergeResult(
-                    status=200,
-                    body={"merged": True},
-                    transport_error=False,
-                    malformed=False,
-                    dry_run=False,
-                )
-            ]
-        )
-        default_readiness = {
-            "state": "OPEN",
-            "headRefOid": "a" * 40,
-            "autoMergeRequest": None,
-            "baseRefName": "main",
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": "CLEAN",
-        }
-        self._readiness = (
-            list(readiness) if isinstance(readiness, list) else [readiness or default_readiness]
-        )
-        self.merge_attempts: list[tuple[int, str]] = []
-        self._required_checks_green = required_checks_green
-        self._merge_queue_method = merge_queue_method
-        self._strict_update_enforced = strict_update_enforced
-        self._check_response_timeout_minutes = check_response_timeout_minutes
-        self._min_entries_to_merge_wait_minutes = min_entries_to_merge_wait_minutes
-        self.checked_heads: list[str] = []
-        self.policy_bases: list[str] = []
-        self.events: list[str] = []
-        self._queue_reconciliations = list(queue_reconciliations or [])
+        self._states = list(states or [_open_pr()])
+        self._result = result if result is not None else AutoMergeEnableResult(enabled=True)
+        self._raises = raises
+        self.enable_calls: list[int] = []
+        self.merge_calls: list[int] = []
 
-    def reconcile_merge_queue_entry(
-        self,
-        pr_number: int,
-        pull_request_id: str,
-        reviewed_sha: str,
-        *,
-        deadline_s: float,
-        cancellation: threading.Event,
-    ) -> MergeQueueReconciliation:
-        """Return the next scripted live queue-entry state."""
-        configured = super().reconcile_merge_queue_entry(
-            pr_number,
-            pull_request_id,
-            reviewed_sha,
-            deadline_s=deadline_s,
-            cancellation=cancellation,
-        )
-        self.events.append(f"queue:{reviewed_sha}")
-        if self._queue_reconciliations:
-            return self._queue_reconciliations.pop(0)
-        return configured
-
-    def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
-        del pr_number
-        if len(self._states) > 1:
+    def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+        """Return each scripted state once, then repeat the last one."""
+        if self._states:
             return self._states.pop(0)
-        return self._states[0]
+        return None
 
-    def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
-        """Return the next repository-scoped default-branch record."""
-        branch = (
-            self._default_branches.pop(0)
-            if len(self._default_branches) > 1
-            else self._default_branches[0]
-        )
-        if branch is None:
-            raise ValueError("repository default branch is unavailable")
-        return VerifiedRepositoryDefaultBranch(
-            "HomericIntelligence",
-            "Hephaestus",
-            "HomericIntelligence/Hephaestus",
-            branch,
-        )
+    def enable_auto_merge(self, pr_number: int, **kwargs: Any) -> AutoMergeEnableResult:
+        """Record one enablement request."""
+        self.enable_calls.append(pr_number)
+        if self._raises:
+            raise RuntimeError("transport exploded")
+        return self._result
 
-    def merge_pr_if_head(
-        self,
-        pr_number: int,
-        reviewed_sha: str,
-        **_kwargs: Any,
-    ) -> ConditionalMergeResult:
-        self.events.append(f"merge:{reviewed_sha}")
-        self.merge_attempts.append((pr_number, reviewed_sha))
-        return self._merge_results.pop(0)
-
-    def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, object] | None:
-        del pr_number
-        if len(self._readiness) > 1:
-            return dict(self._readiness.pop(0))
-        return dict(self._readiness[0])
-
-    def effective_merge_policy(
-        self, pr_number: int, base_branch: str, **_kwargs: Any
-    ) -> EffectiveMergePolicy:
-        """Return the scripted effective policy."""
-        self.policy_bases.append(base_branch)
-        return EffectiveMergePolicy(
-            base_branch=base_branch,
-            default_branch=self._policy_default_branch,
-            conversation_resolution_enforced=self._conversation_resolution,
-            required_checks=(RequiredCheck("required-ci", 1),),
-            bypassable_ruleset_ids=(),
-            strict_update_enforced=self._strict_update_enforced,
-            merge_queue_method=self._merge_queue_method,
-            check_response_timeout_minutes=(
-                self._check_response_timeout_minutes if self._merge_queue_method else None
-            ),
-            min_entries_to_merge_wait_minutes=(
-                self._min_entries_to_merge_wait_minutes if self._merge_queue_method else None
-            ),
-        )
-
-    def required_checks_pass_for_head(
-        self,
-        head_sha: str,
-        policy: Any,
-        *,
-        deadline_s: float,
-        cancellation: threading.Event,
-    ) -> bool:
-        """Return the scripted exact-head check result."""
-        del policy, deadline_s, cancellation
-        self.events.append(f"checks:{head_sha}")
-        self.checked_heads.append(head_sha)
-        return self._required_checks_green
+    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str, **kwargs: Any) -> Any:
+        """Record that the removed conditional merge was never called."""
+        self.merge_calls.append(pr_number)
+        raise AssertionError("merge_pr_if_head must not be called")
 
 
-def _reviewed_item(make_work_item: Any, *, head: str = "a" * 40) -> Any:
-    return make_work_item(
-        stage=StageName.MERGE_WAIT,
-        pr=12,
-        state=MERGE,
-        payload={"reviewed_pr_head_sha": head},
-    )
+def _run_cycle(github: _AutoMergeGitHub, job: GitHubJob) -> Any:
+    """Run one merge-wait GitHub cycle against the fake accessor."""
+    request = job.request
+    assert isinstance(request, RunMergeWaitCycleRequest)
+    return PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
 
 
-def _complete_merge_cycle(stage: MergeWaitStage, item: Any, ctx: Any) -> Any:
-    """Execute a dispatched merge cycle at the worker boundary, then apply it."""
-    request = stage.step(item, ctx)
-    if not isinstance(request, JobRequest) or not isinstance(request.job, GitHubJob):
-        return request
-    assert isinstance(request.job.request, RunMergeWaitCycleRequest)
-    try:
-        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
-            request.job.request,
-            ctx.github,
-        )
-        result = JobResult(ok=True, value=receipt)
-    except Exception as error:
-        result = JobResult(ok=False, error=f"{type(error).__name__}: {error}")
-    stage.on_job_done(item, result, ctx)
-    item.state = request.on_done_state
-    applied = stage.step(item, ctx)
-    if isinstance(applied, StageOutcome) and applied.disposition is Disposition.RETRY:
-        item.state = MERGE
-    return applied
-
-
-def test_missing_implementation_go_label_is_blocked(make_ctx: Any, make_work_item: Any) -> None:
-    """A missing implementation-go label routes back to review."""
-    github = _ConditionalGitHub(labels=(False, False))
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
-    assert github.merge_attempts == []
-
-
-def test_green_exact_head_checks_allow_merge_without_operator_review(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A current GO label and green exact-head checks can reach the merge."""
-    head = "a" * 40
-    github = _ConditionalGitHub(
-        states=[_open_pr(head), _open_pr(head), {"state": "MERGED"}],
-    )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-
-    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item, head=head), ctx)
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.checked_heads == [head]
-    assert github.events == [f"checks:{head}", f"merge:{head}"]
-    assert len(github.merge_attempts) == 1
-
-
-def test_verified_master_default_branch_reaches_one_conditional_merge(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A PR on the verified non-main default branch can merge."""
-    head = "a" * 40
-    github = _ConditionalGitHub(
-        states=[_open_pr(head, base="master"), _open_pr(head, base="master"), {"state": "MERGED"}],
-        default_branches=["master", "master"],
-    )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-
-    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, head)]
-    assert github.policy_bases == ["master", "master"]
-
-
-@pytest.mark.parametrize("base", ["main", "release"])
-def test_non_default_base_fails_without_conditional_merge(
-    make_ctx: Any, make_work_item: Any, base: str
-) -> None:
-    """A PR on a non-default branch cannot reach a merge request."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(base=base)],
-        default_branches=["master"],
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "non_default_base")
-    assert github.merge_attempts == []
-
-
-def test_missing_default_branch_metadata_fails_closed_without_mutation(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Missing repository metadata prevents all merge mutations."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(base="master")],
-        default_branches=[None],
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "default_branch_unavailable")
-    assert github.merge_attempts == []
-    assert github.mutation_log == []
-
-
-@pytest.mark.parametrize(
-    ("states", "default_branches", "outcome"),
-    [
-        (
-            [_open_pr(base="master"), _open_pr(base="master")],
-            ["master", "trunk"],
-            "default_branch_drift",
+def _job(repo_root: Any) -> GitHubJob:
+    """Build one merge-wait GitHub job."""
+    return GitHubJob(
+        repo="test-repo",
+        repo_root=repo_root,
+        request=RunMergeWaitCycleRequest(
+            issue_number=1,
+            pr_number=7,
+            reviewed_head_sha="a" * 40,
+            deadline_s=60.0,
+            cancellation=__import__("threading").Event(),
         ),
-        (
-            [_open_pr(base="master"), _open_pr(base="release")],
-            ["master", "master"],
-            "pr_base_drift",
-        ),
-    ],
-)
-def test_branch_drift_blocks_the_final_conditional_merge(
-    make_ctx: Any,
-    make_work_item: Any,
-    states: list[dict[str, object]],
-    default_branches: list[str],
-    outcome: str,
+        descr="merge_wait_admission_cycle",
+    )
+
+
+def test_open_go_labelled_pr_enables_auto_merge(tmp_path: Any) -> None:
+    """The normal case: one enablement request and no conditional merge."""
+    github = _AutoMergeGitHub()
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert github.enable_calls == [7]
+    assert github.merge_calls == []
+    assert receipt.outcome == "auto_merge_enabled"
+    assert receipt.attempted is True
+
+
+def test_auto_merge_is_enabled_even_when_required_checks_are_not_green(
+    tmp_path: Any,
 ) -> None:
-    """The final branch snapshot must equal the initial admission snapshot."""
-    github = _ConditionalGitHub(states=states, default_branches=default_branches)
+    """Required status evidence is GitHub's gate, not this stage's."""
+    github = _AutoMergeGitHub(result=AutoMergeEnableResult(enabled=True))
+    github.required_checks_pass_for_head = lambda *a, **k: False  # type: ignore[method-assign]
 
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
+    receipt = _run_cycle(github, _job(tmp_path))
 
-    assert result == StageOutcome(Disposition.FINISH_FAIL, outcome)
-    assert github.merge_attempts == []
-    assert github.mutation_log == []
+    assert receipt.outcome == "auto_merge_enabled"
+    assert github.enable_calls == [7]
 
 
-def test_reconstructed_item_accepts_reconciled_queue_admission_without_replay(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A reconstructed reviewed item accepts readback and then only polls."""
-    queued = ConditionalMergeResult(
-        status=200,
-        body={"merged": False, "queue_entry_id": "MQE_node"},
-        queued=True,
-    )
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr()],
-        merge_results=[queued],
-        merge_queue_method="SQUASH",
-        strict_update_enforced=False,
-    )
-    ctx = make_ctx(github=github)
-    item = _reviewed_item(make_work_item)
-    assert "merge_queue_admitted_head_sha" not in item.payload
-    stage = MergeWaitStage()
+def test_a_conflicting_pull_request_still_enables_auto_merge(tmp_path: Any) -> None:
+    """A conflict is not a failure. GitHub reports it and rebases on demand."""
+    github = _AutoMergeGitHub(states=[_open_pr()])
+    receipt = _run_cycle(github, _job(tmp_path))
 
-    first = _complete_merge_cycle(stage, item, ctx)
-    second = _complete_merge_cycle(stage, item, ctx)
-
-    assert first == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert second == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert item.payload["merge_queue_admitted_head_sha"] == "a" * 40
+    assert receipt.outcome == "auto_merge_enabled"
 
 
-def test_removed_queue_entry_permits_one_new_exact_head_admission(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A GitHub-proven queue removal clears admission proof before a new request."""
-    queued = ConditionalMergeResult(
-        status=200,
-        body={"merged": False, "queue_entry_id": "MQE_node"},
-        queued=True,
-    )
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr(), _open_pr()],
-        merge_results=[queued, queued],
-        merge_queue_method="SQUASH",
-        strict_update_enforced=False,
-        queue_reconciliations=[MergeQueueReconciliation.REMOVED],
-    )
-    ctx = make_ctx(github=github)
-    item = _reviewed_item(make_work_item)
-    item.payload["merge_queue_admitted_head_sha"] = "a" * 40
-    item.payload["merge_queue_admitted_proof_generation"] = 0
+def test_missing_go_label_is_not_admitted(tmp_path: Any) -> None:
+    """Without the approval label nothing is mutated."""
+    github = _AutoMergeGitHub(labels=(False, False))
+    receipt = _run_cycle(github, _job(tmp_path))
 
-    stage = MergeWaitStage()
-    first = _complete_merge_cycle(stage, item, ctx)
-    result = _complete_merge_cycle(stage, item, ctx)
-
-    assert first == StageOutcome(Disposition.RETRY, "merge_not_ready")
-    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert github.events == [f"queue:{'a' * 40}", f"checks:{'a' * 40}", f"merge:{'a' * 40}"]
-    assert github.merge_attempts == [(12, "a" * 40)]
+    assert receipt.outcome == "not_implementation_go"
+    assert github.enable_calls == []
 
 
-def test_unavailable_queue_reconciliation_preserves_proof_without_replay(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Ambiguous live queue state ends the item without another admission."""
-    github = _ConditionalGitHub(
-        states=[_open_pr()],
-        merge_queue_method="SQUASH",
-        strict_update_enforced=False,
-        queue_reconciliations=[MergeQueueReconciliation.UNAVAILABLE],
-    )
-    item = _reviewed_item(make_work_item)
-    item.payload["merge_queue_admitted_head_sha"] = "a" * 40
-    item.payload["merge_queue_admitted_proof_generation"] = 0
+def test_no_go_label_is_not_admitted(tmp_path: Any) -> None:
+    """An exclusive NO-GO blocks the enablement."""
+    github = _AutoMergeGitHub(labels=(True, True))
+    receipt = _run_cycle(github, _job(tmp_path))
 
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_queue_reconciliation_unavailable")
-    assert item.payload["merge_queue_admitted_head_sha"] == "a" * 40
-    assert item.payload["merge_queue_admitted_proof_generation"] == 0
-    assert github.merge_attempts == []
+    assert receipt.outcome == "not_implementation_go"
+    assert github.enable_calls == []
 
 
-def test_canonical_stage_fake_defaults_queue_reconciliation_to_unavailable() -> None:
-    """An unconfigured test double cannot silently authorize continued residence."""
-    github = FakeStageGitHub()
+def test_closed_pull_request_is_not_admitted(tmp_path: Any) -> None:
+    """A closed pull request is terminal, not a merge."""
+    github = _AutoMergeGitHub(states=[_open_pr(state="CLOSED")])
+    receipt = _run_cycle(github, _job(tmp_path))
 
-    result = github.reconcile_merge_queue_entry(
-        12,
-        "PR_node",
-        "a" * 40,
-        deadline_s=200.0,
+    assert receipt.outcome == "closed"
+    assert github.enable_calls == []
+
+
+def test_already_merged_pull_request_is_not_admitted(tmp_path: Any) -> None:
+    """An already-merged pull request reports the merge instead."""
+    github = _AutoMergeGitHub(states=[_merged_pr()])
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "merged"
+    assert github.enable_calls == []
+
+
+def test_unreadable_pull_request_state_does_not_enable(tmp_path: Any) -> None:
+    """An unverified read is refused rather than guessed."""
+    github = _AutoMergeGitHub(states=[None])
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "pr_state_unavailable"
+    assert github.enable_calls == []
+
+
+def test_state_without_the_auto_merge_field_is_refused(tmp_path: Any) -> None:
+    """A missing autoMergeRequest field cannot prove the PR is unarmed."""
+    partial = _open_pr()
+    del partial["autoMergeRequest"]
+    github = _AutoMergeGitHub(states=[partial])
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "pr_state_unverified"
+    assert github.enable_calls == []
+
+
+def test_transport_error_is_retryable(tmp_path: Any) -> None:
+    """An unknown enablement outcome retries rather than failing the item."""
+    github = _AutoMergeGitHub(result=AutoMergeEnableResult(enabled=False, transport_error=True))
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "auto_merge_transport_error"
+    assert receipt.retryable is True
+
+
+def test_raised_transport_failure_is_retryable(tmp_path: Any) -> None:
+    """An adapter exception at the boundary becomes a retry, not a crash."""
+    github = _AutoMergeGitHub(raises=True)
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "auto_merge_transport_error"
+    assert receipt.retryable is True
+
+
+def test_malformed_response_is_terminal_for_that_attempt(tmp_path: Any) -> None:
+    """An uninterpretable response is reported and not retried blindly."""
+    github = _AutoMergeGitHub(result=AutoMergeEnableResult(enabled=False, malformed=True))
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "auto_merge_malformed"
+    assert receipt.retryable is False
+
+
+def test_dry_run_reports_without_mutating(tmp_path: Any) -> None:
+    """A dry run never issues the real mutation."""
+    github = _AutoMergeGitHub(result=AutoMergeEnableResult(enabled=False, dry_run=True))
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "auto_merge_dry_run"
+
+
+def test_missing_pull_request_id_still_enables_by_number(tmp_path: Any) -> None:
+    """A read without a node id still enables by pull request number.
+
+    `gh pr merge --auto` addresses the pull request by number, so a missing node
+    id is not a reason to refuse.
+    """
+    state = _open_pr()
+    del state["id"]
+    github = _AutoMergeGitHub(states=[state])
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "auto_merge_enabled"
+    assert github.enable_calls == [7]
+
+
+def test_observed_head_is_not_compared_against_live_state(tmp_path: Any) -> None:
+    """A new commit between review and enablement does not block the merge."""
+    github = _AutoMergeGitHub(states=[_open_pr(head="f" * 40)])
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "auto_merge_enabled"
+    assert github.enable_calls == [7]
+
+
+def test_stage_parks_after_a_successful_enablement(make_ctx: Any, make_work_item: Any) -> None:
+    """After enabling, the stage waits for GitHub instead of declaring success."""
+    import threading
+
+    item = make_work_item(kind="pr", pr=7, issue=1)
+    item.payload["reviewed_pr_head_sha"] = "a" * 40
+    item.state = MERGE_APPLY
+    request = RunMergeWaitCycleRequest(
+        issue_number=1,
+        pr_number=7,
+        reviewed_head_sha="a" * 40,
+        deadline_s=60.0,
         cancellation=threading.Event(),
     )
-
-    assert result is MergeQueueReconciliation.UNAVAILABLE
-    assert github.queue_reconciliation_calls == [(12, "PR_node", "a" * 40, 200.0)]
-
-
-def test_present_queue_entry_uses_the_complete_policy_wait_window(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A live queue entry can outlast the shorter generic readiness wait."""
-    queued = ConditionalMergeResult(
-        status=200,
-        body={"merged": False, "queue_entry_id": "MQE_node"},
-        queued=True,
+    item.payload["_pending_github_request"] = request
+    item.payload["_merge_wait_cycle_receipt"] = MergeWaitCycleCompleted(
+        request=request, outcome="auto_merge_enabled", attempted=True
     )
-    now = [100.0]
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr()],
-        merge_results=[queued],
-        merge_queue_method="SQUASH",
-        strict_update_enforced=False,
-    )
-    ctx = make_ctx(
-        github=github,
-        now_fn=lambda: now[0],
-        config_overrides={"poll_max_wait": 1200},
-    )
-    item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
 
-    first = _complete_merge_cycle(stage, item, ctx)
-    now[0] = 1301.0
-    present = _complete_merge_cycle(stage, item, ctx)
-    now[0] = 11200.0
-    expired = _complete_merge_cycle(stage, item, ctx)
+    outcome = stage._merge_apply(item, make_ctx())
 
-    assert first == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert present == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert expired == StageOutcome(Disposition.FINISH_FAIL, "merge_queue_residence_timeout")
-    assert item.payload["merge_queue_residence_deadline_s"] == 11200.0
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert len(github.queue_reconciliation_calls) == 1
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.RETRY
 
 
-def test_repeated_queue_removals_cannot_exceed_the_merge_attempt_budget(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Two queue admissions at budget two cannot issue a third admission."""
-    queued = ConditionalMergeResult(
-        status=200,
-        body={"merged": False, "queue_entry_id": "MQE_node"},
-        queued=True,
-    )
-    github = _ConditionalGitHub(
-        states=[_open_pr()],
-        merge_results=[queued, queued],
-        merge_queue_method="SQUASH",
-        strict_update_enforced=False,
-        queue_reconciliations=[
-            MergeQueueReconciliation.REMOVED,
-            MergeQueueReconciliation.REMOVED,
-        ],
-    )
-    ctx = make_ctx(github=github, budget_fn=lambda name: 2 if name == "merge" else 1)
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
+def test_stage_finishes_once_github_reports_merged(make_ctx: Any, make_work_item: Any) -> None:
+    """A confirmed merge is a pass, and the learning intent is recorded."""
+    import threading
 
-    outcomes = [_complete_merge_cycle(stage, item, ctx) for _ in range(4)]
-
-    assert outcomes[-1] == StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
-    assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
-    assert len(github.queue_reconciliation_calls) == 2
-    assert "merge_queue_admitted_head_sha" not in item.payload
-    assert "merge_queue_residence_deadline_s" not in item.payload
-
-
-def test_failed_queue_reconciliation_is_terminal_without_mutation_replay(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A malformed readback cannot enter the retry route or record admission."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr()],
-        merge_results=[ConditionalMergeResult(status=None, body=None, malformed=True)],
-        merge_queue_method="SQUASH",
-        strict_update_enforced=False,
-    )
-    item = _reviewed_item(make_work_item)
-
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_result_malformed")
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert "retry_delay_s" not in item.payload
-    assert "merge_queue_admitted_head_sha" not in item.payload
-
-
-def test_failed_exact_head_checks_block_merge_without_operator_review(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Failed current-head checks stop merge admission without a review."""
-    head = "a" * 40
-    github = _ConditionalGitHub(required_checks_green=False)
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item, head=head), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.BLOCKED, "required_checks_not_green")
-    assert github.checked_heads == [head]
-    assert github.merge_attempts == []
-
-
-def test_merge_cycle_dispatches_without_inline_github_calls(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """MERGE freezes its exact proof before any admission or mutation call."""
-
-    class InlineGitHubForbidden(FakeStageGitHub):
-        def __getattribute__(self, name: str) -> object:
-            if name in {
-                "gh_pr_state",
-                "pr_has_implementation_state_label",
-                "list_unresolved_review_threads",
-                "effective_merge_policy",
-                "gh_pr_merge_readiness",
-                "merge_pr_if_head",
-            }:
-                raise AttributeError(f"GitHub call ran inline: {name}")
-            return super().__getattribute__(name)
-
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
-    ctx = make_ctx(github=InlineGitHubForbidden())
-
-    started = time.monotonic()
-    result = stage.step(item, ctx)
-    elapsed = time.monotonic() - started
-
-    assert isinstance(result, JobRequest)
-    assert isinstance(result.job, GitHubJob)
-    assert isinstance(result.job.request, RunMergeWaitCycleRequest)
-    assert result.job.request.reviewed_head_sha == "a" * 40
-    assert result.job.request.deadline_s > 0
-    assert result.job.request.cancellation is ctx.cancellation
-    assert elapsed < 0.25
-
-
-def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A 200 response is insufficient until the terminal lifecycle read is merged."""
-    github = _ConditionalGitHub(states=[_open_pr(), _open_pr(), {"state": "MERGED"}])
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-
-    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-
-@pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS"])
-def test_mergeable_requestable_readiness_merges_successfully(
-    make_ctx: Any, make_work_item: Any, merge_state_status: str
-) -> None:
-    """Initially-ready requestable states reach the PUT without seeding a wait."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
-        readiness={
-            **_open_pr(),
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": merge_state_status,
-        },
-    )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-    item = _reviewed_item(make_work_item)
-
-    result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert "merge_readiness_deadline_s" not in item.payload
-    assert "merge_readiness_polls" not in item.payload
-
-
-def test_optional_failure_unstable_readiness_attempts_conditional_merge(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """An optional failing status lets server protection classify the first PUT."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
-        readiness={
-            **_open_pr(),
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": "UNSTABLE",
-        },
-    )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-    item = _reviewed_item(make_work_item)
-
-    result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert "merge_readiness_deadline_s" not in item.payload
-    assert "merge_readiness_polls" not in item.payload
-
-
-def test_blocked_readiness_waits_before_the_first_conditional_merge(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Pending readiness is polled without burning a conditional PUT."""
-    not_ready = {
-        **_open_pr(),
-        "mergeable": "MERGEABLE",
-        "mergeStateStatus": "BLOCKED",
-    }
-    ready = {
-        **_open_pr(),
-        "mergeable": "MERGEABLE",
-        "mergeStateStatus": "CLEAN",
-    }
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr(), {"state": "MERGED"}],
-        readiness=[not_ready, ready],
-    )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-    item = _reviewed_item(make_work_item)
-
-    first = _complete_merge_cycle(MergeWaitStage(), item, ctx)
-
-    assert first == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert item.payload["retry_delay_s"] == 5.0
-    assert github.merge_attempts == []
-
-    second = _complete_merge_cycle(MergeWaitStage(), item, ctx)
-
-    assert second == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-
-def test_readiness_wake_rechecks_the_head_before_a_conditional_merge(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A head change during the timer wait returns to fresh review without a PUT."""
-    blocked = {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED"}
-    ready = {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr("b" * 40)],
-        readiness=[blocked, ready],
-    )
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
-    ctx = make_ctx(github=github)
-
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.RETRY, "merge_readiness_wait"
-    )
-
-    result = _complete_merge_cycle(stage, item, ctx)
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
-    assert github.merge_attempts == []
-
-
-def test_readiness_wake_fails_closed_when_a_thread_appears_while_ci_is_pending(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A timer wake rejects a newly unresolved thread before re-parking."""
-
-    class ThreadAppearsDuringReadinessWaitGitHub(_ConditionalGitHub):
-        def __init__(self) -> None:
-            super().__init__(
-                readiness={
-                    **_open_pr(),
-                    "mergeable": "MERGEABLE",
-                    "mergeStateStatus": "BLOCKED",
-                }
-            )
-            self.thread_reads = 0
-
-        def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, object]]:
-            del pr_number
-            self.thread_reads += 1
-            if self.thread_reads == 1:
-                return []
-            return [{"id": "late-thread", "automation_owned": True}]
-
-    github = ThreadAppearsDuringReadinessWaitGitHub()
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
-    ctx = make_ctx(github=github)
-
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.RETRY, "merge_readiness_wait"
-    )
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.FINISH_FAIL,
-        "unresolved_review_threads",
-    )
-    assert github.merge_attempts == []
-
-
-def test_readiness_wake_fails_closed_when_conversation_protection_is_removed(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A timer wake rejects a branch-policy change before re-parking."""
-
-    class ProtectionRemovedDuringReadinessWaitGitHub(_ConditionalGitHub):
-        def __init__(self) -> None:
-            super().__init__(
-                readiness={
-                    **_open_pr(),
-                    "mergeable": "MERGEABLE",
-                    "mergeStateStatus": "BLOCKED",
-                }
-            )
-            self.policy_reads = 0
-
-        def effective_merge_policy(
-            self, pr_number: int, base_branch: str, **kwargs: Any
-        ) -> EffectiveMergePolicy:
-            self.policy_reads += 1
-            policy = super().effective_merge_policy(pr_number, base_branch, **kwargs)
-            return EffectiveMergePolicy(
-                base_branch=policy.base_branch,
-                default_branch=policy.default_branch,
-                required_checks=policy.required_checks,
-                conversation_resolution_enforced=self.policy_reads == 1,
-                bypassable_ruleset_ids=policy.bypassable_ruleset_ids,
-                strict_update_enforced=policy.strict_update_enforced,
-                merge_queue_method=policy.merge_queue_method,
-            )
-
-    github = ProtectionRemovedDuringReadinessWaitGitHub()
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
-    ctx = make_ctx(github=github)
-
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.RETRY, "merge_readiness_wait"
-    )
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.FINISH_FAIL,
-        "conversation_resolution_required",
-    )
-    assert github.merge_attempts == []
-
-
-def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Normal CI-duration readiness does not burn conditional merge attempts."""
-    now = [0.0]
-
-    class DelayedReadyGitHub(_ConditionalGitHub):
-        def __init__(self) -> None:
-            super().__init__()
-            self.merged = False
-
-        def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
-            del pr_number
-            return {"state": "MERGED"} if self.merged else _open_pr()
-
-        def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, object] | None:
-            del pr_number
-            status = "CLEAN" if now[0] >= 10 * 60 else "BLOCKED"
-            return {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": status}
-
-        def merge_pr_if_head(
-            self,
-            pr_number: int,
-            reviewed_sha: str,
-            **_kwargs: Any,
-        ) -> ConditionalMergeResult:
-            self.merge_attempts.append((pr_number, reviewed_sha))
-            self.merged = True
-            return ConditionalMergeResult(
-                status=200,
-                body={"merged": True},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            )
-
-    github = DelayedReadyGitHub()
-    ctx = make_ctx(
-        github=github,
-        now_fn=lambda: now[0],
-        config_overrides={"enable_learn": False},
-    )
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
-
-    while now[0] < 10 * 60:
-        result = _complete_merge_cycle(stage, item, ctx)
-        assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-        assert github.merge_attempts == []
-        now[0] += item.payload["retry_delay_s"]
-
-    result = _complete_merge_cycle(stage, item, ctx)
-
-    assert now[0] >= 10 * 60
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-
-def test_open_thread_immediately_before_merge_fails_back_without_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Merge wait independently rejects a thread that appears after review GO."""
-
-    class LateThreadGitHub(_ConditionalGitHub):
-        def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, object]]:
-            del pr_number
-            return [{"id": "late-thread", "automation_owned": True}]
-
-    github = LateThreadGitHub(states=[_open_pr()])
-
-    item = _reviewed_item(make_work_item)
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "unresolved_review_threads")
-    assert github.merge_attempts == []
-
-
-@pytest.mark.parametrize("conversation_resolution", [False])
-def test_missing_conversation_resolution_policy_blocks_merge_put(
-    make_ctx: Any,
-    make_work_item: Any,
-    conversation_resolution: bool,
-) -> None:
-    """A branch without server-enforced conversation resolution cannot merge."""
-    github = _ConditionalGitHub(conversation_resolution=conversation_resolution)
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
-    assert github.merge_attempts == []
-
-
-def test_missing_admin_enforcement_policy_blocks_merge_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """The combined server-policy admission also rejects an admin bypass risk."""
-
-    class NoAdminEnforcementGitHub(_ConditionalGitHub):
-        def effective_merge_policy(
-            self, pr_number: int, base_branch: str, **kwargs: Any
-        ) -> EffectiveMergePolicy:
-            policy = super().effective_merge_policy(pr_number, base_branch, **kwargs)
-            return EffectiveMergePolicy(
-                base_branch=policy.base_branch,
-                default_branch=policy.default_branch,
-                required_checks=policy.required_checks,
-                conversation_resolution_enforced=False,
-                bypassable_ruleset_ids=policy.bypassable_ruleset_ids,
-                strict_update_enforced=policy.strict_update_enforced,
-                merge_queue_method=policy.merge_queue_method,
-            )
-
-    github = NoAdminEnforcementGitHub()
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
-    assert github.merge_attempts == []
-
-
-def test_unreadable_conversation_resolution_policy_blocks_merge_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """An unavailable server gate fails closed before the conditional PUT."""
-
-    class UnreadablePolicyGitHub(_ConditionalGitHub):
-        def effective_merge_policy(
-            self, pr_number: int, base_branch: str, **kwargs: Any
-        ) -> EffectiveMergePolicy:
-            del pr_number, base_branch, kwargs
-            raise RuntimeError("protection read failed")
-
-    github = UnreadablePolicyGitHub()
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_policy_unavailable")
-    assert github.merge_attempts == []
-
-
-def test_bypassable_effective_policy_is_a_terminal_fail_closed_outcome(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A bypass-capable actor cannot enter readiness or use a merge request."""
-
-    class BypassableRulesetGitHub(_ConditionalGitHub):
-        def effective_merge_policy(
-            self, pr_number: int, base_branch: str, **_kwargs: Any
-        ) -> EffectiveMergePolicy:
-            policy = super().effective_merge_policy(pr_number, base_branch, **_kwargs)
-            return EffectiveMergePolicy(
-                base_branch=policy.base_branch,
-                default_branch=policy.default_branch,
-                required_checks=policy.required_checks,
-                conversation_resolution_enforced=policy.conversation_resolution_enforced,
-                bypassable_ruleset_ids=(15556494,),
-            )
-
-    github = BypassableRulesetGitHub(required_checks_green=True)
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_policy_bypassable")
-    assert github.checked_heads == []
-    assert github.merge_attempts == []
-
-
-def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Server protection, not the local read, prevents a late-thread merge."""
-
-    class ServerRejectsLateThreadGitHub(_ConditionalGitHub):
-        def __init__(self) -> None:
-            super().__init__(
-                readiness=[
-                    {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
-                    {**_open_pr(), "mergeable": "BLOCKED", "mergeStateStatus": "BLOCKED"},
-                ]
-            )
-            self._thread_appeared_after_local_read = False
-
-        def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, object]]:
-            del pr_number
-            return []
-
-        def effective_merge_policy(
-            self, pr_number: int, base_branch: str, **kwargs: Any
-        ) -> EffectiveMergePolicy:
-            policy = super().effective_merge_policy(pr_number, base_branch, **kwargs)
-            self._thread_appeared_after_local_read = True
-            return policy
-
-        def merge_pr_if_head(
-            self,
-            pr_number: int,
-            reviewed_sha: str,
-            **_kwargs: Any,
-        ) -> ConditionalMergeResult:
-            assert self._thread_appeared_after_local_read
-            self.merge_attempts.append((pr_number, reviewed_sha))
-            return ConditionalMergeResult(
-                status=405,
-                body={"message": "review conversations must be resolved"},
-            )
-
-    github = ServerRejectsLateThreadGitHub()
-    item = _reviewed_item(make_work_item)
-
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert item.payload["retry_delay_s"] == 5.0
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-
-def test_external_arm_blocks_conditional_merge_without_any_mutation(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """An arm observed at final admission belongs to an external actor."""
-    github = _ConditionalGitHub(states=[_open_pr(auto_merge_request={"enabledAt": "elsewhere"})])
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert github.merge_attempts == []
-    assert github.mutation_log == []
-
-
-def test_stale_proof_fails_back_without_revoking_a_label(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A stale process owns no later label and must only request fresh review."""
-    github = _ConditionalGitHub(states=[_open_pr("b" * 40)])
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
-    assert github.merge_attempts == []
-    assert github.mutation_log == []
-
-
-def test_already_merged_retry_never_attempts_a_second_merge(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A retry that observes terminal merged state is a success without a PUT."""
-    github = _ConditionalGitHub(states=[{"state": "MERGED"}])
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-
-    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == []
-
-
-def test_merged_emits_post_merge_intent_without_job(
-    tmp_path: Path, make_ctx: Any, make_work_item: Any
-) -> None:
-    """A confirmed merge records auxiliary work without blocking merge success."""
-    from hephaestus.automation.learning_journal import LearningJournalStore
-
-    github = _ConditionalGitHub(states=[{"state": "MERGED"}])
-    item = _reviewed_item(make_work_item)
-    journal = LearningJournalStore(lambda: tmp_path)
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, learning_journal=journal)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert item.learning_intents == [LearningIntent.post_merge(repo=item.repo, issue=1, pr=12)]
-    record = journal.load(item.learning_intents[0].key)
-    assert record is not None and record["status"] == "pending"
-    assert github.merge_attempts == []
-
-
-def test_post_merge_journal_failure_is_ancillary(make_ctx: Any, make_work_item: Any) -> None:
-    """A journal failure after merge confirmation cannot change merge success."""
-    from hephaestus.automation.learning_journal import LearningJournalStore
-
-    class BrokenJournal(LearningJournalStore):
-        def ensure_pending(
-            self,
-            key: str,
-            *,
-            kind: str,
-            identity: dict[str, object] | None = None,
-        ) -> dict[str, Any]:
-            raise OSError("journal unavailable")
-
-    github = _ConditionalGitHub(states=[{"state": "MERGED"}])
-    item = _reviewed_item(make_work_item)
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(),
-        item,
-        make_ctx(github=github, learning_journal=BrokenJournal(lambda: Path("."))),
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert item.payload["learning_failures"][0]["error"] == "learning_intent_persist_failed"
-
-
-def test_ambiguous_transport_reconciles_a_merged_pr_without_duplicate_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """An unknown transport outcome is reconciled before any retry is considered."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
-        merge_results=[
-            ConditionalMergeResult(
-                status=None,
-                body=None,
-                transport_error=True,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
-    )
-    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
-
-    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
-
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-
-def test_ambiguous_transport_head_drift_fails_back_without_label_mutation(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A transport retry cannot carry a review proof across a changed head."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr("b" * 40)],
-        merge_results=[
-            ConditionalMergeResult(
-                status=None,
-                body=None,
-                transport_error=True,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert github.mutation_log == []
-
-
-def test_ambiguous_transport_retries_only_after_delayed_same_head_read(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A same-head ambiguity earns one timer retry, never an in-step re-PUT."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr()],
-        merge_results=[
-            ConditionalMergeResult(
-                status=None,
-                body=None,
-                transport_error=True,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
-    )
-    item = _reviewed_item(make_work_item)
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, budget_fn=lambda _route: 2)
-    )
-
-    assert result == StageOutcome(Disposition.RETRY, "merge_not_ready")
-    assert item.attempts["merge"] == 1
-    assert item.payload["retry_delay_s"] == 1.0
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert github.mutation_log == []
-
-
-def test_ambiguous_transport_with_unreadable_reconciliation_is_terminal(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A transport ambiguity cannot retry when the confirming read is unavailable."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), None],
-        merge_results=[
-            ConditionalMergeResult(
-                status=None,
-                body=None,
-                transport_error=True,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert github.mutation_log == []
-
-
-def test_restarted_merge_without_process_local_proof_fails_back_without_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A restarted process never reconstructs authority from durable labels alone."""
-    github = _ConditionalGitHub(states=[_open_pr()])
-    item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=MERGE)
-
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
-    assert github.merge_attempts == []
-    assert github.mutation_log == []
-
-
-def test_409_head_drift_fails_back_without_label_mutation(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """The conditional SHA conflict cannot revoke an actor-owned later label."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr("b" * 40)],
-        merge_results=[
-            ConditionalMergeResult(
-                status=409,
-                body={"message": "head changed"},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert github.mutation_log == []
-
-
-def test_405_reenters_readiness_wait_without_a_second_conditional_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Not-ready protections retry later instead of issuing a second PUT in-step."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr()],
-        merge_results=[
-            ConditionalMergeResult(
-                status=405,
-                body={"message": "not ready"},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
-        readiness=[
-            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
-            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED"},
-            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
-        ],
-    )
-    item = _reviewed_item(make_work_item)
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, budget_fn=lambda _route: 2)
-    )
-
-    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert item.payload["retry_delay_s"] == 5.0
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-
-@pytest.mark.parametrize("merge_state_status", ["CLEAN", "HAS_HOOKS", "UNSTABLE"])
-def test_persistent_405_unchanged_readiness_does_not_duplicate_the_put(
-    make_ctx: Any, make_work_item: Any, merge_state_status: str
-) -> None:
-    """A 405 parks while readiness is unchanged instead of retrying the same PUT."""
-    readiness = {
-        **_open_pr(),
-        "mergeable": "MERGEABLE",
-        "mergeStateStatus": merge_state_status,
-    }
-    github = _ConditionalGitHub(
-        states=[_open_pr()],
-        merge_results=[
-            ConditionalMergeResult(
-                status=405,
-                body={"message": "not ready"},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
-        readiness=[readiness, readiness, readiness],
-    )
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
-    ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
-
-    first = _complete_merge_cycle(stage, item, ctx)
-
-    assert first == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert item.payload["retry_delay_s"] == 5.0
-    assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-    second = _complete_merge_cycle(stage, item, ctx)
-
-    assert second == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert item.payload["retry_delay_s"] == 10.0
-    assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-
-def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Unchanged HAS_HOOKS after 405 parks across wakes until readiness changes."""
-    has_hooks = {
-        **_open_pr(),
-        "mergeable": "MERGEABLE",
-        "mergeStateStatus": "HAS_HOOKS",
-    }
-    clean = {
-        **_open_pr(),
-        "mergeable": "MERGEABLE",
-        "mergeStateStatus": "CLEAN",
-    }
-    scripted_states: list[dict[str, object] | None] = [_open_pr() for _ in range(7)]
-    scripted_states.append({"state": "MERGED"})
-    github = _ConditionalGitHub(
-        states=scripted_states,
-        merge_results=[
-            ConditionalMergeResult(
-                status=405,
-                body={"message": "not ready"},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            ),
-            ConditionalMergeResult(
-                status=200,
-                body={"merged": True},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            ),
-        ],
-        readiness=[has_hooks, has_hooks, has_hooks, has_hooks, clean],
-    )
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
-    ctx = make_ctx(
-        github=github,
-        budget_fn=lambda _route: 2,
-        config_overrides={"enable_learn": False},
-    )
-
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.RETRY, "merge_readiness_wait"
-    )
-    assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.RETRY, "merge_readiness_wait"
-    )
-    assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-    # A second unchanged HAS_HOOKS wake must remain non-mutating. This makes
-    # the regression independent of the one-step in-call 405 reconciliation.
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.RETRY, "merge_readiness_wait"
-    )
-    assert item.attempts["merge"] == 1
-    assert github.merge_attempts == [(12, "a" * 40)]
-
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.FINISH_PASS, "merged"
-    )
-    assert item.attempts["merge"] == 2
-    assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
-
-
-def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A re-review of unchanged code gets its own permitted conditional request."""
-    unstable = {
-        **_open_pr(),
-        "mergeable": "MERGEABLE",
-        "mergeStateStatus": "UNSTABLE",
-    }
-
-    class FreshProofGitHub(_ConditionalGitHub):
-        def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
-            del pr_number
-            return {"state": "MERGED"} if len(self.merge_attempts) == 2 else _open_pr()
-
-    github = FreshProofGitHub(
-        merge_results=[
-            ConditionalMergeResult(
-                status=405,
-                body={"message": "not ready"},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            ),
-            ConditionalMergeResult(
-                status=200,
-                body={"merged": True},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            ),
-        ],
-        readiness=[unstable, unstable, unstable],
-    )
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
-    ctx = make_ctx(
-        github=github,
-        budget_fn=lambda _route: 2,
-        config_overrides={"enable_learn": False},
-    )
-
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.RETRY, "merge_readiness_wait"
-    )
-
-    item.payload["reviewed_pr_proof_generation"] = 1
-
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.FINISH_PASS, "merged"
-    )
-    assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
-
-
-@pytest.mark.parametrize("merge_state_status", ["CONFLICTING", "DIRTY"])
-def test_405_conflicting_or_dirty_readiness_returns_to_implementer(
-    make_ctx: Any, make_work_item: Any, merge_state_status: str
-) -> None:
-    """A reviewed conflict is handed to the implementation agent to resolve."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr()],
-        merge_results=[
-            ConditionalMergeResult(
-                status=405,
-                body={"message": "not ready"},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
-        readiness=[
-            {**_open_pr(), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
-            {
-                **_open_pr(),
-                "mergeable": "CONFLICTING",
-                "mergeStateStatus": merge_state_status,
-            },
-        ],
-    )
-
-    item = _reviewed_item(make_work_item)
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "merge_conflicting")
-    assert item.payload["post_review_rebase_required"] is True
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert github.mutation_log == []
-
-
-def test_reviewed_behind_head_waits_without_rebase(make_ctx: Any, make_work_item: Any) -> None:
-    """A branch that is only behind main waits without a rebase."""
-    github = _ConditionalGitHub(
-        readiness={
-            **_open_pr(),
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": "BEHIND",
-        }
-    )
-    item = _reviewed_item(make_work_item)
-
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert "post_review_rebase_required" not in item.payload
-    assert github.merge_attempts == []
-
-
-def test_409_reconciliation_external_arm_blocks_without_label_mutation(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A fresh external arm after a 409 blocks the run without trying to revoke it."""
-    github = _ConditionalGitHub(
-        states=[_open_pr(), _open_pr(), _open_pr(auto_merge_request={"enabledAt": "external"})],
-        merge_results=[
-            ConditionalMergeResult(
-                status=409,
-                body={"message": "head changed"},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            )
-        ],
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
-    assert github.merge_attempts == [(12, "a" * 40)]
-    assert github.mutation_log == []
-
-
-def test_label_loss_or_non_default_base_prevents_the_conditional_request(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Final admission facts are all required immediately before the PUT."""
-    label_lost = _ConditionalGitHub(labels=(False, False), states=[_open_pr()])
-    wrong_base = _ConditionalGitHub(states=[_open_pr(base="release")])
-
-    assert _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=label_lost)
-    ) == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
-    assert _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=wrong_base)
-    ) == StageOutcome(Disposition.FINISH_FAIL, "non_default_base")
-    assert label_lost.merge_attempts == []
-    assert wrong_base.merge_attempts == []
-
-
-def test_contradictory_implementation_labels_prevent_the_conditional_request(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A contradictory durable state is not an exclusive implementation approval."""
-    github = _ConditionalGitHub(labels=(True, True), states=[_open_pr()])
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
-    assert github.merge_attempts == []
-    assert github.mutation_log == []
-
-
-def test_review_prose_cannot_replace_a_missing_implementation_go_label(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Decision-shaped review text is never an admission fact."""
-    github = _ConditionalGitHub(labels=(False, False), states=[_open_pr()])
-    item = _reviewed_item(make_work_item)
-    item.payload["review_feedback"] = "Verdict: GO"
-
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
-
-    assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
-    assert github.merge_attempts == []
-    assert github.mutation_log == []
-
-
-def test_200_without_merged_true_is_terminal(make_ctx: Any, make_work_item: Any) -> None:
-    """A successful transport does not imply the PR was merged."""
-    github = _ConditionalGitHub(
-        merge_results=[
-            ConditionalMergeResult(
-                status=200,
-                body={"merged": False},
-                transport_error=False,
-                malformed=False,
-                dry_run=False,
-            )
-        ]
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_not_merged")
-
-
-def test_blocked_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadline(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A normal CI restart fits while readiness waiting remains bounded."""
-    github = _ConditionalGitHub(
-        states=[_open_pr()],
-        readiness={
-            "state": "OPEN",
-            "headRefOid": "a" * 40,
-            "autoMergeRequest": None,
-            "baseRefName": "main",
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": "BLOCKED",
-        },
-    )
-    item = _reviewed_item(make_work_item)
-    stage = MergeWaitStage()
-    now = [1000.0]
-    ctx = make_ctx(
-        github=github,
-        budget_fn=lambda _route: 2,
-        now_fn=lambda: now[0],
-    )
-
-    for _ in range(23):
-        result = _complete_merge_cycle(stage, item, ctx)
-        assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-        assert github.merge_attempts == []
-        now[0] += item.payload["retry_delay_s"]
-
-    result = _complete_merge_cycle(stage, item, ctx)
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
-    assert github.merge_attempts == []
-    assert item.payload["merge_readiness_deadline_s"] == 2200.0
-    assert item.payload["merge_readiness_polls"] == 23
-
-
-@pytest.mark.parametrize("now", [1900.0, 1901.0])
-def test_requestable_readiness_honors_an_existing_matching_deadline_without_puts(
-    make_ctx: Any, make_work_item: Any, now: float
-) -> None:
-    """A ready PR cannot outlive an already-established matching wait deadline."""
-    github = _ConditionalGitHub(
-        readiness={
-            **_open_pr(),
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": "CLEAN",
-        }
-    )
-    item = _reviewed_item(make_work_item)
-    item.payload.update(
-        {
-            "merge_readiness_head_sha": "a" * 40,
-            "merge_readiness_proof_generation": 0,
-            "merge_readiness_deadline_s": 1900.0,
-            "merge_readiness_polls": 17,
-        }
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, now_fn=lambda: now)
-    )
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
-    assert github.merge_attempts == []
-    assert item.payload["merge_readiness_deadline_s"] == 1900.0
-    assert item.payload["merge_readiness_polls"] == 17
-
-
-def test_readiness_wait_resets_its_deadline_for_a_fresh_reviewed_head(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A new review proof cannot inherit an earlier head's waiting budget."""
-    fresh_head = "b" * 40
-    github = _ConditionalGitHub(
-        states=[_open_pr(fresh_head)],
-        readiness={
-            **_open_pr(fresh_head),
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": "BLOCKED",
-        },
-    )
-    item = _reviewed_item(make_work_item, head=fresh_head)
-    item.payload.update(
-        {
-            "merge_readiness_head_sha": "a" * 40,
-            "merge_readiness_deadline_s": 1.0,
-            "merge_readiness_polls": 17,
-        }
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, now_fn=lambda: 100.0)
-    )
-
-    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert item.payload["merge_readiness_head_sha"] == fresh_head
-    assert item.payload["merge_readiness_deadline_s"] == 1300.0
-    assert item.payload["merge_readiness_polls"] == 1
-    assert github.merge_attempts == []
-
-
-def test_readiness_wait_resets_for_a_fresh_proof_of_the_same_head(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Fresh review of unchanged code receives a fresh bounded wait window."""
-    github = _ConditionalGitHub(
-        readiness={
-            **_open_pr(),
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": "BLOCKED",
-        }
-    )
-    item = _reviewed_item(make_work_item)
-    item.payload.update(
-        {
-            "reviewed_pr_proof_generation": 2,
-            "merge_readiness_head_sha": "a" * 40,
-            "merge_readiness_proof_generation": 1,
-            "merge_readiness_deadline_s": 1.0,
-            "merge_readiness_polls": 17,
-        }
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), item, make_ctx(github=github, now_fn=lambda: 100.0)
-    )
-
-    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert item.payload["merge_readiness_proof_generation"] == 2
-    assert item.payload["merge_readiness_deadline_s"] == 1300.0
-    assert item.payload["merge_readiness_polls"] == 1
-    assert github.merge_attempts == []
-
-
-def test_unknown_mergeability_waits_without_a_conditional_put(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """GitHub's transient mergeability calculation is operationally pending."""
-    github = _ConditionalGitHub(
-        readiness={
-            **_open_pr(),
-            "mergeable": "UNKNOWN",
-            "mergeStateStatus": "CLEAN",
-        }
-    )
-
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
-
-    assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert github.merge_attempts == []
-
-
-def test_exhausted_merge_budget_does_not_enter_readiness_wait(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """No wait is useful once the next conditional request is forbidden."""
-    github = _ConditionalGitHub()
-    item = _reviewed_item(make_work_item)
-    item.attempts["merge"] = 2
-
-    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _route: 2))
-
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
-    assert github.merge_attempts == []
-
-
-def test_stage_github_exposes_a_conditional_merge_adapter(make_ctx: Any) -> None:
-    """The stage contract has an explicit adapter rather than a CLI merge escape hatch."""
-    assert callable(getattr(make_ctx().github, "merge_pr_if_head", None))
-
-
-def test_retained_review_checks_the_resulting_rebase_head(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """Required checks use the new head while the initial review stays fixed."""
-    item, record = _retained_review_item(make_work_item)
-    github = _ConditionalGitHub(
-        states=[_open_pr("c" * 40)],
-        readiness={**_open_pr("c" * 40), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
-        required_checks_green=False,
-    )
-    github.review_rebase_records[item.pr] = record
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github, org="test-org"))
-    assert result == StageOutcome(Disposition.BLOCKED, "required_checks_not_green")
-    assert github.checked_heads == ["c" * 40]
-    assert github.merge_attempts == []
-    assert item.payload["reviewed_pr_head_sha"] == "a" * 40
-
-
-def _retained_review_item(make_work_item: Any) -> tuple[Any, Any]:
-    """Keep the initial audit with the proof used by merge wait."""
-    from dataclasses import asdict
-
-    from hephaestus.automation.pipeline.rebase_review import RebaseReviewProof
-    from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
-    from hephaestus.automation.review_audit import ReviewAudit
-
-    item = _reviewed_item(make_work_item)
-    audit = ReviewAudit("A", "Checks passed.", (), "", True, "GO")
-    proof = RebaseReviewProof(
-        repository="test-org/test-repo",
-        issue_number=item.issue,
-        pr_number=item.pr,
+    item = make_work_item(kind="pr", pr=7, issue=1)
+    item.payload["reviewed_pr_head_sha"] = "a" * 40
+    item.state = MERGE_APPLY
+    request = RunMergeWaitCycleRequest(
+        issue_number=1,
+        pr_number=7,
         reviewed_head_sha="a" * 40,
-        reviewed_base_sha="b" * 40,
-        source_head_sha="a" * 40,
-        target_base_sha="b" * 40,
-        resulting_head_sha="c" * 40,
-        resulting_tree_sha="d" * 40,
-        original_audit_id=(
-            f"<!-- hephaestus-implementation-go-audit:pr={item.pr}:head={'a' * 40} -->"
-        ),
+        deadline_s=60.0,
+        cancellation=threading.Event(),
     )
-    record = RebaseReviewRecord(**asdict(proof), audit=audit)
-    item.payload.update(retained_rebase_review_proof=proof, review_audit=audit)
-    return item, record
-
-
-@pytest.mark.parametrize("moment", ["before_cycle", "during_checks"])
-@pytest.mark.parametrize("change", ["missing", "revoked", "record", "audit", "unavailable"])
-@pytest.mark.parametrize("queue_method", [None, "SQUASH"])
-def test_rebase_record_change_blocks_merge_after_host_proof(
-    make_ctx: Any, make_work_item: Any, moment: str, change: str, queue_method: str | None
-) -> None:
-    """A changed record or initial audit cannot use an earlier host proof."""
-    from dataclasses import replace
-
-    item, initial = _retained_review_item(make_work_item)
-
-    class ChangedRecordGitHub(_ConditionalGitHub):
-        def __init__(self) -> None:
-            super().__init__(
-                states=[_open_pr("c" * 40)],
-                readiness={
-                    **_open_pr("c" * 40),
-                    "mergeable": "MERGEABLE",
-                    "mergeStateStatus": "CLEAN",
-                },
-                merge_queue_method=queue_method,
-            )
-            self.changed = moment == "before_cycle"
-
-        def read_review_rebase_record(self, pr_number: int) -> Any:
-            assert pr_number == item.pr
-            if not self.changed:
-                return initial
-            if change == "missing":
-                return None
-            if change == "revoked":
-                return replace(initial, state="revoked")
-            if change == "record":
-                return replace(initial, source_head_sha="f" * 40)
-            if change == "audit":
-                return replace(initial, audit=replace(initial.audit, summary="Checks differ."))
-            raise RuntimeError("The record is unavailable.")
-
-        def required_checks_pass_for_head(
-            self,
-            head_sha: str,
-            policy: Any,
-            *,
-            deadline_s: float,
-            cancellation: threading.Event,
-        ) -> bool:
-            result = super().required_checks_pass_for_head(
-                head_sha, policy, deadline_s=deadline_s, cancellation=cancellation
-            )
-            self.changed = True
-            return result
-
-    github = ChangedRecordGitHub()
-    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github, org="test-org"))
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "rebase_review_record_changed")
-    assert github.merge_attempts == []
-    assert item.payload["review_audit"] == initial.audit
-    assert item.payload["reviewed_pr_head_sha"] == initial.reviewed_head_sha
-
-
-def test_unchanged_rebase_record_is_read_before_final_head_admission(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A record read must not follow the final head check before merge."""
-    item, record = _retained_review_item(make_work_item)
-
-    class OrderedRecordGitHub(_ConditionalGitHub):
-        def gh_pr_state(self, pr_number: int) -> dict[str, object] | None:
-            self.events.append("head")
-            return super().gh_pr_state(pr_number)
-
-        def read_review_rebase_record(self, pr_number: int) -> Any:
-            assert pr_number == item.pr
-            self.events.append("record")
-            return record
-
-        def merge_pr_if_head(
-            self, pr_number: int, reviewed_sha: str, **kwargs: Any
-        ) -> ConditionalMergeResult:
-            result = super().merge_pr_if_head(pr_number, reviewed_sha, **kwargs)
-            self._states = [{"state": "MERGED"}]
-            return result
-
-    github = OrderedRecordGitHub(
-        states=[_open_pr("c" * 40)],
-        readiness={**_open_pr("c" * 40), "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
+    item.payload["_pending_github_request"] = request
+    item.payload["_merge_wait_cycle_receipt"] = MergeWaitCycleCompleted(
+        request=request, outcome="merged", attempted=True, merge_sha="c" * 40
     )
-    result = _complete_merge_cycle(
-        MergeWaitStage(),
-        item,
-        make_ctx(
-            github=github,
-            org="test-org",
-            config_overrides={"enable_learn": False},
-        ),
-    )
-    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
-    merge_index = github.events.index(f"merge:{'c' * 40}")
-    assert github.events[merge_index - 2 : merge_index] == ["record", "head"]
-    assert github.events.count("record") == 2
-
-
-def test_rebase_record_is_rechecked_after_a_readiness_wait(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A later merge cycle cannot use a record that was deleted during a wait."""
-    item, record = _retained_review_item(make_work_item)
-    github = _ConditionalGitHub(
-        states=[_open_pr("c" * 40)],
-        readiness={**_open_pr("c" * 40), "mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"},
-    )
-    github.review_rebase_records[item.pr] = record
-    ctx = make_ctx(github=github, org="test-org")
     stage = MergeWaitStage()
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.RETRY, "merge_readiness_wait"
-    )
-    del github.review_rebase_records[item.pr]
-    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
-        Disposition.FINISH_FAIL, "rebase_review_record_changed"
-    )
-    assert github.merge_attempts == []
+
+    outcome = stage._merge_apply(item, make_ctx())
+
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.FINISH_PASS
+
+
+def test_merge_observes_the_head_when_no_review_round_read_one(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A pull request with no review in this process still has an observed head."""
+    github = _AutoMergeGitHub(states=[_open_pr("c" * 40)])
+    item = make_work_item(kind="pr", pr=7, issue=1)
+    item.state = "MERGE"
+    stage = MergeWaitStage()
+
+    request = stage._merge(item, make_ctx(github=github))
+
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, GitHubJob)
+    assert isinstance(request.job.request, RunMergeWaitCycleRequest)
+    assert request.job.request.reviewed_head_sha == "c" * 40

@@ -184,6 +184,24 @@ class ConditionalMergeResult:
 
 
 @dataclass(frozen=True)
+class AutoMergeEnableResult:
+    """Outcome of one request to enable GitHub native auto-merge.
+
+    ``enabled`` is True only when the server confirmed the auto-merge request.
+    ``already_enabled`` means the pull request already carried one, which is a
+    success for the caller. ``transport_error`` means the outcome is unknown and
+    ``malformed`` means the response arrived but could not be interpreted. The
+    adapter never retries this mutation itself.
+    """
+
+    enabled: bool
+    already_enabled: bool = False
+    transport_error: bool = False
+    malformed: bool = False
+    dry_run: bool = False
+
+
+@dataclass(frozen=True)
 class ImplementationThreadReplyResult:
     """Outcome of posting head-gated implementation replies to review threads.
 

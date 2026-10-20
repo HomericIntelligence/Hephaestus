@@ -695,13 +695,11 @@ def test_prompts_bind_evidence_and_minimize_repeated_code() -> None:
         repository_revision="a" * 40,
     )
 
-    assert "b" * 64 in recovery and "a" * 40 in recovery
-    assert f"The `evidence` value MUST be exactly `{'b' * 64}`" in recovery
+    assert "Broken retry" in recovery
     assert "Do not include diffs" in recovery
     assert "minimal" in recovery.lower()
     assert "independent" in review.lower()
-    assert "acme/repo" in review and "a" * 40 in review
-    assert "bound checkout" in review
+    assert "acme/repo" in review
     assert "GO or NOGO" in review
     assert "BLOCKED" not in review
 

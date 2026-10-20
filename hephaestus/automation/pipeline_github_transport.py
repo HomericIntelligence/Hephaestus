@@ -33,6 +33,7 @@ from hephaestus.automation.pipeline.scope_retraction import (
     scope_retraction_marker,
 )
 from hephaestus.automation.pipeline.stages.base import (
+    AutoMergeEnableResult,
     ConditionalMergeResult,
     ImplementationThreadReplyResult,
     ReviewerThreadReconciliationResult,
@@ -344,7 +345,8 @@ __all__ = [
     'STATE_IMPLEMENTATION_GO', 'STATE_IMPLEMENTATION_NO_GO', 'STATE_LABEL_SPECS', 'STATE_SKIP',
     'VALID_SEVERITIES', '_CLOSES_ISSUE_LINE_RE', '_FULL_COMMIT_SHA_RE', '_HTTP_STATUS_RE',
     '_IMPLEMENTATION_REPLY_BODY_RE', '_STANDALONE_VERDICT_LINE_RE', 'Any',
-    'ConditionalMergeResult', 'ImplementationThreadReplyResult', 'IssueComment',
+    'AutoMergeEnableResult', 'ConditionalMergeResult', 'ImplementationThreadReplyResult',
+    'IssueComment',
     'LockUnavailableError', 'Path', 'PipelineGitHubTransport',
     'ReviewerThreadReconciliationResult',
     '_parse_included_http_response', '_with_severity_marker',
