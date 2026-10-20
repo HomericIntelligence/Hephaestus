@@ -22,18 +22,26 @@ def is_managed_source_lane_path(path: Path) -> bool:
     A managed source lane is the automation's own writer worktree for one
     issue and lane. It holds uncommitted work while an implementation runs,
     so a caller must not read its state as a fault.
+
+    The lane sits in the ``build/.worktrees`` worker base, and its item
+    number is positive. Both rules match
+    :func:`is_expected_managed_worktree_path` and
+    :func:`source_worktree_name`, so the three predicates keep one shape.
     """
     try:
         resolved = path.resolve()
     except OSError:
         return False
-    if resolved.parent.name != ".worktrees":
+    base = resolved.parent
+    if base.name != ".worktrees" or base.parent.name != "build":
         return False
     name = resolved.name
     if not name.startswith("auto-"):
         return False
     number, separator, lane = name.removeprefix("auto-").rpartition("-")
-    return bool(separator) and number.isdecimal() and lane in SOURCE_WORKTREE_LANES
+    if not separator or not number.isdecimal() or lane not in SOURCE_WORKTREE_LANES:
+        return False
+    return int(number) > 0
 
 
 def is_expected_managed_worktree_path(

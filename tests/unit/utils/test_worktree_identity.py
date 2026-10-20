@@ -26,7 +26,9 @@ def test_a_managed_source_lane_is_recognized(tmp_path: Path, name: str) -> None:
         "build/.worktrees/auto-7-guard",
         "build/.worktrees/auto-impl",
         "build/.worktrees/auto-x-impl",
+        "build/.worktrees/auto-0-impl",
         "build/worktrees/auto-7-impl",
+        "other/.worktrees/auto-7-impl",
     ],
 )
 def test_a_foreign_worktree_is_not_a_managed_source_lane(tmp_path: Path, relative: str) -> None:
