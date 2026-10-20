@@ -40,6 +40,26 @@ from hephaestus.utils.file_lock import (
 )
 from hephaestus.utils.worktree_identity import source_worktree_name
 
+_MAX_SOURCE_WORKSPACE_RECEIPT_BYTES = 65536
+
+_SOURCE_WORKSPACE_RECEIPT_FIELDS_V1 = frozenset(
+    {
+        "schema_version",
+        "repository",
+        "repository_identity",
+        "ownership_key",
+        "item_number",
+        "lane",
+        "path",
+        "revision",
+        "generation",
+        "detached",
+        "branch",
+        "obligations",
+    }
+)
+_SOURCE_WORKSPACE_RECEIPT_FIELDS_V2_EXTRA = frozenset({"dirty_claim"})
+
 
 class RepoIntakeError(RuntimeError):
     """Raised when an intake checkout cannot be verified safely."""
@@ -366,6 +386,7 @@ class RepoIntakeManager:
         git_runner: Callable[..., subprocess.CompletedProcess[str]],
         git_env: dict[str, str],
         remote_config: tuple[str, ...],
+        allow_automation_interrupted_operations: bool = False,
     ) -> None:
         """Initialize an intake manager for a caller-selected checkout."""
         if not repository or "/" not in repository:
@@ -401,6 +422,7 @@ class RepoIntakeManager:
         self.worktree_path = self.state_dir / "worktree"
         self.receipt_path = self.state_dir / "receipt.json"
         self.ownership_key = f"{self.repository_identity}:intake"
+        self.allow_automation_interrupted_operations = allow_automation_interrupted_operations
 
     @property
     def run_lease_path(self) -> Path:
@@ -744,15 +766,23 @@ class RepoIntakeManager:
         return receipt
 
     def _reject_modified_intake_tree(self, records: tuple[_WorktreeRecord, ...]) -> None:
-        """Block only when the intake worktree holds modified tracked files.
+        """Classify and block a dirty legacy worktree that automation must not adopt.
 
         The caller's own checkout is never inspected. A dirty operator
         checkout is unrelated local work, and intake uses its own worktree, so
         it never blocks. Untracked and ignored content never blocks either.
 
-        A modified tracked file inside the intake worktree is different: it
-        means another agent wrote source there and automation must not adopt
-        or overwrite that work.
+        A modified tracked file inside a registered legacy worktree is
+        different: it means another agent wrote source there and automation
+        must not adopt or overwrite that work. A root left mid-rebase is
+        classified deliberately: the canonical rebase probe names the active
+        branch, and a durable source-workspace receipt must prove that
+        automation owns the root. A branch name by itself never proves
+        ownership. The strict block stays the default. When
+        ``allow_automation_interrupted_operations`` is set and the probe and
+        a receipt both prove the root, intake tolerates it and writes nothing
+        to it. A probe failure, a merge state, or a cherry-pick state stays
+        unclassified and keeps the strict block.
         """
         for root in self._legacy_worktree_roots(records):
             if self._same_path(root, self.caller_root) or not root.exists():
@@ -765,10 +795,107 @@ class RepoIntakeManager:
             if result.returncode != 0:
                 continue
             if result.stdout.strip():
+                branch_ref = self._interrupted_rebase_branch(root)
+                if branch_ref is not None:
+                    if (
+                        self.allow_automation_interrupted_operations
+                        and self._automation_receipt_proves(root, branch_ref)
+                    ):
+                        continue
+                    raise RepoIntakeError(
+                        "repository-intake requires a clean tracked tree; "
+                        f"{root} holds an interrupted rebase of {branch_ref}; "
+                        f"run git -C {root} rebase --continue or "
+                        f"git -C {root} rebase --abort to resolve it; "
+                        "a commit or a stash cannot resolve a rebase conflict"
+                    )
                 raise RepoIntakeError(
                     "repository-intake requires a clean tracked tree; "
                     f"preserve the tracked changes in {root}, then commit or stash them"
                 )
+
+    def _interrupted_rebase_branch(self, root: Path) -> str | None:
+        """Return the active rebase branch ref for *root*, or None when unproven.
+
+        The canonical probe runs through the injected intake pathway so the
+        controlled Git environment stays authoritative. A probe failure is
+        not a classification: None keeps the strict block.
+        """
+        from hephaestus.automation.git_utils import _detached_rebase_branch_ref
+
+        def probe_runner(
+            command: list[str],
+            *,
+            cwd: Path,
+            **discarded: Any,
+        ) -> subprocess.CompletedProcess[str]:
+            del discarded
+            return self._run(command, cwd=cwd, check=False)
+
+        try:
+            return _detached_rebase_branch_ref(
+                root,
+                common_git_dir=self.common_dir,
+                runner=probe_runner,
+            )
+        except (RuntimeError, RepoIntakeError):
+            return None
+
+    def _automation_receipt_proves(self, root: Path, branch_ref: str) -> bool:
+        """Return whether a durable source-workspace receipt proves ownership.
+
+        One closed-schema receipt must bind this repository, this repository
+        identity, the resolved dirty root, and the active rebase branch. A
+        branch name by itself never proves ownership. A candidate that is
+        unreadable, oversized, symlinked, or malformed is not proof, and any
+        failure leaves the strict block in place.
+
+        The schema check stays local. Importing the canonical parser from
+        source_worktree here would close a runtime import cycle, and a closed
+        schema needs only the exact field set, a supported version, and the
+        four proof fields.
+        """
+        receipts_dir = self.common_dir / "hephaestus-source-workspaces"
+        if not receipts_dir.is_dir():
+            return False
+        try:
+            root_resolved = root.resolve()
+        except (OSError, RuntimeError):
+            return False
+        for candidate in sorted(receipts_dir.glob("*.json")):
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                if candidate.stat().st_size > _MAX_SOURCE_WORKSPACE_RECEIPT_BYTES:
+                    continue
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    continue
+                fields = _SOURCE_WORKSPACE_RECEIPT_FIELDS_V1
+                if payload.get("schema_version") == 2:
+                    fields = fields | _SOURCE_WORKSPACE_RECEIPT_FIELDS_V2_EXTRA
+                if set(payload) != fields:
+                    continue
+                version = int(payload["schema_version"])
+                generation = int(payload["generation"])
+                branch = payload["branch"]
+                candidate_root = Path(str(payload["path"])).resolve()
+                repository_matches = (
+                    payload["repository"] == self.repository
+                    and payload["repository_identity"] == self.repository_identity
+                )
+            except (OSError, RuntimeError, TypeError, ValueError, UnicodeError):
+                continue
+            if (
+                version in (1, 2)
+                and generation >= 1
+                and repository_matches
+                and candidate_root == root_resolved
+                and branch is not None
+                and f"refs/heads/{branch}" == branch_ref
+            ):
+                return True
+        return False
 
     def _migrate_durable_state(self, source: Path, destination_root: Path) -> None:
         """Copy one durable state directory into the canonical state root."""
