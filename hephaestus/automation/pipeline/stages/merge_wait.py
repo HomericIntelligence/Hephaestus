@@ -76,16 +76,8 @@ _QUEUE_RESIDENCE_POLLS = "merge_queue_residence_polls"
 
 
 def _merge_head(item: WorkItem) -> object:
-    """Keep readiness state bound to the head the merge is bound to.
-
-    A review round records the head it read. A pull request that no review
-    round in this process read still has an observed head, because the merge
-    never compares the head.
-    """
-    reviewed = item.payload.get("reviewed_pr_head_sha")
-    if isinstance(reviewed, str) and reviewed:
-        return reviewed
-    return item.payload.get("merge_observed_head_sha")
+    """Keep readiness state bound to the reviewed head."""
+    return item.payload.get("reviewed_pr_head_sha")
 
 
 class MergeWaitStage(Stage):
@@ -127,15 +119,7 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         reviewed_head = item.payload.get("reviewed_pr_head_sha")
         if not isinstance(reviewed_head, str) or not reviewed_head:
-            # The approval label is the whole contract. The head is observed
-            # for the merge receipt and is never compared, so a pull request
-            # that no review round in this process read still has one.
-            state = ctx.github.gh_pr_state(item.pr)
-            head = state.get("headRefOid") if isinstance(state, dict) else None
-            if not isinstance(head, str) or not head:
-                return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
-            item.payload["merge_observed_head_sha"] = head
-            reviewed_head = head
+            return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
         deadline = self._matching_readiness_deadline_outcome(item, ctx)
         if deadline is not None:
             return deadline
