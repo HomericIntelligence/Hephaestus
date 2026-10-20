@@ -266,15 +266,20 @@ class PipelineGitHubMutations(PipelineGitHubIssueComments):
         except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
             logger.warning("PR #%s: auto-merge enable failed: %s", pr_number, exc)
             return AutoMergeEnableResult(enabled=False, transport_error=True)
-        text = result.stdout or ""
-        # `gh` reports success on stdout and already-enabled on stderr.
-        lowered = text.lower()
+        # `gh` reports success on stdout. It reports an already-enabled or
+        # already-queued pull request on stderr.
+        lowered = (result.stdout or "").lower()
         if "auto-merge" in lowered and "already" in lowered:
             return AutoMergeEnableResult(enabled=True, already_enabled=True)
         if "auto-merge" in lowered or "enabled" in lowered:
             return AutoMergeEnableResult(enabled=True)
         if not result.stderr and result.returncode == 0:
             return AutoMergeEnableResult(enabled=True)
+        stderr_lowered = (result.stderr or "").lower()
+        if "already queued to merge" in stderr_lowered:
+            return AutoMergeEnableResult(enabled=True, already_enabled=True)
+        if "auto-merge" in stderr_lowered and "already" in stderr_lowered:
+            return AutoMergeEnableResult(enabled=True, already_enabled=True)
         return AutoMergeEnableResult(enabled=False, malformed=True)
 
     def add_labels(self, issue_number: int, labels: list[str]) -> None:

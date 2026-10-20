@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import math
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -58,6 +59,7 @@ from hephaestus.automation.pipeline.scope_expansion_records import (
     render_scope_expansion_child_body,
     render_scope_expansion_lifecycle_comment,
 )
+from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.pipeline_github_reviews import ReviewPublicationResult
 from hephaestus.automation.remediation_recovery import (
@@ -2845,3 +2847,31 @@ def test_adopted_read_request_rejects_invalid_pins(
 
     with pytest.raises(ValueError):
         replace(cast(Any, _adopted_read_job(tmp_path).request), **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "returncode", "enabled", "already"),
+    [
+        ("", "! Pull request owner/repo#7 is already queued to merge\n", 1, True, True),
+        ("", "auto-merge already enabled\n", 1, True, True),
+        ("✓ auto-merge enabled\n", "", 0, True, False),
+        ("", "fatal: auto-merge is not supported\n", 1, False, False),
+    ],
+)
+def test_enable_auto_merge_reads_the_gh_report(
+    stdout: str, stderr: str, returncode: int, enabled: bool, already: bool
+) -> None:
+    """The auto-merge adapter reads the report that GitHub actually writes."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr=stderr)
+
+    github = PipelineGitHub("acme", repo="repo", command_runner=run)
+
+    result = github.enable_auto_merge(7)
+
+    assert result.enabled is enabled
+    assert result.already_enabled is already
+    assert calls == [["pr", "merge", "7", "--squash", "--auto"]]
