@@ -4523,7 +4523,8 @@ def test_namespace_create_normalizes_mkdir_mode_ignoring_filesystem(
 
     monkeypatch.setattr(module.os, "mkdir", fake_mkdir)
     record = _record(tmp_path)
-    assert _store(common).write(record, expected=None) == record
+    written = _store(common).write(record, expected=None)
+    assert written == record
     created = common / "hephaestus-source-workspaces" / "pending-rebases"
     assert stat.S_IMODE(created.stat().st_mode) == 0o700
 
