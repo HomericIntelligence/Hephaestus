@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -14,7 +16,10 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation import git_utils
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.worker_pool import _RemoteGitAuthenticationError
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceManager,
+    _PreparationDeadline,
+)
 from tests.unit.automation.pipeline.test_worker_pool import _git
 from tests.unit.automation.test_first_publication_admission import _retain_failed_publication
 from tests.unit.automation.test_first_publication_process import _pool, _publication_job
@@ -115,3 +120,26 @@ def test_discovery_does_not_replace_fresh_recovery_admission(
         if pool is not None:
             pool.shutdown()
         os.umask(mask)
+
+
+def test_stale_retained_branch_reports_no_retainable_rebase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A retained receipt from an older run reports no retainable rebase."""
+    job = _publication_job(tmp_path, monkeypatch)
+    root = Path(job.kwargs["repo_root"])
+    manager = SourceWorkspaceManager(root, repository=job.repo)
+    receipt = manager._require_receipt(9, SourceLane.IMPLEMENTATION)
+    stale = replace(
+        job,
+        kwargs={**job.kwargs, "branch": "9-auto-impl-direct-stale"},
+    )
+    deadline = _PreparationDeadline(30.0, time.monotonic, threading.Event())
+    pool = _pool(root, monkeypatch)
+
+    with caplog.at_level("WARNING", logger="hephaestus.automation.pipeline.worker_pool"):
+        retained = pool._first_publication_pre_intent(stale, manager, deadline)
+
+    assert retained is False
+    assert receipt.branch != "9-auto-impl-direct-stale"
+    assert any("stale receipt" in record.getMessage() for record in caplog.records)
