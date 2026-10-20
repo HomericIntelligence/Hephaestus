@@ -71,6 +71,7 @@ _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _MERGE_CYCLE_DEADLINE_S = "_merge_cycle_deadline_s"
 _MERGE_CYCLE_RECEIPT = "_merge_wait_cycle_receipt"
 _MERGE_CYCLE_RECEIPT_ERROR = "_merge_wait_cycle_receipt_error"
+_AUTO_MERGE_ARMED = "merge_auto_merge_armed"
 _QUEUE_RESIDENCE_DEADLINE_S = "merge_queue_residence_deadline_s"
 _QUEUE_RESIDENCE_POLLS = "merge_queue_residence_polls"
 
@@ -136,6 +137,7 @@ class MergeWaitStage(Stage):
                 reviewed_head_sha=reviewed_head,
                 deadline_s=operation_deadline,
                 cancellation=ctx.cancellation,
+                auto_merge_armed=bool(item.payload.get(_AUTO_MERGE_ARMED)),
             )
         except ValueError:
             return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
@@ -202,6 +204,7 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.BLOCKED, outcome)
         if outcome in {"auto_merge_enabled", "auto_merge_already_armed"}:
             # GitHub owns the merge from here. Wait for the terminal result.
+            item.payload[_AUTO_MERGE_ARMED] = True
             item.state = MERGE
             return self._park_for_readiness(item, ctx)
         if outcome in {"not_implementation_go", "reviewed_head_drift"}:

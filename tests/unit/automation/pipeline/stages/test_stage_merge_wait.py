@@ -18,6 +18,7 @@ from hephaestus.automation.pipeline.github_jobs import (
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
     AutoMergeEnableResult,
+    JobRequest,
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
@@ -319,3 +320,64 @@ def test_stage_finishes_once_github_reports_merged(make_ctx: Any, make_work_item
 
     assert isinstance(outcome, StageOutcome)
     assert outcome.disposition is Disposition.FINISH_PASS
+
+
+def test_an_armed_auto_merge_is_observed_and_not_enabled_again(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """Once armed, the merge stage observes the pull request without arming it again."""
+    import threading
+
+    item = make_work_item(kind="pr", pr=7, issue=1)
+    item.payload["reviewed_pr_head_sha"] = "a" * 40
+    item.state = MERGE_APPLY
+    request = RunMergeWaitCycleRequest(
+        issue_number=1,
+        pr_number=7,
+        reviewed_head_sha="a" * 40,
+        deadline_s=60.0,
+        cancellation=threading.Event(),
+    )
+    item.payload["_pending_github_request"] = request
+    item.payload["_merge_wait_cycle_receipt"] = MergeWaitCycleCompleted(
+        request=request, outcome="auto_merge_enabled", attempted=True
+    )
+    stage = MergeWaitStage()
+    ctx = make_ctx()
+
+    outcome = stage._merge_apply(item, ctx)
+
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.RETRY
+    assert item.payload["merge_auto_merge_armed"] is True
+    assert item.attempts["merge"] == 1
+
+    item.state = "MERGE"
+    follow_up = stage._merge(item, ctx)
+
+    assert isinstance(follow_up, JobRequest)
+    assert isinstance(follow_up.job, GitHubJob)
+    assert isinstance(follow_up.job.request, RunMergeWaitCycleRequest)
+    assert follow_up.job.request.auto_merge_armed is True
+
+
+def test_an_armed_auto_merge_is_not_enabled_again(tmp_path: Any) -> None:
+    """The cycle observes an armed pull request without arming it again."""
+    github = _AutoMergeGitHub()
+    job = _job(tmp_path)
+    source = job.request
+    assert isinstance(source, RunMergeWaitCycleRequest)
+    request = RunMergeWaitCycleRequest(
+        issue_number=source.issue_number,
+        pr_number=source.pr_number,
+        reviewed_head_sha=source.reviewed_head_sha,
+        deadline_s=source.deadline_s,
+        cancellation=source.cancellation,
+        auto_merge_armed=True,
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
+
+    assert receipt.outcome == "auto_merge_already_armed"
+    assert receipt.attempted is False
+    assert github.enable_calls == []

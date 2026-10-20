@@ -1596,6 +1596,10 @@ class PipelineGitHubJobRunner:
         state = admit()
         if isinstance(state, str):
             return complete(state, merge_sha=terminal_merge_sha)
+        if request.auto_merge_armed:
+            # The auto-merge is already armed. Observe the pull request
+            # without enabling it again. GitHub owns the merge from here.
+            return complete("auto_merge_already_armed", attempted=False)
         # The implementation-GO label is the whole merge contract. GitHub owns
         # everything after this: branch protection, the required checks, any merge
         # queue, and a rebase when the merge reports a real conflict. A
