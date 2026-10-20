@@ -352,6 +352,131 @@ def _dirty_restart_claim_request(
     return stage, item, ctx, claim.job, claim.on_done_state
 
 
+def test_post_timeout_probe_claim_adopts_the_published_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_claim_creation_mask: None,
+) -> None:
+    """A timed-out writer's own lane is adopted from its advanced receipt."""
+    import queue
+    import threading
+    from dataclasses import asdict
+    from unittest.mock import MagicMock, patch
+
+    from hephaestus.automation.pipeline.github_jobs import DirtyDirectPrStateRead, FrozenJson
+    from hephaestus.automation.pipeline.jobs import GitJob, JobResult
+    from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.automation.review_journal import (
+        IssueComment,
+        render_current_plan,
+        render_current_review,
+    )
+    from tests.unit.automation.test_source_worktree import _git
+
+    repo, _, head = _repository(tmp_path, origin_repository="example/project")
+    _registered_git_fixture(repo, monkeypatch)
+    _source_registration_fixture(repo, monkeypatch)
+    manager = SourceWorkspaceManager(repo, repository="project")
+    branch = _claim().branch
+    original = manager.prepare(12, SourceLane.IMPLEMENTATION, head, branch=branch)
+    (original.cwd / "tracked.txt").write_text("pending\n")
+    # The start rebase publication advances the receipt to the writer's own head.
+    _git(original.cwd, "commit", "--allow-empty", "-m", "published start head")
+    advanced = _git(original.cwd, "rev-parse", "HEAD")
+    receipt = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+    manager._write_receipt(replace(receipt, revision=advanced, generation=receipt.generation + 1))
+    comments = [
+        IssueComment(
+            render_current_plan("## Files to Modify\n- `tracked.txt`", revision=5),
+            viewer_did_author=True,
+        ),
+        IssueComment(render_current_review("state:plan-go", revision=5), viewer_did_author=True),
+    ]
+    runner = MagicMock()
+    runner.run.return_value = DirtyDirectPrStateRead(
+        "example/project",
+        12,
+        branch,
+        (),
+        None,
+        plan_journal=FrozenJson.snapshot([asdict(c) for c in comments]),
+        issue_state="OPEN",
+        issue_labels=("state:plan-go",),
+    )
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        github_job_runner=runner,
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
+    start_job = GitJob(
+        repo="project",
+        op="rebase",
+        timeout_s=30,
+        expected_repository="example/project",
+        kwargs={
+            "repo_root": str(repo),
+            "cwd": original.cwd,
+            "issue_number": 12,
+            "branch": branch,
+        },
+    )
+    path, identity = pool._initial_start_identity(start_job)
+    pool._record_initial_start(
+        start_job, JobResult(ok=True, value={"head_sha": advanced}), path, identity
+    )
+    try:
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value=advanced),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+        ):
+            stage, item, ctx, claim_job, claim_state = _dirty_restart_claim_request(
+                pool, repo, manager
+            )
+            assert claim_job.kwargs["probe"] is True
+            result = pool._run_git(claim_job)
+        assert head != advanced
+        assert result.ok, result.error
+        assert result.value["implementation_started"] is True
+        assert result.value["branch"] == branch
+        assert "dirty_direct_not_applicable" not in result.value
+        assert result.value["direct_scope_reservation"] == {
+            "branch": branch,
+            "base_sha": advanced,
+        }
+        assert result.value["source_workspace"]["revision"] == advanced
+        armed = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+        assert armed.dirty_claim is not None and armed.dirty_claim.state == "armed"
+
+        from hephaestus.automation.pipeline.stages import Continue
+
+        item.state = claim_state
+        stage.on_job_done(item, result, ctx)
+        assert stage.step(item, ctx) == Continue(next_state="IMPLEMENT_WAIT")
+        assert item.payload["_direct_scope_base_sha"] == advanced
+
+        # A second probe on the active lane changes nothing.
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value=advanced),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+        ):
+            repeat = pool._run_git(claim_job)
+        assert not repeat.ok
+        after = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+        assert after == armed
+    finally:
+        pool._executor.shutdown()
+
+
 def test_consumed_dirty_binding_cannot_be_armed_again(tmp_path: Path) -> None:
     """A consumed claim does not regain authority after its content is restored."""
     repo, _, head = _repository(tmp_path)

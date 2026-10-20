@@ -15520,6 +15520,74 @@ class TestGitOps:
         assert "private" not in result.stderr_tail
         assert not state_path.exists()
 
+    def test_initial_reservation_publication_pins_the_pushed_head(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A successful own publish returns the pushed head as the reservation base."""
+        original = "a" * 40
+        target = "b" * 40
+        branch = "7-auto-impl"
+        cwd = tmp_path / "writer"
+        cwd.mkdir()
+        state_path = tmp_path / "state" / "7-implementation-start.json"
+        state_path.parent.mkdir()
+        identity: dict[str, object] = {
+            "format": 1,
+            "repository": "test/repo",
+            "repository_identity": "identity",
+            "issue_number": 7,
+            "branch": branch,
+        }
+        job = GitJob(
+            "test/repo",
+            "rebase",
+            60,
+            kwargs={
+                "cwd": str(cwd),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "branch": branch,
+                "rebase_reason": "implementation_start",
+                "direct_scope_reservation": {"branch": branch, "base_sha": original},
+            },
+        )
+        manager = MagicMock()
+        manager._require_receipt.return_value = MagicMock(
+            revision=target,
+            branch=branch,
+            path=cwd,
+        )
+        manager._physical_matches_receipt.return_value = True
+        with (
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=manager),
+            patch.object(pool, "_read_remote_branch_head", return_value=original),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=Mock(return_value=({}, ())),
+            ),
+            patch(f"{_WP}.git_utils.push_head_to_branch"),
+        ):
+            result = pool._record_initial_start(
+                job,
+                JobResult(
+                    ok=True,
+                    value={"rebased": True, "published": False, "head_sha": target},
+                ),
+                state_path,
+                identity,
+            )
+
+        assert original != target
+        assert result.ok
+        assert result.value["published"] is True
+        assert result.value["head_sha"] == target
+        assert result.value["direct_scope_reservation"] == {
+            "branch": branch,
+            "base_sha": target,
+        }
+        assert state_path.exists()
+
     def test_commit_push_probe_failure_orders_push_and_probe_diagnostics(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
