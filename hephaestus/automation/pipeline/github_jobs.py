@@ -16,7 +16,6 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
-from hephaestus.automation.pipeline.rebase_review import RebaseReviewProof
 from hephaestus.automation.pipeline.repository_validation import (
     RepositoryValidationGap,
     RepositoryValidationInvocation,
@@ -492,43 +491,9 @@ class RunMergeWaitCycleRequest:
     deadline_s: float
     cancellation: threading.Event
     issue_number: int | None = None
-    rebase_proof: RebaseReviewProof | None = None
-    rebase_record: RebaseReviewRecord | None = None
-
-    @property
-    def merge_head_sha(self) -> str:
-        """Return the head recorded with the merge receipt.
-
-        Observed context only. The merge never compares it against live state:
-        the approval label is the contract.
-        """
-        return self.rebase_proof.resulting_head_sha if self.rebase_proof else self.reviewed_head_sha
-
-    def _validate_rebase_evidence(self) -> None:
-        """Keep the initial audit and complete record with the host proof."""
-        if (self.rebase_proof is None) != (self.rebase_record is None):
-            raise ValueError("rebase proof and initial record must both be present")
-        if self.rebase_record is not None and (
-            not isinstance(self.rebase_record, RebaseReviewRecord)
-            or not isinstance(self.rebase_proof, RebaseReviewProof)
-            or self.rebase_record.state != "active"
-            or any(
-                getattr(self.rebase_record, name) != getattr(self.rebase_proof, name)
-                for name in RebaseReviewProof.__dataclass_fields__
-            )
-        ):
-            raise ValueError("rebase record must match the host proof")
-        if self.rebase_proof is not None and (
-            not isinstance(self.rebase_proof, RebaseReviewProof)
-            or self.rebase_proof.pr_number != self.pr_number
-            or self.rebase_proof.issue_number != self.issue_number
-            or self.rebase_proof.reviewed_head_sha != self.reviewed_head_sha
-        ):
-            raise ValueError("rebase proof must match the original review and merge target")
 
     def __post_init__(self) -> None:
-        """Validate the exact-head merge proof and readiness fingerprint."""
-        self._validate_rebase_evidence()
+        """Validate the merge request and its readiness fingerprint."""
         _positive_identifier(self.pr_number, "pr_number")
         _full_sha(self.reviewed_head_sha, "reviewed_head_sha")
         if (

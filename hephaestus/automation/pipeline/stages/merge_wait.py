@@ -23,7 +23,6 @@ The implemented mini-state graph is:
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
 from pathlib import Path
 
 from hephaestus.automation.issue_waves import (
@@ -33,15 +32,12 @@ from hephaestus.automation.issue_waves import (
     WaveLease,
 )
 from hephaestus.automation.learning_journal import LearningJournalStore
-from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
-from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 
 from ..github_jobs import (
     GitHubJob,
     MergeWaitCycleCompleted,
     RunMergeWaitCycleRequest,
 )
-from ..rebase_review import REBASE_REVIEW_PROOF_KEY, RebaseReviewProof
 from ..work_item import LearningIntent
 from .base import (
     Continue,
@@ -56,7 +52,7 @@ from .base import (
     WorkItem,
     _repo_state_root,
 )
-from .rebase_review_recovery import receive_rebase_review, recover_rebase_review
+from .rebase_review_recovery import receive_rebase_review
 
 logger = logging.getLogger(__name__)
 
@@ -80,32 +76,8 @@ _QUEUE_RESIDENCE_POLLS = "merge_queue_residence_polls"
 
 
 def _merge_head(item: WorkItem) -> object:
-    """Keep readiness state bound to the resulting head."""
-    proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
-    return (
-        proof.resulting_head_sha
-        if isinstance(proof, RebaseReviewProof)
-        else item.payload.get("reviewed_pr_head_sha")
-    )
-
-
-def _bound_rebase_record(item: WorkItem, ctx: StageContext) -> RebaseReviewRecord | None:
-    """Bind the initial audit and host proof for one merge cycle."""
-    proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
-    if proof is None:
-        return None
-    if (
-        not isinstance(proof, RebaseReviewProof)
-        or proof.repository != f"{ctx.org}/{item.repo}"
-        or proof.pr_number != item.pr
-        or proof.issue_number != item.issue
-        or proof.reviewed_head_sha != item.payload.get("reviewed_pr_head_sha")
-    ):
-        raise ValueError("rebase review proof is invalid")
-    audit = item.payload.get("review_audit")
-    if not isinstance(audit, ReviewAudit) or not is_clean_go_review(audit):
-        raise ValueError("rebase review audit is invalid")
-    return RebaseReviewRecord(**asdict(proof), audit=audit)
+    """Keep readiness state bound to the reviewed head."""
+    return item.payload.get("reviewed_pr_head_sha")
 
 
 class MergeWaitStage(Stage):
@@ -143,14 +115,6 @@ class MergeWaitStage(Stage):
         The head is observed for the merge receipt and never compared, so a new
         commit between review and merge does not restart this stage.
         """
-        recovery = recover_rebase_review(item, ctx)
-        if recovery is not None:
-            return recovery
-        try:
-            record = _bound_rebase_record(item, ctx)
-        except ValueError:
-            return StageOutcome(Disposition.FINISH_FAIL, "rebase_review_proof_invalid")
-        proof = item.payload.get(REBASE_REVIEW_PROOF_KEY)
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         reviewed_head = item.payload.get("reviewed_pr_head_sha")
@@ -170,8 +134,6 @@ class MergeWaitStage(Stage):
                 issue_number=item.issue,
                 pr_number=item.pr,
                 reviewed_head_sha=reviewed_head,
-                rebase_proof=proof,
-                rebase_record=record,
                 deadline_s=operation_deadline,
                 cancellation=ctx.cancellation,
             )
@@ -226,7 +188,7 @@ class MergeWaitStage(Stage):
                         lease,
                         issue_number=item.issue,
                         pr_number=item.pr,
-                        reviewed_head_sha=receipt.request.merge_head_sha,
+                        reviewed_head_sha=receipt.request.reviewed_head_sha,
                         merge_sha=receipt.merge_sha,
                     )
                 except IssueWaveError as exc:

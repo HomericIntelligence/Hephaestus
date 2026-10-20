@@ -1561,16 +1561,6 @@ class PipelineGitHubJobRunner:
                 return "merge_cycle_cancelled"
             return None
 
-        def rebase_record_outcome() -> str | None:
-            """Reject a changed record or initial audit before merge admission."""
-            if request.rebase_record is None:
-                return None
-            try:
-                live_record = github.read_review_rebase_record(request.pr_number)
-            except Exception:
-                return "rebase_review_record_changed"
-            return None if live_record == request.rebase_record else "rebase_review_record_changed"
-
         def admit() -> dict[str, object] | str:
             """Admit an open pull request carrying the exclusive GO label.
 
@@ -1606,9 +1596,6 @@ class PipelineGitHubJobRunner:
         state = admit()
         if isinstance(state, str):
             return complete(state, merge_sha=terminal_merge_sha)
-        record_status = rebase_record_outcome()
-        if record_status is not None:
-            return complete(record_status)
         # The implementation-GO label is the whole merge contract. GitHub owns
         # everything after this: branch protection, the required checks, any merge
         # queue, and a rebase when the merge reports a real conflict. A
