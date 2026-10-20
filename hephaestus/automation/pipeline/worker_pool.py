@@ -8594,7 +8594,7 @@ class WorkerPool:
                 try:
                     # The clone created this directory, so the loop owns it. A
                     # group-writable Git directory blocks the recovery layer.
-                    os.chmod(git_dir, 0o755)
+                    os.chmod(git_dir, 0o700)
                 except OSError as error:
                     return JobResult(
                         ok=False,

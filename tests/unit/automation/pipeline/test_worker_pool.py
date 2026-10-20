@@ -18826,7 +18826,7 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is True
-        assert stat.S_IMODE((dest / ".git").stat().st_mode) == 0o755
+        assert stat.S_IMODE((dest / ".git").stat().st_mode) == 0o700
 
     def test_clone_job_reports_a_failed_mode_normalization(
         self,
