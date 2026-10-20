@@ -375,7 +375,12 @@ class PrReviewRepositoryValidationMixin(_PrReviewHost):
             workspace = source_workspace_binding(
                 item, ctx, SourceLane.REVIEW, revision=expected_head
             )
-        except (RuntimeError, SourceWorkspaceError):
+        except (RuntimeError, SourceWorkspaceError) as error:
+            logger.warning(
+                "pr_review:%d: review source binding failed: %s",
+                _issue_number(item),
+                error,
+            )
             return StageOutcome(Disposition.FINISH_FAIL, "review_source_binding_failed")
         if _validation_profile(item, ctx.org) is not None:
             return self._start_repository_validation(item, ctx, workspace)
