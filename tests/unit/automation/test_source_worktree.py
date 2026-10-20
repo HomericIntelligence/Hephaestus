@@ -1703,10 +1703,10 @@ def test_direct_writer_transition_refuses_to_discard_predecessor_changes(
     assert pending.read_text() == "preserve\n"
 
 
-def test_direct_writer_transition_rejects_receipt_when_path_is_missing(
+def test_direct_writer_transition_ignores_a_receipt_for_a_removed_checkout(
     tmp_path: Path,
 ) -> None:
-    """A receipt without its checkout remains available for manual recovery."""
+    """A receipt whose checkout was removed is stale state, not a fault."""
     repo, first, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     predecessor = manager.prepare(
@@ -1717,6 +1717,34 @@ def test_direct_writer_transition_rejects_receipt_when_path_is_missing(
     )
     receipt_path = manager._receipt_path(9, SourceLane.IMPLEMENTATION)
     _git(repo, "worktree", "remove", str(predecessor.cwd))
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        armed = manager.authorize_direct_implementation_writer_transition(
+            9,
+            branch="writer-branch",
+            base_sha=second,
+            handoff=handoff,
+        )
+
+    assert armed is False
+    assert receipt_path.exists()
+    assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
+
+
+def test_direct_writer_transition_rejects_a_receipt_for_a_moved_checkout(
+    tmp_path: Path,
+) -> None:
+    """A registered checkout that is not at its path remains available for recovery."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        first,
+        branch="old-writer-branch",
+    )
+    receipt_path = manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+    shutil.rmtree(predecessor.cwd)
 
     with manager.implementation_writer_handoff(9) as handoff:
         with pytest.raises(SourceWorkspaceError, match="receipt path is missing") as captured:
@@ -3708,3 +3736,29 @@ def test_prepared_same_identity_recovery_preserves_registered_predecessor(tmp_pa
     assert _git(writer.cwd, "rev-parse", "HEAD") == head
     assert _git(writer.cwd, "symbolic-ref", "--short", "HEAD") == "adopted-writer"
     assert _git(writer.cwd, "status", "--porcelain") == ""
+
+
+def test_authorize_writer_transition_ignores_a_receipt_for_a_removed_worktree(
+    tmp_path: Path,
+) -> None:
+    """A receipt whose worktree was removed and pruned is stale, not a fault."""
+    repo, _first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="old-writer-branch",
+    )
+    shutil.rmtree(predecessor.cwd)
+    _git(repo, "worktree", "prune")
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        armed = manager.authorize_direct_implementation_writer_transition(
+            9,
+            branch="writer-branch",
+            base_sha=second,
+            handoff=handoff,
+        )
+
+    assert armed is False

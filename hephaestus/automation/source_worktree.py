@@ -1306,6 +1306,27 @@ class SourceWorkspaceManager:
                 ),
             )
         if not expected_path.exists():
+            try:
+                predecessor_is_registered = self._has_worktree_registration(expected_path)
+            except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
+                raise SourceWorkspaceError(
+                    "implementation writer predecessor is unproven",
+                    recovery=self._unproven_recovery(
+                        item_number=item_number,
+                        path=expected_path,
+                        receipt_path=receipt_path,
+                    ),
+                ) from exc
+            if not predecessor_is_registered:
+                # The worktree was removed and its registration pruned. The
+                # receipt is stale state from an earlier run, so the lane has
+                # no predecessor and a new transition may start.
+                logger.warning(
+                    "source workspace receipt %s names a removed worktree; "
+                    "ignoring the stale receipt",
+                    expected_path,
+                )
+                return False
             raise SourceWorkspaceError(
                 f"source workspace receipt path is missing: {expected_path}",
                 recovery=self._recovery(
