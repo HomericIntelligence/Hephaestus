@@ -83,6 +83,7 @@ def test_transient_handler_failure_recovers_exactly_once(nats_server: NatsServer
                         if record.get("state") == "acked":
                             return record
                     except APIError:
+                        # LEDGER_STREAM record not yet available; retry on next iteration
                         pass
                     await asyncio.sleep(0.2)
                 return None
@@ -293,6 +294,7 @@ def test_max_delivery_advisory_recovers_undisposed_messages(
                         fetched = await sub.fetch(1, timeout=1.0)
                         deliveries += len(fetched)  # never dispose of anything
                     except Exception:
+                        # Fetch timeout or transient error; continue polling for DLQ record
                         pass
                     record = await harness.wait_last_msg(
                         nc,
