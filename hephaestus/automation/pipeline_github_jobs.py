@@ -1925,6 +1925,10 @@ class PipelineGitHubJobRunner:
                         if isinstance(head, str) and head:
                             return head
                 except Exception:
+                    # Any failure to read the remote head (network error, PR not found,
+                    # malformed response) returns None. This causes reconcile_on_open
+                    # to fail closed with ProtectedMergeUncertainError, which is the
+                    # intended fail-closed behavior.
                     pass
                 return None
 

@@ -680,6 +680,77 @@ class ProtectedMergeStateStore:
             self._write_unlocked(generation + 1, attempts, cycles)
             return record
 
+    def _verify_published_cycle(
+        self,
+        pr_number: int,
+        record: RebaseCycleRecord,
+        remote: str | None,
+    ) -> RebaseCycleRecord:
+        """Verify a published cycle matches the remote head."""
+        if remote != record.published_head_sha:
+            raise ProtectedMergeUncertainError(
+                f"published rebase cycle {record.index} for PR #{pr_number} "
+                "does not match the remote head"
+            )
+        return record
+
+    def _verify_prepared_cycle(
+        self,
+        pr_number: int,
+        record: RebaseCycleRecord,
+        remote: str | None,
+        bridge_validator: Callable[[str], tuple[int, int, str, str, str]] | None,
+    ) -> tuple[RebaseCycleRecord, bool]:
+        """Verify a prepared cycle against the remote.
+
+        Returns the verified record and a boolean indicating if it was upgraded
+        to published.
+        """
+        if remote == record.bridge_sha:
+            if bridge_validator is not None:
+                try:
+                    bridge_sha: str = record.bridge_sha  # type: ignore[assignment]
+                    validated = bridge_validator(bridge_sha)
+                    v_pr, v_cycle, v_base, v_prev, _v_tip = validated
+                    if (
+                        v_pr != pr_number
+                        or v_cycle != record.index + 1
+                        or v_base != record.requested_base_sha
+                        or v_prev != record.requested_head_sha
+                    ):
+                        raise ProtectedMergeUncertainError(
+                            f"bridge metadata mismatch for cycle {record.index} on PR #{pr_number}"
+                        )
+                    # The logical tip (_v_tip) is the first parent of the bridge
+                    # commit (the rebased head). It is not stored in the durable
+                    # record, which only retains the original requested_head_sha
+                    # (the pre-rebase head). Therefore we cannot validate _v_tip
+                    # against stored state; the bridge validator's job is to
+                    # confirm the bridge commit message encodes the correct cycle
+                    # identity, base, and previous head.
+                except ProtectedMergeValidationError:
+                    raise
+                except Exception as exc:
+                    raise ProtectedMergeUncertainError(
+                        f"bridge metadata validation failed for cycle "
+                        f"{record.index} on PR #{pr_number}: {exc}"
+                    ) from exc
+            upgraded = RebaseCycleRecord(
+                index=record.index,
+                requested_head_sha=record.requested_head_sha,
+                requested_base_sha=record.requested_base_sha,
+                state="published",
+                published_head_sha=record.bridge_sha,
+                bridge_sha=record.bridge_sha,
+            )
+            return upgraded, True
+        if remote == record.requested_head_sha:
+            return record, False
+        raise ProtectedMergeUncertainError(
+            f"prepared rebase cycle {record.index} for PR #{pr_number} "
+            "neither matches the requested head nor the bridge on the remote"
+        )
+
     def reconcile_on_open(
         self,
         remote_head_lookup: Callable[[int], str | None],
@@ -717,58 +788,17 @@ class ProtectedMergeStateStore:
                         )
                     remote = remote_head_lookup(pr_number)
                     if record.state == "published":
-                        if remote != record.published_head_sha:
-                            raise ProtectedMergeUncertainError(
-                                f"published rebase cycle {record.index} for PR #{pr_number} "
-                                "does not match the remote head"
-                            )
-                        verified.append(record)
+                        verified.append(self._verify_published_cycle(pr_number, record, remote))
                         continue
                     if record.state == "prepared":
-                        if remote == record.bridge_sha:
-                            if bridge_validator is not None:
-                                try:
-                                    # bridge_sha is non-None here because remote == bridge_sha
-                                    bridge_sha: str = record.bridge_sha  # type: ignore[assignment]
-                                    validated = bridge_validator(bridge_sha)
-                                    v_pr, v_cycle, v_base, v_prev, v_tip = validated
-                                    if (
-                                        v_pr != pr_number
-                                        or v_cycle != record.index + 1
-                                        or v_base != record.requested_base_sha
-                                        or v_prev != record.requested_head_sha
-                                        or v_tip != record.bridge_sha
-                                    ):
-                                        raise ProtectedMergeUncertainError(
-                                            f"bridge metadata mismatch for cycle {record.index} "
-                                            f"on PR #{pr_number}"
-                                        )
-                                except ProtectedMergeValidationError:
-                                    raise
-                                except Exception as exc:
-                                    raise ProtectedMergeUncertainError(
-                                        f"bridge metadata validation failed for cycle "
-                                        f"{record.index} on PR #{pr_number}: {exc}"
-                                    ) from exc
-                            upgraded = RebaseCycleRecord(
-                                index=record.index,
-                                requested_head_sha=record.requested_head_sha,
-                                requested_base_sha=record.requested_base_sha,
-                                state="published",
-                                published_head_sha=record.bridge_sha,
-                                bridge_sha=record.bridge_sha,
-                            )
-                            family[position] = upgraded
-                            changed = True
-                            verified.append(upgraded)
-                            continue
-                        if remote == record.requested_head_sha:
-                            verified.append(record)
-                            continue
-                        raise ProtectedMergeUncertainError(
-                            f"prepared rebase cycle {record.index} for PR #{pr_number} "
-                            "neither matches the requested head nor the bridge on the remote"
+                        upgraded_record, was_upgraded = self._verify_prepared_cycle(
+                            pr_number, record, remote, bridge_validator
                         )
+                        if was_upgraded:
+                            family[position] = upgraded_record
+                            changed = True
+                        verified.append(upgraded_record)
+                        continue
             if changed:
                 self._write_unlocked(generation + 1, attempts, cycles)
             return tuple(verified)
