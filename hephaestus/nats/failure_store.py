@@ -235,15 +235,15 @@ class JetStreamAdmin(Protocol):
 
     async def stream_info(self, name: str) -> ExistingStream | None:
         """Return the live stream view, or ``None`` when absent."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
     async def add_stream(self, topology: StreamTopology) -> None:
         """Create one stream from an exact topology."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
     async def update_stream(self, name: str, *, subjects: frozenset[str]) -> None:
         """Replace only the subjects of one managed stream."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
     async def publish(
         self,
@@ -258,15 +258,15 @@ class JetStreamAdmin(Protocol):
             SequenceConflictError: The expected subject sequence is stale.
 
         """
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
     async def get_message(self, stream: str, sequence: int) -> StoredSourceMessage | None:
         """Fetch one source message by stream sequence, or ``None``."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
     async def get_last_message(self, stream: str, subject: str) -> StoredLedger | None:
         """Fetch the last message for one subject, or ``None``."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
 
 class NatsJetStreamAdmin:

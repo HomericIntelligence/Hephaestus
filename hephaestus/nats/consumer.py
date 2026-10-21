@@ -152,19 +152,19 @@ class ConsumerAdmin(Protocol):
 
     async def consumer_info(self, stream: str, durable: str) -> ConsumerInfoView | None:
         """Return the live consumer view, or ``None`` when absent."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
     async def add_consumer(self, stream: str, config: ExplicitConsumerConfig) -> None:
         """Create or update one consumer from an explicit configuration."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
     async def delete_consumer(self, stream: str, durable: str) -> None:
         """Delete one durable consumer."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
     async def restore_consumer(self, stream: str, snapshot: dict[str, Any]) -> None:
         """Restore one consumer from its raw configuration snapshot."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
 
 class ConsumerManager:
@@ -257,7 +257,7 @@ class _HeartbeatMsg(Protocol):
 
     async def in_progress(self) -> None:
         """Signal that work is in progress, resetting the ack deadline."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
 
 class _LeaseRenewer(Protocol):
@@ -265,7 +265,7 @@ class _LeaseRenewer(Protocol):
 
     async def renew_lease(self, claim: DeliveryClaim) -> bool:
         """Renew the delivery-ledger lease for one claim."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
 
 class DeliveryHeartbeat:

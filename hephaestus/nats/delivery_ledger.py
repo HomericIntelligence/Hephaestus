@@ -101,7 +101,7 @@ class LedgerTransport(Protocol):
 
     async def read(self, subject: str) -> StoredLedger | None:
         """Return the current row for *subject*, or ``None`` when absent."""
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
     async def write(self, subject: str, payload: bytes, *, expected_sequence: int) -> int:
         """Publish *payload* with expected-last-subject-sequence CAS.
@@ -113,7 +113,7 @@ class LedgerTransport(Protocol):
             LedgerStoreError: The store cannot satisfy the write.
 
         """
-        ...  # pragma: no cover - protocol declaration
+        pass  # pragma: no cover - protocol declaration
 
 
 def ledger_subject(event_id: str) -> str:
