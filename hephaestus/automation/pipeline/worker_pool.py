@@ -221,6 +221,7 @@ from hephaestus.automation.prompts._review_rubric import plugin_skills_context
 from hephaestus.automation.protected_merge_state import (
     ProtectedMergeStateError,
     ProtectedMergeStateStore,
+    ProtectedMergeUncertainError,
     ProtectedRebaseCyclesExhausted,
 )
 from hephaestus.automation.protected_rebase import (
@@ -8841,6 +8842,66 @@ class WorkerPool:
             store = ProtectedMergeStateStore(repo_root, job.transport_repository)
         except ProtectedMergeStateError:
             return JobResult(ok=False, error="protected_merge_state_unavailable")
+
+        try:
+            remote_env, remote_config = self._authenticated_remote_git_configuration(
+                cwd=repo_root, expected_repo=job.transport_repository, timeout=job.timeout_s
+            )
+        except Exception as exc:
+            return JobResult(ok=False, error=f"protected rebase remote setup failed: {exc}")
+
+        def remote_tip(ref: str) -> str | None:
+            out = git_utils.run(
+                ["git", "rev-parse", "--verify", ref],
+                cwd=repo_root,
+                timeout=job.timeout_s,
+            ).stdout.strip()
+            return out if _is_full_commit_sha(out) else None
+
+        try:
+            git_utils.run(
+                [
+                    "git",
+                    *remote_config,
+                    "fetch",
+                    "origin",
+                    f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
+                    f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+                ],
+                cwd=repo_root,
+                timeout=job.timeout_s,
+                env=remote_env,
+            )
+        except Exception as exc:
+            return JobResult(ok=False, error=f"protected rebase fetch failed: {exc}")
+
+        def remote_head_lookup(pr: int) -> str | None:
+            return remote_tip(f"refs/remotes/origin/{branch}")
+
+        def bridge_validator(bridge_sha: str) -> tuple[int, int, str, str, str]:
+            from hephaestus.automation.protected_rebase import parse_bridge_metadata
+
+            message = git_utils.run(
+                ["git", "log", "-1", "--format=%B", bridge_sha],
+                cwd=repo_root,
+                timeout=job.timeout_s,
+            ).stdout
+            metadata = parse_bridge_metadata(message)
+            return (
+                metadata.pr_number,
+                metadata.cycle,
+                metadata.base_sha,
+                metadata.previous_head_sha,
+                metadata.logical_tip_sha,
+            )
+
+        try:
+            store.reconcile_on_open(remote_head_lookup, bridge_validator)
+        except ProtectedMergeUncertainError as exc:
+            return JobResult(ok=False, error=f"protected_merge_reconcile_failed: {exc}")
+        except ProtectedMergeStateError:
+            return JobResult(ok=False, error="protected_merge_state_unavailable")
+
         try:
             cycle = store.claim_rebase_cycle(pr_number, head_sha, base_sha)
         except ProtectedRebaseCyclesExhausted:
@@ -8873,21 +8934,6 @@ class WorkerPool:
                     "branch": branch,
                 },
             )
-
-        try:
-            remote_env, remote_config = self._authenticated_remote_git_configuration(
-                cwd=repo_root, expected_repo=job.transport_repository, timeout=job.timeout_s
-            )
-        except Exception as exc:
-            return fail("remote_authentication", f"protected rebase remote setup failed: {exc}")
-
-        def remote_tip(ref: str) -> str | None:
-            out = git_utils.run(
-                ["git", "rev-parse", "--verify", ref],
-                cwd=repo_root,
-                timeout=job.timeout_s,
-            ).stdout.strip()
-            return out if _is_full_commit_sha(out) else None
 
         try:
             git_utils.run(

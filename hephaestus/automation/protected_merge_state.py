@@ -683,14 +683,24 @@ class ProtectedMergeStateStore:
     def reconcile_on_open(
         self,
         remote_head_lookup: Callable[[int], str | None],
+        bridge_validator: Callable[[str], tuple[int, int, str, str, str]] | None = None,
     ) -> tuple[RebaseCycleRecord, ...]:
         """Verify non-terminal cycles against the remote without any mutation.
 
         A ``published`` cycle must equal the remote head.  A ``prepared``
         cycle publishes nothing: it confirms that the remote still holds the
         requested head, upgrades to published when the remote already holds
-        the bridge, or fails closed.  A ``requested`` cycle has no prepared
-        bridge by construction and is uncertain.
+        the bridge and the bridge metadata validates, or fails closed.  A
+        ``requested`` cycle has no prepared bridge by construction and is
+        uncertain.
+
+        Args:
+            remote_head_lookup: Callable that returns the remote head SHA for a PR number.
+            bridge_validator: Optional callable that takes a bridge SHA and returns
+                a tuple of (pr_number, cycle, base_sha, previous_head_sha, logical_tip_sha)
+                parsed from the bridge commit message. If provided, the metadata is
+                validated against the stored cycle before upgrading.
+
         """
         with self._locked():
             generation, attempts, cycles = self._read_unlocked()
@@ -716,6 +726,30 @@ class ProtectedMergeStateStore:
                         continue
                     if record.state == "prepared":
                         if remote == record.bridge_sha:
+                            if bridge_validator is not None:
+                                try:
+                                    # bridge_sha is non-None here because remote == bridge_sha
+                                    bridge_sha: str = record.bridge_sha  # type: ignore[assignment]
+                                    validated = bridge_validator(bridge_sha)
+                                    v_pr, v_cycle, v_base, v_prev, v_tip = validated
+                                    if (
+                                        v_pr != pr_number
+                                        or v_cycle != record.index + 1
+                                        or v_base != record.requested_base_sha
+                                        or v_prev != record.requested_head_sha
+                                        or v_tip != record.bridge_sha
+                                    ):
+                                        raise ProtectedMergeUncertainError(
+                                            f"bridge metadata mismatch for cycle {record.index} "
+                                            f"on PR #{pr_number}"
+                                        )
+                                except ProtectedMergeValidationError:
+                                    raise
+                                except Exception as exc:
+                                    raise ProtectedMergeUncertainError(
+                                        f"bridge metadata validation failed for cycle "
+                                        f"{record.index} on PR #{pr_number}: {exc}"
+                                    ) from exc
                             upgraded = RebaseCycleRecord(
                                 index=record.index,
                                 requested_head_sha=record.requested_head_sha,

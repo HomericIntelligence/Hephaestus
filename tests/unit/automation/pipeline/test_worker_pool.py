@@ -26572,7 +26572,10 @@ def test_protected_rebase_rejects_a_missing_writer_worktree(
 
 
 def test_protected_rebase_reports_cycles_exhausted(
-    pool: WorkerPool, tmp_path: Path, protected_capability_isolation: None
+    pool: WorkerPool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_capability_isolation: None,
 ) -> None:
     """A ninth distinct cycle for one pull request grants no work."""
     (tmp_path / "repo").mkdir()
@@ -26586,6 +26589,13 @@ def test_protected_rebase_reports_cycles_exhausted(
         cycle = store.claim_rebase_cycle(4201, head, base)
         assert cycle.index == index
         store.mark_cycle_failed(4201, index, f"failure {index}")
+
+    _bounded_remote_configuration(pool, monkeypatch)
+    monkeypatch.setattr(
+        git_utils,
+        "run",
+        _protected_cycle_git(base=base, head=head, recorded=[]),
+    )
 
     result = pool._git_protected_rebase(job)
 
@@ -26692,20 +26702,39 @@ def test_protected_rebase_replays_an_already_published_cycle(
     store.mark_cycle_published(4201, cycle.index, bridge)
     token = _register_cycle_capability(tmp_path)
     job = _protected_rebase_job(tmp_path, token=token)
-    monkeypatch.setattr(
-        pool,
-        "_authenticated_remote_git_configuration",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("a published cycle touches no remote configuration")
-        ),
-    )
-    monkeypatch.setattr(
-        git_utils,
-        "run",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("a published cycle runs no Git command")
-        ),
-    )
+    _bounded_remote_configuration(pool, monkeypatch)
+
+    recorded: list[list[str]] = []
+
+    def run_reconcile_only(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        recorded.append(cmd)
+        if "rev-parse" in cmd:
+            ref = cmd[cmd.index("--verify") + 1]
+            if ref.endswith("/12-auto-impl"):
+                return subprocess.CompletedProcess(cmd, 0, bridge + "\n", "")
+            if ref.endswith("/main"):
+                return subprocess.CompletedProcess(cmd, 0, "b" * 40 + "\n", "")
+        if "fetch" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "log" in cmd and "--format=%B" in cmd:
+            # Return a valid bridge message for validation
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                f"chore(automation): preserve protected rebase ancestry\n\n"
+                f"Hephaestus-Rebase-Format: 1\n"
+                f"Hephaestus-Issue: 12\n"
+                f"Hephaestus-PR: 4201\n"
+                f"Hephaestus-Rebase-Cycle: {cycle.index + 1}\n"
+                f"Hephaestus-Rebase-Base: {'b' * 40}\n"
+                f"Hephaestus-Rebase-Previous-Head: {'a' * 40}\n"
+                f"Hephaestus-Rebase-Logical-Tip: {bridge}\n"
+                f"Signed-off-by: Test <test@example.com>\n",
+                "",
+            )
+        raise AssertionError(f"a published cycle runs no Git command beyond reconciliation: {cmd}")
+
+    monkeypatch.setattr(git_utils, "run", run_reconcile_only)
 
     result = pool._git_protected_rebase(job)
 
@@ -26717,6 +26746,9 @@ def test_protected_rebase_replays_an_already_published_cycle(
         "base_sha": "b" * 40,
         "branch": "12-auto-impl",
     }
+    # Only reconciliation commands (rev-parse, fetch, log) should run; no rebase or push.
+    assert not any("rebase" in cmd for cmd in recorded)
+    assert not any("push" in cmd for cmd in recorded)
 
 
 def test_protected_rebase_marks_push_failures_failed(

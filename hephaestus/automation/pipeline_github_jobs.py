@@ -74,6 +74,7 @@ from hephaestus.automation.protected_merge_state import (
     MergeAttemptKey,
     ProtectedMergeStateError,
     ProtectedMergeStateStore,
+    ProtectedMergeUncertainError,
 )
 from hephaestus.automation.protected_rebase import (
     MERGE_ATTEMPT_AMBIGUOUS,
@@ -1915,6 +1916,52 @@ class PipelineGitHubJobRunner:
             protected_store = self._protected_merge_store(job, initial_snapshot)
             if protected_store is None:
                 return complete("protected_merge_state_unavailable")
+
+            def remote_head_lookup(pr: int) -> str | None:
+                try:
+                    state = github.gh_pr_state(pr)
+                    if isinstance(state, dict):
+                        head = state.get("headRefOid")
+                        if isinstance(head, str) and head:
+                            return head
+                except Exception:
+                    pass
+                return None
+
+            def bridge_validator(bridge_sha: str) -> tuple[int, int, str, str, str]:
+                import subprocess
+
+                from hephaestus.automation.protected_rebase import parse_bridge_metadata
+
+                try:
+                    result = subprocess.run(
+                        ["git", "log", "-1", "--format=%B", bridge_sha],
+                        cwd=job.repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.gh_timeout,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(f"git log failed: {result.stderr}")
+                    message = result.stdout
+                    metadata = parse_bridge_metadata(message)
+                    return (
+                        metadata.pr_number,
+                        metadata.cycle,
+                        metadata.base_sha,
+                        metadata.previous_head_sha,
+                        metadata.logical_tip_sha,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(f"bridge validation failed: {exc}") from exc
+
+            try:
+                protected_store.reconcile_on_open(remote_head_lookup, bridge_validator)
+            except ProtectedMergeUncertainError:
+                return complete("protected_merge_reconcile_failed", fingerprint=fingerprint)
+            except ProtectedMergeStateError:
+                return complete("protected_merge_state_unavailable")
+
             base_sha = readiness.get("baseRefOid") if isinstance(readiness, dict) else None
             mergeable_text = (
                 str(readiness.get("mergeable") or "").upper() if isinstance(readiness, dict) else ""
