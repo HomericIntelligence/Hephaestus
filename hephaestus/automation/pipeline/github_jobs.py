@@ -491,11 +491,14 @@ class RunMergeWaitCycleRequest:
     deadline_s: float
     cancellation: threading.Event
     issue_number: int | None = None
+    auto_merge_armed: bool = False
 
     def __post_init__(self) -> None:
         """Validate the merge request and its readiness fingerprint."""
         _positive_identifier(self.pr_number, "pr_number")
         _full_sha(self.reviewed_head_sha, "reviewed_head_sha")
+        if type(self.auto_merge_armed) is not bool:
+            raise ValueError("auto_merge_armed must be a boolean")
         if (
             isinstance(self.deadline_s, bool)
             or not isinstance(self.deadline_s, (int, float))
