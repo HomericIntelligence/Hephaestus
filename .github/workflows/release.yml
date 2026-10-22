@@ -247,7 +247,12 @@ jobs:
           -m "not performance and not contract and not nightly"
           -n auto
 
+      - name: Install pinned nats-server
+        uses: ./.github/actions/setup-nats-server
+
       - name: Run integration tests
+        env:
+          HEPHAESTUS_REQUIRE_NATS_SERVER: "1"
         # A release validates each normal integration test except the offline
         # fixture lane. --override-ini clears the default precommit selection;
         # --strict-markers is safe

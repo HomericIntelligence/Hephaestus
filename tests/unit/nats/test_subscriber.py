@@ -473,17 +473,11 @@ cfg = NATSConfig(enabled=True, url='nats://127.0.0.1:1', subjects=['x.>'])
 t = NATSSubscriberThread(config=cfg, handler=lambda e: None)
 
 fake_nats = types.ModuleType("nats")
-fake_api = types.ModuleType("nats.js.api")
 
 async def connect(url, **kwargs):
     raise RuntimeError("connect stopped before network")
 
-class DeliverPolicy(str):
-    def __new__(cls, value):
-        return str.__new__(cls, value)
-
 fake_nats.connect = connect
-fake_api.DeliverPolicy = DeliverPolicy
 real_import = builtins.__import__
 
 def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -496,8 +490,6 @@ def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
             module="nats",
         )
         return fake_nats
-    if name == "nats.js.api":
-        return fake_api
     return real_import(name, globals, locals, fromlist, level)
 
 builtins.__import__ = fake_import

@@ -177,9 +177,33 @@ jobs:
           --override-ini="addopts=" --basetemp=build/pytest-codex-artifacts
           -v --strict-markers -m codex_release_artifact
 
+  nats-integration:
+    name: NATS real-broker integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+      - name: Install pinned nats-server
+        uses: ./.github/actions/setup-nats-server
+      - name: Run NATS durable-failure integration tests
+        env:
+          HEPHAESTUS_REQUIRE_NATS_SERVER: "1"
+        run: >
+          uv run pytest tests/integration/nats
+          --override-ini="addopts="
+          --basetemp=build/pytest-nats -v --strict-markers
+
   notify-failure:
     name: Open or update failure tracking issue
-    needs: [unit-coverage, functional-tests, pi-conformance, installed-cli-tests, shell-tests, build]
+    needs: [unit-coverage, functional-tests, pi-conformance, installed-cli-tests, shell-tests, build, nats-integration]
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

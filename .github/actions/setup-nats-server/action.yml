@@ -1,0 +1,25 @@
+name: Install pinned nats-server
+description: >-
+  Download the pinned nats-server release, verify its SHA-256 digest, and
+  install it into build/tools/ for the NATS real-broker integration lane.
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify nats-server
+      shell: bash
+      env:
+        NATS_SERVER_VERSION: v2.15.1
+        NATS_SERVER_SHA256: bf5edc7b1ce98e885c368cb43a886eb148dc5d0551d99f3cf6141fb5e1954c70
+      run: |
+        set -euo pipefail
+        mkdir -p build/tools
+        archive="nats-server-${NATS_SERVER_VERSION}-linux-amd64.tar.gz"
+        url="https://github.com/nats-io/nats-server/releases/download/${NATS_SERVER_VERSION}/${archive}"
+        curl -fsSL "$url" -o "$archive"
+        echo "${NATS_SERVER_SHA256}  ${archive}" | sha256sum -c -
+        tar -xzf "$archive" -C build/tools \
+          --strip-components=1 \
+          "nats-server-${NATS_SERVER_VERSION}-linux-amd64/nats-server"
+        rm "$archive"
+        build/tools/nats-server --version

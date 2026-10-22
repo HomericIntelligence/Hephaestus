@@ -32,7 +32,12 @@ from hephaestus.nats.events import (
     SubjectParts as SubjectParts,
     parse_subject as parse_subject,
 )
+from hephaestus.nats.failure_models import FailureEnvelope as FailureEnvelope
 from hephaestus.nats.handlers import EventRouter as EventRouter
+from hephaestus.nats.replay import (
+    FailureReplayer as FailureReplayer,
+    ReplayOutcome as ReplayOutcome,
+)
 from hephaestus.nats.subscriber import (
     DEFAULT_JOIN_TIMEOUT as DEFAULT_JOIN_TIMEOUT,
     NATSSubscriberThread as NATSSubscriberThread,
@@ -42,9 +47,12 @@ from hephaestus.nats.subscriber import (
 __all__ = [
     "DEFAULT_JOIN_TIMEOUT",
     "EventRouter",
+    "FailureEnvelope",
+    "FailureReplayer",
     "NATSConfig",
     "NATSEvent",
     "NATSSubscriberThread",
+    "ReplayOutcome",
     "SubjectParts",
     "SubscriberState",
     "load_nats_config",
