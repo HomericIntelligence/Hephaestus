@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import queue
 import shlex
@@ -9011,19 +9012,29 @@ def test_pretest_stage_persists_before_dispatching_tests(
         JobResult(ok=True, value={"record_sha256": "c" * 64, "sequence": 2}),
     ],
 )
-def test_pretest_stage_stops_when_persistence_is_unproven(
-    tmp_path: Path, make_ctx: Any, make_work_item: Any, result: JobResult
+def test_pretest_stage_inspects_the_writer_when_persistence_is_unproven(
+    tmp_path: Path,
+    make_ctx: Any,
+    make_work_item: Any,
+    result: JobResult,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Store failures cannot be retried as tests or source replacement."""
+    """An unproven store routes to the writer inspection instead of the tests."""
     item = _pretest_stage_item(tmp_path, make_work_item)
     item.state = "PRETEST_PERSIST_WAIT"
     stage = ImplementationStage()
     ctx = make_ctx()
     stage.on_job_done(item, result, ctx)
     item.state = "TEST_WAIT"
-    outcome = stage.step(item, ctx)
-    assert isinstance(outcome, StageOutcome) and outcome.disposition == Disposition.FINISH_FAIL
+    with caplog.at_level(
+        logging.WARNING, logger="hephaestus.automation.pipeline.stages.implementation"
+    ):
+        outcome = stage.step(item, ctx)
+    assert outcome == Continue(next_state="WORKTREE_WAIT")
+    assert item.payload["remediation_reply_inspection_required"] is True
+    assert "remediation_pretest_input" not in item.payload
     assert item.worktree is not None
+    assert "the pretest could not record the change" in caplog.text
 
 
 def test_pretest_stage_invalidates_before_test_fix(
@@ -9179,7 +9190,8 @@ def test_pretest_recovery_routes_only_exact_worker_evidence_to_tests(
     item.state = "DIRTY_DECISION_WAIT"
     route = stage.step(item, ctx)
     if mutation is not None:
-        assert isinstance(route, StageOutcome) and route.disposition == Disposition.FINISH_FAIL
+        assert route == Continue(next_state="WORKTREE_WAIT")
+        assert item.payload["remediation_reply_inspection_required"] is True
     else:
         assert route == Continue(next_state="TEST_WAIT")
         item.state = "TEST_WAIT"
@@ -9286,7 +9298,8 @@ def test_pretest_clean_completion_keeps_normal_test_route(
     item.state = "TEST_WAIT"
     route = stage.step(item, ctx)
     if changed:
-        assert isinstance(route, StageOutcome) and route.disposition == Disposition.FINISH_FAIL
+        assert route == Continue(next_state="WORKTREE_WAIT")
+        assert item.payload["remediation_reply_inspection_required"] is True
         return
     assert isinstance(route, JobRequest) and isinstance(route.job, BuildTestJob)
     assert item.payload["remediation_output"] == replies
