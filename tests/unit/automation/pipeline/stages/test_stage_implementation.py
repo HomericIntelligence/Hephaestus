@@ -5697,6 +5697,140 @@ class TestTestsAndFix:
 class TestCommitPushAndPrCreate:
     """COMMIT_PUSH_WAIT / PR_CREATE: durable journal entry + deferral order."""
 
+    def test_reply_for_the_addressed_threads_is_accepted(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reply for the threads the job received is accepted."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": [{"thread_id": "thread-2"}],
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    },
+                    {
+                        "id": "thread-2",
+                        "path": "b.py",
+                        "line": 4,
+                        "side": "RIGHT",
+                        "body": "fix it too",
+                        "comments": [
+                            {"id": "comment-2", "author": "reviewer", "body": "fix it too"}
+                        ],
+                    },
+                ],
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "addressed": ["thread-2"],
+                    "replies": {"thread-2": "[Response] Fixed the missing guard."},
+                },
+            ),
+            ctx,
+        )
+
+        assert "remediation_reply_error" not in item.payload
+        assert item.payload["remediation_output"] == {
+            "addressed": ["thread-2"],
+            "replies": {"thread-2": "[Response] Fixed the missing guard."},
+        }
+
+    def test_reply_for_a_thread_outside_the_snapshot_fails_closed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reply target that the snapshot does not hold fails closed."""
+        stage = ImplementationStage()
+        ctx = make_ctx(github=FakeStageGitHub())
+        item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": [{"thread_id": "thread-2"}],
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "addressed": ["thread-2"],
+                    "replies": {"thread-2": "[Response] Fixed the missing guard."},
+                },
+            ),
+            ctx,
+        )
+
+        assert item.payload["remediation_reply_error"] is True
+        assert "remediation_output" not in item.payload
+
+    def test_reply_without_a_target_set_is_accepted(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reply for every snapshot thread is accepted when no target set exists."""
+        stage = ImplementationStage()
+        ctx = make_ctx(github=FakeStageGitHub())
+        item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": [],
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Fixed the missing guard."},
+                },
+            ),
+            ctx,
+        )
+
+        assert "remediation_reply_error" not in item.payload
+        assert item.payload["remediation_output"] == {
+            "addressed": ["thread-1"],
+            "replies": {"thread-1": "[Response] Fixed the missing guard."},
+        }
+
     def test_pushed_remediation_with_malformed_reply_mapping_fails_closed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
