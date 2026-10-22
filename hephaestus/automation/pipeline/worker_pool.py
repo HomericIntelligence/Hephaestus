@@ -4737,6 +4737,69 @@ class _PretestSuccess:
     in_use: bool = False
 
 
+def _remediation_scope_paths(job: GitJob) -> frozenset[str]:
+    """Return the files that the review findings of one remediation name.
+
+    A review finding names the file that must change. The plan scope is stale
+    after the review, so the findings widen the scope of the remediation.
+
+    Args:
+        job: The job that continues one review remediation.
+
+    Returns:
+        The files that the reply targets anchor to.
+
+    """
+    snapshots = job.kwargs.get("remediation_thread_snapshots")
+    if isinstance(snapshots, (list, tuple)):
+        candidates: list[object] = list(snapshots)
+    else:
+        inputs = job.kwargs.get("remediation_pretest_input")
+        raw = getattr(inputs, "thread_snapshot_json", None)
+        if not isinstance(raw, str):
+            return frozenset()
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "the remediation thread snapshot is not valid JSON (%s); the scope "
+                "of the remediation stays the plan scope",
+                type(exc).__name__,
+            )
+            return frozenset()
+        candidates = decoded if isinstance(decoded, list) else []
+    paths: set[str] = set()
+    for snapshot in candidates:
+        if not isinstance(snapshot, dict):
+            continue
+        path = snapshot.get("path")
+        # The predicate is a general path-safety check. The review finding
+        # paths use it for the same reason as a scope retraction path.
+        if isinstance(path, str) and is_safe_scope_retraction_path(path):
+            paths.add(path)
+    return frozenset(paths)
+
+
+def _is_remediation_job(job: GitJob) -> bool:
+    """Return whether one job continues a review remediation.
+
+    Args:
+        job: The job to inspect.
+
+    Returns:
+        True when the job answers review findings.
+
+    """
+    return any(
+        job.kwargs.get(key) is not None
+        for key in (
+            "remediation_pr_number",
+            "remediation_pretest_input",
+            "remediation_thread_snapshots",
+        )
+    )
+
+
 class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
@@ -5529,7 +5592,13 @@ class WorkerPool:
     ) -> tuple[SourceWorkspaceReceipt, _DirtySnapshotEvidence, str, _BoundedGitOutput, CommitPaths]:
         """Inspect exact local bytes and recheck source after fresh remote facts."""
         source = self._pretest_source(manager, inputs)
-        scope_job = replace(job, kwargs={"scope_history_base_sha": inputs.expected_remote_sha})
+        scope_job = replace(
+            job,
+            kwargs={
+                **job.kwargs,
+                "scope_history_base_sha": inputs.expected_remote_sha,
+            },
+        )
         if (
             self._verify_implementation_edit_scope(
                 scope_job, source.path, allowed_paths=inputs.allowed_paths
@@ -13123,6 +13192,7 @@ class WorkerPool:
             )
             if fetch_failure is not None:
                 return fetch_failure
+        reuse_dirty_lane = False
         if (
             implementation_source_lane
             and source_manager is not None
@@ -13132,12 +13202,20 @@ class WorkerPool:
             try:
                 item_number = cast(int, kwargs["issue_number"])
                 if adopting_implementation_writer:
-                    source_manager.authorize_adopted_implementation_writer_transition(
+                    reuse_dirty_lane = self._adopted_lane_holds_agent_work(
+                        source_manager,
                         item_number,
-                        branch=branch_name,
+                        branch_name=branch_name,
                         expected_head=cast(str, implementation_adoption_head),
-                        handoff=implementation_writer_handoff,
+                        timeout_s=job.timeout_s,
                     )
+                    if not reuse_dirty_lane:
+                        source_manager.authorize_adopted_implementation_writer_transition(
+                            item_number,
+                            branch=branch_name,
+                            expected_head=cast(str, implementation_adoption_head),
+                            handoff=implementation_writer_handoff,
+                        )
                 else:
                     source_manager.authorize_direct_implementation_writer_transition(
                         item_number,
@@ -13168,6 +13246,7 @@ class WorkerPool:
             repo_root=repo_root,
             expected_repo=job.transport_repository,
             timeout_s=job.timeout_s,
+            reuse_dirty_lane=reuse_dirty_lane,
         )
         if isinstance(created_or_failure, JobResult):
             return created_or_failure
@@ -13255,6 +13334,42 @@ class WorkerPool:
             },
         )
 
+    @staticmethod
+    def _adopted_lane_holds_agent_work(
+        source_manager: SourceWorkspaceManager,
+        item_number: int,
+        *,
+        branch_name: str,
+        expected_head: str,
+        timeout_s: int,
+    ) -> bool:
+        """Return whether the implementation lane holds the agent's own work.
+
+        The lane holds uncommitted work at the adopted head on the adopted
+        branch. The agent continues in that lane, so the adoption keeps the
+        worktree instead of replacing it.
+
+        Args:
+            source_manager: The source workspace manager that owns the lane.
+            item_number: The issue number that owns the lane.
+            branch_name: The branch that the adoption expects.
+            expected_head: The head that the adoption expects.
+            timeout_s: The timeout for each git command.
+
+        Returns:
+            True when the lane holds uncommitted work at the adopted head.
+
+        """
+        try:
+            path = source_manager.path_for(item_number, SourceLane.IMPLEMENTATION)
+            if not path.exists() or not source_manager._is_dirty(path):
+                return False
+            revision = source_manager._head_revision(path)
+            branch = source_manager._head_branch(path)
+        except (OSError, UnicodeError, subprocess.SubprocessError, SourceWorkspaceError):
+            return False
+        return revision == expected_head and branch == f"refs/heads/{branch_name}"
+
     def _create_managed_worktree(
         self,
         *,
@@ -13266,10 +13381,14 @@ class WorkerPool:
         repo_root: Path,
         expected_repo: str,
         timeout_s: int,
+        reuse_dirty_lane: bool = False,
     ) -> Path | JobResult:
         """Create a worktree and preserve typed writer-receipt failures."""
         try:
-            return manager.create_worktree(**kwargs, timeout=timeout_s)
+            create_kwargs = dict(kwargs)
+            if reuse_dirty_lane:
+                create_kwargs["reuse_dirty_lane"] = True
+            return manager.create_worktree(**create_kwargs, timeout=timeout_s)
         except SourceWorkspaceTerminalError:
             raise
         except (RemoteGitRefreshError, subprocess.CalledProcessError) as exc:
@@ -15455,11 +15574,39 @@ class WorkerPool:
             if restoration is not None:
                 return restoration
             permitted.update(retractions)
+        permitted.update(_remediation_scope_paths(job))
         if not changed.issubset(permitted):
+            return WorkerPool._remediation_scope_outcome(job, changed, permitted)
+        return None
+
+    @staticmethod
+    def _remediation_scope_outcome(
+        job: GitJob, changed: set[str], permitted: set[str]
+    ) -> JobResult | None:
+        """Return the outcome for one edit that the plan scope does not cover.
+
+        A review finding names the file that must change. The plan scope is
+        stale after the review, so a remediation warns and continues. The next
+        review round judges the change. Every other job keeps the refusal.
+
+        Args:
+            job: The job that owns the edit.
+            changed: The paths that the job changed.
+            permitted: The paths that the job may change.
+
+        Returns:
+            The failure for a job outside a remediation, else None.
+
+        """
+        if not _is_remediation_job(job):
             return JobResult(
                 ok=False,
                 error="implementation changed paths outside approved scope",
             )
+        logger.warning(
+            "implementation changed paths outside the plan scope during a remediation: %s",
+            ",".join(sorted(changed - permitted)),
+        )
         return None
 
     def _commit_if_changes_with_controlled_signing(

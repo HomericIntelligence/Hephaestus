@@ -1742,7 +1742,7 @@ class ImplementationStage(Stage):
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_turn_failed")
         if item.payload.get("remediation_pretest_error"):
-            return StageOutcome(Disposition.FINISH_FAIL, "remediation_pretest_failed")
+            return self._remediation_pretest_fallback(item, ctx)
         handler_name = _STEP_HANDLER_NAMES.get(item.state)
         if handler_name is not None:
             item_snapshot = deepcopy(item)
@@ -1765,6 +1765,43 @@ class ImplementationStage(Stage):
     def _enter(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ENTER advances to GATE."""
         return Continue(next_state=GATE)
+
+    def _remediation_pretest_fallback(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Publish the agent's change through the writer after a pretest failure.
+
+        The pretest records the candidate that the host publishes. When the
+        record fails, the host inspects the writer and publishes the inspected
+        content instead. The agent's change stays in the lane, and the next
+        review round judges it.
+
+        Args:
+            item: The work item to update.
+            ctx: The stage context.
+
+        Returns:
+            The next state for the writer inspection.
+
+        """
+        issue = _issue_number(item)
+        item.payload.pop("remediation_pretest_error", None)
+        logger.warning(
+            "implementation:%d: the pretest could not record the change; the host "
+            "inspects the writer and publishes the change",
+            issue,
+        )
+        for key in (
+            "remediation_pretest_input",
+            "remediation_pretest_nonce",
+            "remediation_pretest_result_sha256",
+            "remediation_pretest_record_sha256",
+            "remediation_pretest_ready",
+            "remediation_pretest_invalidated",
+            "remediation_pretest_clean_completion",
+        ):
+            item.payload.pop(key, None)
+        item.payload["remediation_reply_inspection_required"] = True
+        item.state = WORKTREE_WAIT
+        return Continue(next_state=WORKTREE_WAIT)
 
     def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """WORKTREE_WAIT submits the create-worktree git job."""

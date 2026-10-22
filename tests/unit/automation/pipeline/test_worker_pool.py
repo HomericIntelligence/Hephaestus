@@ -1301,6 +1301,81 @@ def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_p
     push.assert_not_called()
 
 
+def _remediation_scope_job(
+    *, snapshots: list[dict[str, Any]], allowed_paths: tuple[str, ...]
+) -> GitJob:
+    """Build one commit job that answers review findings."""
+    return GitJob(
+        repo="test/repo",
+        op="commit_push",
+        timeout_s=60,
+        kwargs={
+            "allowed_paths": allowed_paths,
+            "scope_history_base_sha": "a" * 40,
+            "remediation_pr_number": 2473,
+            "remediation_thread_snapshots": snapshots,
+        },
+    )
+
+
+def test_a_remediation_may_change_the_file_that_the_finding_names(
+    pool: WorkerPool, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A review finding widens the scope of the remediation."""
+    job = _remediation_scope_job(
+        snapshots=[{"id": "thread-1", "path": "scripts/run_ci_local.sh"}],
+        allowed_paths=("hephaestus/automation/claude_invoke.py",),
+    )
+    git_outputs = ("", "", "", "scripts/run_ci_local.sh\0")
+
+    with (
+        patch(
+            f"{_WP}.git_utils.run",
+            side_effect=(
+                subprocess.CompletedProcess([], 0, stdout=output) for output in git_outputs
+            ),
+        ),
+        caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.worker_pool"),
+    ):
+        outcome = pool._verify_implementation_edit_scope(
+            job,
+            tmp_path,
+            allowed_paths=("hephaestus/automation/claude_invoke.py",),
+        )
+
+    assert outcome is None
+    assert "outside the plan scope" not in caplog.text
+
+
+def test_a_remediation_warns_about_a_file_that_no_finding_names(
+    pool: WorkerPool, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A remediation continues when the plan scope does not cover the change."""
+    job = _remediation_scope_job(
+        snapshots=[{"id": "thread-1", "path": "hephaestus/automation/claude_invoke.py"}],
+        allowed_paths=("hephaestus/automation/claude_invoke.py",),
+    )
+    git_outputs = ("", "", "", "scripts/run_ci_local.sh\0")
+
+    with (
+        patch(
+            f"{_WP}.git_utils.run",
+            side_effect=(
+                subprocess.CompletedProcess([], 0, stdout=output) for output in git_outputs
+            ),
+        ),
+        caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.worker_pool"),
+    ):
+        outcome = pool._verify_implementation_edit_scope(
+            job,
+            tmp_path,
+            allowed_paths=("hephaestus/automation/claude_invoke.py",),
+        )
+
+    assert outcome is None
+    assert "scripts/run_ci_local.sh" in caplog.text
+
+
 @pytest.mark.parametrize("model", ["", "default", "resume", "gpt-6-astra:max", "MyModel", "sol"])
 @pytest.mark.parametrize("replace_staged_after_return", [False, True])
 @pytest.mark.parametrize(
@@ -12276,6 +12351,57 @@ class TestGitOps:
         _run_git(caller, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
         assert _manager(caller, remote).prepare().path == intake.path
 
+    def test_an_adopted_lane_keeps_the_agent_uncommitted_work(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An adopted lane that holds the agent's work keeps that worktree."""
+        from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
+
+        caller, remote = _make_repository(tmp_path)
+        intake = _manager(caller, remote).prepare()
+        expected_head = intake.revision
+        _run_git(caller, "push", str(remote), "HEAD:refs/heads/602-auto")
+        source_manager = SourceWorkspaceManager(
+            intake.path,
+            repository="acme/repo",
+            base_dir=intake.state_root / "build" / ".worktrees",
+        )
+        predecessor = source_manager.prepare(
+            602, SourceLane.IMPLEMENTATION, expected_head, branch="602-auto"
+        )
+        pending = predecessor.cwd / "pending-change"
+        pending.write_text("preserve\n", encoding="utf-8")
+        job = GitJob(
+            repo="acme/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 602,
+                "branch_name": "602-auto",
+                "repo_root": str(intake.path),
+                "source_lane": "impl",
+                "sync_to_remote": True,
+                "pr_number": 603,
+                "implementation_adoption_head": expected_head,
+            },
+        )
+        with patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ("-c", f"url.{remote}.insteadOf=https://github.com/acme/repo.git")),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=30)
+
+        assert result.ok, result.error
+        assert isinstance(result.value, dict)
+        assert result.value["path"] == str(predecessor.cwd)
+        assert pending.read_text() == "preserve\n"
+        assert _run_git(predecessor.cwd, "rev-parse", "HEAD").stdout.strip() == expected_head
+
     @pytest.mark.parametrize("failure", ["validation", "transport"])
     def test_adopted_head_fetch_failure_precedes_writer_transition(
         self, pool: WorkerPool, completion_q: CompletionQueue, tmp_path: Path, failure: str
@@ -16933,6 +17059,8 @@ class TestGitOps:
                 **_RECOVERY_PATH_MANIFEST,
             },
         )
+        job.kwargs["remediation_pr_number"] = None
+        job.kwargs["remediation_thread_snapshots"] = None
         with (
             patch(
                 f"{_WP}._linked_worktree_git_env",
@@ -16956,6 +17084,54 @@ class TestGitOps:
         assert result.error == "implementation changed paths outside approved scope"
         candidate.assert_not_called()
         commit.assert_not_called()
+
+    def test_recovery_scope_warns_about_an_unrelated_path_during_a_remediation(
+        self, pool: WorkerPool, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A remediation names an unrelated path and lets the review judge it."""
+        old_head = "a" * 40
+        tree = "c" * 40
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2973,
+                "worktree_path": str(tmp_path),
+                "repo_root": str(tmp_path),
+                "branch": "2973-auto-impl",
+                "agent": "codex",
+                "allowed_paths": ("planned.py",),
+                "scope_history_base_sha": old_head,
+                "expected_recovery_head": old_head,
+                "expected_recovery_content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "expected_recovery_tree_sha": tree,
+                **_RECOVERY_PATH_MANIFEST,
+            },
+        )
+        with (
+            patch(
+                f"{_WP}._linked_worktree_git_env",
+                return_value=_test_git_binding(tmp_path),
+            ),
+            patch.object(pool, "_read_publish_head", return_value=old_head),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+            patch(
+                f"{_WP}._candidate_commit_tree_evidence",
+                return_value=(tree, _EMPTY_DIFF_OUTPUT),
+            ),
+            patch.object(pool, "_commit_if_changes_with_controlled_signing"),
+            patch(f"{_WP}.git_utils.run", return_value=MagicMock(stdout="unrelated.py\0")),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.worker_pool"),
+        ):
+            result = pool._git_commit_push(job)
+
+        assert result.error != "implementation changed paths outside approved scope"
+        assert "unrelated.py" in caplog.text
 
     def test_recovered_reply_commit_timeout_preserves_an_exact_created_child(
         self, pool: WorkerPool, tmp_path: Path
