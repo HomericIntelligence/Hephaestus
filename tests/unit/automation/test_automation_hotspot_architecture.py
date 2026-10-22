@@ -57,6 +57,9 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/merge_wait_admission.py": 125,
     "hephaestus/automation/pipeline_github_reviews.py": 1_475,
     "hephaestus/automation/pipeline_github_mutations.py": 475,
+    # The merge-queue reconciliation and the native auto-merge enablement are
+    # one bounded concern, separate from the label and pull-request mutations.
+    "hephaestus/automation/pipeline_github_merge_mutations.py": 300,
     "hephaestus/automation/pipeline/stages/pr_review.py": 550,
     "hephaestus/automation/pipeline/stages/pr_review_threads.py": 850,
     "hephaestus/automation/pipeline/stages/pr_review_diagnostics.py": 150,
@@ -102,6 +105,7 @@ _COLLABORATOR_MODULES = frozenset(
         "merge_wait_admission",
         "pipeline_github_reviews",
         "pipeline_github_mutations",
+        "pipeline_github_merge_mutations",
         "pr_review_threads",
         "pr_review_diagnostics",
         "pr_review_repository",
