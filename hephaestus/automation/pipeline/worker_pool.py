@@ -4737,6 +4737,62 @@ class _PretestSuccess:
     in_use: bool = False
 
 
+def _remediation_scope_paths(job: GitJob) -> frozenset[str]:
+    """Return the files that the review findings of one remediation name.
+
+    A review finding names the file that must change. The plan scope is stale
+    after the review, so the findings widen the scope of the remediation.
+
+    Args:
+        job: The job that continues one review remediation.
+
+    Returns:
+        The files that the reply targets anchor to.
+
+    """
+    snapshots = job.kwargs.get("remediation_thread_snapshots")
+    if isinstance(snapshots, (list, tuple)):
+        candidates: list[object] = list(snapshots)
+    else:
+        inputs = job.kwargs.get("remediation_pretest_input")
+        raw = getattr(inputs, "thread_snapshot_json", None)
+        if not isinstance(raw, str):
+            return frozenset()
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError):
+            return frozenset()
+        candidates = decoded if isinstance(decoded, list) else []
+    paths: set[str] = set()
+    for snapshot in candidates:
+        if not isinstance(snapshot, dict):
+            continue
+        path = snapshot.get("path")
+        if isinstance(path, str) and is_safe_scope_retraction_path(path):
+            paths.add(path)
+    return frozenset(paths)
+
+
+def _is_remediation_job(job: GitJob) -> bool:
+    """Return whether one job continues a review remediation.
+
+    Args:
+        job: The job to inspect.
+
+    Returns:
+        True when the job answers review findings.
+
+    """
+    return any(
+        job.kwargs.get(key) is not None
+        for key in (
+            "remediation_pr_number",
+            "remediation_pretest_input",
+            "remediation_thread_snapshots",
+        )
+    )
+
+
 class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
@@ -5529,7 +5585,13 @@ class WorkerPool:
     ) -> tuple[SourceWorkspaceReceipt, _DirtySnapshotEvidence, str, _BoundedGitOutput, CommitPaths]:
         """Inspect exact local bytes and recheck source after fresh remote facts."""
         source = self._pretest_source(manager, inputs)
-        scope_job = replace(job, kwargs={"scope_history_base_sha": inputs.expected_remote_sha})
+        scope_job = replace(
+            job,
+            kwargs={
+                **job.kwargs,
+                "scope_history_base_sha": inputs.expected_remote_sha,
+            },
+        )
         if (
             self._verify_implementation_edit_scope(
                 scope_job, source.path, allowed_paths=inputs.allowed_paths
@@ -15455,11 +15517,39 @@ class WorkerPool:
             if restoration is not None:
                 return restoration
             permitted.update(retractions)
+        permitted.update(_remediation_scope_paths(job))
         if not changed.issubset(permitted):
+            return WorkerPool._remediation_scope_outcome(job, changed, permitted)
+        return None
+
+    @staticmethod
+    def _remediation_scope_outcome(
+        job: GitJob, changed: set[str], permitted: set[str]
+    ) -> JobResult | None:
+        """Return the outcome for one edit that the plan scope does not cover.
+
+        A review finding names the file that must change. The plan scope is
+        stale after the review, so a remediation warns and continues. The next
+        review round judges the change. Every other job keeps the refusal.
+
+        Args:
+            job: The job that owns the edit.
+            changed: The paths that the job changed.
+            permitted: The paths that the job may change.
+
+        Returns:
+            The failure for a job outside a remediation, else None.
+
+        """
+        if not _is_remediation_job(job):
             return JobResult(
                 ok=False,
                 error="implementation changed paths outside approved scope",
             )
+        logger.warning(
+            "implementation changed paths outside the plan scope during a remediation: %s",
+            ",".join(sorted(changed - permitted)),
+        )
         return None
 
     def _commit_if_changes_with_controlled_signing(
