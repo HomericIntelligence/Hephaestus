@@ -1,12 +1,16 @@
-"""Merge-wait: final head-bound admission and one conditional normal merge.
+"""Merge-wait: admit a GO pull request and let GitHub merge it.
 
 ``pr_review`` owns the loop's automated implementation-eligibility decision.
-This stage may perform one ordinary REST squash merge only after it observes
-the exact active-run reviewed head, an exclusive implementation-GO label, an
-open PR against the verified repository default branch, an explicitly absent
-auto-merge request, no unresolved
-review threads, and passing required status evidence for that head. It never
-enables, disables, adopts, or polls native auto-merge.
+This stage admits an open pull request that carries the current-process
+reviewed-head proof and the exclusive ``state:implementation-go`` label, then
+enables GitHub native auto-merge. GitHub owns everything after that: branch
+protection, the required checks, any merge queue, and a rebase when the merge
+reports a real conflict.
+
+The stage does not revalidate the head before the merge request, does not gate
+on required status evidence, and does not rebase before arming. A recovered
+proof from an earlier process cannot grant merge authority; only a review in
+the current process can.
 
 The implemented mini-state graph is:
 

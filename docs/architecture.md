@@ -77,34 +77,24 @@ Repository and direct intake use the same row boundary. Intake does not write
  into the same queue and the loop reconverges
  ([`_park_resumable`](../hephaestus/automation/pipeline/coordinator.py),
  [`_finalize_resumable`](../hephaestus/automation/pipeline/coordinator.py)).
-- **Reviewed-head proof, conditional queue merge.** `state:implementation-go`
+- **Reviewed-head proof, then native auto-merge.** `state:implementation-go`
  is applied only by `pr_review._eval`, which is the sole stage authorized to
  write the label. Before the reviewer runs, `pr_review` snapshots the GitHub
  review inputs and its head SHA, then requires a clean local checkout at that
  exact SHA. The resulting in-memory proof is rechecked against a confirmed,
- unarmed live PR before the label is written. `merge_wait` uses that same
- active-run proof before every request in a bounded sequence (default: five)
- of policy-selected server merge requests. Each request also requires
- complete passing required status evidence for that exact head. The evidence
- is an independent merge gate, not a substitute for the structural review proof.
- After the evidence passes, `merge_wait` reads the stable effective policy again.
- The new typed policy must equal the policy that supplied the required-check
- inventory. The stage applies bypass and conversation safety to the new policy.
- Before a request, it may make a bounded read-only readiness wait without
- spending a merge attempt. The `--poll-max-wait` option controls this wait. Its
- default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof.
- Readiness is not authorization, and each request
- still has fresh open/unarmed/exclusive-GO admission against the verified
- repository default branch. The initial repository/default-branch/base/head
- snapshot must equal the final snapshot immediately before the request. If the
- metadata accessor fails, stop queue-driven merge requests and use the normal
- protected manual process until repair. Do not guess `main` or use labels as
- branch authority.
- The adapter makes one request per call and never retries. A required merge
- queue uses exact-head GraphQL admission. Otherwise, direct REST merge requires
- strict-update protection from a source that the current actor cannot bypass.
- No queue stage invokes `gh pr merge`, creates, disables, adopts, or polls
- native auto-merge, or uses an administrator bypass
+ unarmed live PR before the label is written.
+ `merge_wait` requires that current-process reviewed-head proof and the
+ exclusive `state:implementation-go` label, then enables GitHub native
+ auto-merge once. It does not revalidate the head before that request, does not
+ gate on required status evidence, and does not rebase first. GitHub applies
+ branch protection, the required CI/CD checks, and any merge queue; those remain
+ the merge contract. The stage rebases only when the merge reports a real
+ conflict. A later readiness poll observes the pull request without enabling
+ auto-merge again. The `--poll-max-wait` option bounds that wait; the default is
+ 1,200 seconds (20 minutes). The merge budget (default: five) bounds actual
+ requests and safe pre-dispatch retries, not readiness polling. A recovered
+ proof from an earlier process cannot grant merge authority.
+ No queue stage invokes `gh pr merge` or uses an administrator bypass
  ([`pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py),
  [`worker_pool.py`](../hephaestus/automation/pipeline/worker_pool.py),
  [`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
@@ -1722,48 +1712,34 @@ Architectural contract:
   review. Completed, stale, and blocked settlements clear actionable retry
   state. Exhausted visibility retries retain the durable journal and stop the
   handoff; they do not reset the retry counter indefinitely.
-- No queue stage arms, disables, adopts, or polls auto-merge.
+- No queue stage disables, adopts, or polls an auto-merge request that it did
+  not arm. `merge_wait` arms native auto-merge once for the reviewed GO head.
 
 ### 5.6 Merge wait
 
-Merge wait verifies a still-valid implementation review against its
-in-memory reviewed-head proof before each request. It may issue a bounded
-sequence (default: five) of policy-selected server merge requests. Admission
-for every request requires an open PR whose base equals the verified repository
-default branch, an explicitly unarmed record, an exclusive implementation-GO
-label, the current-process reviewed-head proof or a verified retained rebase
-proof, no unresolved review threads, and complete passing required status
-evidence for the merge head. The merge head is the original reviewed commit
-or the separate resulting commit in a host-verified rebase proof. A read-only
-readiness wait may park for the `--poll-max-wait` period before a request. Its
-default is 1,200 seconds (20 minutes) for each reviewed head. The wait does not
-consume the merge budget or authorize a merge. After status evidence
-passes, merge wait reads the stable effective policy again. The new typed policy
-must equal the policy that supplied the required-check inventory. The stage
-applies bypass and conversation safety to the new policy before final admission.
-The adapter performs one request per call and never retries. A required merge
-queue uses exact-head GraphQL admission and then lifecycle polling without a
-mutation replay. If GitHub returns the typed exact already-enqueued rejection,
-the adapter runs one read-only queue-entry query within the operation time that
-remains. The query must prove the same open pull request node, exact reviewed
-head, and valid queue entry. Only that result is successful idempotent
-admission. A canceled, late, unavailable, absent, malformed, or mismatched
-readback fails closed. All other uncertain mutation outcomes remain terminal.
-Otherwise, direct REST merge requires strict-update protection from a source
-that the current actor cannot bypass. Merge wait does not invoke `gh pr merge`,
-create, disable, adopt, or poll native auto-merge, or use an administrator
-bypass. An existing native auto-merge request is external ownership and is
-left untouched.
+Merge wait requires the current-process reviewed-head proof and the
+exclusive implementation-GO label on an open pull request, then enables GitHub
+native auto-merge once. GitHub owns the merge from there: branch protection,
+the required CI/CD checks, any merge queue, and a rebase when the merge reports
+a real conflict. Merge wait does not revalidate the head before that request,
+does not gate on required status evidence, and does not rebase first. A
+read-only readiness wait may park for the `--poll-max-wait` period and observe
+the pull request without enabling auto-merge again; the default is 1,200
+seconds (20 minutes) for each reviewed head. The merge budget (default: five)
+bounds actual requests and safe pre-dispatch retries, not readiness polling. A
+proof recovered from an earlier process cannot grant merge authority: a restart
+needs a fresh review. Merge wait does not invoke `gh pr merge` and does not use
+an administrator bypass.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
-    Approved["GO label + reviewed-head proof + passing exact-head status evidence"] --> Verify
-    Verify --> Merge["Policy-selected server merge request"]
-    Verify --> Review["Missing or drifted proof"]
-    Verify --> Operator["External or ambiguous ownership"]
-    Merge --> Merged --> Learn["Optional learning"] --> Finished
+    Approved["GO label + current-process reviewed-head proof"] --> Verify
+    Verify --> Merge["Enable native auto-merge once"]
+    Verify --> Review["Missing or recovered proof"]
+    Merge --> Server["GitHub applies protection, checks, and merge queue"]
+    Server --> Merged --> Learn["Optional learning"] --> Finished
 ```
 
 #### State machine
@@ -2897,11 +2873,11 @@ Exit-code priority is:
   matching the live `headRefOid` of the PR. `pr_review` creates its
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
-  compares the proof with the confirmed-unarmed live PR, verifies that its base
-  equals the repository default branch from validated repository metadata,
-  reads complete passing required status evidence for that SHA, and issues the
-  server route that the effective policy requires. It does not arm or poll
-  native auto-merge.
+  requires that proof and the GO label on an open pull request, then enables
+  GitHub native auto-merge once. GitHub applies branch protection, the required
+  checks, any merge queue, and a rebase when the merge reports a real conflict.
+  A later readiness poll observes the pull request and does not enable
+  auto-merge again.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Host advice and learning** — typed `AthenaSkillJob` operations executed
   by the Mnemosyne host boundary. Advice and learning do not invoke an agent

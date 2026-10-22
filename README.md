@@ -589,9 +589,10 @@ the loop does not change CI/CD. Required CI/CD checks are the merge contract.
    contains the literal line `Closes #123` (capital `C`, no colon, on its own
    line — `Fixes`/`Resolves` are **not** accepted). The title becomes the
    squash-merge subject on `main`.
-6. Do not enable auto-merge manually. The automation loop's review, label, and
-   `merge_wait` preserves the head-bound approval boundary with a
-   SHA-conditional normal merge and never mutates native auto-merge.
+6. Do not enable auto-merge manually. The automation loop's review and label
+   stage owns approval, and `merge_wait` enables GitHub native auto-merge after
+   that approved `GO` head. GitHub applies branch protection and the required
+   checks as the separate merge gate.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 
