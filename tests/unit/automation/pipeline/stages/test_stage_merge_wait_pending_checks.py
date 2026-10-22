@@ -81,12 +81,12 @@ def reader_github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def test_stable_pending_checks_park_and_retry(
-    reader_github: Any, make_ctx: Any, make_work_item: Any
+    reader_github: Any, make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Stable active evidence waits without a merge attempt."""
     github, _reads, calls, _reader = reader_github
     item = _reviewed_item(make_work_item)
-    outcome = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+    outcome = _complete_merge_cycle(MergeWaitStage(), item, make_real_ctx(github=github))
 
     assert outcome == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] > 0
@@ -96,14 +96,14 @@ def test_stable_pending_checks_park_and_retry(
 
 
 def test_pending_checks_reach_readiness_timeout(
-    reader_github: Any, make_ctx: Any, make_work_item: Any
+    reader_github: Any, make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """Repeated pending results keep the first readiness deadline."""
     github, _reads, calls, _reader = reader_github
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
     now = [1000.0]
-    ctx = make_ctx(github=github, now_fn=lambda: now[0])
+    ctx = make_real_ctx(github=github, now_fn=lambda: now[0])
 
     for _ in range(23):
         assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
@@ -121,13 +121,13 @@ def test_pending_checks_reach_readiness_timeout(
 
 
 def test_pending_checks_then_success_merge_same_reviewed_head(
-    reader_github: Any, make_ctx: Any, make_work_item: Any
+    reader_github: Any, make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A later stable success permits a merge for the same reviewed head."""
     github, reads, calls, reader = reader_github
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(github=github)
+    ctx = make_real_ctx(github=github)
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.RETRY, "merge_readiness_wait"
     )
@@ -143,13 +143,13 @@ def test_pending_checks_then_success_merge_same_reviewed_head(
 
 
 def test_queued_to_in_progress_requires_another_bounded_read(
-    reader_github: Any, make_ctx: Any, make_work_item: Any
+    reader_github: Any, make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A lifecycle change needs a new scheduled pair of reads."""
     github, reads, calls, reader = reader_github
     reads[:] = [[_run("QUEUED")], [_run("IN_PROGRESS")]]
     item = _reviewed_item(make_work_item)
-    ctx = make_ctx(github=github)
+    ctx = make_real_ctx(github=github)
     stage = MergeWaitStage()
 
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
@@ -179,14 +179,15 @@ def test_queued_to_in_progress_requires_another_bounded_read(
     ids=["failed", "malformed", "missing", "unavailable", "wrong-head", "duplicate", "lifecycle"],
 )
 def test_rejected_check_evidence_never_merges(
-    reader_github: Any, make_ctx: Any, make_work_item: Any, evidence: Any
+    reader_github: Any, make_real_ctx: Any, make_work_item: Any, evidence: Any
 ) -> None:
     """Invalid or unavailable required evidence cannot permit a merge."""
     github, reads, _calls, _reader = reader_github
     reads[:] = [evidence]
     item = _reviewed_item(make_work_item)
 
-    assert _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github)) == StageOutcome(
+    ctx = make_real_ctx(github=github)
+    assert _complete_merge_cycle(MergeWaitStage(), item, ctx) == StageOutcome(
         Disposition.BLOCKED, "required_checks_not_green"
     )
     assert github.merge_attempts == []
@@ -194,12 +195,12 @@ def test_rejected_check_evidence_never_merges(
 
 
 def test_pending_checks_cannot_reuse_proof_after_head_drift(
-    reader_github: Any, make_ctx: Any, make_work_item: Any
+    reader_github: Any, make_real_ctx: Any, make_work_item: Any
 ) -> None:
     """A changed live head needs a new review before admission."""
     github, reads, calls, _reader = reader_github
     item = _reviewed_item(make_work_item)
-    ctx = make_ctx(github=github)
+    ctx = make_real_ctx(github=github)
     stage = MergeWaitStage()
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.RETRY, "merge_readiness_wait"

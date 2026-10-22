@@ -104,13 +104,15 @@ every merge-wait proof payload the stale base had produced.
 A stale ready PR costs at most eight bounded cycles and one fresh review. It
 never consumes a merge request against a stale base. The durable store holds
 the claim and cycle bounds across coordinator restarts. The `reconcile_on_open`
-function is called explicitly in two places: (1) in the merge-wait cycle
-(`pipeline_github_jobs.py`) before claiming a merge attempt, and (2) in the
-protected-rebase worker (`worker_pool.py`) before claiming a rebase cycle.
-It is not called on every store access or automatically on store open. The
-function verifies non-terminal cycles against the remote head and validates
-bridge metadata (including the logical tip) before upgrading a prepared cycle
-to published. The merge-queue path is unchanged: it uses no durable claim,
-and a re-admission after a proven queue removal costs no cycle. If the store
-cannot open, the merge cycle stops with `protected_merge_state_unavailable`
-and the item takes the ordinary non-GO review path.
+function is called explicitly at two operation entry points: (1) in the
+merge-wait cycle (`pipeline_github_jobs.py`) before claiming a merge attempt,
+and (2) in the protected-rebase worker (`worker_pool.py`) before claiming a
+rebase cycle. It is not called automatically on store open or on every store
+access. The function verifies non-terminal cycles against the remote head and
+requires a bridge validator to validate bridge metadata (including the logical
+tip, PR number, cycle index, base, and previous head) before upgrading a
+prepared cycle to published. The merge-queue path is unchanged: it uses no
+durable claim, and a re-admission after a proven queue removal costs no cycle.
+If the store cannot open, the merge cycle stops with
+`protected_merge_state_unavailable` and the item takes the ordinary non-GO
+review path.

@@ -283,12 +283,18 @@ def test_failed_cycle_records_terminal_reason(tmp_path: Path) -> None:
     assert state.rebase_cycles[0][1][0].state == "failed"
 
 
+def _validator(bridge_sha: str) -> tuple[int, int, str, str, str]:
+    """Return matching metadata for test constants."""
+    del bridge_sha
+    return (17, 1, BASE, HEAD, LOGICAL_TIP)
+
+
 def test_reconcile_on_open_rejects_an_unprepared_requested_cycle(tmp_path: Path) -> None:
     """A durable requested cycle without a prepared bridge is uncertain."""
     store = _store(tmp_path)
     store.claim_rebase_cycle(17, HEAD, BASE)
     with pytest.raises(ProtectedMergeUncertainError):
-        _store(tmp_path).reconcile_on_open(lambda pr_number: HEAD)
+        _store(tmp_path).reconcile_on_open(lambda pr_number: HEAD, _validator)
 
 
 def test_reconcile_on_open_confirms_a_published_cycle(tmp_path: Path) -> None:
@@ -297,10 +303,10 @@ def test_reconcile_on_open_confirms_a_published_cycle(tmp_path: Path) -> None:
     store.claim_rebase_cycle(17, HEAD, BASE)
     store.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
     store.mark_cycle_published(17, 0, BRIDGE)
-    verified = _store(tmp_path).reconcile_on_open(lambda pr_number: BRIDGE)
+    verified = _store(tmp_path).reconcile_on_open(lambda pr_number: BRIDGE, _validator)
     assert len(verified) == 1 and verified[0].state == "published"
     with pytest.raises(ProtectedMergeUncertainError):
-        _store(tmp_path).reconcile_on_open(lambda pr_number: REMOTE)
+        _store(tmp_path).reconcile_on_open(lambda pr_number: REMOTE, _validator)
 
 
 def test_reconcile_on_open_handles_a_prepared_cycle_without_mutation(tmp_path: Path) -> None:
@@ -310,20 +316,20 @@ def test_reconcile_on_open_handles_a_prepared_cycle_without_mutation(tmp_path: P
     store.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
 
     # The push never happened: the remote still holds the requested head.
-    verified = _store(tmp_path).reconcile_on_open(lambda pr_number: HEAD)
+    verified = _store(tmp_path).reconcile_on_open(lambda pr_number: HEAD, _validator)
     assert len(verified) == 1 and verified[0].state == "prepared"
     state = _store(tmp_path).load()
     assert state is not None and state.rebase_cycles[0][1][0].state == "prepared"
 
     # The push landed but the publication write crashed: equality upgrades.
-    upgraded = _store(tmp_path).reconcile_on_open(lambda pr_number: BRIDGE)
+    upgraded = _store(tmp_path).reconcile_on_open(lambda pr_number: BRIDGE, _validator)
     assert len(upgraded) == 1 and upgraded[0].state == "published"
 
     # Any other remote state fails closed.
     store.claim_rebase_cycle(17, HEAD2, BASE)
     store.mark_cycle_prepared(17, 1, REMOTE, LOGICAL_TIP)
     with pytest.raises(ProtectedMergeUncertainError):
-        _store(tmp_path).reconcile_on_open(lambda pr_number: "1" * 40)
+        _store(tmp_path).reconcile_on_open(lambda pr_number: "1" * 40, _validator)
 
 
 def test_restart_persists_claims_and_cycles(tmp_path: Path) -> None:
