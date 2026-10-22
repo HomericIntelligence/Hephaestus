@@ -1027,7 +1027,7 @@ def _reply_target_threads(item: WorkItem) -> list[dict[str, Any]]:
     remediation = item.payload.get("remediation_threads")
     if not isinstance(snapshots, list):
         raise ValueError("remediation thread snapshot is unavailable")
-    if not isinstance(remediation, list):
+    if not isinstance(remediation, list) or not remediation:
         # No address job was given a target set, so every snapshot thread is
         # the target.
         return snapshots
@@ -1045,6 +1045,18 @@ def _reply_target_threads(item: WorkItem) -> list[dict[str, Any]]:
     if len(selected) != len(targets) or not targets:
         raise ValueError("remediation thread snapshot does not cover the reply targets")
     return selected
+
+
+def _reply_snapshot(item: WorkItem) -> list[dict[str, Any]] | None:
+    """Return the reply target threads, or None when the target set is unknown.
+
+    The reply journal and the commit inputs must name the same threads that
+    the address job received, so they read the reply target set.
+    """
+    try:
+        return _reply_target_threads(item)
+    except ValueError:
+        return None
 
 
 def _new_pretest_input(item: WorkItem, ctx: StageContext) -> RemediationPretestInput:
@@ -1350,7 +1362,7 @@ def _remediation_prepare_request(item: WorkItem, ctx: StageContext) -> StepResul
     """Build one commit-preparation job from the inspected writer."""
     issue_metadata = _commit_issue_metadata(item)
     recovery_kwargs = _recovery_publish_kwargs(item)
-    snapshots = item.payload.get("remediation_thread_snapshots")
+    snapshots = _reply_snapshot(item)
     diagnostic = item.payload.get("remediation_failure_diagnostic", "")
     if (
         item.issue is None
@@ -1508,7 +1520,7 @@ def _clear_remediation_cycle(item: WorkItem) -> None:
 
 
 def _remediation_reply_head(
-    receipt: dict[str, object], snapshots: list[object]
+    receipt: dict[str, object], snapshots: Sequence[object]
 ) -> tuple[str | None, bool]:
     """Return the pushed or unchanged snapshotted head for a reply handoff."""
     pushed = receipt.get("pushed") is True
@@ -1854,7 +1866,7 @@ class ImplementationStage(Stage):
             kwargs["sync_to_remote"] = True
             kwargs["pr_number"] = item.pr
             kwargs["implementation_adoption_head"] = adopted_head
-            remediation_snapshots = item.payload.get("remediation_thread_snapshots")
+            remediation_snapshots = _reply_snapshot(item)
             if item.payload.get("implementation_remediation") and isinstance(
                 remediation_snapshots, list
             ):
@@ -3362,7 +3374,7 @@ class ImplementationStage(Stage):
                 item.payload["scope_retraction_paths"] = scope_retraction_paths
             else:
                 item.payload.pop("scope_retraction_paths", None)
-            snapshots = item.payload.get("remediation_thread_snapshots")
+            snapshots = _reply_snapshot(item)
             if isinstance(snapshots, list):
                 if item.payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF) is not None:
                     return Continue(next_state=PR_CREATE)
@@ -4024,7 +4036,7 @@ class ImplementationStage(Stage):
         """Dispatch a detached exact-thread journal recovery read."""
         if item.issue is None or item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
-        snapshots = item.payload.get("remediation_thread_snapshots")
+        snapshots = _reply_snapshot(item)
         if not isinstance(snapshots, list):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
         pending = item.payload.get(_PENDING_GITHUB_REQUEST)
@@ -4606,7 +4618,7 @@ class ImplementationStage(Stage):
         if receipt.handoff is None:
             return
         handoff = receipt.handoff.thaw()
-        snapshots = item.payload.get("remediation_thread_snapshots")
+        snapshots = _reply_snapshot(item)
         current_head, _pushed = _remediation_reply_head(
             {},
             snapshots if isinstance(snapshots, list) else [],
@@ -4845,7 +4857,7 @@ class ImplementationStage(Stage):
         if not item.payload.get("implementation_remediation"):
             return
         receipt = result.value if isinstance(result.value, dict) else {}
-        snapshots = item.payload.get("remediation_thread_snapshots")
+        snapshots = _reply_snapshot(item)
         if not isinstance(snapshots, list):
             item.payload["remediation_reply_error"] = True
             return
@@ -4939,12 +4951,14 @@ class ImplementationStage(Stage):
         item.payload.pop("post_review_rebase_required", None)
         item.payload.pop("rebase_conflict", None)
         if item.payload.get("implementation_remediation"):
-            snapshots = item.payload.get("remediation_thread_snapshots")
-            if (
-                not result.value
-                or not isinstance(snapshots, list)
-                or parse_addressed_replies(result.value, snapshots) is None
-            ):
+            # The reply is validated against the threads the address job was
+            # given. The live snapshot can hold threads that no job received.
+            try:
+                targets = _reply_target_threads(item)
+            except ValueError:
+                item.payload["remediation_reply_error"] = True
+                return
+            if not result.value or parse_addressed_replies(result.value, targets) is None:
                 item.payload["remediation_reply_error"] = True
             else:
                 item.payload["remediation_output"] = result.value
