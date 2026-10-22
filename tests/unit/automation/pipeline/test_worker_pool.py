@@ -12351,6 +12351,57 @@ class TestGitOps:
         _run_git(caller, "remote", "set-url", "origin", "https://github.com/acme/repo.git")
         assert _manager(caller, remote).prepare().path == intake.path
 
+    def test_an_adopted_lane_keeps_the_agent_uncommitted_work(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An adopted lane that holds the agent's work keeps that worktree."""
+        from tests.unit.automation.test_repo_intake import _make_repository, _manager, _run_git
+
+        caller, remote = _make_repository(tmp_path)
+        intake = _manager(caller, remote).prepare()
+        expected_head = intake.revision
+        _run_git(caller, "push", str(remote), "HEAD:refs/heads/602-auto")
+        source_manager = SourceWorkspaceManager(
+            intake.path,
+            repository="acme/repo",
+            base_dir=intake.state_root / "build" / ".worktrees",
+        )
+        predecessor = source_manager.prepare(
+            602, SourceLane.IMPLEMENTATION, expected_head, branch="602-auto"
+        )
+        pending = predecessor.cwd / "pending-change"
+        pending.write_text("preserve\n", encoding="utf-8")
+        job = GitJob(
+            repo="acme/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 602,
+                "branch_name": "602-auto",
+                "repo_root": str(intake.path),
+                "source_lane": "impl",
+                "sync_to_remote": True,
+                "pr_number": 603,
+                "implementation_adoption_head": expected_head,
+            },
+        )
+        with patch.object(
+            pool,
+            "_authenticated_remote_git_configuration",
+            return_value=({}, ("-c", f"url.{remote}.insteadOf=https://github.com/acme/repo.git")),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=30)
+
+        assert result.ok, result.error
+        assert isinstance(result.value, dict)
+        assert result.value["path"] == str(predecessor.cwd)
+        assert pending.read_text() == "preserve\n"
+        assert _run_git(predecessor.cwd, "rev-parse", "HEAD").stdout.strip() == expected_head
+
     @pytest.mark.parametrize("failure", ["validation", "transport"])
     def test_adopted_head_fetch_failure_precedes_writer_transition(
         self, pool: WorkerPool, completion_q: CompletionQueue, tmp_path: Path, failure: str

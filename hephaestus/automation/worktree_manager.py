@@ -476,6 +476,7 @@ class WorktreeManager:
         source_lane: str | None = None,
         implementation_adoption_head: str | None = None,
         implementation_writer_handoff: object = None,
+        reuse_dirty_lane: bool = False,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -510,6 +511,9 @@ class WorktreeManager:
                 source-reading lane. Legacy callers omit this during migration.
             implementation_adoption_head: Authenticated, exact PR head used
                 only to adopt an existing implementation writer branch.
+            reuse_dirty_lane: When True, an implementation lane that already
+                holds the agent's uncommitted work at the adopted head keeps
+                that worktree. The agent continues in that lane.
             timeout: Optional timeout in seconds for each git command.
 
         Returns:
@@ -788,6 +792,7 @@ class WorktreeManager:
                                 expected_head=implementation_adoption_head or "",
                                 timeout=timeout,
                                 implementation_writer_handoff=implementation_writer_handoff,
+                                reuse_dirty_lane=reuse_dirty_lane,
                             )
                         else:
                             if direct_target_ref_revision is None:
@@ -1615,6 +1620,7 @@ class WorktreeManager:
         expected_head: str,
         timeout: int | None,
         implementation_writer_handoff: ImplementationWriterHandoff | None = None,
+        reuse_dirty_lane: bool = False,
     ) -> None:
         """Create one writer from the authenticated, exact adopted PR head.
 
@@ -1643,63 +1649,17 @@ class WorktreeManager:
             raise BranchWorktreeOwnedError(branch_name, worktree_path)
         predecessor_evidence = None
         if worktree_path.exists():
-            if not is_clean_working_tree(worktree_path, timeout=timeout):
-                raise WorktreeCreationReceiptError(
-                    f"authenticated implementation writer is dirty and preserved: {worktree_path}"
-                )
-            predecessor_evidence = None
-            if isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
-                predecessor_revision = run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=worktree_path,
-                    capture_output=True,
-                    **_timeout_kw(timeout),
-                ).stdout.strip()
-                predecessor_symbolic_ref = run(
-                    ["git", "symbolic-ref", "--quiet", "HEAD"],
-                    cwd=worktree_path,
-                    capture_output=True,
-                    check=False,
-                    **_timeout_kw(timeout),
-                )
-                predecessor_branch = predecessor_symbolic_ref.stdout.strip() or None
-                target_ref_revision = self._local_branch_revision(
-                    branch_name,
-                    timeout=timeout,
-                )
-                self._assert_writer_transition_holder_state(
-                    worktree_path=worktree_path,
-                    predecessor_detached=predecessor_branch is None,
-                    predecessor_branch=(
-                        predecessor_branch.removeprefix("refs/heads/")
-                        if predecessor_branch is not None
-                        else None
-                    ),
-                    successor_branch=branch_name,
-                    timeout=timeout,
-                )
-                try:
-                    predecessor_evidence = implementation_writer_handoff._consume_writer_transition(
-                        path=worktree_path,
-                        predecessor_revision=predecessor_revision,
-                        predecessor_detached=predecessor_branch is None,
-                        predecessor_branch=(
-                            predecessor_branch.removeprefix("refs/heads/")
-                            if predecessor_branch is not None
-                            else None
-                        ),
-                        successor_branch=branch_name,
-                        successor_revision=expected_head,
-                        transition="adopted",
-                        target_ref_revision=target_ref_revision,
-                    )
-                except RuntimeError as exc:
-                    raise WorktreeCreationReceiptError(str(exc)) from exc
-            self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
-            if predecessor_evidence is not None:
-                if not isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
-                    raise WorktreeCreationReceiptError("implementation writer handoff is missing")
-                implementation_writer_handoff._mark_transition_phase("successor_creating")
+            predecessor_evidence, kept = self._prepare_existing_adopted_lane(
+                issue_number=issue_number,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                expected_head=expected_head,
+                timeout=timeout,
+                implementation_writer_handoff=implementation_writer_handoff,
+                reuse_dirty_lane=reuse_dirty_lane,
+            )
+            if kept:
+                return
         run(
             ["git", "worktree", "add", "-B", branch_name, str(worktree_path), expected_head],
             cwd=self.repo_root,
@@ -1730,6 +1690,164 @@ class WorktreeManager:
                 path=worktree_path.resolve(),
                 revision=expected_head,
                 predecessor_evidence=predecessor_evidence,
+            )
+        )
+
+    def _prepare_existing_adopted_lane(
+        self,
+        *,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        expected_head: str,
+        timeout: int | None,
+        implementation_writer_handoff: ImplementationWriterHandoff | None,
+        reuse_dirty_lane: bool,
+    ) -> tuple[object | None, bool]:
+        """Prepare one existing lane for the adoption.
+
+        A clean lane is replaced by the adoption. A lane that holds the
+        agent's own work at the adopted head keeps that worktree, and the
+        agent continues in that lane.
+
+        Args:
+            issue_number: The issue number that owns the lane.
+            branch_name: The branch that the adoption expects.
+            worktree_path: The lane path.
+            expected_head: The head that the adoption expects.
+            timeout: Optional timeout in seconds for each git command.
+            implementation_writer_handoff: The armed writer handoff.
+            reuse_dirty_lane: Whether a dirty lane at the adopted head is kept.
+
+        Returns:
+            The predecessor evidence and whether the lane was kept.
+
+        Raises:
+            WorktreeCreationReceiptError: If the lane cannot serve the adoption.
+
+        """
+        if not is_clean_working_tree(worktree_path, timeout=timeout):
+            if not reuse_dirty_lane:
+                raise WorktreeCreationReceiptError(
+                    f"authenticated implementation writer is dirty and preserved: {worktree_path}"
+                )
+            # The lane already holds the agent's work at the adopted head.
+            # The agent continues in that lane, so the worktree is kept.
+            self._keep_dirty_adopted_lane(
+                issue_number=issue_number,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                expected_head=expected_head,
+                timeout=timeout,
+            )
+            return None, True
+        predecessor_evidence = None
+        if isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
+            predecessor_revision = run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=worktree_path,
+                capture_output=True,
+                **_timeout_kw(timeout),
+            ).stdout.strip()
+            predecessor_symbolic_ref = run(
+                ["git", "symbolic-ref", "--quiet", "HEAD"],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+                **_timeout_kw(timeout),
+            )
+            predecessor_branch = predecessor_symbolic_ref.stdout.strip() or None
+            target_ref_revision = self._local_branch_revision(
+                branch_name,
+                timeout=timeout,
+            )
+            self._assert_writer_transition_holder_state(
+                worktree_path=worktree_path,
+                predecessor_detached=predecessor_branch is None,
+                predecessor_branch=(
+                    predecessor_branch.removeprefix("refs/heads/")
+                    if predecessor_branch is not None
+                    else None
+                ),
+                successor_branch=branch_name,
+                timeout=timeout,
+            )
+            try:
+                predecessor_evidence = implementation_writer_handoff._consume_writer_transition(
+                    path=worktree_path,
+                    predecessor_revision=predecessor_revision,
+                    predecessor_detached=predecessor_branch is None,
+                    predecessor_branch=(
+                        predecessor_branch.removeprefix("refs/heads/")
+                        if predecessor_branch is not None
+                        else None
+                    ),
+                    successor_branch=branch_name,
+                    successor_revision=expected_head,
+                    transition="adopted",
+                    target_ref_revision=target_ref_revision,
+                )
+            except RuntimeError as exc:
+                raise WorktreeCreationReceiptError(str(exc)) from exc
+        self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+        if predecessor_evidence is not None:
+            if not isinstance(implementation_writer_handoff, ImplementationWriterHandoff):
+                raise WorktreeCreationReceiptError("implementation writer handoff is missing")
+            implementation_writer_handoff._mark_transition_phase("successor_creating")
+        return predecessor_evidence, False
+
+    def _keep_dirty_adopted_lane(
+        self,
+        *,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        expected_head: str,
+        timeout: int | None,
+    ) -> None:
+        """Keep one implementation lane that holds the agent's own work.
+
+        The lane already holds uncommitted work at the adopted head on the
+        adopted branch. The agent continues in that lane, so the adoption
+        keeps the worktree and mints the authority for that checkout.
+
+        Args:
+            issue_number: The issue number that owns the lane.
+            branch_name: The branch that the adoption expects.
+            worktree_path: The lane path.
+            expected_head: The head that the adoption expects.
+            timeout: Optional timeout in seconds for each git command.
+
+        Raises:
+            WorktreeCreationReceiptError: If the lane is not at the adopted head.
+
+        """
+        verified_branch = run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            **_timeout_kw(timeout),
+        ).stdout.strip()
+        verified_head = run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            **_timeout_kw(timeout),
+        ).stdout.strip()
+        if verified_branch != branch_name or verified_head != expected_head:
+            raise WorktreeCreationReceiptError("implementation writer adoption identity is invalid")
+        logger.warning(
+            "implementation writer lane %s keeps the agent's uncommitted work at the "
+            "adopted head; the agent continues in that lane",
+            worktree_path,
+        )
+        self._pending_implementation_adoptions[worktree_path.resolve()] = (
+            _ImplementationWriterAuthorityRecord(
+                issue_number=issue_number,
+                branch=branch_name,
+                path=worktree_path.resolve(),
+                revision=expected_head,
+                predecessor_evidence=None,
             )
         )
 

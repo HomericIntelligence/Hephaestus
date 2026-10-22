@@ -1704,6 +1704,30 @@ def test_direct_writer_transition_refuses_to_discard_predecessor_changes(
     assert pending.read_text() == "preserve\n"
 
 
+def test_adopted_writer_transition_refuses_to_discard_uncommitted_work(
+    tmp_path: Path,
+) -> None:
+    """An adopted transition that replaces the lane still refuses the work."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    predecessor = manager.prepare(9, SourceLane.IMPLEMENTATION, first, branch="writer-branch")
+    pending = predecessor.cwd / "pending-change"
+    pending.write_text("preserve\n", encoding="utf-8")
+
+    with manager.implementation_writer_handoff(9) as handoff:
+        with pytest.raises(SourceWorkspaceError) as captured:
+            manager.authorize_adopted_implementation_writer_transition(
+                9,
+                branch="writer-branch",
+                expected_head=second,
+                handoff=handoff,
+            )
+
+    assert captured.value.recovery is not None
+    assert captured.value.recovery.kind.value == "dirty_worktree"
+    assert pending.read_text() == "preserve\n"
+
+
 def test_direct_writer_transition_ignores_a_receipt_for_a_removed_checkout(
     tmp_path: Path,
 ) -> None:

@@ -4761,6 +4761,10 @@ def _remediation_scope_paths(job: GitJob) -> frozenset[str]:
         try:
             decoded = json.loads(raw)
         except (TypeError, ValueError):
+            logger.warning(
+                "the remediation thread snapshot is not valid JSON; the scope of the "
+                "remediation stays the plan scope"
+            )
             return frozenset()
         candidates = decoded if isinstance(decoded, list) else []
     paths: set[str] = set()
@@ -4768,6 +4772,8 @@ def _remediation_scope_paths(job: GitJob) -> frozenset[str]:
         if not isinstance(snapshot, dict):
             continue
         path = snapshot.get("path")
+        # The predicate is a general path-safety check. The review finding
+        # paths use it for the same reason as a scope retraction path.
         if isinstance(path, str) and is_safe_scope_retraction_path(path):
             paths.add(path)
     return frozenset(paths)
@@ -13185,6 +13191,7 @@ class WorkerPool:
             )
             if fetch_failure is not None:
                 return fetch_failure
+        reuse_dirty_lane = False
         if (
             implementation_source_lane
             and source_manager is not None
@@ -13194,12 +13201,20 @@ class WorkerPool:
             try:
                 item_number = cast(int, kwargs["issue_number"])
                 if adopting_implementation_writer:
-                    source_manager.authorize_adopted_implementation_writer_transition(
+                    reuse_dirty_lane = self._adopted_lane_holds_agent_work(
+                        source_manager,
                         item_number,
-                        branch=branch_name,
+                        branch_name=branch_name,
                         expected_head=cast(str, implementation_adoption_head),
-                        handoff=implementation_writer_handoff,
+                        timeout_s=job.timeout_s,
                     )
+                    if not reuse_dirty_lane:
+                        source_manager.authorize_adopted_implementation_writer_transition(
+                            item_number,
+                            branch=branch_name,
+                            expected_head=cast(str, implementation_adoption_head),
+                            handoff=implementation_writer_handoff,
+                        )
                 else:
                     source_manager.authorize_direct_implementation_writer_transition(
                         item_number,
@@ -13230,6 +13245,7 @@ class WorkerPool:
             repo_root=repo_root,
             expected_repo=job.transport_repository,
             timeout_s=job.timeout_s,
+            reuse_dirty_lane=reuse_dirty_lane,
         )
         if isinstance(created_or_failure, JobResult):
             return created_or_failure
@@ -13317,6 +13333,42 @@ class WorkerPool:
             },
         )
 
+    @staticmethod
+    def _adopted_lane_holds_agent_work(
+        source_manager: SourceWorkspaceManager,
+        item_number: int,
+        *,
+        branch_name: str,
+        expected_head: str,
+        timeout_s: int,
+    ) -> bool:
+        """Return whether the implementation lane holds the agent's own work.
+
+        The lane holds uncommitted work at the adopted head on the adopted
+        branch. The agent continues in that lane, so the adoption keeps the
+        worktree instead of replacing it.
+
+        Args:
+            source_manager: The source workspace manager that owns the lane.
+            item_number: The issue number that owns the lane.
+            branch_name: The branch that the adoption expects.
+            expected_head: The head that the adoption expects.
+            timeout_s: The timeout for each git command.
+
+        Returns:
+            True when the lane holds uncommitted work at the adopted head.
+
+        """
+        try:
+            path = source_manager.path_for(item_number, SourceLane.IMPLEMENTATION)
+            if not path.exists() or not source_manager._is_dirty(path):
+                return False
+            revision = source_manager._head_revision(path)
+            branch = source_manager._head_branch(path)
+        except (OSError, UnicodeError, subprocess.SubprocessError, SourceWorkspaceError):
+            return False
+        return revision == expected_head and branch == f"refs/heads/{branch_name}"
+
     def _create_managed_worktree(
         self,
         *,
@@ -13328,10 +13380,14 @@ class WorkerPool:
         repo_root: Path,
         expected_repo: str,
         timeout_s: int,
+        reuse_dirty_lane: bool = False,
     ) -> Path | JobResult:
         """Create a worktree and preserve typed writer-receipt failures."""
         try:
-            return manager.create_worktree(**kwargs, timeout=timeout_s)
+            create_kwargs = dict(kwargs)
+            if reuse_dirty_lane:
+                create_kwargs["reuse_dirty_lane"] = True
+            return manager.create_worktree(**create_kwargs, timeout=timeout_s)
         except SourceWorkspaceTerminalError:
             raise
         except (RemoteGitRefreshError, subprocess.CalledProcessError) as exc:
