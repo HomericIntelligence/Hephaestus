@@ -1929,7 +1929,7 @@ class PipelineGitHubJobRunner:
                     # malformed response) returns None. This causes reconcile_on_open
                     # to fail closed with ProtectedMergeUncertainError, which is the
                     # intended fail-closed behavior.
-                    pass
+                    pass  # nosec B112 - intentional silent pass for fail-closed behavior
                 return None
 
             def bridge_validator(bridge_sha: str) -> tuple[int, int, str, str, str]:

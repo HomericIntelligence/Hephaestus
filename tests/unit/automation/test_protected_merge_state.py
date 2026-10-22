@@ -26,6 +26,7 @@ HEAD = "b" * 40
 HEAD2 = "c" * 40
 BRIDGE = "d" * 40
 REMOTE = "e" * 40
+LOGICAL_TIP = "f" * 40
 
 
 def _key(
@@ -174,7 +175,7 @@ def test_compare_and_swap_rejects_stale_mutation(tmp_path: Path) -> None:
     with pytest.raises(ProtectedMergeConflictError):
         first.record_claim_response(key, 200, "merged")
     with pytest.raises(ProtectedMergeConflictError):
-        first.mark_cycle_prepared(17, 0, BRIDGE)
+        first.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
 
 
 def test_two_store_instances_grant_exactly_one_merge_claim(tmp_path: Path) -> None:
@@ -259,12 +260,14 @@ def test_cycle_transition_order_is_enforced(tmp_path: Path) -> None:
     store.claim_rebase_cycle(17, HEAD, BASE)
     with pytest.raises(ProtectedMergeConflictError):
         store.mark_cycle_published(17, 0, REMOTE)
-    prepared = store.mark_cycle_prepared(17, 0, BRIDGE)
+    prepared = store.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
     assert prepared.state == "prepared" and prepared.bridge_sha == BRIDGE
+    assert prepared.logical_tip_sha == LOGICAL_TIP
     with pytest.raises(ProtectedMergeConflictError):
-        store.mark_cycle_prepared(17, 0, BRIDGE)
+        store.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
     published = store.mark_cycle_published(17, 0, BRIDGE)
     assert published.state == "published" and published.published_head_sha == BRIDGE
+    assert published.logical_tip_sha == LOGICAL_TIP
     with pytest.raises(ProtectedMergeConflictError):
         store.mark_cycle_failed(17, 0, "late failure")
 
@@ -292,7 +295,7 @@ def test_reconcile_on_open_confirms_a_published_cycle(tmp_path: Path) -> None:
     """A published cycle must still equal the remote head."""
     store = _store(tmp_path)
     store.claim_rebase_cycle(17, HEAD, BASE)
-    store.mark_cycle_prepared(17, 0, BRIDGE)
+    store.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
     store.mark_cycle_published(17, 0, BRIDGE)
     verified = _store(tmp_path).reconcile_on_open(lambda pr_number: BRIDGE)
     assert len(verified) == 1 and verified[0].state == "published"
@@ -304,7 +307,7 @@ def test_reconcile_on_open_handles_a_prepared_cycle_without_mutation(tmp_path: P
     """A prepared cycle confirms the remote or fails closed; it never publishes."""
     store = _store(tmp_path)
     store.claim_rebase_cycle(17, HEAD, BASE)
-    store.mark_cycle_prepared(17, 0, BRIDGE)
+    store.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
 
     # The push never happened: the remote still holds the requested head.
     verified = _store(tmp_path).reconcile_on_open(lambda pr_number: HEAD)
@@ -318,7 +321,7 @@ def test_reconcile_on_open_handles_a_prepared_cycle_without_mutation(tmp_path: P
 
     # Any other remote state fails closed.
     store.claim_rebase_cycle(17, HEAD2, BASE)
-    store.mark_cycle_prepared(17, 1, REMOTE)
+    store.mark_cycle_prepared(17, 1, REMOTE, LOGICAL_TIP)
     with pytest.raises(ProtectedMergeUncertainError):
         _store(tmp_path).reconcile_on_open(lambda pr_number: "1" * 40)
 
@@ -341,15 +344,15 @@ def test_reconcile_on_open_validates_bridge_metadata(tmp_path: Path) -> None:
     # Test 1: Valid metadata upgrades the cycle to published
     store = _store(tmp_path)
     store.claim_rebase_cycle(17, HEAD, BASE)
-    store.mark_cycle_prepared(17, 0, BRIDGE)
+    store.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
 
     def validator(bridge_sha: str) -> tuple[int, int, str, str, str]:
         # Returns (pr_number, cycle, base_sha, previous_head_sha, logical_tip_sha)
         assert bridge_sha == BRIDGE
-        return (17, 1, BASE, HEAD, "f" * 40)  # logical_tip differs from bridge
+        return (17, 1, BASE, HEAD, LOGICAL_TIP)
 
-    # Remote holds the bridge; validator returns matching metadata for the
-    # four fields we can check (pr_number, cycle, base, previous_head).
+    # Remote holds the bridge; validator returns matching metadata for all
+    # five fields (pr_number, cycle, base, previous_head, logical_tip).
     upgraded = store.reconcile_on_open(lambda pr_number: BRIDGE, validator)
     assert len(upgraded) == 1
     assert upgraded[0].state == "published"
@@ -360,10 +363,10 @@ def test_reconcile_on_open_validates_bridge_metadata(tmp_path: Path) -> None:
     path2.mkdir()
     store2 = _store(path2)
     store2.claim_rebase_cycle(17, HEAD, BASE)
-    store2.mark_cycle_prepared(17, 0, BRIDGE)
+    store2.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
 
     def bad_cycle_validator(bridge_sha: str) -> tuple[int, int, str, str, str]:
-        return (17, 2, BASE, HEAD, "f" * 40)
+        return (17, 2, BASE, HEAD, LOGICAL_TIP)
 
     with pytest.raises(ProtectedMergeUncertainError):
         store2.reconcile_on_open(lambda pr_number: BRIDGE, bad_cycle_validator)
@@ -373,10 +376,10 @@ def test_reconcile_on_open_validates_bridge_metadata(tmp_path: Path) -> None:
     path3.mkdir()
     store3 = _store(path3)
     store3.claim_rebase_cycle(17, HEAD, BASE)
-    store3.mark_cycle_prepared(17, 0, BRIDGE)
+    store3.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
 
     def bad_base_validator(bridge_sha: str) -> tuple[int, int, str, str, str]:
-        return (17, 1, "x" * 40, HEAD, "f" * 40)
+        return (17, 1, "x" * 40, HEAD, LOGICAL_TIP)
 
     with pytest.raises(ProtectedMergeUncertainError):
         store3.reconcile_on_open(lambda pr_number: BRIDGE, bad_base_validator)
@@ -386,10 +389,10 @@ def test_reconcile_on_open_validates_bridge_metadata(tmp_path: Path) -> None:
     path4.mkdir()
     store4 = _store(path4)
     store4.claim_rebase_cycle(17, HEAD, BASE)
-    store4.mark_cycle_prepared(17, 0, BRIDGE)
+    store4.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
 
     def bad_prev_validator(bridge_sha: str) -> tuple[int, int, str, str, str]:
-        return (17, 1, BASE, "y" * 40, "f" * 40)
+        return (17, 1, BASE, "y" * 40, LOGICAL_TIP)
 
     with pytest.raises(ProtectedMergeUncertainError):
         store4.reconcile_on_open(lambda pr_number: BRIDGE, bad_prev_validator)
@@ -399,10 +402,23 @@ def test_reconcile_on_open_validates_bridge_metadata(tmp_path: Path) -> None:
     path5.mkdir()
     store5 = _store(path5)
     store5.claim_rebase_cycle(17, HEAD, BASE)
-    store5.mark_cycle_prepared(17, 0, BRIDGE)
+    store5.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
 
     def bad_pr_validator(bridge_sha: str) -> tuple[int, int, str, str, str]:
-        return (99, 1, BASE, HEAD, "f" * 40)
+        return (99, 1, BASE, HEAD, LOGICAL_TIP)
 
     with pytest.raises(ProtectedMergeUncertainError):
         store5.reconcile_on_open(lambda pr_number: BRIDGE, bad_pr_validator)
+
+    # Test 6: A mismatched logical tip fails closed.
+    path6 = tmp_path / "repo6"
+    path6.mkdir()
+    store6 = _store(path6)
+    store6.claim_rebase_cycle(17, HEAD, BASE)
+    store6.mark_cycle_prepared(17, 0, BRIDGE, LOGICAL_TIP)
+
+    def bad_tip_validator(bridge_sha: str) -> tuple[int, int, str, str, str]:
+        return (17, 1, BASE, HEAD, "x" * 40)
+
+    with pytest.raises(ProtectedMergeUncertainError):
+        store6.reconcile_on_open(lambda pr_number: BRIDGE, bad_tip_validator)

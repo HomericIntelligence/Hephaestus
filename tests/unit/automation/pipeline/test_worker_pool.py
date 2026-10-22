@@ -26645,7 +26645,9 @@ def test_protected_rebase_publishes_and_defers_push_until_prepared(
     token = _register_cycle_capability(tmp_path)
     job = _protected_rebase_job(tmp_path, token=token)
     _bounded_remote_configuration(pool, monkeypatch)
-    monkeypatch.setattr(pool, "_protected_rebase_build_bridge", lambda *args, **kwargs: bridge)
+    monkeypatch.setattr(
+        pool, "_protected_rebase_build_bridge", lambda *args, **kwargs: (bridge, "f" * 40)
+    )
     recorded: list[list[str]] = []
     prepared_at_push: list[bool] = []
 
@@ -26696,9 +26698,10 @@ def test_protected_rebase_replays_an_already_published_cycle(
     (tmp_path / "repo").mkdir()
     (tmp_path / "writer").mkdir()
     bridge = "d" * 40
+    logical_tip = "f" * 40
     store = ProtectedMergeStateStore(tmp_path / "repo", _PROTECTED_REBASE_TRANSPORT)
     cycle = store.claim_rebase_cycle(4201, "a" * 40, "b" * 40)
-    store.mark_cycle_prepared(4201, cycle.index, bridge)
+    store.mark_cycle_prepared(4201, cycle.index, bridge, logical_tip)
     store.mark_cycle_published(4201, cycle.index, bridge)
     token = _register_cycle_capability(tmp_path)
     job = _protected_rebase_job(tmp_path, token=token)
@@ -26728,7 +26731,7 @@ def test_protected_rebase_replays_an_already_published_cycle(
                 f"Hephaestus-Rebase-Cycle: {cycle.index + 1}\n"
                 f"Hephaestus-Rebase-Base: {'b' * 40}\n"
                 f"Hephaestus-Rebase-Previous-Head: {'a' * 40}\n"
-                f"Hephaestus-Rebase-Logical-Tip: {bridge}\n"
+                f"Hephaestus-Rebase-Logical-Tip: {logical_tip}\n"
                 f"Signed-off-by: Test <test@example.com>\n",
                 "",
             )
@@ -26764,7 +26767,9 @@ def test_protected_rebase_marks_push_failures_failed(
     token = _register_cycle_capability(tmp_path)
     job = _protected_rebase_job(tmp_path, token=token)
     _bounded_remote_configuration(pool, monkeypatch)
-    monkeypatch.setattr(pool, "_protected_rebase_build_bridge", lambda *args, **kwargs: bridge)
+    monkeypatch.setattr(
+        pool, "_protected_rebase_build_bridge", lambda *args, **kwargs: (bridge, "f" * 40)
+    )
 
     def run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if "push" in cmd:

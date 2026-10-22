@@ -8977,7 +8977,7 @@ class WorkerPool:
             )
             if isinstance(prepared, JobResult):
                 return fail("build_failed", prepared.error or "protected rebase build failed")
-            bridge = prepared
+            bridge, logical_tip = prepared
         if not bridge or not _is_full_commit_sha(bridge):
             return fail("bridge_invalid", PROTECTED_REBASE_COMMIT_INVALID)
         try:
@@ -8995,7 +8995,7 @@ class WorkerPool:
             return fail("ancestry_invalid", PROTECTED_REBASE_COMMIT_INVALID)
         if cycle.state == "requested":
             try:
-                store.mark_cycle_prepared(pr_number, cycle.index, bridge)
+                store.mark_cycle_prepared(pr_number, cycle.index, bridge, logical_tip)
             except ProtectedMergeStateError:
                 return fail("state_unavailable", "protected_merge_state_unavailable")
         try:
@@ -9039,12 +9039,13 @@ class WorkerPool:
         base_sha: str,
         remote_env: dict[str, str],
         remote_config: tuple[str, ...],
-    ) -> str | JobResult:
-        """Build and return the verified bridge SHA for a requested cycle.
+    ) -> tuple[str, str] | JobResult:
+        """Build and return the verified bridge SHA and logical tip for a requested cycle.
 
         A temporary detached worktree replays the exact reviewed range onto
         the proven base with signed commits and signs the fast-forward
-        bridge.  Return the bridge SHA, or one closed failure result.
+        bridge.  Return a tuple of (bridge_sha, logical_tip_sha), or one
+        closed failure result.
         """
         prior_bridge_message: str | None = None
         if cycle_index > 0:
@@ -9197,7 +9198,10 @@ class WorkerPool:
         bridge = slots.get(BRIDGE_SLOT)
         if not bridge:
             return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
-        return bridge
+        logical_tip = slots.get(NEW_TIP_SLOT)
+        if not logical_tip:
+            return JobResult(ok=False, error=PROTECTED_REBASE_COMMIT_INVALID)
+        return bridge, logical_tip
 
     def _initial_start_identity(self, job: GitJob) -> tuple[Path, dict[str, object]]:
         """Bind a first-start record to host Git state and one issue branch."""

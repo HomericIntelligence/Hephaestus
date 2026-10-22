@@ -176,6 +176,7 @@ class RebaseCycleRecord:
     state: Literal["requested", "prepared", "published", "failed"]
     published_head_sha: str | None = None
     bridge_sha: str | None = None
+    logical_tip_sha: str | None = None
     failure_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -186,10 +187,14 @@ class RebaseCycleRecord:
             raise ProtectedMergeValidationError("rebase cycle state is unsupported")
         if self.state == "prepared" and not _is_full_commit_sha(self.bridge_sha):
             raise ProtectedMergeValidationError("a prepared cycle requires a full bridge SHA")
+        if self.state == "prepared" and not _is_full_commit_sha(self.logical_tip_sha):
+            raise ProtectedMergeValidationError("a prepared cycle requires a full logical tip SHA")
         if self.state == "published" and not _is_full_commit_sha(self.published_head_sha):
             raise ProtectedMergeValidationError(
                 "a published cycle requires a full published head SHA"
             )
+        if self.state == "published" and not _is_full_commit_sha(self.logical_tip_sha):
+            raise ProtectedMergeValidationError("a published cycle requires a full logical tip SHA")
 
 
 @dataclass(frozen=True)
@@ -279,6 +284,11 @@ def _decode(raw: Any) -> tuple[dict[str, MergeAttemptRecord], dict[int, list[Reb
                 if cycle_value.get("bridge_sha") is not None
                 else None
             ),
+            logical_tip_sha=(
+                _full_sha(cycle_value.get("logical_tip_sha"), "rebase cycle logical_tip_sha")
+                if cycle_value.get("logical_tip_sha") is not None
+                else None
+            ),
             failure_reason=(
                 cast(str, cycle_value.get("failure_reason"))
                 if cycle_value.get("failure_reason") is not None
@@ -327,6 +337,7 @@ def _encode(
             "state": record.state,
             "published_head_sha": record.published_head_sha,
             "bridge_sha": record.bridge_sha,
+            "logical_tip_sha": record.logical_tip_sha,
             "failure_reason": record.failure_reason,
         }
         for pr_number, family in sorted(cycles.items())
@@ -611,9 +622,11 @@ class ProtectedMergeStateStore:
         pr_number: int,
         index: int,
         bridge_sha: str,
+        logical_tip_sha: str,
     ) -> RebaseCycleRecord:
         """Record the built bridge for a requested cycle before publication."""
         _full_sha(bridge_sha, "rebase cycle bridge_sha")
+        _full_sha(logical_tip_sha, "rebase cycle logical_tip_sha")
         with self._locked():
             generation, attempts, cycles = self._read_unlocked()
             family, current = self._cycle_locked(cycles, pr_number, index)
@@ -625,6 +638,7 @@ class ProtectedMergeStateStore:
                 requested_base_sha=current.requested_base_sha,
                 state="prepared",
                 bridge_sha=bridge_sha,
+                logical_tip_sha=logical_tip_sha,
             )
             family[index] = record
             self._write_unlocked(generation + 1, attempts, cycles)
@@ -650,6 +664,7 @@ class ProtectedMergeStateStore:
                 state="published",
                 published_head_sha=published_head_sha,
                 bridge_sha=current.bridge_sha,
+                logical_tip_sha=current.logical_tip_sha,
             )
             family[index] = record
             self._write_unlocked(generation + 1, attempts, cycles)
@@ -674,6 +689,7 @@ class ProtectedMergeStateStore:
                 requested_base_sha=current.requested_base_sha,
                 state="failed",
                 bridge_sha=current.bridge_sha,
+                logical_tip_sha=current.logical_tip_sha,
                 failure_reason=reason,
             )
             family[index] = record
@@ -711,23 +727,17 @@ class ProtectedMergeStateStore:
                 try:
                     bridge_sha: str = record.bridge_sha  # type: ignore[assignment]
                     validated = bridge_validator(bridge_sha)
-                    v_pr, v_cycle, v_base, v_prev, _v_tip = validated
+                    v_pr, v_cycle, v_base, v_prev, v_tip = validated
                     if (
                         v_pr != pr_number
                         or v_cycle != record.index + 1
                         or v_base != record.requested_base_sha
                         or v_prev != record.requested_head_sha
+                        or v_tip != record.logical_tip_sha
                     ):
                         raise ProtectedMergeUncertainError(
                             f"bridge metadata mismatch for cycle {record.index} on PR #{pr_number}"
                         )
-                    # The logical tip (_v_tip) is the first parent of the bridge
-                    # commit (the rebased head). It is not stored in the durable
-                    # record, which only retains the original requested_head_sha
-                    # (the pre-rebase head). Therefore we cannot validate _v_tip
-                    # against stored state; the bridge validator's job is to
-                    # confirm the bridge commit message encodes the correct cycle
-                    # identity, base, and previous head.
                 except ProtectedMergeValidationError:
                     raise
                 except Exception as exc:
@@ -742,6 +752,7 @@ class ProtectedMergeStateStore:
                 state="published",
                 published_head_sha=record.bridge_sha,
                 bridge_sha=record.bridge_sha,
+                logical_tip_sha=record.logical_tip_sha,
             )
             return upgraded, True
         if remote == record.requested_head_sha:
