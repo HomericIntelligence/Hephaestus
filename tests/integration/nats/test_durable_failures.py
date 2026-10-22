@@ -88,7 +88,6 @@ def test_transient_handler_failure_recovers_exactly_once(nats_server: NatsServer
                         # Any other APIError would indicate a real problem and
                         # will surface on the next get_last_msg call.
                         _ = exc
-                        pass
                     await asyncio.sleep(0.2)
                 return None
             finally:
@@ -305,7 +304,6 @@ def test_max_delivery_advisory_recovers_undisposed_messages(
                         # for the DLQ record. Any persistent error will eventually
                         # cause the deadline to expire and the test to fail.
                         _ = exc
-                        pass
                     record = await harness.wait_last_msg(
                         nc,
                         FAILURE_STREAM,
