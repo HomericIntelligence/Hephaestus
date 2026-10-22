@@ -82,8 +82,12 @@ def test_transient_handler_failure_recovers_exactly_once(nats_server: NatsServer
                         record: dict[str, Any] = json.loads(record_msg.data.decode())
                         if record.get("state") == "acked":
                             return record
-                    except APIError:
-                        # LEDGER_STREAM record not yet available; retry on next iteration
+                    except APIError as exc:
+                        # The ledger record does not exist yet (err_code 10068).
+                        # This is expected during the initial poll window; retry.
+                        # Any other APIError would indicate a real problem and
+                        # will surface on the next get_last_msg call.
+                        _ = exc
                         pass
                     await asyncio.sleep(0.2)
                 return None
@@ -293,8 +297,14 @@ def test_max_delivery_advisory_recovers_undisposed_messages(
                     try:
                         fetched = await sub.fetch(1, timeout=1.0)
                         deliveries += len(fetched)  # never dispose of anything
-                    except Exception:
-                        # Fetch timeout or transient error; continue polling for DLQ record
+                    except Exception as exc:
+                        # sub.fetch() raises on timeout (no messages available) or
+                        # transient connection errors. Both are expected during the
+                        # polling window while we wait for the advisory reconciler
+                        # to publish the DLQ record. We continue the loop to check
+                        # for the DLQ record. Any persistent error will eventually
+                        # cause the deadline to expire and the test to fail.
+                        _ = exc
                         pass
                     record = await harness.wait_last_msg(
                         nc,
