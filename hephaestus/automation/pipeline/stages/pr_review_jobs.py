@@ -430,15 +430,37 @@ class PrReviewJobs(
                 threads=live_threads,
             )
         except Exception as error:
+            # A transient transport or API failure is not a review result.
+            # Retry it within the consecutive-failure cap so the round is not
+            # lost, and keep the existing terminal reason for the cap.
+            retries = item.payload.get(_THREAD_RECEIPT_RETRIES, 0) + 1
+            item.payload[_THREAD_RECEIPT_RETRIES] = retries
+            if retries > REVIEW_ERROR_RETRY_CAP:
+                logger.warning(
+                    "pr_review:%s: could not reread threads before broad "
+                    "review (%s); %d consecutive failures (cap %d)",
+                    item.issue,
+                    type(error).__name__,
+                    retries,
+                    REVIEW_ERROR_RETRY_CAP,
+                )
+                return self._cleanup_review_worktree_then(
+                    item,
+                    StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_unavailable"),
+                )
             logger.warning(
-                "pr_review:%s: could not reread threads before broad review (%s)",
+                "pr_review:%s: could not reread threads before broad review "
+                "(%s); retry %d/%d (no round burned)",
                 item.issue,
                 type(error).__name__,
+                retries,
+                REVIEW_ERROR_RETRY_CAP,
             )
             return self._cleanup_review_worktree_then(
                 item,
-                StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_unavailable"),
+                StageOutcome(Disposition.RETRY, "review thread receipts unavailable"),
             )
+        item.payload.pop(_THREAD_RECEIPT_RETRIES, None)
         if item.payload.pop("scope_dependency_force_fresh_review", False):
             empty_diff = empty_diff_outcome(item)
             if empty_diff:

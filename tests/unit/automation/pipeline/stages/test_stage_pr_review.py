@@ -5412,6 +5412,32 @@ class TestReviewThreadLifecycle:
         assert result == Continue(next_state="EVAL")
         assert github.mutation_log == []
 
+    def test_transient_thread_read_retries_before_ending_the_round(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A transient thread read retries, then keeps the terminal reason."""
+
+        class UnavailableThreadsGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                raise RuntimeError("gh api graphql failed")
+
+        stage = PrReviewStage()
+        github = UnavailableThreadsGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        item.payload.pop("review_worktree", None)
+
+        outcomes = [stage._route_threads_before_broad_review(item, ctx) for _ in range(3)]
+
+        assert outcomes[0] == StageOutcome(Disposition.RETRY, "review thread receipts unavailable")
+        assert outcomes[1] == StageOutcome(Disposition.RETRY, "review thread receipts unavailable")
+        assert outcomes[2] == StageOutcome(
+            Disposition.FINISH_FAIL, "review_thread_receipts_unavailable"
+        )
+        assert github.mutation_log == []
+
 
 class TestPrReviewRestartSafetyGuards:
     """Unreachable PR-narrowing guards use the restart-safety no_pr contract."""

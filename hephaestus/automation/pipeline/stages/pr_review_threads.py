@@ -207,6 +207,10 @@ REVIEW_CHECKOUT_RETRY_CAP = 2
 
 _HOST_VERIFICATION_PENDING = "host_verification_pending"
 _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
+#: Consecutive failures of the pre-review thread read. A transient transport or
+#: API failure is not a review result; the counter bounds its retries and is
+#: cleared as soon as one read succeeds.
+_THREAD_RECEIPT_RETRIES = "review_thread_receipt_retries"
 
 
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
@@ -689,6 +693,7 @@ __all__ = [
     "_JSON_RESPONSE_BLOCK_RE",
     "_ROUND_PAYLOAD_KEYS",
     "_STEP_HANDLER_NAMES",
+    "_THREAD_RECEIPT_RETRIES",
     "AgentJob",
     "Any",
     "BuildTestJob",
