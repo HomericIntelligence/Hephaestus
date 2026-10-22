@@ -395,7 +395,7 @@ class NatsConsumerAdmin:
             durable_name=config.durable_name or durable,
             ack_policy=str(ack_policy),
             push_bound=bool(getattr(info, "push_bound", False)),
-            ack_floor_seq=int(getattr(ack_floor, "stream_seq", 0) or 0) if ack_floor else 0,
+            ack_floor_seq=int(getattr(ack_floor, "stream_seq", 0)) if ack_floor else 0,
             ack_wait=float(getattr(config, "ack_wait", 0) or 0),
             max_deliver=int(getattr(config, "max_deliver", 0) or 0),
             filter_subject=str(getattr(config, "filter_subject", "") or ""),

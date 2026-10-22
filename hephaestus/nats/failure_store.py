@@ -422,6 +422,8 @@ def _validate_existing(topology: StreamTopology, existing: ExistingStream) -> No
     if existing.max_msg_size < topology.max_msg_size:
         undersized.append(f"max_msg_size {existing.max_msg_size} < {topology.max_msg_size}")
     if topology.max_msgs_per_subject == -1:
+        # JetStream reports -1 for an unlimited per-subject cap. A server that
+        # reports any other value has a real cap, so the comparison stands.
         if existing.max_msgs_per_subject != -1:
             undersized.append(f"max_msgs_per_subject {existing.max_msgs_per_subject} != unlimited")
     elif existing.max_msgs_per_subject < topology.max_msgs_per_subject:
@@ -684,6 +686,9 @@ class AdvisoryReconciler:
             else ()
         )
         self._subscriptions: list[Any] = []
+        # One store per reconciler: the store holds no per-publication state,
+        # so rebuilding it for every advisory only allocates.
+        self._failure_store = FailureStore(admin, clock=clock)
 
     async def reconcile_advisory(self, subject: str, payload: bytes) -> ReconcileOutcome:
         """Turn one advisory into one durable dead-letter publication.
@@ -746,7 +751,7 @@ class AdvisoryReconciler:
                 last_attempt_at=last_attempt_at,
             )
 
-        outcome = await FailureStore(self._admin, clock=self._clock).publish_failure(envelope)
+        outcome = await self._failure_store.publish_failure(envelope)
         return ReconcileOutcome(outcome.value)
 
     # ------------------------------------------------------------------

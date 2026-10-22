@@ -452,6 +452,10 @@ class DeliveryLedger:
         if prior.state is LedgerState.RUNNING:
             if prior.lease_expires_at is not None and prior.lease_expires_at > now:
                 return DeliveryClaim(DeliveryAction.ABSTAIN, prior)
+            # The lease expired, so the handler outcome is unknown. The
+            # attempt already counted when the claim entered RUNNING, so this
+            # transition keeps `attempt_count`: the dead-letter record names
+            # the attempts that were made, and it does not claim one more.
             record = replace(
                 prior,
                 state=LedgerState.HANDOFF,
