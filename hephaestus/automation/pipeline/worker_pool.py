@@ -4760,10 +4760,11 @@ def _remediation_scope_paths(job: GitJob) -> frozenset[str]:
             return frozenset()
         try:
             decoded = json.loads(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             logger.warning(
-                "the remediation thread snapshot is not valid JSON; the scope of the "
-                "remediation stays the plan scope"
+                "the remediation thread snapshot is not valid JSON (%s); the scope "
+                "of the remediation stays the plan scope",
+                type(exc).__name__,
             )
             return frozenset()
         candidates = decoded if isinstance(decoded, list) else []

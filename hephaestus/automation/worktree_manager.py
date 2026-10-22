@@ -675,6 +675,10 @@ class WorktreeManager:
                                     worktree_path=worktree_path,
                                 ),
                             )
+                        # An adopted transition stays on the target branch and
+                        # keeps the lane worktree. There is no predecessor
+                        # transition to record, so the authority record carries
+                        # no predecessor evidence.
                         predecessor_evidence = None
                         if direct_predecessor:
                             if not isinstance(
