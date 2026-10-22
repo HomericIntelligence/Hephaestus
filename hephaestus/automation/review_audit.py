@@ -19,6 +19,7 @@ from hephaestus.automation.pipeline.scope_retraction import (
     is_scope_retraction_finding,
     normalize_scope_retraction_paths,
 )
+from hephaestus.automation.prompts.pr_review import BLOCKING_SEVERITIES
 from hephaestus.automation.review_finding_history import (
     normalize_review_finding_collection,
     review_finding_collection_payload,
@@ -151,25 +152,37 @@ class ReviewAudit:
 def is_clean_go_review(audit: object | None) -> bool:
     """Return whether one parsed audit can authorize implementation GO.
 
-    A reported finding is not a warning. It is a defect that the reviewer found
-    and that the host could not publish as an inline anchor. The implementation
-    sign-off gate is the one blocking gate in this design, so it must not
-    authorize a GO while such a defect is unresolved. Any reported finding
-    therefore prevents a clean sign-off here.
+    The reviewer verdict is required. A ``GO`` verdict authorizes the label on
+    its own, with two boundaries:
 
-    This boundary does not skip the finding. The publication path still renders
-    the finding in the visible review body with a warning marker, the reviewer
-    can re-anchor it, and the work item routes through the normal non-GO review
-    path. The gate never raises and never fails open.
+    - A reported finding is not a warning. It is a defect that the host could
+      not publish with an inline anchor, so the host cannot place it and the
+      sign-off must not proceed. Every reported finding blocks here.
+    - A finding at a blocking severity (``critical`` or ``major``) blocks here.
+      Those severities publish inline and require an addressed review thread
+      before any merge. A ``minor`` or ``nitpick`` finding publishes on the
+      review body as an advisory record and does not block the sign-off.
+
+    This boundary does not skip any finding. The publication path still renders
+    every finding, the reviewer can re-anchor a reported finding, and the work
+    item routes through the normal non-GO review path when the verdict is not
+    ``GO`` or a blocking finding remains. The gate never raises and never fails
+    open.
     """
     return (
         isinstance(audit, ReviewAudit)
         and audit.valid
         and audit.verdict == "GO"
-        and not audit.findings
         and not audit.reported_findings
         and not audit.scope_expansions
+        and not any(_is_blocking_finding(finding) for finding in audit.findings)
     )
+
+
+def _is_blocking_finding(finding: Mapping[str, object]) -> bool:
+    """Return whether one finding carries a severity that blocks a sign-off."""
+    severity = finding.get("severity")
+    return isinstance(severity, str) and severity.strip().lower() in BLOCKING_SEVERITIES
 
 
 def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
