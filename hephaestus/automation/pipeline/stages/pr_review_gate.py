@@ -120,7 +120,8 @@ class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
 
         if not open_thread_count:
-            # A clean thread read cannot infer GO; the shared contract requires GO and no findings.
+            # A clean thread read cannot infer GO; the shared contract requires
+            # the reviewer verdict and no blocking finding.
             if not is_clean_go_review(audit):
                 return self._handle_non_go(
                     item,
