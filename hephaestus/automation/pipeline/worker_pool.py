@@ -12047,7 +12047,7 @@ class WorkerPool:
             raise SourceWorkspaceError("dirty direct PR absence is unconfirmed")
         return receipt
 
-    def _git_claim_dirty_direct_continuation(self, job: GitJob) -> JobResult:
+    def _git_claim_dirty_direct_continuation(self, job: GitJob) -> JobResult:  # noqa: C901
         """Claim an existing dirty direct writer without a new reservation."""
         issue = job.kwargs.get("issue_number")
         raw_root = job.kwargs.get("repo_root")
@@ -12068,6 +12068,12 @@ class WorkerPool:
                             raise SourceWorkspaceError("dirty direct writer owner is unavailable")
                         return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
                     manager._reject_foreign_owner(original, issue, SourceLane.IMPLEMENTATION)
+                    # A missing or unregistered worktree is not a dirty writer:
+                    # route it to normal worktree allocation instead of failing.
+                    if not original.path.exists() and not original.path.is_symlink():
+                        return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
+                    if not manager._path_is_registered_to_repository(original.path):
+                        return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
                     if original.schema_version == 1 and not manager._is_dirty(original.path):
                         return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
                 if original is None:
