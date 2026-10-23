@@ -56,6 +56,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.config.paths import resolve_projects_dir
+from hephaestus.constants import AGENT_REVIEW_TIMEOUT
 from hephaestus.utils.git import _is_full_commit_sha, run_git
 from hephaestus.utils.helpers import get_repo_root
 
@@ -732,7 +733,7 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
         )
     for name, default in (
         ("planner", 1200),
-        ("reviewer", 1200),
+        ("reviewer", AGENT_REVIEW_TIMEOUT),
         ("implementer", 1800),
         ("address-review", 7200),
         ("git-message", 1200),
