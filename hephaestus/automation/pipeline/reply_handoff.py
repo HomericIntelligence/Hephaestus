@@ -229,6 +229,19 @@ def _thread_snapshot_fingerprint(threads: object) -> str | None:
     return sha256(encoded).hexdigest()
 
 
+# Visible notice for temporary implementation-reply handoff journals.
+# Must appear before the hidden marker and payload.
+_IMPLEMENTATION_JOURNAL_NOTICE = (
+    "<sub>[auto-msg] Temporary bookkeeping comment. "
+    "Hephaestus will remove this comment before merge.</sub>"
+)
+
+# Journal payload phases.
+_JOURNAL_PHASE_PENDING = "pending"
+_JOURNAL_PHASE_DELIVERED = "delivered"
+_JOURNAL_PHASE_SUPERSEDED = "superseded"
+
+
 def implementation_reply_handoff_journal_entry(
     pr_number: object,
     handoff: object,
@@ -269,9 +282,18 @@ def implementation_reply_handoff_journal_entry(
     thread_snapshot_sha256 = _thread_snapshot_fingerprint(normalized["threads"])
     if thread_snapshot_sha256 is None:
         return None
+    # Determine phase from handoff; default to pending for new journals.
+    phase = normalized.get("phase")
+    if not isinstance(phase, str) or phase not in (
+        _JOURNAL_PHASE_PENDING,
+        _JOURNAL_PHASE_DELIVERED,
+        _JOURNAL_PHASE_SUPERSEDED,
+    ):
+        phase = _JOURNAL_PHASE_PENDING
     payload = json.dumps(
         {
             "format": 2,
+            "phase": phase,
             "armed": True,
             "pr_number": pr_number,
             "head_sha": normalized["head_sha"],
@@ -287,9 +309,8 @@ def implementation_reply_handoff_journal_entry(
         sort_keys=True,
         separators=(",", ":"),
     )
-    # Keep the machine journal invisible in the issue timeline. The actual
-    # implementation prose is only rendered as its source-attached response.
-    body = f"{marker}\n<!-- {payload} -->"
+    # Render visible notice first, then hidden marker and payload.
+    body = f"{_IMPLEMENTATION_JOURNAL_NOTICE}\n{marker}\n<!-- {payload} -->"
     return marker, body
 
 
@@ -305,8 +326,27 @@ def _journal_handoff_from_comment(
     all-or-nothing because a partly read journal comment would recover a reply
     batch for a head or a source snapshot that it does not prove. The caller
     quarantines this comment instead of raising.
+
+    Supports both:
+    - New format: visible notice + newline + marker + newline + hidden payload
+    - Legacy format: marker + newline + hidden payload (no visible notice)
     """
-    marker, separator, payload = comment.body.lstrip().partition("\n")
+    body = comment.body.lstrip()
+
+    # Check for new format with visible notice
+    if body.startswith(_IMPLEMENTATION_JOURNAL_NOTICE):
+        # Skip the visible notice
+        after_notice = body[len(_IMPLEMENTATION_JOURNAL_NOTICE) :]
+        # Expect a single newline after notice, then marker
+        if not after_notice.startswith("\n"):
+            raise ValueError("implementation reply handoff journal is malformed")
+        after_notice = after_notice[1:]  # skip the single newline after notice
+        # Do not lstrip here - the marker must be at the start of the line
+        marker, separator, payload = after_notice.partition("\n")
+    else:
+        # Legacy format: starts directly with marker
+        marker, separator, payload = body.partition("\n")
+
     match = _HANDOFF_JOURNAL_RE.fullmatch(marker)
     if match is None or int(match.group("pr")) != pr_number:
         return None
@@ -320,6 +360,18 @@ def _journal_handoff_from_comment(
         or raw.get("armed") is not True
     ):
         raise ValueError("implementation reply handoff journal identity is invalid")
+    # Accept both old (no phase) and new (with phase) payloads.
+    phase = raw.get("phase")
+    if phase is not None and (
+        not isinstance(phase, str)
+        or phase
+        not in (
+            _JOURNAL_PHASE_PENDING,
+            _JOURNAL_PHASE_DELIVERED,
+            _JOURNAL_PHASE_SUPERSEDED,
+        )
+    ):
+        raise ValueError("implementation reply handoff journal phase is invalid")
     if raw.get("thread_snapshot_sha256") != _thread_snapshot_fingerprint(threads):
         return None
     progress = (
@@ -344,6 +396,9 @@ def _journal_handoff_from_comment(
     ):
         raise ValueError("implementation reply handoff journal payload is invalid")
     handoff["reconciliation_only"] = True
+    # Preserve the phase in the recovered handoff
+    if phase is not None:
+        handoff["phase"] = phase
     return handoff
 
 

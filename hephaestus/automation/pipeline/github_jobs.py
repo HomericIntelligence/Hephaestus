@@ -43,6 +43,13 @@ _REMEDIATION_JOURNAL_MARKER_RE = re.compile(
     r"batch=[0-9a-f]{32}:seq=(?:0|[1-9][0-9]*) -->"
 )
 
+# Visible notice for temporary implementation-reply handoff journals.
+# Must match the constant in reply_handoff.py to avoid circular import.
+_IMPLEMENTATION_JOURNAL_NOTICE = (
+    "<sub>[auto-msg] Temporary bookkeeping comment. "
+    "Hephaestus will remove this comment before merge.</sub>"
+)
+
 
 class MergeQueueReconciliation(StrEnum):
     """Classify a validated live merge-queue entry read."""
@@ -342,7 +349,14 @@ class AppendReplyJournalRequest:
             for pattern in (_JOURNAL_MARKER_RE, _REMEDIATION_JOURNAL_MARKER_RE)
         ):
             raise ValueError("marker must be an exact implementation reply journal marker")
-        if not isinstance(self.body, str) or not self.body.startswith(f"{self.marker}\n<!-- "):
+        # Accept both old format (marker + payload) and new format (notice + marker + payload)
+        if not isinstance(self.body, str):
+            raise ValueError("body must be a string")
+        has_old_format = self.body.startswith(f"{self.marker}\n<!-- ")
+        has_new_format = self.body.startswith(_IMPLEMENTATION_JOURNAL_NOTICE + "\n") and self.body[
+            len(_IMPLEMENTATION_JOURNAL_NOTICE) + 1 :
+        ].startswith(f"{self.marker}\n<!-- ")
+        if not (has_old_format or has_new_format):
             raise ValueError("body must contain the exact journal marker and payload")
         _deadline(self.deadline_s)
         if self.prepublication_receipt_sha256 is not None and (

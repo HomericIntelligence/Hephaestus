@@ -808,6 +808,7 @@ def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
     recovered = runner.run(recovery_job)
     recovered_handoff = dict(handoff)
     recovered_handoff["reconciliation_only"] = True
+    recovered_handoff["phase"] = "pending"
     assert recovered == ReplyJournalRecovered(
         request=recovery_request,
         handoff=FrozenJson.snapshot(recovered_handoff),

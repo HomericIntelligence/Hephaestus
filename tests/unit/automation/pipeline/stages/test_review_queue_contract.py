@@ -110,11 +110,20 @@ def test_reply_recovery_requires_the_current_armed_journal(journal_format: int) 
     entry = implementation_reply_handoff_journal_entry(1001, handoff)
     assert entry is not None
     marker, body = entry
-    payload = json.loads(body.split("\n", 1)[1].removeprefix("<!-- ").removesuffix(" -->"))
+    # New format: visible_notice\nmarker\n<!-- payload -->
+    # Extract payload from the last <!-- ... --> section
+    payload_str = body.rsplit("\n<!-- ", 1)[1].removesuffix(" -->")
+    payload = json.loads(payload_str)
     payload["format"] = journal_format
     if journal_format == 1:
         payload.pop("armed")
-    comment = IssueComment(body=f"{marker}\n<!-- {json.dumps(payload)} -->", viewer_did_author=True)
+    # Reconstruct body with visible notice (new format)
+    visible_notice = (
+        "<sub>[auto-msg] Temporary bookkeeping comment. "
+        "Hephaestus will remove this comment before merge.</sub>"
+    )
+    comment_body = f"{visible_notice}\n{marker}\n<!-- {json.dumps(payload)} -->"
+    comment = IssueComment(body=comment_body, viewer_did_author=True)
 
     if journal_format == 1:
         # A retired record is quarantined with a warning. It cannot restore
