@@ -52,6 +52,10 @@ from hephaestus.automation.pipeline.github_jobs import (
     ScopeExpansionChildrenEnsured,
     ScopeExpansionDependenciesReconciled,
 )
+from hephaestus.automation.pipeline.merge_wait_admission import (
+    RequiredChecksEvidence,
+    RequiredChecksGate,
+)
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
     journaled_implementation_remediation_reply_handoff,
@@ -1522,6 +1526,7 @@ class PipelineGitHubJobRunner:
             can_retry: bool = False,
             merge_sha: str | None = None,
             queue_residence_timeout_s: float | None = None,
+            required_checks_evidence: RequiredChecksEvidence | None = None,
         ) -> MergeWaitCycleCompleted:
             return MergeWaitCycleCompleted(
                 request=request,
@@ -1531,6 +1536,7 @@ class PipelineGitHubJobRunner:
                 retryable=can_retry,
                 merge_sha=merge_sha,
                 queue_residence_timeout_s=queue_residence_timeout_s,
+                required_checks_evidence=required_checks_evidence,
             )
 
         def terminal(state: object) -> str | None:
@@ -1599,7 +1605,7 @@ class PipelineGitHubJobRunner:
         if request.auto_merge_armed:
             # The auto-merge is already armed. Observe the pull request
             # without enabling it again. GitHub owns the merge from here.
-            return complete("auto_merge_already_armed", attempted=False)
+            return complete("auto_merge_enabled", attempted=False)
         # The implementation-GO label is the whole merge contract. GitHub owns
         # everything after this: branch protection, the required checks, any merge
         # queue, and a rebase when the merge reports a real conflict. A
@@ -1617,12 +1623,64 @@ class PipelineGitHubJobRunner:
         if result.dry_run:
             return complete("auto_merge_dry_run", attempted=True)
         if result.enabled:
-            return complete("auto_merge_enabled", attempted=True)
+            # Auto-merge is armed. GitHub owns the merge and its required
+            # checks. Record the required-check state for the summary only: a
+            # check that is not green yet must not stop this stage from waiting.
+            evidence = _evaluate_required_checks_gate(github, request, state)
+            return complete(
+                "auto_merge_enabled",
+                attempted=True,
+                required_checks_evidence=evidence,
+            )
         if result.transport_error:
             return complete("auto_merge_transport_error", attempted=True, can_retry=True)
         if result.malformed:
             return complete("auto_merge_malformed", attempted=True)
         return complete("auto_merge_not_enabled", attempted=True, can_retry=True)
+
+
+def _evaluate_required_checks_gate(
+    github: Any, request: RunMergeWaitCycleRequest, state: dict[str, object]
+) -> RequiredChecksEvidence | None:
+    """Read required-check evidence for the current pull-request head.
+
+    The evidence is diagnostic: the approval label is the merge contract, and
+    GitHub enforces the required checks when it merges whatever head is
+    current. A non-green or unreadable result must not stop the wait.
+    """
+    head_sha = state.get("headRefOid")
+    base_branch = state.get("baseRefName")
+    if not isinstance(head_sha, str) or not isinstance(base_branch, str):
+        return RequiredChecksEvidence(
+            boundary="invalid_request",
+            contexts=(),
+            detail="pr_state",
+        )
+    policy = github.effective_merge_policy(
+        request.pr_number,
+        base_branch,
+        deadline_s=request.deadline_s,
+        cancellation=request.cancellation,
+    )
+    if policy is None:
+        return RequiredChecksEvidence(
+            boundary="read_unavailable",
+            contexts=(),
+            detail="merge_policy",
+        )
+    gate = github.required_checks_gate_for_head(
+        head_sha,
+        policy,
+        deadline_s=request.deadline_s,
+        cancellation=request.cancellation,
+    )
+    if not isinstance(gate, RequiredChecksGate):
+        return RequiredChecksEvidence(
+            boundary="invalid_request",
+            contexts=(),
+            detail="gate_result",
+        )
+    return gate.evidence
 
 
 def _read_dirty_direct_state(
