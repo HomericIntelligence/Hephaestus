@@ -40,8 +40,10 @@ from hephaestus.automation.pipeline.events import RepositoryBusyEvent
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
+    MergeWaitCycleCompleted,
     ReconcileScopeExpansionDependenciesRequest,
     ReplyJournalAppended,
+    RunMergeWaitCycleRequest,
     ScopeExpansionDependenciesReconciled,
 )
 from hephaestus.automation.pipeline.jobs import (
@@ -52,6 +54,7 @@ from hephaestus.automation.pipeline.jobs import (
     JobHandle,
     JobResult,
 )
+from hephaestus.automation.pipeline.merge_wait_admission import RequiredChecksEvidence
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import (
     Disposition,
@@ -1771,6 +1774,81 @@ class TestFailBackRouting:
         event_text = event_log_path.read_text()
         assert credential_value not in event_text
         assert "api_key=<redacted>" in event_text
+
+    def test_merge_admission_outcome_is_journaled_before_apply(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The merge admission outcome and evidence are recorded in the complete event."""
+        del monkeypatch
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                event_log_path=event_log_path,
+                rate_guard_enabled=False,
+            ),
+            github=FakeStageGitHub(),
+            **fake_worker_factories(FakeWorkerPool(), None),
+            install_signals=False,
+        )
+        item = _issue_item(3186, StageName.MERGE_WAIT)
+        item.pr = 42
+        item.state = "MERGE_APPLY"
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+        import threading
+
+        request = RunMergeWaitCycleRequest(
+            issue_number=3186,
+            pr_number=42,
+            reviewed_head_sha="a" * 40,
+            deadline_s=60.0,
+            cancellation=threading.Event(),
+        )
+        item.payload["_pending_github_request"] = request
+        receipt = MergeWaitCycleCompleted(
+            request=request,
+            outcome="auto_merge_enabled",
+            attempted=True,
+            required_checks_evidence=RequiredChecksEvidence(
+                boundary="nonpassing_check_run",
+                contexts=("required-ci",),
+                detail="conclusion=failure",
+            ),
+        )
+        item.payload["_merge_wait_cycle_receipt"] = receipt
+
+        job = GitHubJob(
+            repo="repo-a",
+            repo_root=Path(tmp_path),
+            request=request,
+            descr="merge_wait_admission_cycle",
+        )
+        handle = JobHandle(job=job, on_done_state="MERGE_APPLY")
+        claim_test_item(coordinator, item)
+        coordinator.in_flight[handle] = item
+        coordinator.inflight_per_repo[item.repo] = 1
+
+        coordinator._handle_completion(
+            handle,
+            JobResult(
+                ok=True,
+                value=receipt,
+            ),
+        )
+
+        # The complete event should contain the merge_admission fields
+        event_text = event_log_path.read_text()
+        assert "merge_admission" in event_text
+        assert "auto_merge_enabled" in event_text
+        assert "attempted" in event_text
+        assert "required_checks" in event_text
+        assert "nonpassing_check_run" in event_text
+        assert "required-ci" in event_text
+        assert "conclusion=failure" in event_text
+        # No raw GitHub payload should appear
+        assert "headRefOid" not in event_text
 
     def test_merge_wait_late_thread_stand_down_is_terminal_not_rerouted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

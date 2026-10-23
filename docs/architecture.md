@@ -683,21 +683,66 @@ exact-head status evidence ─────► current CI merge gate
                       SHA-conditional squash merge
 ```
 
-`merge_wait` requires the implementation-GO label, a matching in-memory
-reviewed-head proof on an open PR whose base equals the verified repository
-default branch, a confirmed-unarmed live PR with an exclusive GO label, no
-unresolved review threads, and complete passing required status evidence for
-that head. A missing or drifted proof,
-failed or missing required status evidence, or untrusted merge state blocks
-without a label mutation. A matching set
-permits a bounded sequence (default: five) of policy-selected server requests.
-A required merge queue uses exact-head GraphQL admission. Otherwise, a direct
-SHA-conditional REST squash merge requires strict-update protection from a
-source that the current actor cannot bypass. A read-only readiness wait may park for
-the `--poll-max-wait` period. Its default is 1,200 seconds (20 minutes) for each
-fresh proof. Readiness and review prose never authorize
-merging, and fresh admission precedes every request
+`merge_wait` requires the implementation-GO label without
+`state:implementation-no-go`, on an open PR whose base equals the verified
+repository default branch. The approval label is the merge contract: the stage
+does not compare the head at merge time, so a new commit between review and
+merge does not restart it. GitHub applies branch protection, the required
+checks, and any merge queue to whatever head is current. An untrusted merge
+state blocks without a label mutation. A matching set permits a bounded
+sequence (default: five) of policy-selected server requests. A read-only
+readiness wait may park for the `--poll-max-wait` period. Its default is 1,200
+seconds (20 minutes) for each fresh proof. Readiness and review prose never
+authorize merging, and fresh admission precedes every request
 ([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
+
+### Merge admission diagnostics
+
+When a merge admission cycle completes, the coordinator records the outcome
+and bounded required-check evidence in the durable event journal before
+applying the receipt. The terminal summary renders one diagnostic line for
+each item that recorded negative evidence.
+
+The evidence is diagnostic. A required check that is not green yet, or a
+check read that fails, does not stop the merge wait: the stage keeps waiting
+with exponential backoff and fails closed only when its wait deadline expires.
+The gate reads the current pull-request head, because GitHub merges whatever
+head is current.
+
+Event journal fields (emitted in the `complete` event for a
+`merge_wait_admission_cycle` job):
+
+- `merge_admission.outcome` — the cycle outcome, normally `auto_merge_enabled`.
+- `merge_admission.attempted` — whether an auto-merge enablement was attempted.
+- `merge_admission.required_checks` (present only for negative evidence) — a
+  bounded evidence object with:
+  - `boundary` — a closed vocabulary value identifying the failure boundary
+    (see below).
+  - `detail` — a fixed-token string (≤ 40 characters) with a concise reason.
+  - `contexts` — a list of up to eight redacted context names (≤ 80 characters
+    each) relevant to the boundary.
+
+Terminal summary line (printed for each item with negative evidence):
+
+```
+merge-admission: outcome=<outcome> boundary=<boundary> detail=<detail> contexts=[<ctx1>, <ctx2>, ...]
+```
+
+Boundary vocabulary (closed, enumerated in
+[`REQUIRED_CHECKS_EVIDENCE_BOUNDARIES`](../hephaestus/automation/pipeline/merge_wait_admission.py)):
+
+| Boundary | Meaning | Safe retry |
+|----------|---------|------------|
+| `invalid_request` | Input validation failed (e.g. malformed SHA, missing policy). | Fix the caller or escalate. |
+| `read_unavailable` | A GitHub read failed (network, transport, or timeout). | Rerun the loop; transient GitHub issue. |
+| `snapshot_unverifiable` | Check Run identity malformed or ambiguous. | Rerun; unstable GitHub evidence. |
+| `unstable_snapshot` | Check Suite or Check Run inventory changed between the two reads. | Rerun; unstable GitHub state. |
+| `pending_check_run` | At least one required check is still in progress. | None; GitHub completes the check. |
+| `nonpassing_check_run` | A required check concluded with a non-passing status (e.g. `failure`). | Rerun the failed named checks, or fix and push a new head. |
+| `missing_requirement` | A required check context is absent from the evidence. | Start the missing required workflow, then rerun. |
+| `no_required_checks` | The effective merge policy has no required checks configured. | Fix the branch protection, or escalate. |
+
+The diagnostic never grants merge authority.
 
 Plan-review labels remain durable routing state. Native review records remain
 part of review-thread and scope data, but a second user and a marked native

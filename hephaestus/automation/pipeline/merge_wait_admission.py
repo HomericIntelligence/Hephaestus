@@ -19,6 +19,67 @@ class RequiredChecksDeferred(Enum):
     UNSTABLE = "unstable"
 
 
+REQUIRED_CHECKS_EVIDENCE_BOUNDARIES = frozenset(
+    {
+        "invalid_request",
+        "read_unavailable",
+        "snapshot_unverifiable",
+        "unstable_snapshot",
+        "pending_check_run",
+        "nonpassing_check_run",
+        "missing_requirement",
+        "no_required_checks",
+    }
+)
+
+
+def _validate_contexts(contexts: tuple[str, ...]) -> None:
+    """Reject unbounded or malformed context sequences."""
+    if not isinstance(contexts, tuple):
+        raise ValueError("contexts must be a tuple")
+    if len(contexts) > 8:
+        raise ValueError("contexts must contain at most eight entries")
+    for ctx in contexts:
+        if not isinstance(ctx, str) or len(ctx) > 80:
+            raise ValueError("each context must be a string of at most 80 characters")
+
+
+@dataclass(frozen=True)
+class RequiredChecksEvidence:
+    """Bounded, redacted evidence for a required-checks admission outcome."""
+
+    boundary: str
+    contexts: tuple[str, ...]
+    detail: str
+
+    def __post_init__(self) -> None:
+        """Enforce closed vocabulary and strict bounds."""
+        if not isinstance(self.boundary, str):
+            raise ValueError("boundary must be a string")
+        if self.boundary not in REQUIRED_CHECKS_EVIDENCE_BOUNDARIES:
+            raise ValueError(
+                f"boundary must be one of {sorted(REQUIRED_CHECKS_EVIDENCE_BOUNDARIES)}"
+            )
+        _validate_contexts(self.contexts)
+        if not isinstance(self.detail, str) or len(self.detail) > 40:
+            raise ValueError("detail must be a string of at most 40 characters")
+
+
+@dataclass(frozen=True)
+class RequiredChecksGate:
+    """Single-evaluation gate result with typed outcome and bounded evidence."""
+
+    outcome: bool | RequiredChecksDeferred
+    evidence: RequiredChecksEvidence | None = None
+
+    def __post_init__(self) -> None:
+        """Enforce evidence contract: only non-True outcomes may carry evidence."""
+        if not isinstance(self.outcome, (bool, RequiredChecksDeferred)):
+            raise ValueError("outcome must be bool or RequiredChecksDeferred")
+        if self.outcome is True and self.evidence is not None:
+            raise ValueError("True outcome must not carry evidence")
+
+
 @dataclass(frozen=True)
 class VerifiedRepositoryDefaultBranch:
     """Repository identity and default branch from one validated GitHub read."""
@@ -95,8 +156,11 @@ def validate_merge_wait_admission(
 
 
 __all__ = [
+    "REQUIRED_CHECKS_EVIDENCE_BOUNDARIES",
     "MergeWaitAdmissionSnapshot",
     "RequiredChecksDeferred",
+    "RequiredChecksEvidence",
+    "RequiredChecksGate",
     "VerifiedRepositoryDefaultBranch",
     "validate_merge_wait_admission",
 ]

@@ -19,6 +19,7 @@ from hephaestus.automation.direct_review_recovery import (
 )
 from hephaestus.automation.issue_waves import IssueWaveError, IssueWaveStore
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
+from hephaestus.automation.pipeline.github_jobs import MergeWaitCycleCompleted
 from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, Route
 
@@ -766,42 +767,82 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
         if diagnostics:
             fields["diagnostics"] = diagnostics
-        if result.error in {"lock_timeout", "lock_metadata_error"}:
-            lock_fields = repository_operation_lock_event_fields(value)
-            if lock_fields is not None:
-                fields["lock"] = lock_fields
-            elif not (
-                isinstance(value, dict)
-                and value.get("failure_kind") in {"lock_timeout", "lock_metadata_error"}
-            ):
-                lock_contention = repository_contention_event_fields(value)
-                if lock_contention is not None:
-                    fields["lock_contention"] = lock_contention
-        if isinstance(value, dict) and value.get("failure_kind") == "source_workspace_ownership":
-            recovery = bounded_source_workspace_recovery(value.get("source_workspace_recovery"))
-            if recovery is not None:
-                fields["source_workspace_recovery"] = recovery
-        if (
-            isinstance(value, dict)
-            and value.get("failure_kind") in {"signing", "continuation"}
-            and value.get("phase") in {"stage_conflicts", "validate_index", "rebase_continue"}
-        ):
-            fields["rebase_failure_diagnostic"] = {
-                "failure_kind": value["failure_kind"],
-                "phase": value["phase"],
-                "returncode": value.get("returncode"),
-                "receipt_error": redact_diagnostic_text(str(value.get("receipt_error") or ""))[
-                    -500:
-                ],
-                "stdout_tail": diagnostics.get("stdout_tail", ""),
-                "stderr_tail": diagnostics.get("stderr_tail", ""),
-            }
+        CoordinatorRuntime._maybe_add_lock_fields(fields, value, result.error)
+        CoordinatorRuntime._maybe_add_source_workspace_recovery(fields, value)
+        CoordinatorRuntime._maybe_add_rebase_failure_diagnostic(fields, value, diagnostics)
         if isinstance(job, GitJob) and job.op in {
             "validate_rebase_conflict",
             "continue_rebase",
         }:
             fields |= rebase_conflict_event_fields(value, result.error)
+        # Record merge admission outcome and bounded evidence for merge_wait_admission_cycle jobs.
+        CoordinatorRuntime._maybe_add_merge_admission(fields, value)
         return fields
+
+    @staticmethod
+    def _maybe_add_lock_fields(fields: dict[str, ct.Any], value: object, error: str | None) -> None:
+        """Add lock-related fields if the result indicates a lock failure."""
+        if error not in {"lock_timeout", "lock_metadata_error"}:
+            return
+        lock_fields = repository_operation_lock_event_fields(value)
+        if lock_fields is not None:
+            fields["lock"] = lock_fields
+            return
+        if not (
+            isinstance(value, dict)
+            and value.get("failure_kind") in {"lock_timeout", "lock_metadata_error"}
+        ):
+            lock_contention = repository_contention_event_fields(value)
+            if lock_contention is not None:
+                fields["lock_contention"] = lock_contention
+
+    @staticmethod
+    def _maybe_add_source_workspace_recovery(fields: dict[str, ct.Any], value: object) -> None:
+        """Add source workspace recovery fields if present."""
+        if not isinstance(value, dict):
+            return
+        if value.get("failure_kind") != "source_workspace_ownership":
+            return
+        recovery = bounded_source_workspace_recovery(value.get("source_workspace_recovery"))
+        if recovery is not None:
+            fields["source_workspace_recovery"] = recovery
+
+    @staticmethod
+    def _maybe_add_rebase_failure_diagnostic(
+        fields: dict[str, ct.Any], value: object, diagnostics: dict[str, str]
+    ) -> None:
+        """Add rebase failure diagnostic if the result indicates a rebase failure."""
+        if not isinstance(value, dict):
+            return
+        if value.get("failure_kind") not in {"signing", "continuation"}:
+            return
+        if value.get("phase") not in {"stage_conflicts", "validate_index", "rebase_continue"}:
+            return
+        fields["rebase_failure_diagnostic"] = {
+            "failure_kind": value["failure_kind"],
+            "phase": value["phase"],
+            "returncode": value.get("returncode"),
+            "receipt_error": redact_diagnostic_text(str(value.get("receipt_error") or ""))[-500:],
+            "stdout_tail": diagnostics.get("stdout_tail", ""),
+            "stderr_tail": diagnostics.get("stderr_tail", ""),
+        }
+
+    @staticmethod
+    def _maybe_add_merge_admission(fields: dict[str, ct.Any], value: object) -> None:
+        """Add merge admission outcome and bounded evidence if present."""
+        if not isinstance(value, MergeWaitCycleCompleted):
+            return
+        fields["merge_admission"] = {
+            "outcome": value.outcome,
+            "attempted": value.attempted,
+        }
+        evidence = value.required_checks_evidence
+        if evidence is not None:
+            fields["merge_admission"]["required_checks"] = {
+                "boundary": evidence.boundary,
+                "detail": evidence.detail,
+                "contexts": list(evidence.contexts),
+            }
 
     @staticmethod
     def _job_result_error_class(result: JobResult) -> str | None:

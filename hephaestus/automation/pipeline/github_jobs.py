@@ -16,6 +16,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
+from hephaestus.automation.pipeline.merge_wait_admission import RequiredChecksEvidence
 from hephaestus.automation.pipeline.repository_validation import (
     RepositoryValidationGap,
     RepositoryValidationInvocation,
@@ -1143,6 +1144,7 @@ class MergeWaitCycleCompleted:
     retryable: bool = False
     merge_sha: str | None = None
     queue_residence_timeout_s: float | None = None
+    required_checks_evidence: RequiredChecksEvidence | None = None
 
     def __post_init__(self) -> None:
         """Validate merge-cycle outcome metadata."""
@@ -1168,6 +1170,15 @@ class MergeWaitCycleCompleted:
             or self.queue_residence_timeout_s <= 0
         ):
             raise ValueError("queue_residence_timeout_s must be a finite positive number or None")
+        if self.required_checks_evidence is not None:
+            if not isinstance(self.required_checks_evidence, RequiredChecksEvidence):
+                raise ValueError(
+                    "required_checks_evidence must be a RequiredChecksEvidence instance"
+                )
+            if self.outcome != "auto_merge_enabled":
+                raise ValueError(
+                    "required_checks_evidence is only permitted for auto_merge_enabled"
+                )
 
 
 @dataclass(frozen=True)

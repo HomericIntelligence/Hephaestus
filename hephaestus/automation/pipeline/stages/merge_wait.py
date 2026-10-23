@@ -204,10 +204,16 @@ class MergeWaitStage(Stage):
             return self._route_merged(item, ctx)
         if outcome == "closed":
             return StageOutcome(Disposition.FINISH_FAIL, "closed")
-        if outcome == "required_checks_not_green":
-            return StageOutcome(Disposition.BLOCKED, outcome)
-        if outcome in {"auto_merge_enabled", "auto_merge_already_armed"}:
+        if outcome == "auto_merge_enabled":
             # GitHub owns the merge from here. Wait for the terminal result.
+            evidence = receipt.required_checks_evidence
+            if evidence is not None:
+                item.payload["merge_admission_evidence"] = {
+                    "outcome": outcome,
+                    "boundary": evidence.boundary,
+                    "detail": evidence.detail,
+                    "contexts": list(evidence.contexts),
+                }
             item.payload[_AUTO_MERGE_ARMED] = True
             item.state = MERGE
             return self._park_for_readiness(item, ctx)
@@ -215,7 +221,7 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome == "merge_conflicting":
             return self._post_review_rebase(item, outcome)
-        if outcome in {"readiness_wait", "required_checks_pending", "required_checks_unstable"}:
+        if outcome == "readiness_wait":
             if receipt.attempted and item.attempts["merge"] >= ctx.budget("merge"):
                 return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
             item.state = MERGE

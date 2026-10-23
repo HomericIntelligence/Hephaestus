@@ -8,7 +8,12 @@ import subprocess
 from datetime import UTC, datetime
 from threading import Event
 
-from .pipeline.merge_wait_admission import RequiredChecksDeferred
+from .pipeline.diagnostics import redact_diagnostic_text
+from .pipeline.merge_wait_admission import (
+    RequiredChecksDeferred,
+    RequiredChecksEvidence,
+    RequiredChecksGate,
+)
 from .pipeline_github_check_policy import EffectiveMergePolicy
 from .pipeline_github_check_run_inventory import (
     _nullable_app_id,
@@ -34,10 +39,24 @@ logger = logging.getLogger(__name__)
 
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
+_MAX_CONTEXTS = 8
+_MAX_CONTEXT_LEN = 80
+
 
 def _status_evidence_now_utc() -> datetime:
     """Return the current UTC time through a test-controlled seam."""
     return datetime.now(UTC)
+
+
+def _bound_contexts(contexts: tuple[str, ...]) -> tuple[str, ...]:
+    """Redact and bound context names for durable evidence."""
+    bounded: list[str] = []
+    for ctx in contexts[:_MAX_CONTEXTS]:
+        redacted = redact_diagnostic_text(ctx)
+        if len(redacted) > _MAX_CONTEXT_LEN:
+            redacted = redacted[:_MAX_CONTEXT_LEN]
+        bounded.append(redacted)
+    return tuple(bounded)
 
 
 def _check_run_required_matches(
@@ -145,8 +164,8 @@ def _passing_check_run_requirements(
     head_sha: str,
     required_checks: frozenset[_RequiredCheck],
     now_utc: datetime,
-) -> tuple[frozenset[_RequiredCheck], frozenset[_RequiredCheck]] | None:
-    """Return passing and pending requirements, or reject invalid evidence."""
+) -> tuple[frozenset[_RequiredCheck], frozenset[_RequiredCheck], frozenset[str]] | None:
+    """Return passing, pending, and nonpassing requirements, or reject bad evidence."""
     candidate_runs: _CheckRunGroups = {}
     seen_ids: set[int] = set()
     for check_run in check_runs:
@@ -193,10 +212,11 @@ def _unique_current_check_run(
 def _passing_current_check_runs(
     current_runs: _CheckRunGroups,
     now_utc: datetime,
-) -> tuple[frozenset[_RequiredCheck], frozenset[_RequiredCheck]] | None:
-    """Return passing and pending requirements from unambiguous runs."""
+) -> tuple[frozenset[_RequiredCheck], frozenset[_RequiredCheck], frozenset[str]] | None:
+    """Return passing, pending, and nonpassing/stale required-context names."""
     matched_checks: set[_RequiredCheck] = set()
     pending: set[_RequiredCheck] = set()
+    nonpassing: set[str] = set()
     for requirement, runs_by_app in current_runs.items():
         if requirement[1] is None and len(runs_by_app) != 1:
             logger.warning(
@@ -217,9 +237,10 @@ def _passing_current_check_runs(
             conclusion not in _CHECK_SUCCESS_CONCLUSIONS
             or _current_evidence_timestamp(check_run.get("completed_at"), now_utc) is None
         ):
-            return None
+            nonpassing.add(requirement[0])
+            continue
         matched_checks.add(requirement)
-    return frozenset(matched_checks), frozenset(pending)
+    return frozenset(matched_checks), frozenset(pending), frozenset(nonpassing)
 
 
 def _required_checks_result(
@@ -239,22 +260,32 @@ def _required_checks_result(
 class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
     """Read exact-head required status evidence for the final merge gate."""
 
-    def required_checks_pass_for_head(
+    def required_checks_gate_for_head(  # noqa: C901
         self,
         head_sha: str,
         policy: EffectiveMergePolicy,
         *,
         deadline_s: float,
         cancellation: Event,
-    ) -> bool | RequiredChecksDeferred:
-        """Only literal True permits admission; deferred results need another read."""
+    ) -> RequiredChecksGate:
+        """Compute outcome and bounded evidence in a single evaluation."""
+        # Input validation
         if (
             self._repo_slug is None
             or _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None
             or not isinstance(policy, EffectiveMergePolicy)
             or not isinstance(cancellation, Event)
         ):
-            return False
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="invalid_request",
+                    contexts=(),
+                    detail="validation failed",
+                ),
+            )
+
+        # First read: suite inventory + check runs
         try:
             now_utc = _status_evidence_now_utc()
             if now_utc.tzinfo is None or now_utc.utcoffset() is None:
@@ -267,7 +298,14 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
                 head_sha, deadline_s=deadline_s, cancellation=cancellation
             )
             if suite_inventory is None:
-                return False
+                return RequiredChecksGate(
+                    outcome=False,
+                    evidence=RequiredChecksEvidence(
+                        boundary="read_unavailable",
+                        contexts=(),
+                        detail="check_suites",
+                    ),
+                )
             first = self._check_runs_for_head(
                 head_sha,
                 suite_inventory,
@@ -283,12 +321,47 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             OSError,
         ) as exc:
             logger.warning("Check Runs read failed for %s: %s", head_sha, exc)
-            return False
-        if not required_checks or first is None:
-            return False
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="read_unavailable",
+                    contexts=(),
+                    detail="check_runs",
+                ),
+            )
+
+        if not required_checks:
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="no_required_checks",
+                    contexts=(),
+                    detail="policy has no required checks",
+                ),
+            )
+
+        if first is None:
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="read_unavailable",
+                    contexts=(),
+                    detail="check_runs",
+                ),
+            )
+
         first_snapshot = _check_run_snapshot(first, head_sha, required_checks, suite_inventory)
         if first_snapshot is None:
-            return False
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="snapshot_unverifiable",
+                    contexts=(),
+                    detail="first snapshot malformed",
+                ),
+            )
+
+        # Second read: stability check
         try:
             second = self._check_runs_for_head(
                 head_sha,
@@ -308,15 +381,40 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             OSError,
         ) as exc:
             logger.warning("Check Runs stability read failed for %s: %s", head_sha, exc)
-            return False
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="read_unavailable",
+                    contexts=(),
+                    detail="check_runs_stability",
+                ),
+            )
+
         second_snapshot = _check_run_snapshot(
             second, head_sha, required_checks, final_suite_inventory
         )
         if second is None or second_snapshot is None:
-            return False
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="read_unavailable",
+                    contexts=(),
+                    detail="check_runs",
+                ),
+            )
+
         if final_suite_inventory != suite_inventory or second_snapshot != first_snapshot:
             logger.warning("Check Suite or Check Run inventory changed for %s", head_sha)
-            return RequiredChecksDeferred.UNSTABLE
+            return RequiredChecksGate(
+                outcome=RequiredChecksDeferred.UNSTABLE,
+                evidence=RequiredChecksEvidence(
+                    boundary="unstable_snapshot",
+                    contexts=(),
+                    detail="inventory changed",
+                ),
+            )
+
+        # Evaluate check run requirements
         run_requirements = _passing_check_run_requirements(
             second,
             head_sha,
@@ -324,7 +422,18 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             now_utc,
         )
         if run_requirements is None:
-            return False
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="snapshot_unverifiable",
+                    contexts=(),
+                    detail="identity ambiguity",
+                ),
+            )
+
+        passing, pending, nonpassing = run_requirements
+
+        # Evaluate commit status requirements
         try:
             status_requirements = stable_passing_commit_status_requirements(
                 self,
@@ -343,8 +452,65 @@ class PipelineGitHubRequiredChecks(_PipelineGitHubHost):
             OSError,
         ) as exc:
             logger.warning("Commit-status stability read failed for %s: %s", head_sha, exc)
-            return False
-        return _required_checks_result(run_requirements, status_requirements, required_checks)
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="read_unavailable",
+                    contexts=(),
+                    detail="commit_statuses",
+                ),
+            )
+
+        # Determine final outcome with evidence precedence
+        satisfied = passing | pending | (status_requirements or frozenset())
+        if satisfied != required_checks:
+            missing = {context for context, _app_id in required_checks} - {
+                context for context, _app_id in satisfied
+            }
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="missing_requirement",
+                    contexts=_bound_contexts(tuple(missing)),
+                    detail="required context absent",
+                ),
+            )
+
+        if nonpassing:
+            return RequiredChecksGate(
+                outcome=False,
+                evidence=RequiredChecksEvidence(
+                    boundary="nonpassing_check_run",
+                    contexts=_bound_contexts(tuple(nonpassing)),
+                    detail="conclusion=failure",
+                ),
+            )
+
+        if pending:
+            return RequiredChecksGate(
+                outcome=RequiredChecksDeferred.PENDING,
+                evidence=RequiredChecksEvidence(
+                    boundary="pending_check_run",
+                    contexts=_bound_contexts(tuple({context for context, _ in pending})),
+                    detail="status=in_progress",
+                ),
+            )
+
+        return RequiredChecksGate(outcome=True, evidence=None)
+
+    def required_checks_pass_for_head(
+        self,
+        head_sha: str,
+        policy: EffectiveMergePolicy,
+        *,
+        deadline_s: float,
+        cancellation: Event,
+    ) -> bool | RequiredChecksDeferred:
+        """Only literal True permits admission; deferred results need another read."""
+        gate = self.required_checks_gate_for_head(
+            head_sha, policy, deadline_s=deadline_s, cancellation=cancellation
+        )
+        return gate.outcome
 
     def _check_runs_for_head(
         self,
