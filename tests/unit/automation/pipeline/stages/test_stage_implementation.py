@@ -79,6 +79,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     HEPHAESTUS_REQUIRED_CHECK_ARGV,
     PRE_PR_TEST_ARGV,
     ImplementationStage,
+    _git_failure_fallback,
     build_implementation_prompt,
     build_test_fix_prompt,
 )
@@ -2758,6 +2759,71 @@ class TestGitErrorRetryCap:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.FINISH_FAIL
         assert outcome.note == "git_error: remote hung up"
+
+    def test_scope_rejection_skips_git_retry_and_reports_the_cause(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An approved-scope rejection is terminal, not a transient Git failure."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.payload["git_error_retries"] = 1
+        result = JobResult(
+            ok=False,
+            error="commit paths outside approved scope: docs/adr/9999.md",
+        )
+
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note == (
+            "scope_violation: commit paths outside approved scope: docs/adr/9999.md"
+        )
+        assert "scope_violation" not in item.payload
+        assert "scope_violation_summary" not in item.payload
+        assert "git_error" not in item.payload
+        assert "git_error_retries" not in item.payload
+
+    def test_transient_push_failure_retries_without_scope_violation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A transient push failure stays on the bounded Git RETRY path."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=False, error="connection reset by peer"), ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert "scope_violation" not in item.payload
+        assert item.payload["git_error_retries"] == 1
+
+    def test_scope_violation_summary_uses_the_shared_redacted_fallback(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The terminal scope note carries the bounded, redacted failure summary."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        result = JobResult(
+            ok=False,
+            error="commit paths outside approved scope: " + "x" * 1000,
+        )
+
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note == f"scope_violation: {_git_failure_fallback(result)}"
+        assert len(outcome.note) <= len("scope_violation: ") + 500
 
     @pytest.mark.parametrize("error", ["lock_timeout", "lock_metadata_error"])
     def test_push_lock_failure_finishes_without_git_retry(

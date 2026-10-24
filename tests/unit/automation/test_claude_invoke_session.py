@@ -1034,3 +1034,38 @@ class TestPromptNullByteSanitization:
             cwd=cwd,
         )
         assert out == ""
+
+
+class TestRequirementsRecoverySessionKeys:
+    """#3469 / PR #3480 F-001: recovery keys start a real Claude session."""
+
+    @pytest.mark.parametrize(
+        "agent",
+        [
+            "requirements-recovery:2758:e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79",
+            "requirements-recovery-review:2758:e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79",
+        ],
+    )
+    def test_recovery_key_reaches_the_claude_cli(
+        self, stub_run: MagicMock, fake_home: Path, agent: str
+    ) -> None:
+        """`session_name` raised `ValueError: unknown agent` for these keys."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+
+        out, sid = invoke_claude_with_session(
+            repo="repo",
+            issue=2758,
+            agent=agent,
+            prompt="recover",
+            model="model",
+            cwd=cwd,
+        )
+
+        assert out == "ok"
+        assert sid
+        argv = _argv(stub_run.call_args)
+        assert "--session-id" in argv
+        # The recovery key reaches the CLI only via the identity; the
+        # ``claude --name`` display name must stay name-safe (no ``:``).
+        assert ":" not in argv[argv.index("--name") + 1]

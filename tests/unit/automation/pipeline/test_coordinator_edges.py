@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import subprocess
 import textwrap
 from pathlib import Path
 from typing import Any, get_type_hints
@@ -667,6 +668,89 @@ class TestCompletionEdges:
         assert item.stage is StageName.FINISHED
         assert len(pool.submitted) == 1  # nothing new was submitted
 
+    def test_transient_subprocess_failure_parks_resumable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transient subprocess fault parks the item; it does not poison it."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        item = _item()
+        coordinator._submit(
+            claim_test_item(coordinator, item), JobRequest(_agent_job(), on_done_state="VERIFY")
+        )
+
+        class TransientStage(Stage):
+            def on_enter(self, i: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, i: WorkItem, ctx: Any) -> Any:
+                return StageOutcome(Disposition.SKIP, "unreached")
+
+            def on_job_done(self, i: WorkItem, result: JobResult, ctx: Any) -> None:
+                raise subprocess.CalledProcessError(
+                    56, ("curl",), stderr="curl 56: connection reset by peer"
+                )
+
+        coordinator.stages[StageName.PLANNING] = TransientStage()
+        coordinator._drain_completions()
+
+        assert item.result is not None
+        assert item.result.reason == "resumable at planning"
+        assert item.stage is StageName.PLANNING
+
+    def test_timeout_expired_poisons_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An intentional timeout is not transient: it poisons the item."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        item = _item()
+        coordinator._submit(
+            claim_test_item(coordinator, item), JobRequest(_agent_job(), on_done_state="VERIFY")
+        )
+
+        class TimeoutStage(Stage):
+            def on_enter(self, i: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, i: WorkItem, ctx: Any) -> Any:
+                return StageOutcome(Disposition.SKIP, "unreached")
+
+            def on_job_done(self, i: WorkItem, result: JobResult, ctx: Any) -> None:
+                raise subprocess.TimeoutExpired(("gh",), 30)
+
+        coordinator.stages[StageName.PLANNING] = TimeoutStage()
+        coordinator._drain_completions()
+
+        assert item.result is not None
+        assert "poisoned" in item.result.reason
+        assert item.stage is StageName.FINISHED
+
+    def test_deterministic_oserror_poisons_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError without a transient signature still poisons the item."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        item = _item()
+        coordinator._submit(
+            claim_test_item(coordinator, item), JobRequest(_agent_job(), on_done_state="VERIFY")
+        )
+
+        class DiskStage(Stage):
+            def on_enter(self, i: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, i: WorkItem, ctx: Any) -> Any:
+                return StageOutcome(Disposition.SKIP, "unreached")
+
+            def on_job_done(self, i: WorkItem, result: JobResult, ctx: Any) -> None:
+                raise OSError("no space left on device")
+
+        coordinator.stages[StageName.PLANNING] = DiskStage()
+        coordinator._drain_completions()
+
+        assert item.result is not None
+        assert "poisoned" in item.result.reason
+        assert item.stage is StageName.FINISHED
+
 
 class TestRunItemEdges:
     """on_enter routing, runaway Continue, dry-run descr fallback."""
@@ -693,6 +777,58 @@ class TestRunItemEdges:
         coordinator._drain_queues()
 
         assert item.stage is StageName.PLAN_REVIEW
+
+    def test_transient_step_failure_parks_resumable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transient provider fault in step parks the item for a restart."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+
+        class DropStage(Stage):
+            def on_enter(self, i: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, i: WorkItem, ctx: Any) -> Any:
+                raise ConnectionError("connection refused")
+
+            def on_job_done(self, i: WorkItem, result: JobResult, ctx: Any) -> None:
+                pass
+
+        coordinator.stages[StageName.PLANNING] = DropStage()
+        item = _item()
+        coordinator._push_item(item, StageName.PLANNING, enter=True)
+
+        coordinator._drain_queues()
+
+        assert item.result is not None
+        assert item.result.reason == "resumable at planning"
+        assert item.stage is StageName.PLANNING
+
+    def test_timeout_expired_step_poisons_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An intentional timeout in step is not transient: it poisons the item."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+
+        class SlowStage(Stage):
+            def on_enter(self, i: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, i: WorkItem, ctx: Any) -> Any:
+                raise subprocess.TimeoutExpired(("gh",), 30)
+
+            def on_job_done(self, i: WorkItem, result: JobResult, ctx: Any) -> None:
+                pass
+
+        coordinator.stages[StageName.PLANNING] = SlowStage()
+        item = _item()
+        coordinator._push_item(item, StageName.PLANNING, enter=True)
+
+        coordinator._drain_queues()
+
+        assert item.result is not None
+        assert "poisoned" in item.result.reason
+        assert item.stage is StageName.FINISHED
 
     def test_runaway_continue_is_poisoned(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -760,6 +896,29 @@ class TestSubmitEdges:
         submitted = pool.submitted[0].job
         assert isinstance(submitted, AgentJob)
         assert submitted.timeout_s == 10
+        assert submitted.deadline_s is not None
+
+    def test_phase_timeout_bounds_larger_reviewer_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--phase-timeout still bounds a job sized by the raised reviewer default (#3185)."""
+        from dataclasses import replace
+
+        from hephaestus.constants import AGENT_REVIEW_TIMEOUT
+
+        coordinator = _coordinator(tmp_path, monkeypatch, phase_timeout_s=1473.0)
+        pool = coordinator.pool
+        assert isinstance(pool, FakeWorkerPool)
+        job = replace(_agent_job(), timeout_s=AGENT_REVIEW_TIMEOUT)
+
+        coordinator._submit(
+            claim_test_item(coordinator, _item()), JobRequest(job, on_done_state="V")
+        )
+
+        submitted = pool.submitted[0].job
+        assert isinstance(submitted, AgentJob)
+        assert AGENT_REVIEW_TIMEOUT > 1473  # the default must exceed the phase budget
+        assert submitted.timeout_s == 1473
         assert submitted.deadline_s is not None
 
     def test_submit_preserves_implementation_codex_isolation_inputs(

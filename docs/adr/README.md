@@ -71,4 +71,5 @@ confirm all three.
 | [0056](0056-explicit-host-capabilities-and-operation-recovery.md) | Explicit host capabilities and durable operation recovery | Draft; unconfigured-host blocking superseded by 0057 |
 | [0057](0057-operator-direct-host-verification.md) | Operator-direct host verification without a configured Linux backend | Accepted |
 | [0058](0058-durable-nats-failure-delivery.md) | Durable NATS failure delivery and replay | Accepted |
+| [0059](0059-standalone-pr-merge-cli-stays-retired.md) | Standalone PR-merge CLI stays retired | Accepted |
 | [0060](0060-pi-capability-sourceinfo-provenance-binding-removed.md) | Pi capability admission drops the sourceInfo provenance binding | Accepted |
