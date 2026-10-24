@@ -1091,3 +1091,74 @@ def test_native_dirty_codex_turn_keeps_one_use_claim(tmp_path: Path, outcome: st
         )
     finally:
         pool._executor.shutdown()
+
+
+@pytest.mark.parametrize("scenario", ["missing", "unregistered", "clean"])
+def test_probe_claim_marks_unusable_owned_lane_not_applicable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    protected_claim_creation_mask: None,
+) -> None:
+    """Probes of unusable owned lanes classify instead of claiming (#3080).
+
+    Regression coverage for PR #3472 review F-001: a bounded probe that finds
+    an owned receipt whose worktree path is missing, unregistered, or cleanly
+    held by a schema-1 writer must answer ``dirty_direct_not_applicable``
+    without contacting GitHub evidence or arming a dirty claim.
+    """
+    import queue
+    import threading
+    from unittest.mock import MagicMock, patch
+
+    from hephaestus.automation.pipeline.jobs import GitJob
+    from hephaestus.automation.pipeline.worker_pool import WorkerPool
+
+    repo, _, head = _repository(tmp_path, origin_repository="example/project")
+    _registered_git_fixture(repo, monkeypatch)
+    _source_registration_fixture(repo, monkeypatch)
+    manager = SourceWorkspaceManager(repo, repository="project")
+    branch = _claim().branch
+    manager.prepare(12, SourceLane.IMPLEMENTATION, head, branch=branch)
+    receipt = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+    if scenario == "missing":
+        import shutil
+
+        shutil.rmtree(receipt.path)
+    elif scenario == "unregistered":
+        stray = tmp_path / "stray-writer"
+        stray.mkdir()
+        (stray / "output.txt").write_text("orphaned\n", encoding="utf-8")
+        manager._write_receipt(replace(receipt, path=stray))
+    runner = MagicMock()
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        github_job_runner=runner,
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
+    try:
+        probe = GitJob(
+            repo="project",
+            op="claim_dirty_direct_continuation",
+            timeout_s=30,
+            expected_repository="example/project",
+            kwargs={"repo_root": str(repo), "issue_number": 12, "probe": True},
+        )
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value=head),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+        ):
+            result = pool._run_git(probe)
+        assert result.ok, result.error
+        assert result.value == {"dirty_direct_not_applicable": True}
+        assert runner.run.call_count == 0
+        stored = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+        assert stored.dirty_claim is None
+    finally:
+        pool._executor.shutdown()
