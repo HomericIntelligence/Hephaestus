@@ -92,6 +92,31 @@ class TestSessionName:
             session_name("R", 1, "wizard")
 
     @pytest.mark.parametrize(
+        "agent",
+        [
+            "requirements-recovery:2758:e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79",
+            "requirements-recovery-review:2758:e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79",
+        ],
+    )
+    def test_requirements_recovery_keys_are_session_agents(self, agent: str) -> None:
+        """The planning recovery session keys build a name (#3469 / PR F-001)."""
+        assert session_name("R", 2758, agent) == f"R_2758_{agent}"
+
+    @pytest.mark.parametrize(
+        "agent",
+        [
+            "requirements-recovery:issue:deadbeef",
+            "requirements-recovery:2758:",
+            "requirements-recovery:2758:A" + "0" * 63,
+            "requirements-evil:2758:e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79",
+        ],
+    )
+    def test_requirements_recovery_shape_rejects_near_misses(self, agent: str) -> None:
+        """Only the exact recovery-key form is accepted (PR F-001)."""
+        with pytest.raises(ValueError, match="unknown agent"):
+            session_name("R", 5, agent)
+
+    @pytest.mark.parametrize(
         ("repo", "issue"),
         [("", 1), ("R", "")],
     )

@@ -259,7 +259,7 @@ def reviewer_agent(base_agent: str, iteration: int) -> str:
 
 
 def _is_valid_agent(agent: str) -> bool:
-    """Return True for a known base agent or a per-iteration reviewer token."""
+    """Return True for a known agent, reviewer token, cycle token, or recovery key."""
     if agent in _ALL_AGENTS:
         return True
     # Accept the reviewer_agent() form: "<base>-r<N>".
