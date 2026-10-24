@@ -475,3 +475,108 @@ def test_distinct_literal_models_have_distinct_session_keys() -> None:
     assert session_name("Repo", 1, AGENT_IMPLEMENTER, "provider/model") != session_name(
         "Repo", 1, AGENT_IMPLEMENTER, "provider-model"
     )
+
+
+class TestTranscriptWorktreeLifecycle:
+    """Worktree family transcript lifecycle across removal, recreation, and sibling callers."""
+
+    def test_root_transcript_allows_removed_worktree_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A root-held transcript survives replacement of its recorded worktree."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner" / "Repo"
+        removed_worktree = repo_root / "build" / ".worktrees" / "issue-2284-a"
+        replacement_worktree = repo_root / "build" / ".worktrees" / "issue-2284-c"
+        removed_worktree.mkdir(parents=True)
+        replacement_worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, repo_root)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(
+            f'{{"cwd": "{repo_root.resolve()}"}}\n{{"cwd": "{removed_worktree.resolve()}"}}\n',
+            encoding="utf-8",
+        )
+        removed_worktree.rmdir()
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(repo_root.resolve(), replacement_worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, replacement_worktree) == transcript
+
+    def test_removed_managed_predecessor_resumes_from_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transcript created at the repo root resolves from a replacement worktree."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner" / "Repo"
+        replacement = tmp_path / "separate-root" / "issue-2284-b"
+        repo_root.mkdir(parents=True)
+        replacement.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, repo_root)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(repo_root.resolve(), replacement.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, replacement) == transcript
+
+    def test_recreated_worktree_resumes_removed_worktree_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recreated worktree at a colliding encoded path resumes its own transcript."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner" / "Repo"
+        worktree = repo_root / "build" / ".worktrees" / "issue-2284-a"
+        worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, worktree)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{worktree.resolve()}"}}\n', encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(repo_root.resolve(), worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, worktree) == transcript
+
+    def test_sibling_worktree_resumes_main_checkout_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transcript created from one sibling worktree resolves from the other sibling."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "main" / "Repo"
+        sibling_worktree = tmp_path / "separate-root" / "issue-2284"
+        repo_root.mkdir(parents=True)
+        sibling_worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, repo_root)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(repo_root.resolve(), sibling_worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, sibling_worktree) == transcript
+
+    def test_exact_cwd_transcript_does_not_require_git_discovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When Git discovery fails, resolver falls back to exact-cwd transcript."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        cwd = tmp_path / "checkout"
+        cwd.mkdir()
+        transcript = session_jsonl_path("session-id", cwd)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{cwd.resolve()}"}}\n', encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config.subprocess.run",
+            side_effect=subprocess.CalledProcessError(128, ["git"]),
+        ):
+            assert resolve_session_jsonl_path("session-id", cwd) == transcript
