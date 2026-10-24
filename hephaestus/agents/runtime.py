@@ -5114,7 +5114,7 @@ def _opencode_session_arg(session_id: str) -> list[str] | None:
     return [session_id]
 
 
-def archive_and_prune_opencode_session(
+def archive_and_prune_opencode_session(  # noqa: C901
     session_id: str,
     *,
     timeout: int = 120,
@@ -5147,17 +5147,31 @@ def archive_and_prune_opencode_session(
     if timeout <= 0:
         raise ValueError("opencode archive timeout must be positive")
     env = _platform_child_env()
-    try:
-        exported = subprocess.run(
-            ["opencode", "export", *argument],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        emit(f"opencode_archive_export_failed:{type(exc).__name__}")
+    # OpenCode V2 uses `session export`; V1 uses `export`. Try V2 first.
+    exported = None
+    commands = (
+        ["opencode", "session", "export", *argument],
+        ["opencode", "export", *argument],
+    )
+    for command in commands:
+        try:
+            candidate = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            emit(f"opencode_archive_export_failed:{type(exc).__name__}")
+            return None
+        if candidate.returncode == 0:
+            exported = candidate
+            break
+        exported = candidate
+    if exported is None:
+        emit("opencode_archive_export_failed:exit1")
         return None
     if exported.returncode != 0:
         emit(f"opencode_archive_export_failed:exit{exported.returncode}")
