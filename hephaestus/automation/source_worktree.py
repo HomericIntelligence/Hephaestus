@@ -2098,6 +2098,8 @@ class SourceWorkspaceManager:
 
     @staticmethod
     def _is_dirty(path: Path, *, deadline: _PreparationDeadline | None = None) -> bool:
+        from hephaestus.automation.models import DEFAULT_STATE_DIR
+
         result = _git(
             path,
             "status",
@@ -2108,7 +2110,17 @@ class SourceWorkspaceManager:
         )
         if result.returncode:
             raise SourceWorkspaceError(f"cannot inspect source workspace: {path}")
-        return bool(result.stdout)
+        # The automation's own state directory is automation-owned by
+        # construction; ignore it so a target repo that does not ignore
+        # ``build/`` is not falsely reported dirty (issue #3364).
+        state_prefix = f"{DEFAULT_STATE_DIR}/"
+        for line in result.stdout.splitlines():
+            # Porcelain v1: "XY path" or "?? path".
+            path_part = line[3:] if len(line) > 3 else ""
+            if path_part == DEFAULT_STATE_DIR or path_part.startswith(state_prefix):
+                continue
+            return True
+        return False
 
     @staticmethod
     def _head_revision(path: Path, *, deadline: _PreparationDeadline | None = None) -> str:
