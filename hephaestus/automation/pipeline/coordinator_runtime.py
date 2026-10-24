@@ -3,7 +3,6 @@ from __future__ import annotations
 import heapq
 import logging
 import signal
-import subprocess
 from contextlib import suppress
 from pathlib import Path
 
@@ -23,6 +22,7 @@ from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.github_jobs import MergeWaitCycleCompleted
 from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, Route
+from hephaestus.resilience import is_transient_subprocess_error
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
@@ -949,15 +949,15 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             raise RuntimeError(
                 f"stage {item.stage.value} exceeded {ct._MAX_STEPS_PER_TICK} steps in one tick"
             )
-        except (OSError, TimeoutError, ConnectionError, subprocess.TimeoutExpired):
-            logger.warning(
-                "transient provider failure for item %s at %s; parking resumable",
-                self._item_key(item),
-                item.stage.value,
-            )
-            self._park_resumable(item)
-            return
         except Exception as exc:
+            if is_transient_subprocess_error(exc):
+                logger.warning(
+                    "transient provider failure for item %s at %s; parking resumable",
+                    self._item_key(item),
+                    item.stage.value,
+                )
+                self._park_resumable(item)
+                return
             logger.exception(
                 "pipeline item %s poisoned at %s; routing to finished(fail)",
                 self._item_key(item),
