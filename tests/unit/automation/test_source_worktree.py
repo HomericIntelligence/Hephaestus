@@ -3832,3 +3832,33 @@ def test_fsync_state_dir_preserves_an_existing_mode(tmp_path: Path) -> None:
     manager._fsync_state_dir()
 
     assert stat.S_IMODE(state_dir.stat().st_mode) == 0o775
+
+
+@pytest.mark.parametrize(
+    ("relative", "expected_dirty"),
+    [
+        ("build/.issue_implementer/locks/12.json", False),
+        ("build/.issue_implementer/journals/run.json", False),
+        ("build/.issue_implementer-state/notes.txt", True),
+        ("build/other/artifact.txt", True),
+        ("plain-untracked.txt", True),
+    ],
+)
+def test_dirty_check_ignores_only_the_automation_state_dir(
+    tmp_path: Path, relative: str, expected_dirty: bool
+) -> None:
+    """Only automation-owned state is excluded from dirtiness (#3364).
+
+    Regression coverage for PR #3479 review F-001: a target repository that
+    does not ignore ``build/`` must not report a lane dirty for the
+    automation's own state directory, while any other untracked content —
+    including directory prefixes that merely resemble it — stays dirty.
+    """
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(12, SourceLane.IMPLEMENTATION, second)
+    target = binding.cwd / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("generated\n", encoding="utf-8")
+
+    assert manager._is_dirty(binding.cwd) is expected_dirty
