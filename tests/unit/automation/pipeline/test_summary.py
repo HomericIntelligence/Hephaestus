@@ -627,3 +627,38 @@ class TestJsonEnvelope:
         print_summary([], _stats(), [], json_out=False)
 
         assert capsys.readouterr().out == ""
+
+    def test_merge_admission_evidence_in_summary(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The recorded required-check evidence appears in the summary."""
+        item = _item(3186, StageName.FINISHED, passed=False, reason="merge_readiness_timeout")
+        item.payload["merge_admission_evidence"] = {
+            "outcome": "auto_merge_enabled",
+            "boundary": "nonpassing_check_run",
+            "detail": "conclusion=failure",
+            "contexts": ["required-ci", "lint"],
+        }
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "merge-admission: outcome=auto_merge_enabled" in caplog.text
+        assert "boundary=nonpassing_check_run" in caplog.text
+        assert "detail=conclusion=failure" in caplog.text
+        assert "contexts=['required-ci', 'lint']" in caplog.text
+
+    def test_merge_admission_malformed_evidence_is_ignored(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Malformed merge admission evidence is dropped from the summary."""
+        item = _item(3188, StageName.FINISHED, passed=False, reason="merge_readiness_timeout")
+        item.payload["merge_admission_evidence"] = {
+            "outcome": "auto_merge_enabled",
+            "boundary": 123,
+            "detail": "conclusion=failure",
+            "contexts": "not a list",
+        }
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "merge-admission" not in caplog.text

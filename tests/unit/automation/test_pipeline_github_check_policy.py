@@ -15,6 +15,7 @@ import pytest
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
 import hephaestus.automation.pipeline_github_required_checks as required_checks_mod
+from hephaestus.automation.pipeline.merge_wait_admission import RequiredChecksDeferred
 from hephaestus.automation.pipeline_github_check_policy import (
     EffectiveMergePolicy,
     RequiredCheck,
@@ -1175,7 +1176,7 @@ def _check_run(
     run_id: int,
     context: str,
     app_id: int | None,
-    conclusion: str = "success",
+    conclusion: str | None = "success",
     completed_at: object = "2026-09-05T12:00:00Z",
     check_suite_id: object = 1,
 ) -> dict[str, object]:
@@ -2134,3 +2135,394 @@ def test_required_queue_rejects_an_unavailable_existing_entry(
     assert result.malformed is True
     assert result.queued is False
     assert graphql_mock.call_count == 2
+
+
+class TestRequiredChecksGate:
+    """Tests for the single-evaluation gate method with bounded evidence."""
+
+    def test_gate_read_unavailable_check_runs(self, command_runner: MagicMock) -> None:
+        """OSError from check-runs read produces read_unavailable evidence."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            endpoint = next(part for part in args if isinstance(part, str) and "/repos/" in part)
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-suites"):
+                return _response({"check_suites": [{"id": 1, "app": {"id": 15368}}]})
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-runs"):
+                raise OSError("network down")
+            return _response({"sha": "a" * 40, "total_count": 0, "statuses": []})
+
+        command_runner.side_effect = call
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        gate = adapter.required_checks_gate_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert gate.outcome is False
+        assert gate.evidence is not None
+        assert gate.evidence.boundary == "read_unavailable"
+        assert gate.evidence.detail == "check_runs"
+        assert gate.evidence.contexts == ()
+
+    def test_gate_read_unavailable_check_suites(self, command_runner: MagicMock) -> None:
+        """OSError from check-suites read produces read_unavailable evidence."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            endpoint = next(part for part in args if isinstance(part, str) and "/repos/" in part)
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-suites"):
+                raise OSError("network down")
+            return _response({"sha": "a" * 40, "total_count": 0, "statuses": []})
+
+        command_runner.side_effect = call
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        gate = adapter.required_checks_gate_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert gate.outcome is False
+        assert gate.evidence is not None
+        assert gate.evidence.boundary == "read_unavailable"
+        assert gate.evidence.detail == "check_suites"
+        assert gate.evidence.contexts == ()
+
+    def test_gate_no_required_checks(self, command_runner: MagicMock) -> None:
+        """Empty required checks produces no_required_checks evidence."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            endpoint = next(part for part in args if isinstance(part, str) and "/repos/" in part)
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-suites"):
+                return _response({"check_suites": [{"id": 1, "app": {"id": 15368}}]})
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-runs"):
+                return _response({"total_count": 0, "check_runs": []})
+            return _response({"sha": "a" * 40, "total_count": 0, "statuses": []})
+
+        command_runner.side_effect = call
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        gate = adapter.required_checks_gate_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert gate.outcome is False
+        assert gate.evidence is not None
+        assert gate.evidence.boundary == "no_required_checks"
+        assert gate.evidence.contexts == ()
+
+    def test_gate_missing_requirement(self, command_runner: MagicMock) -> None:
+        """Required context absent from evidence produces missing_requirement evidence."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            endpoint = next(part for part in args if isinstance(part, str) and "/repos/" in part)
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-suites"):
+                return _response({"check_suites": [{"id": 1, "app": {"id": 15368}}]})
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-runs"):
+                return _response(
+                    {
+                        "total_count": 1,
+                        "check_runs": [
+                            _check_run("a" * 40, run_id=1, context="other-ci", app_id=15368)
+                        ],
+                    }
+                )
+            return _response({"sha": "a" * 40, "total_count": 0, "statuses": []})
+
+        command_runner.side_effect = call
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        gate = adapter.required_checks_gate_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert gate.outcome is False
+        assert gate.evidence is not None
+        assert gate.evidence.boundary == "missing_requirement"
+        assert "required-ci" in gate.evidence.contexts
+
+    def test_gate_nonpassing_check_run(self, command_runner: MagicMock) -> None:
+        """Failed conclusion produces nonpassing_check_run evidence with contexts."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            endpoint = next(part for part in args if isinstance(part, str) and "/repos/" in part)
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-suites"):
+                return _response({"check_suites": [{"id": 1, "app": {"id": 15368}}]})
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-runs"):
+                return _response(
+                    {
+                        "total_count": 1,
+                        "check_runs": [
+                            _check_run(
+                                "a" * 40,
+                                run_id=1,
+                                context="required-ci",
+                                app_id=15368,
+                                conclusion="failure",
+                            )
+                        ],
+                    }
+                )
+            return _response({"sha": "a" * 40, "total_count": 0, "statuses": []})
+
+        command_runner.side_effect = call
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        gate = adapter.required_checks_gate_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert gate.outcome is False
+        assert gate.evidence is not None
+        assert gate.evidence.boundary == "nonpassing_check_run"
+        assert gate.evidence.contexts == ("required-ci",)
+        assert gate.evidence.detail == "conclusion=failure"
+
+    def test_gate_pending_check_run(self, command_runner: MagicMock) -> None:
+        """Pending check run produces pending_check_run deferred outcome with evidence."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            endpoint = next(part for part in args if isinstance(part, str) and "/repos/" in part)
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-suites"):
+                return _response({"check_suites": [{"id": 1, "app": {"id": 15368}}]})
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-runs"):
+                return _response(
+                    {
+                        "total_count": 1,
+                        "check_runs": [
+                            _check_run(
+                                "a" * 40,
+                                run_id=1,
+                                context="required-ci",
+                                app_id=15368,
+                                conclusion=None,
+                                completed_at=None,
+                                check_suite_id=1,
+                            )
+                        ],
+                    }
+                )
+            return _response({"sha": "a" * 40, "total_count": 0, "statuses": []})
+
+        command_runner.side_effect = call
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        gate = adapter.required_checks_gate_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert gate.outcome is RequiredChecksDeferred.PENDING
+        assert gate.evidence is not None
+        assert gate.evidence.boundary == "pending_check_run"
+        assert gate.evidence.contexts == ("required-ci",)
+        assert gate.evidence.detail == "status=in_progress"
+
+    def test_gate_unstable_snapshot(self, command_runner: MagicMock) -> None:
+        """Inventory change between reads produces unstable_snapshot deferred outcome."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        call_count = {"suites": 0, "runs": 0}
+
+        def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            endpoint = next(part for part in args if isinstance(part, str) and "/repos/" in part)
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-suites"):
+                call_count["suites"] += 1
+                if call_count["suites"] == 1:
+                    return _response({"check_suites": [{"id": 1, "app": {"id": 15368}}]})
+                return _response(
+                    {
+                        "check_suites": [
+                            {"id": 1, "app": {"id": 15368}},
+                            {"id": 2, "app": {"id": 15369}},
+                        ]
+                    }
+                )
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-runs"):
+                call_count["runs"] += 1
+                if call_count["runs"] <= 2:
+                    return _response(
+                        {
+                            "total_count": 1,
+                            "check_runs": [
+                                _check_run("a" * 40, run_id=1, context="required-ci", app_id=15368)
+                            ],
+                        }
+                    )
+                return _response(
+                    {
+                        "total_count": 2,
+                        "check_runs": [
+                            _check_run("a" * 40, run_id=1, context="required-ci", app_id=15368),
+                            _check_run("a" * 40, run_id=2, context="new-ci", app_id=15369),
+                        ],
+                    }
+                )
+            return _response({"sha": "a" * 40, "total_count": 0, "statuses": []})
+
+        command_runner.side_effect = call
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        gate = adapter.required_checks_gate_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert gate.outcome is RequiredChecksDeferred.UNSTABLE
+        assert gate.evidence is not None
+        assert gate.evidence.boundary == "unstable_snapshot"
+        assert gate.evidence.detail == "inventory changed"
+
+    def test_gate_snapshot_unverifiable(self, command_runner: MagicMock) -> None:
+        """Malformed run identity produces snapshot_unverifiable evidence."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            endpoint = next(part for part in args if isinstance(part, str) and "/repos/" in part)
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-suites"):
+                return _response({"check_suites": [{"id": 1, "app": {"id": 15368}}]})
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-runs"):
+                # Two runs for same context/app - ambiguous identity
+                return _response(
+                    {
+                        "total_count": 2,
+                        "check_runs": [
+                            _check_run("a" * 40, run_id=1, context="required-ci", app_id=15368),
+                            _check_run("a" * 40, run_id=2, context="required-ci", app_id=15368),
+                        ],
+                    }
+                )
+            return _response({"sha": "a" * 40, "total_count": 0, "statuses": []})
+
+        command_runner.side_effect = call
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        gate = adapter.required_checks_gate_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert gate.outcome is False
+        assert gate.evidence is not None
+        assert gate.evidence.boundary == "snapshot_unverifiable"
+        assert gate.evidence.detail == "identity ambiguity"
+        assert gate.evidence.contexts == ()
+
+    def test_gate_invalid_request(self, command_runner: MagicMock) -> None:
+        """Invalid input produces invalid_request evidence."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        # Invalid SHA
+        gate = adapter.required_checks_gate_for_head(
+            "not-a-sha", policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert gate.outcome is False
+        assert gate.evidence is not None
+        assert gate.evidence.boundary == "invalid_request"
+        assert gate.evidence.detail == "validation failed"
+
+    def test_gate_boolean_wrapper_matches_gate_outcome(self, command_runner: MagicMock) -> None:
+        """required_checks_pass_for_head returns the same outcome as gate.outcome."""
+        adapter = pg.PipelineGitHub("org", repo="repo", command_runner=command_runner)
+        object.__setattr__(adapter, "_repo_slug", "HomericIntelligence/Hephaestus")
+
+        def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            endpoint = next(part for part in args if isinstance(part, str) and "/repos/" in part)
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-suites"):
+                return _response({"check_suites": [{"id": 1, "app": {"id": 15368}}]})
+            if endpoint.endswith("/commits/" + "a" * 40 + "/check-runs"):
+                return _response(
+                    {
+                        "total_count": 1,
+                        "check_runs": [
+                            _check_run("a" * 40, run_id=1, context="required-ci", app_id=15368)
+                        ],
+                    }
+                )
+            return _response({"sha": "a" * 40, "total_count": 0, "statuses": []})
+
+        command_runner.side_effect = call
+        policy = EffectiveMergePolicy(
+            base_branch="main",
+            default_branch="main",
+            required_checks=(RequiredCheck("required-ci", 15368),),
+            conversation_resolution_enforced=True,
+            bypassable_ruleset_ids=(),
+        )
+
+        gate = adapter.required_checks_gate_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+        boolean_result = adapter.required_checks_pass_for_head(
+            "a" * 40, policy, deadline_s=time.monotonic() + 30.0, cancellation=threading.Event()
+        )
+
+        assert boolean_result is gate.outcome
+        assert boolean_result is True

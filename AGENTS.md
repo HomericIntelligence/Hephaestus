@@ -541,7 +541,10 @@ The conditions are the contract; any actor that can satisfy them is qualified.
 - The label transition is exclusive, and a readback confirms it.
 
 Any of these failing means no `GO`. A demoted or reported finding is not a
-clean sign-off and prevents the label. Required CI/CD checks stay green as a
+clean sign-off and prevents the label. A finding at `critical` or `major`
+severity publishes inline and blocks the sign-off until its thread is resolved.
+A `minor` or `nitpick` finding publishes on the review body as an advisory
+record and does not block the sign-off. Required CI/CD checks stay green as a
 separate merge gate; passing them never produces a `GO` by itself.
 
 `merge_wait` enables GitHub native auto-merge once the GO label is present. It

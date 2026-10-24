@@ -41,6 +41,35 @@ def test_parse_review_audit_rejects_missing_structure() -> None:
     assert audit.findings == ()
 
 
+def test_clean_go_ignores_only_non_blocking_severities() -> None:
+    """An advisory finding does not block the sign-off; a blocking one does."""
+    advisory = parse_review_audit(
+        '{"grade":"A","verdict":"GO","summary":"Good","comments":[{"path":"a.py",'
+        '"line":1,"side":"RIGHT","severity":"nitpick","body":"Consider a rename."}]}'
+    )
+    blocking = parse_review_audit(
+        '{"grade":"C","verdict":"GO","summary":"Good","comments":[{"path":"a.py",'
+        '"line":1,"side":"RIGHT","severity":"major","body":"The worker never stops."}]}'
+    )
+
+    assert advisory.valid is True
+    assert advisory.findings[0]["severity"] == "nitpick"
+    assert is_clean_go_review(advisory) is True
+    assert blocking.findings[0]["severity"] == "major"
+    assert is_clean_go_review(blocking) is False
+
+
+def test_clean_go_still_requires_an_explicit_go_verdict() -> None:
+    """A NOGO verdict with only advisory findings cannot sign off."""
+    audit = parse_review_audit(
+        '{"grade":"B","verdict":"NOGO","summary":"Reconsider","comments":[{"path":"a.py",'
+        '"line":1,"side":"RIGHT","severity":"minor","body":"Name the wrong result."}]}'
+    )
+
+    assert audit.valid is True
+    assert is_clean_go_review(audit) is False
+
+
 def test_parse_review_audit_rejects_missing_or_malformed_verdict() -> None:
     """A review without a typed verdict cannot authorize any transition."""
     missing = parse_review_audit('{"grade":"A","summary":"Looks good","comments":[]}')

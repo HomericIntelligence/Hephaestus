@@ -470,6 +470,31 @@ def _review_anchor_target(value: object) -> str | None:
     return f"{path}:{line if line is not None else '?'}:{side}"
 
 
+def _merge_admission_evidence(item: WorkItem) -> dict[str, object] | None:
+    """Return the bounded negative required-check evidence, if present."""
+    raw = item.payload.get("merge_admission_evidence")
+    if not isinstance(raw, dict):
+        return None
+    outcome = raw.get("outcome")
+    boundary = raw.get("boundary")
+    detail = raw.get("detail")
+    contexts = raw.get("contexts")
+    if not isinstance(outcome, str) or not outcome:
+        return None
+    if not isinstance(boundary, str) or not boundary:
+        return None
+    if not isinstance(detail, str):
+        return None
+    if not isinstance(contexts, list) or not all(isinstance(ctx, str) for ctx in contexts):
+        return None
+    return {
+        "outcome": outcome,
+        "boundary": boundary,
+        "detail": detail,
+        "contexts": contexts,
+    }
+
+
 def print_summary(  # noqa: C901
     items: list[WorkItem],
     stats: RunStats,
@@ -530,6 +555,15 @@ def print_summary(  # noqa: C901
                 item.payload.get("plan_review_session_id") or "pending",
                 item.payload.get("review_round", 0),
                 item.payload.get("plan_revision", 1),
+            )
+        merge_admission = _merge_admission_evidence(item)
+        if merge_admission:
+            logger.info(
+                "    merge-admission: outcome=%s boundary=%s detail=%s contexts=%s",
+                merge_admission.get("outcome"),
+                merge_admission.get("boundary"),
+                merge_admission.get("detail"),
+                merge_admission.get("contexts"),
             )
 
     if terminal_summary is None:

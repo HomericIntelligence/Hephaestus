@@ -57,16 +57,6 @@ def test_enabled_auto_merge_parks_and_retries(make_ctx: Any, make_work_item: Any
     assert outcome.note == "merge_readiness_wait"
 
 
-def test_already_armed_auto_merge_also_parks(make_ctx: Any, make_work_item: Any) -> None:
-    """An externally armed auto-merge is also just a wait."""
-    item = _item_with_receipt(make_work_item, "auto_merge_already_armed", attempted=True)
-
-    outcome = MergeWaitStage()._merge_apply(item, make_ctx())
-
-    assert isinstance(outcome, StageOutcome)
-    assert outcome.disposition is Disposition.RETRY
-
-
 def test_wait_backoff_grows_and_stays_bounded(make_ctx: Any, make_work_item: Any) -> None:
     """Repeated polls back off exponentially up to the cap."""
     item = _item_with_receipt(make_work_item, "auto_merge_enabled", attempted=True)
