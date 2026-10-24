@@ -49,15 +49,15 @@ The check-run aware merge capability stays queue-owned through the `merge_wait`
 stage. The four current coverage points that supersede the overlay are:
 
 1. Exact-head conditional squash merge →
-   `hephaestus/automation/pipeline_github_mutations.py:155`
+   `hephaestus/automation/pipeline_github_merge_mutations.py:164`
    `merge_pr_if_head` (uses `-f sha={reviewed_sha}`, `-f merge_method=squash`
-   at `pipeline_github_mutations.py:211`).
+   at `pipeline_github_merge_mutations.py:218`).
 2. Merge-queue handling → policy-first detection
    (`pipeline.merge_queue_required` in
    `hephaestus/automation/pipeline_github_merge_policy.py`) plus exact-head
    GraphQL admission `enqueue_pull_request_mutation(pull_request_id,
    reviewed_sha)` in `_enqueue_pr_if_head`
-   (`pipeline_github_mutations.py:107`). This supersedes the overlay's
+   (`pipeline_github_merge_mutations.py:116`). This supersedes the overlay's
    trial-and-error HTTP-405 detection (`_is_merge_queue_error`).
 3. Required check-run evidence for the merge head →
    `hephaestus/automation/pipeline_github_required_checks.py`,
