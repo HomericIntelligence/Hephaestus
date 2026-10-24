@@ -4875,7 +4875,7 @@ class ImplementationStage(Stage):
             # failure: do not retry the identical commit, and report the
             # specific cause. The worktree is preserved for correction.
             item.payload["scope_violation"] = True
-            item.payload["scope_violation_summary"] = str(result.error or "")[:200]
+            item.payload["scope_violation_summary"] = _git_failure_fallback(result)
             item.payload.pop("git_error_retries", None)
             return
         logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
