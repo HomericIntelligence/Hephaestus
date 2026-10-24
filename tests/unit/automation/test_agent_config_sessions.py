@@ -99,8 +99,10 @@ class TestSessionName:
         ],
     )
     def test_requirements_recovery_keys_are_session_agents(self, agent: str) -> None:
-        """The planning recovery session keys build a name (#3469 / PR F-001)."""
-        assert session_name("R", 2758, agent) == f"R_2758_{agent}"
+        """The planning recovery keys build a ``claude --name``-safe name (#3469 / PR F-001)."""
+        name = session_name("R", 2758, agent)
+        assert name.startswith("R_2758_")
+        assert ":" not in name
 
     @pytest.mark.parametrize(
         "agent",
@@ -175,6 +177,27 @@ class TestSessionUUID:
         a = session_uuid("R", 1, AGENT_PLANNER, "claude-sonnet-4-6")
         b = session_uuid("R", 1, AGENT_PLANNER, "claude-opus-4-8")
         assert a != b
+
+    def test_recovery_key_identity_keeps_the_raw_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR F-001: display-name normalization must not alter the session identity.
+
+        The uuid5 input keeps the RAW recovery key, so the session id for the
+        same issue and binding is unchanged by the name-safe display form.
+        """
+        agent = (
+            "requirements-recovery:2758:"
+            "e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79"
+        )
+        monkeypatch.setattr(
+            agent_config,
+            "_checkout_identity",
+            lambda cwd, *, remaining_timeout=None: "CHECKOUT",
+        )
+        sid = session_uuid("R", 2758, agent, "model", cwd=tmp_path)
+        raw_identity = f"R_2758_{agent}_model@CHECKOUT"
+        assert sid == str(uuid.uuid5(uuid.NAMESPACE_DNS, raw_identity))
 
     def test_registered_worktree_family_gets_same_checkout_uuid(self, tmp_path: Path) -> None:
         """Repo-root and linked-worktree callers share their common-dir identity."""

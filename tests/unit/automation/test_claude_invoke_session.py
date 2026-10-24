@@ -1064,4 +1064,8 @@ class TestRequirementsRecoverySessionKeys:
 
         assert out == "ok"
         assert sid
-        assert "--session-id" in _argv(stub_run.call_args)
+        argv = _argv(stub_run.call_args)
+        assert "--session-id" in argv
+        # The recovery key reaches the CLI only via the identity; the
+        # ``claude --name`` display name must stay name-safe (no ``:``).
+        assert ":" not in argv[argv.index("--name") + 1]

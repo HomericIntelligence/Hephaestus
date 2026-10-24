@@ -298,6 +298,35 @@ def _model_token(model: str | None) -> str:
     return f"{safe}~{sha256(value.encode()).hexdigest()}"
 
 
+def _joined_session_name(
+    repo: str, issue: int | str, agent: str, model: str | None, *, for_display: bool
+) -> str:
+    """Assemble the underscore-joined session string shared by name and identity.
+
+    ``for_display=True`` normalizes the agent token via :func:`_model_token`
+    into a ``claude --name``-safe component (recovery keys contain ``:``).
+    The session identity input (``for_display=False``) keeps the RAW agent key,
+    so display-name normalization never changes a session's uuid5 identity.
+    """
+    if not _is_valid_agent(agent):
+        raise ValueError(
+            f"unknown agent {agent!r}; must be one of {sorted(_ALL_AGENTS)} "
+            f"or a scoped reviewer token (e.g. 'plan-reviewer-r0'), "
+            f"a plan-reviewer-cycle-<uuid> token, or a recovery key "
+            f"('requirements-recovery:<issue>:<hex>')"
+        )
+    repo_s = repo.strip()
+    if not repo_s:
+        raise ValueError("repo must be non-empty")
+    issue_s = str(issue).lstrip("#").strip()
+    if not issue_s:
+        raise ValueError("issue must be non-empty")
+    model_token = _model_token(model)
+    agent_token = _model_token(agent) if for_display else agent
+    base = f"{repo_s}_{issue_s}_{agent_token}"
+    return f"{base}_{model_token}" if model_token else base
+
+
 def session_name(repo: str, issue: int | str, agent: str, model: str | None = None) -> str:
     """Return the human-readable session name.
 
@@ -321,26 +350,16 @@ def session_name(repo: str, issue: int | str, agent: str, model: str | None = No
             never cross models.
 
     Returns:
-        Underscore-joined name suitable for ``claude --name``.
+        Underscore-joined name suitable for ``claude --name``. The agent token
+        is normalized via :func:`_model_token` (recovery keys contain ``:``);
+        :func:`session_uuid` keeps the RAW key as its identity input, so the
+        display form never changes the session identity.
 
     Raises:
         ValueError: If any component is empty or ``agent`` is unknown.
 
     """
-    if not _is_valid_agent(agent):
-        raise ValueError(
-            f"unknown agent {agent!r}; must be one of {sorted(_ALL_AGENTS)} "
-            f"or a scoped reviewer token (e.g. 'plan-reviewer-r0')"
-        )
-    repo_s = repo.strip()
-    if not repo_s:
-        raise ValueError("repo must be non-empty")
-    issue_s = str(issue).lstrip("#").strip()
-    if not issue_s:
-        raise ValueError("issue must be non-empty")
-    model_token = _model_token(model)
-    base = f"{repo_s}_{issue_s}_{agent}"
-    return f"{base}_{model_token}" if model_token else base
+    return _joined_session_name(repo, issue, agent, model, for_display=True)
 
 
 def _checkout_identity(cwd: Path, *, remaining_timeout: Callable[[], int] | None = None) -> str:
@@ -397,7 +416,7 @@ def session_uuid(
     before and after Git discovery. Independent callers use a five-second
     Git timeout.
     """
-    name = session_name(repo, issue, agent, model)
+    name = _joined_session_name(repo, issue, agent, model, for_display=False)
     checkout_cwd = cwd if cwd is not None else Path.cwd()
     name = f"{name}@{_checkout_identity(checkout_cwd, remaining_timeout=remaining_timeout)}"
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
