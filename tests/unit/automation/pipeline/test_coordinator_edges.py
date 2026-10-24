@@ -762,6 +762,29 @@ class TestSubmitEdges:
         assert submitted.timeout_s == 10
         assert submitted.deadline_s is not None
 
+    def test_phase_timeout_bounds_larger_reviewer_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--phase-timeout still bounds a job sized by the raised reviewer default (#3185)."""
+        from dataclasses import replace
+
+        from hephaestus.constants import AGENT_REVIEW_TIMEOUT
+
+        coordinator = _coordinator(tmp_path, monkeypatch, phase_timeout_s=1473.0)
+        pool = coordinator.pool
+        assert isinstance(pool, FakeWorkerPool)
+        job = replace(_agent_job(), timeout_s=AGENT_REVIEW_TIMEOUT)
+
+        coordinator._submit(
+            claim_test_item(coordinator, _item()), JobRequest(job, on_done_state="V")
+        )
+
+        submitted = pool.submitted[0].job
+        assert isinstance(submitted, AgentJob)
+        assert AGENT_REVIEW_TIMEOUT > 1473  # the default must exceed the phase budget
+        assert submitted.timeout_s == 1473
+        assert submitted.deadline_s is not None
+
     def test_submit_preserves_implementation_codex_isolation_inputs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

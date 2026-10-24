@@ -93,7 +93,7 @@ def test_scripts_dir_matches_repo_root() -> None:
     ("constant_name", "value"),
     [
         ("AGENT_IMPL_TIMEOUT", 1800),
-        ("AGENT_REVIEW_TIMEOUT", 1200),
+        ("AGENT_REVIEW_TIMEOUT", 3600),
         ("AGENT_PLAN_TIMEOUT", 1200),
         ("AGENT_LEARN_TIMEOUT", 1200),
         ("AGENT_GIT_TIMEOUT", 30),

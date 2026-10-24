@@ -36,6 +36,14 @@ colon segment is the effort. For a model ID that contains a colon, add
 model. Codex can retry one time without an unsupported effort before it starts
 work. OpenCode and Pi use their native error or fallback behavior.
 
+### Reviewer timeout default
+
+The reviewer job default is now 3,600 seconds. It was 1,200 seconds. One
+constant, `AGENT_REVIEW_TIMEOUT`, supplies the default for
+`--reviewer-timeout`, `PipelineConfig.reviewer_timeout`, and the plan-reviewer
+and PR-reviewer stage jobs. An explicit `--phase-timeout` still bounds each
+reviewer job below the default.
+
 ## 0.x → 1.0 (forthcoming — not yet released)
 
 ### Queue automation cutover
