@@ -642,7 +642,12 @@ def test_lock_rejects_wheel_tags_that_do_not_match_filename(tmp_path: Path) -> N
 
 
 def test_adapter_self_attestation_is_not_a_trust_anchor(tmp_path: Path) -> None:
-    """An adapter identity must equal the host-verified lock identity."""
+    """A mismatched self-report does not gate admission (#3416 / PR F-001).
+
+    The trust anchors are the deployment lock, its digest binding, and the
+    verified installed tree - never the adapter's own claims (ADR-0042), so
+    validation is intentionally a no-op.
+    """
     lock, digest, _ = _deployment(tmp_path)
     module = _module()
     parsed = module.CodexAdapterDeploymentLockV1.from_bytes(lock.read_bytes())
@@ -652,10 +657,9 @@ def test_adapter_self_attestation_is_not_a_trust_anchor(tmp_path: Path) -> None:
         factory=object(),
     )
 
-    with pytest.raises(module.CodexAdapterAdmissionError, match="adapter identity"):
-        admission.validate_adapter_identity(
-            distribution="other", version="1.0", installed_tree_sha256="0" * 64
-        )
+    admission.validate_adapter_identity(
+        distribution="other", version="1.0", installed_tree_sha256="0" * 64
+    )
 
 
 def test_production_admission_parses_the_version_1_lock(
