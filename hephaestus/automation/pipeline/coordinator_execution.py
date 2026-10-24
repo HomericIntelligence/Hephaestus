@@ -11,6 +11,7 @@ from pathlib import Path
 import hephaestus.automation.pipeline.coordinator_types as ct
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
+from hephaestus.resilience import is_transient_subprocess_error
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import session_selection_error, store_agent_session_result
@@ -361,7 +362,16 @@ class ExecutionCoordinator(_CoordinatorHost):
                 return
         try:
             stage.on_job_done(item, result, ctx)
-        except Exception:
+        except Exception as exc:
+            if is_transient_subprocess_error(exc):
+                logger.warning(
+                    "transient provider failure in on_job_done "
+                    "for item %s at %s; parking resumable",
+                    self._item_key(item),
+                    item.stage.value,
+                )
+                self._park_resumable(item)
+                return
             logger.exception(
                 "on_job_done poisoned item %s at %s", self._item_key(item), item.stage.value
             )
