@@ -3,6 +3,7 @@ from __future__ import annotations
 import heapq
 import logging
 import signal
+import subprocess
 from contextlib import suppress
 from pathlib import Path
 
@@ -948,6 +949,14 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             raise RuntimeError(
                 f"stage {item.stage.value} exceeded {ct._MAX_STEPS_PER_TICK} steps in one tick"
             )
+        except (OSError, TimeoutError, ConnectionError, subprocess.TimeoutExpired):
+            logger.warning(
+                "transient provider failure for item %s at %s; parking resumable",
+                self._item_key(item),
+                item.stage.value,
+            )
+            self._park_resumable(item)
+            return
         except Exception as exc:
             logger.exception(
                 "pipeline item %s poisoned at %s; routing to finished(fail)",

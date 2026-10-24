@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import queue as queue_mod
+import subprocess
 from dataclasses import replace
 from math import ceil
 from pathlib import Path
@@ -361,6 +362,14 @@ class ExecutionCoordinator(_CoordinatorHost):
                 return
         try:
             stage.on_job_done(item, result, ctx)
+        except (OSError, TimeoutError, subprocess.TimeoutExpired, ConnectionError):
+            logger.warning(
+                "transient provider failure in on_job_done for item %s at %s; parking resumable",
+                self._item_key(item),
+                item.stage.value,
+            )
+            self._park_resumable(item)
+            return
         except Exception:
             logger.exception(
                 "on_job_done poisoned item %s at %s", self._item_key(item), item.stage.value
