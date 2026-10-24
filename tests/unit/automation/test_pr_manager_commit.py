@@ -687,19 +687,11 @@ class TestCommitOperation:
         assert "fixed.py" in prompt
         assert message.startswith("fix: keep worker local\n\nRepair boundary.")
         assert "Closes #3009" in message
-        assert "Implemented-By: Codex" in message
+        assert "Implemented-By:" not in message
+        assert "Co-Authored-By: Codex" in message
 
-    @pytest.mark.parametrize(
-        ("model", "expected"),
-        (
-            (None, "Claude Code"),
-            ("claude-explicit-5", "claude-explicit-5"),
-        ),
-    )
-    def test_claude_implemented_by_uses_the_resolved_model(
-        self, model: str | None, expected: str
-    ) -> None:
-        """Claude keeps model provenance separate from its human co-author name."""
+    def test_formatted_message_carries_only_the_coauthor_trailer(self) -> None:
+        """The message renderer emits no Implemented-By provenance trailer."""
         with patch.object(
             pr_manager,
             "_agentic_commit_email",
@@ -710,10 +702,9 @@ class TestCommitOperation:
                 agent="claude",
                 subject="fix: repair publication",
                 body="",
-                model=model,
             )
 
-        assert f"Implemented-By: {expected}" in message
+        assert "Implemented-By:" not in message
         assert "Co-Authored-By: Claude Code <operator@example.invalid>" in message
 
     def test_recovery_commit_disables_hooks_for_one_command(self) -> None:
