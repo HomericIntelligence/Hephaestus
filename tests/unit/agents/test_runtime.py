@@ -7531,7 +7531,7 @@ class TestArchiveAndPruneOpencodeSession:
         assert result == destination
         assert json.loads(destination.read_text())["info"]["id"] == "ses_1"
         assert calls == [
-            ["opencode", "export", "ses_1"],
+            ["opencode", "session", "export", "ses_1"],
             ["opencode", "session", "delete", "ses_1"],
         ]
 
@@ -7552,7 +7552,10 @@ class TestArchiveAndPruneOpencodeSession:
         result = agent_runtime.archive_and_prune_opencode_session("ses_1", log=messages.append)
 
         assert result is None
-        assert calls == [["opencode", "export", "ses_1"]]
+        assert calls == [
+            ["opencode", "session", "export", "ses_1"],
+            ["opencode", "export", "ses_1"],
+        ]
         assert messages == ["opencode_archive_export_failed:exit1"]
 
     @pytest.mark.parametrize("session_id", ["", "ses/../etc", "ses 1", "x" * 300, "ses;rm"])
