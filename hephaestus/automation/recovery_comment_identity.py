@@ -6,12 +6,12 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from hephaestus.automation.requirements_recovery import (
+    RECOVERY_PROVENANCE_PREFIX as RECOVERY_PROVENANCE_PREFIX,
+    RecoveryCommentIdentityError as RecoveryCommentIdentityError,
     RecoveryCommentSelection,
     parse_recovery_provenance,
     select_recovery_comment,
 )
-
-RECOVERY_PROVENANCE_PREFIX = "<!-- hephaestus-recovered-requirements:"
 
 
 def marker_matches_body(marker: str, body: str) -> bool:
