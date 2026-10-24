@@ -944,17 +944,11 @@ def verify_capability_inventory(
         for name in package.commands:
             candidates = [entry for entry in command_entries if entry.get("name") == name]
             reported = [entry for entry in reported_command_entries if entry.get("name") == name]
-            if (
-                len(candidates) != 1
-                or len(reported) != 1
-            ):
+            if len(candidates) != 1 or len(reported) != 1:
                 return CapabilityResult(False, "capability_provenance_mismatch", name)
         for name in package.tools:
             known = [entry for entry in all_entries if entry.get("name") == name]
-            if (
-                active_names.count(name) != 1
-                or len(known) != 1
-            ):
+            if active_names.count(name) != 1 or len(known) != 1:
                 return CapabilityResult(False, "capability_provenance_mismatch", name)
     return CapabilityResult(True, "ready")
 

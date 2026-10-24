@@ -644,3 +644,23 @@ def test_repository_validation_prompt_does_not_truncate_evidence(builder_name: s
     )
     with pytest.raises(PrReviewPromptSizeError):
         getattr(prompts, builder_name)(**kwargs, repository_validation_json=summary)
+
+
+def test_dirty_worktree_decision_prompt_offers_only_accepted_tokens() -> None:
+    """The prompt must name exactly the tokens the stage and git job accept.
+
+    Regression: the template asked for ``KEEP``/``SEPARATE`` while the stage
+    handler and the ``recover_dirty_worktree`` git job accept only
+    ``COMMIT``/``STASH``, so every correct answer failed as
+    ``dirty_worktree_decision_invalid``.
+    """
+    rendered = prompts.get_dirty_reused_worktree_decision_prompt(
+        branch_name="810-auto-impl-direct-deadbeef",
+        status_text=" M src/comet/placement.py",
+        diff_text="diff --git a/src/comet/placement.py b/src/comet/placement.py",
+    )
+    lines = [line.strip() for line in rendered.splitlines() if line.strip()]
+    offered = {line for line in lines if line in {"KEEP", "SEPARATE", "COMMIT", "STASH"}}
+
+    assert offered == {"COMMIT", "STASH"}
+    assert not {"KEEP", "SEPARATE"} & offered
