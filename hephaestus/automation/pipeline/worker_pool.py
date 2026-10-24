@@ -12085,13 +12085,15 @@ class WorkerPool:
                 )
                 plan = _dirty_plan_from_read(evidence)
                 identity = _dirty_plan_input_identity(plan)
-                remote = self._read_remote_branch_head(
+                remote = self._read_remote_branch_state(
                     original.path,
                     remote="origin",
                     branch=physical_branch_name,
                     expected_repo=job.transport_repository,
                     timeout=job.timeout_s,
                 )
+                if isinstance(remote, JobResult):
+                    return remote
                 if remote is not None and remote != physical_head:
                     logger.warning(
                         "dirty direct reservation moved on origin (%s != %s); "

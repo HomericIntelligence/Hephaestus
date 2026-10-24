@@ -72,6 +72,13 @@ reset work, repeat a consumed turn, expand file scope, or reuse a PR that
 appears during publication. Manual reconciliation is required when the
 physical workspace and the durable receipt no longer agree.
 
+A confirmed-absent or moved remote lane head does not reject the claim.
+The host reads the remote lane state with the same authenticated contract
+and stops with the typed read failure only when the read cannot prove the
+lane state. It continues from the retained local lane head otherwise, with
+a warning when the two heads do not agree. Manual reconciliation is
+required when an operator must choose between the heads. See #3080.
+
 Planning keeps the detached default-branch assignment from ADR-0040.
 The two-lane workspace limit and other ADR-0028 contracts remain in effect.
 Existing event schemas remain unchanged.
