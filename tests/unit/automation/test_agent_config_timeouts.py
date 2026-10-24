@@ -11,6 +11,7 @@ from hephaestus.automation import agent_config
 
 TWO_HOURS_S = 7200
 DEFAULT_THROUGHPUT_TIMEOUT_S = 1200
+DEFAULT_REVIEW_TIMEOUT_S = 3600
 
 
 def _clear_planner_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,7 +57,7 @@ def test_agent_default_timeout_ignores_removed_env(monkeypatch: pytest.MonkeyPat
             "HEPH_AGENT_REVIEW_TIMEOUT",
             "HEPH_PLAN_REVIEWER_CLAUDE_TIMEOUT",
             agent_config.plan_reviewer_claude_timeout,
-            DEFAULT_THROUGHPUT_TIMEOUT_S,
+            DEFAULT_REVIEW_TIMEOUT_S,
         ),
         (
             "HEPH_AGENT_IMPL_TIMEOUT",
@@ -74,7 +75,7 @@ def test_agent_default_timeout_ignores_removed_env(monkeypatch: pytest.MonkeyPat
             "HEPH_AGENT_REVIEW_TIMEOUT",
             "HEPH_PR_REVIEWER_CLAUDE_TIMEOUT",
             agent_config.pr_reviewer_claude_timeout,
-            DEFAULT_THROUGHPUT_TIMEOUT_S,
+            DEFAULT_REVIEW_TIMEOUT_S,
         ),
         (
             "HEPH_AGENT_LEARN_TIMEOUT",
@@ -121,7 +122,13 @@ def test_agent_timeout_envs_are_ignored(
 ) -> None:
     """New generic agent timeout env vars are read on every function call."""
     monkeypatch.setenv(primary_env, "333")
-    expected = 1800 if primary_env == "HEPH_AGENT_IMPL_TIMEOUT" else 1200
+    expected = (
+        1800
+        if primary_env == "HEPH_AGENT_IMPL_TIMEOUT"
+        else DEFAULT_REVIEW_TIMEOUT_S
+        if primary_env == "HEPH_AGENT_REVIEW_TIMEOUT"
+        else DEFAULT_THROUGHPUT_TIMEOUT_S
+    )
     assert timeout_fn() == expected
 
     monkeypatch.setenv(primary_env, "444")
@@ -141,7 +148,7 @@ def test_agent_timeout_envs_are_ignored(
             "HEPH_AGENT_REVIEW_TIMEOUT",
             "HEPH_PLAN_REVIEWER_AGENT_TIMEOUT",
             agent_config.plan_reviewer_claude_timeout,
-            DEFAULT_THROUGHPUT_TIMEOUT_S,
+            DEFAULT_REVIEW_TIMEOUT_S,
         ),
         (
             "HEPH_AGENT_IMPL_TIMEOUT",
@@ -153,7 +160,7 @@ def test_agent_timeout_envs_are_ignored(
             "HEPH_AGENT_REVIEW_TIMEOUT",
             "HEPH_PR_REVIEWER_AGENT_TIMEOUT",
             agent_config.pr_reviewer_claude_timeout,
-            DEFAULT_THROUGHPUT_TIMEOUT_S,
+            DEFAULT_REVIEW_TIMEOUT_S,
         ),
         (
             "HEPH_AGENT_LEARN_TIMEOUT",
@@ -210,3 +217,19 @@ def test_git_message_timeout_ignores_removed_env(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("HEPH_GIT_MESSAGE_AGENT_TIMEOUT", "90")
 
     assert agent_config.git_message_agent_timeout() == DEFAULT_THROUGHPUT_TIMEOUT_S
+
+
+def test_reviewer_timeout_paths_share_one_canonical_default() -> None:
+    """Constant, CLI, programmatic, and stage review paths share 3600s (#3185)."""
+    from hephaestus import constants
+    from hephaestus.automation import pipeline_cli
+    from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+
+    assert constants.AGENT_REVIEW_TIMEOUT == DEFAULT_REVIEW_TIMEOUT_S
+    assert constants.agent_review_timeout() == DEFAULT_REVIEW_TIMEOUT_S
+    assert agent_config.plan_reviewer_claude_timeout() == DEFAULT_REVIEW_TIMEOUT_S
+    assert agent_config.pr_reviewer_claude_timeout() == DEFAULT_REVIEW_TIMEOUT_S
+    assert PipelineConfig(org="o", repos=["r"]).reviewer_timeout == DEFAULT_REVIEW_TIMEOUT_S
+    for profile in ("full", "review"):
+        args = pipeline_cli.build_parser(profile=profile).parse_args([])
+        assert args.reviewer_timeout == DEFAULT_REVIEW_TIMEOUT_S

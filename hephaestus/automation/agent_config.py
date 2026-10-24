@@ -155,7 +155,7 @@ def planner_claude_timeout() -> int:
 
 
 def plan_reviewer_claude_timeout() -> int:
-    """Timeout for agent calls inside the plan reviewer (default 1200s)."""
+    """Timeout for agent calls inside the plan reviewer (default 3600s)."""
     return AGENT_REVIEW_TIMEOUT
 
 
@@ -170,7 +170,7 @@ def advise_claude_timeout() -> int:
 
 
 def pr_reviewer_claude_timeout() -> int:
-    """Timeout for the PR reviewer's agent analysis (default 1200s)."""
+    """Timeout for the PR reviewer's agent analysis (default 3600s)."""
     return AGENT_REVIEW_TIMEOUT
 
 

@@ -2040,6 +2040,36 @@ class TestPrReviewStageStep:
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
 
+    def test_review_wait_uses_reviewer_timeout_default(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The review job is bounded by the shared reviewer timeout default (#3185)."""
+        from hephaestus.automation.agent_config import pr_reviewer_claude_timeout
+
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+
+        result = _dispatch_review(stage, item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
+        assert result.job.timeout_s == pr_reviewer_claude_timeout()
+
+    def test_review_wait_uses_reviewer_timeout_override(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A configured reviewer timeout replaces the shared reviewer default."""
+        stage = PrReviewStage()
+        ctx = make_ctx(config_overrides={"reviewer_timeout": 654})
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+
+        result = _dispatch_review(stage, item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
+        assert result.job.timeout_s == 654
+
     def test_opencode_review_job_selects_compact_prompt_contract(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

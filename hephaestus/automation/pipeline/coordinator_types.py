@@ -111,6 +111,7 @@ from hephaestus.automation.pipeline.work_item import (
     WorkItem as WorkItem,
 )
 from hephaestus.cli.localization import text
+from hephaestus.constants import AGENT_REVIEW_TIMEOUT
 from hephaestus.prompts import PromptCatalog as PromptCatalog
 
 if TYPE_CHECKING:
@@ -286,7 +287,7 @@ class PipelineConfig:
     rate_guard_threshold: int = 200
     plugin_skills_dir: Path | None = None
     planner_timeout: int = 1200
-    reviewer_timeout: int = 1200
+    reviewer_timeout: int = AGENT_REVIEW_TIMEOUT
     implementer_timeout: int = 1800
     address_review_timeout: int = 7200
     git_message_timeout: int = 1200

@@ -95,9 +95,12 @@ def test_loop_parser_exposes_typed_environment_replacements_with_exact_defaults(
     args = loop_runner.build_parser().parse_args([])
     assert (args.planner_timeout, args.reviewer_timeout, args.implementer_timeout) == (
         1200,
-        1200,
+        3600,
         1800,
     )
+    import hephaestus.constants
+
+    assert args.reviewer_timeout == hephaestus.constants.AGENT_REVIEW_TIMEOUT
     assert args.address_review_timeout == 7200
     assert (args.git_message_timeout, args.poll_max_wait) == (1200, 1200)
     assert args.rate_guard_enabled is True

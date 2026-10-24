@@ -118,6 +118,8 @@ options use seconds. Neither option reduces the Git network-operation time.
 All timeout flags require positive values except `--phase-timeout`, where zero
 or a negative value continues to disable the outer queue-job bound. Established
 defaults are preserved; see each command’s `--help` output and the
+[migration guide](MIGRATION.md). One exception: the reviewer job default is
+now 3,600 seconds from one constant (`AGENT_REVIEW_TIMEOUT`); see the
 [migration guide](MIGRATION.md).
 
 ## Changing the registry
