@@ -4870,6 +4870,14 @@ class ImplementationStage(Stage):
             # PR_CREATE reports incomplete work with the agent summary.
             item.payload["no_commits"] = True
             return
+        if "outside approved scope" in error_text:
+            # A deterministic scope-policy rejection is not a transient Git
+            # failure: do not retry the identical commit, and report the
+            # specific cause. The worktree is preserved for correction.
+            item.payload["scope_violation"] = True
+            item.payload["scope_violation_summary"] = str(result.error or "")[:200]
+            item.payload.pop("git_error_retries", None)
+            return
         logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
         receipt = result.value if isinstance(result.value, dict) else {}
         recovery_commit = receipt.get("recovery_commit_sha")
@@ -6065,6 +6073,13 @@ class ImplementationStage(Stage):
         if lock_failure in _TERMINAL_GIT_LOCK_FAILURES:
             item.payload.pop("git_error_retries", None)
             return StageOutcome(Disposition.FINISH_FAIL, lock_failure)
+        if item.payload.pop("scope_violation", None):
+            summary = item.payload.pop("scope_violation_summary", "")
+            safe_summary = summary if isinstance(summary, str) and summary else ""
+            terminal_note = (
+                f"scope_violation: {safe_summary}" if safe_summary else "scope_violation"
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, terminal_note)
         if item.payload.pop("git_error", None):
             # Push failed: transient git/network trouble — RETRY the stage
             # without burning the implement budget, bounded by
