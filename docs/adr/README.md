@@ -36,7 +36,7 @@ confirm all three.
 | [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Partly superseded by ADR-0025, ADR-0035, ADR-0036, and ADR-0050 (retired commands and direct-provider surfaces) |
 | [0021](0021-durable-issue-wave-checkpoints.md) | Durable merge-checkpointed issue waves | Accepted |
 | [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Superseded by ADR-0031 |
-| [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
+| [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted (capability sourceInfo provenance binding superseded by 0060) |
 | [0024](0024-explicit-operator-merge-authorization.md) | Explicit operator authorization before queue merge | Accepted (historical; superseded by 0038) |
 | [0025](0025-athena-mnemosyne-pi-semantics.md) | Provider-neutral Athena and Mnemosyne semantics | Accepted |
 | [0026](0026-auxiliary-host-learning-lane.md) | Auxiliary host-learning lane | Accepted |
@@ -72,3 +72,4 @@ confirm all three.
 | [0057](0057-operator-direct-host-verification.md) | Operator-direct host verification without a configured Linux backend | Accepted |
 | [0058](0058-durable-nats-failure-delivery.md) | Durable NATS failure delivery and replay | Accepted |
 | [0059](0059-standalone-pr-merge-cli-stays-retired.md) | Standalone PR-merge CLI stays retired | Accepted |
+| [0060](0060-pi-capability-sourceinfo-provenance-binding-removed.md) | Pi capability admission drops the sourceInfo provenance binding | Accepted |

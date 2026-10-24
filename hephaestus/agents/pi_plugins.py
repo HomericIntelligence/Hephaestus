@@ -913,34 +913,12 @@ class CapabilityResult:
     detail: str = ""
 
 
-def _source_matches(entry: dict[str, Any], root: Path, scope: str) -> bool:
-    info = entry.get("sourceInfo")
-    if not isinstance(info, dict):
-        return False
-    raw_base_dir = info.get("baseDir")
-    raw_source_path = info.get("path")
-    if not isinstance(raw_base_dir, str) or not isinstance(raw_source_path, str):
-        return False
-    try:
-        base_dir = Path(raw_base_dir).resolve()
-        source_path = Path(raw_source_path).resolve()
-    except OSError:
-        return False
-    resolved_root = root.resolve()
-    return (
-        info.get("origin") == "package"
-        and info.get("scope") == scope
-        and base_dir == resolved_root
-        and (source_path == resolved_root or resolved_root in source_path.parents)
-    )
-
-
 def verify_capability_inventory(
     payload: dict[str, Any],
     inventory: InventoryResult,
     catalog: PiPackageCatalog,
 ) -> CapabilityResult:
-    """Require every command and active tool to originate in its verified package root."""
+    """Require every command and active tool to occur exactly once in the verified inventory."""
     if not inventory.ready:
         return CapabilityResult(False, "package_inventory_mismatch", inventory.detail)
     commands = payload.get("commands")
@@ -963,25 +941,14 @@ def verify_capability_inventory(
     active_names = cast(list[str], active_tools)
     all_entries = cast(list[dict[str, Any]], all_tools)
     for package in catalog.packages:
-        root = inventory.roots[package.key]
-        scope = inventory.scopes[package.key]
         for name in package.commands:
             candidates = [entry for entry in command_entries if entry.get("name") == name]
             reported = [entry for entry in reported_command_entries if entry.get("name") == name]
-            if (
-                len(candidates) != 1
-                or len(reported) != 1
-                or not _source_matches(candidates[0], root, scope)
-                or not _source_matches(reported[0], root, scope)
-            ):
+            if len(candidates) != 1 or len(reported) != 1:
                 return CapabilityResult(False, "capability_provenance_mismatch", name)
         for name in package.tools:
             known = [entry for entry in all_entries if entry.get("name") == name]
-            if (
-                active_names.count(name) != 1
-                or len(known) != 1
-                or not _source_matches(known[0], root, scope)
-            ):
+            if active_names.count(name) != 1 or len(known) != 1:
                 return CapabilityResult(False, "capability_provenance_mismatch", name)
     return CapabilityResult(True, "ready")
 
@@ -1206,7 +1173,7 @@ def preflight_pi_environment(
     timeout: float = 30.0,
     trust_override: str | None = None,
 ) -> PiPreflightResult:
-    """Verify CLI, settings, package roots, and provenance-bound capabilities in order."""
+    """Verify CLI, settings, package roots, and capability inventory counts in order."""
     catalog = load_pi_package_catalog() if catalog is None else catalog
     discovered = pi_bin or (Path(found) if (found := shutil.which("pi")) else Path("pi"))
     identity = probe_pi_cli_identity(discovered, catalog, runner=runner, timeout=timeout)
