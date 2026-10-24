@@ -17,10 +17,9 @@ from hephaestus.automation.agent_config import (
     session_uuid,
 )
 from hephaestus.automation.claude_invoke import invoke_claude_with_session
-from hephaestus.automation.pipeline.jobs import AgentJob
+from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.pipeline.jobs import JobHandle, JobResult
 
 
 def test_registered_worktree_resolves_repo_root_transcript(
@@ -90,9 +89,7 @@ def test_repo_root_turn_then_worker_turn_resumes_same_transcript(
     )
     try:
         with (
-            patch(
-                "hephaestus.automation.claude_invoke._run_tracked", side_effect=fake_run
-            ),
+            patch("hephaestus.automation.claude_invoke._run_tracked", side_effect=fake_run),
             patch(
                 "hephaestus.automation.pipeline.worker_pool.resolve_agent",
                 return_value="claude",
