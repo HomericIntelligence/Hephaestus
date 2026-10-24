@@ -279,7 +279,7 @@ def test_claim_git_operation_keeps_original_direct_branch(
         )
     try:
         with (
-            patch.object(pool, "_read_remote_branch_head", return_value=head),
+            patch.object(pool, "_read_remote_branch_state", return_value=head),
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",
@@ -310,6 +310,188 @@ def test_claim_git_operation_keeps_original_direct_branch(
             item.state = claim_state
             stage.on_job_done(item, result, ctx)
             assert stage.step(item, ctx) == Continue(next_state="IMPLEMENT_WAIT")
+    finally:
+        pool._executor.shutdown()
+
+
+def _claim_predicate_scaffold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> "tuple[Path, str, SourceWorkspaceManager, WorkerPool, GitJob]":
+    """Build one dirty direct writer ready for a remote-lane-state claim probe."""
+    import queue
+    import threading
+    from dataclasses import asdict
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline.github_jobs import DirtyDirectPrStateRead, FrozenJson
+    from hephaestus.automation.pipeline.jobs import GitJob
+    from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.automation.review_journal import (
+        IssueComment,
+        render_current_plan,
+        render_current_review,
+    )
+
+    repo, _, head = _repository(tmp_path, origin_repository="example/project")
+    _registered_git_fixture(repo, monkeypatch)
+    _source_registration_fixture(repo, monkeypatch)
+    manager = SourceWorkspaceManager(repo, repository="project")
+    branch = _claim().branch
+    original = manager.prepare(12, SourceLane.IMPLEMENTATION, head, branch=branch)
+    (original.cwd / "tracked.txt").write_text("pending\n")
+    comments = [
+        IssueComment(
+            render_current_plan("## Files to Modify\n- `tracked.txt`", revision=5),
+            viewer_did_author=True,
+        ),
+        IssueComment(render_current_review("state:plan-go", revision=5), viewer_did_author=True),
+    ]
+    runner = MagicMock()
+    runner.run.return_value = DirtyDirectPrStateRead(
+        "example/project",
+        12,
+        branch,
+        (),
+        None,
+        plan_journal=FrozenJson.snapshot([asdict(c) for c in comments]),
+        issue_state="OPEN",
+        issue_labels=("state:plan-go",),
+    )
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        github_job_runner=runner,
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
+    claim_job = GitJob(
+        repo="project",
+        op="claim_dirty_direct_continuation",
+        timeout_s=30,
+        expected_repository="example/project",
+        kwargs={"repo_root": str(repo), "issue_number": 12},
+    )
+    return repo, branch, manager, pool, claim_job
+
+
+def test_claim_fails_closed_when_the_remote_lane_read_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_claim_creation_mask: None,
+) -> None:
+    """A failed authenticated remote read stops the claim before any snapshot."""
+    from unittest.mock import patch
+
+    from hephaestus.automation.pipeline.jobs import JobResult
+
+    _repo, _branch, manager, pool, claim_job = _claim_predicate_scaffold(tmp_path, monkeypatch)
+    failure = JobResult(ok=False, error="cannot verify remote writer head")
+    try:
+        with (
+            patch.object(pool, "_read_remote_branch_state", return_value=failure),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+        ):
+            result = pool._run_git(claim_job)
+        assert result.ok is False
+        assert result.error == "cannot verify remote writer head"
+        assert manager._require_receipt(12, SourceLane.IMPLEMENTATION).dirty_claim is None
+    finally:
+        pool._executor.shutdown()
+
+
+def test_claim_continues_local_only_when_the_remote_lane_is_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_claim_creation_mask: None,
+) -> None:
+    """A confirmed-absent remote lane continues the claim from the local lane head."""
+    from unittest.mock import patch
+
+    _repo, branch, manager, pool, claim_job = _claim_predicate_scaffold(tmp_path, monkeypatch)
+    try:
+        with (
+            patch.object(pool, "_read_remote_branch_state", return_value=None),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+        ):
+            result = pool._run_git(claim_job)
+        assert result.ok, result.error
+        assert result.value["implementation_started"] is False
+        assert result.value["branch"] == branch
+        assert result.value["source_workspace"]["schema_version"] == 2
+        assert manager._require_receipt(12, SourceLane.IMPLEMENTATION).dirty_claim is not None
+    finally:
+        pool._executor.shutdown()
+
+
+def test_claim_continues_from_the_local_lane_head_when_the_remote_lane_moved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_claim_creation_mask: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A moved remote lane head only warns; the claim keeps the local lane head."""
+    import hashlib
+    import logging
+    from unittest.mock import patch
+
+    _repo, branch, manager, pool, claim_job = _claim_predicate_scaffold(tmp_path, monkeypatch)
+    moved_remote_head = hashlib.sha1(b"moved remote lane head").hexdigest()
+    try:
+        with (
+            patch.object(pool, "_read_remote_branch_state", return_value=moved_remote_head),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.worker_pool"),
+        ):
+            result = pool._run_git(claim_job)
+        assert result.ok, result.error
+        assert result.value["implementation_started"] is False
+        assert result.value["branch"] == branch
+        assert "dirty direct reservation moved on origin" in caplog.text
+        assert manager._require_receipt(12, SourceLane.IMPLEMENTATION).dirty_claim is not None
+    finally:
+        pool._executor.shutdown()
+
+
+def test_renamed_lane_fails_cleanly_without_poisoning_the_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_claim_creation_mask: None,
+) -> None:
+    """A renamed lane branch stops the claim cleanly; the v1 receipt stays retryable."""
+    from unittest.mock import patch
+
+    from tests.unit.automation.test_source_worktree import _git
+
+    _repo, _branch, manager, pool, claim_job = _claim_predicate_scaffold(tmp_path, monkeypatch)
+    lane_path = manager.path_for(12, SourceLane.IMPLEMENTATION)
+    _git(lane_path, "branch", "-m", "operator/direct-fix")
+    try:
+        with (
+            patch.object(pool, "_read_remote_branch_state", return_value=None),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+        ):
+            result = pool._run_git(claim_job)
+        assert result.ok is False
+        receipt = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+        assert receipt.schema_version == 1
+        assert receipt.dirty_claim is None
     finally:
         pool._executor.shutdown()
 
@@ -428,7 +610,7 @@ def test_post_timeout_probe_claim_adopts_the_published_lane(
     )
     try:
         with (
-            patch.object(pool, "_read_remote_branch_head", return_value=advanced),
+            patch.object(pool, "_read_remote_branch_state", return_value=advanced),
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",
@@ -462,7 +644,7 @@ def test_post_timeout_probe_claim_adopts_the_published_lane(
 
         # A second probe on the active lane changes nothing.
         with (
-            patch.object(pool, "_read_remote_branch_head", return_value=advanced),
+            patch.object(pool, "_read_remote_branch_state", return_value=advanced),
             patch.object(
                 pool,
                 "_authenticated_remote_git_configuration",

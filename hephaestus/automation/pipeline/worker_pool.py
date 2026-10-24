@@ -12047,7 +12047,7 @@ class WorkerPool:
             raise SourceWorkspaceError("dirty direct PR absence is unconfirmed")
         return receipt
 
-    def _git_claim_dirty_direct_continuation(self, job: GitJob) -> JobResult:
+    def _git_claim_dirty_direct_continuation(self, job: GitJob) -> JobResult:  # noqa: C901
         """Claim an existing dirty direct writer without a new reservation."""
         issue = job.kwargs.get("issue_number")
         raw_root = job.kwargs.get("repo_root")
@@ -12073,27 +12073,40 @@ class WorkerPool:
                 if original is None:
                     raise SourceWorkspaceError("dirty direct predecessor is unavailable")
                 manager._reject_foreign_owner(original, issue, SourceLane.IMPLEMENTATION)
-                if original.schema_version != 1 or original.branch is None:
+                if original.schema_version != 1:
                     raise SourceWorkspaceError("dirty direct predecessor is unavailable")
+                physical_branch = manager._head_branch(original.path)
+                if physical_branch is None or not physical_branch.startswith("refs/heads/"):
+                    raise SourceWorkspaceError("dirty direct predecessor has no head branch")
+                physical_branch_name = physical_branch.removeprefix("refs/heads/")
+                physical_head = manager._head_revision(original.path)
                 evidence = self._read_dirty_direct_state(
-                    job, repo_root=repo_root, issue=issue, branch=original.branch
+                    job, repo_root=repo_root, issue=issue, branch=physical_branch_name
                 )
                 plan = _dirty_plan_from_read(evidence)
                 identity = _dirty_plan_input_identity(plan)
-                remote = self._read_remote_branch_head(
+                remote = self._read_remote_branch_state(
                     original.path,
                     remote="origin",
-                    branch=original.branch,
+                    branch=physical_branch_name,
                     expected_repo=job.transport_repository,
                     timeout=job.timeout_s,
                 )
-                if remote != original.revision:
-                    raise SourceWorkspaceError("dirty direct reservation changed")
+                if isinstance(remote, JobResult):
+                    return remote
+                if remote is not None and remote != physical_head:
+                    logger.warning(
+                        "dirty direct reservation moved on origin (%s != %s); "
+                        "continuing from the lane head %s",
+                        remote,
+                        physical_head,
+                        physical_head,
+                    )
                 scope_job = replace(
                     job,
                     kwargs={
                         **job.kwargs,
-                        "scope_history_base_sha": original.revision,
+                        "scope_history_base_sha": physical_head,
                     },
                 )
                 if (
@@ -12105,8 +12118,8 @@ class WorkerPool:
                     raise SourceWorkspaceError("dirty direct pending scope changed")
                 snapshot = _dirty_worktree_content_snapshot(original.path, timeout=job.timeout_s)
                 claim = DirtyDirectClaim(
-                    branch=original.branch,
-                    reservation_base_sha=original.revision,
+                    branch=physical_branch_name,
+                    reservation_base_sha=physical_head,
                     plan_revision=identity.revision,
                     plan_fingerprint=identity.plan_fingerprint,
                     review_fingerprint=identity.review_fingerprint,
@@ -12123,7 +12136,7 @@ class WorkerPool:
                         kwargs={
                             **job.kwargs,
                             "cwd": original.path,
-                            "branch": original.branch,
+                            "branch": physical_branch_name,
                         },
                     )
                 )
@@ -12136,7 +12149,7 @@ class WorkerPool:
                         "dirty_direct_continuation": True,
                         "implementation_started": implementation_started,
                         "worktree_path": str(original.path),
-                        "branch": original.branch,
+                        "branch": physical_branch_name,
                         "source_workspace": binding.to_dict(),
                         "dirty_plan": asdict(plan),
                         "dirty_status": _run_bounded_git_output(
@@ -12154,8 +12167,8 @@ class WorkerPool:
                             retain_text=True,
                         ).text,
                         "direct_scope_reservation": {
-                            "branch": original.branch,
-                            "base_sha": original.revision,
+                            "branch": physical_branch_name,
+                            "base_sha": physical_head,
                         },
                     },
                 )

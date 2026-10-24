@@ -300,14 +300,6 @@ class _PreparationDeadline:
         return remaining
 
 
-def _is_direct_implementation_branch(item_number: int, branch: str | None) -> bool:
-    """Return whether *branch* is the exact managed direct-writer form."""
-    return (
-        branch is not None
-        and re.fullmatch(rf"{item_number}-auto-impl-direct-[0-9a-f]{{32}}", branch) is not None
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class SourceWorkspaceReceipt:
     """Durable ownership and revision record for one source lane."""
@@ -1567,12 +1559,29 @@ class SourceWorkspaceManager:
             receipt.schema_version != 1
             or receipt.generation != expected_generation
             or claim.state != "armed"
-            or receipt.branch != claim.branch
-            or receipt.revision != claim.reservation_base_sha
-            or not _is_direct_implementation_branch(item_number, receipt.branch)
             or not self._is_dirty(receipt.path)
         ):
             raise SourceWorkspaceError("dirty direct claim does not match its predecessor")
+        # The lane is the source of truth for the head branch and revision.
+        # A retained receipt from an older run, or a lane whose head advanced,
+        # must not block the continuation: repair the receipt to the physical
+        # state and require the claim to describe that same state.
+        physical_branch = self._head_branch(receipt.path)
+        physical_head = self._head_revision(receipt.path)
+        if physical_branch is None or not physical_branch.startswith("refs/heads/"):
+            raise SourceWorkspaceError("dirty direct predecessor has no head branch")
+        physical_branch_name = physical_branch.removeprefix("refs/heads/")
+        if physical_branch_name != claim.branch or physical_head != claim.reservation_base_sha:
+            raise SourceWorkspaceError("dirty direct claim does not match its predecessor")
+        if receipt.branch != physical_branch_name or receipt.revision != physical_head:
+            logger.warning(
+                "dirty direct receipt %s/%s does not match the lane %s/%s; repairing the receipt",
+                receipt.branch,
+                receipt.revision,
+                physical_branch_name,
+                physical_head,
+            )
+            receipt = replace(receipt, branch=physical_branch_name, revision=physical_head)
         self._validate_dirty_claim_physical(receipt, claim)
         successor = replace(
             receipt,
