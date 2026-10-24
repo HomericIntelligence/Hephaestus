@@ -272,6 +272,11 @@ def _is_valid_agent(agent: str) -> bool:
             r"[0-9a-f]{4}-[0-9a-f]{12}",
             agent,
         )
+    ) or bool(
+        re.fullmatch(
+            r"requirements-recovery(?:-review)?:[0-9]+:[0-9a-f]+",
+            agent,
+        )
     )
 
 
