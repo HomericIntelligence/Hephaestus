@@ -465,6 +465,37 @@ def test_claim_continues_from_the_local_lane_head_when_the_remote_lane_moved(
         pool._executor.shutdown()
 
 
+def test_renamed_lane_fails_cleanly_without_poisoning_the_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_claim_creation_mask: None,
+) -> None:
+    """A renamed lane branch stops the claim cleanly; the v1 receipt stays retryable."""
+    from unittest.mock import patch
+
+    from tests.unit.automation.test_source_worktree import _git
+
+    _repo, _branch, manager, pool, claim_job = _claim_predicate_scaffold(tmp_path, monkeypatch)
+    lane_path = manager.path_for(12, SourceLane.IMPLEMENTATION)
+    _git(lane_path, "branch", "-m", "operator/direct-fix")
+    try:
+        with (
+            patch.object(pool, "_read_remote_branch_state", return_value=None),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(build_git_child_env(), ()),
+            ),
+        ):
+            result = pool._run_git(claim_job)
+        assert result.ok is False
+        receipt = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+        assert receipt.schema_version == 1
+        assert receipt.dirty_claim is None
+    finally:
+        pool._executor.shutdown()
+
+
 def _dirty_restart_claim_request(
     pool: "WorkerPool", repo: Path, manager: SourceWorkspaceManager
 ) -> "tuple[ImplementationStage, WorkItem, StageContext, GitJob, str]":
