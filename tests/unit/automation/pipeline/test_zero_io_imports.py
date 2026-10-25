@@ -62,6 +62,12 @@ _CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str]]] = {
     "coordinator_sources.py": {
         "hephaestus.automation.github_api.issues": frozenset({"parse_issue_dependencies"}),
     },
+    "coordinator_execution.py": {
+        "hephaestus.resilience": frozenset({"is_transient_subprocess_error"})
+    },
+    "coordinator_runtime.py": {
+        "hephaestus.resilience": frozenset({"is_transient_subprocess_error"})
+    },
     "plan_review.py": {"subprocess": frozenset({"SubprocessError"})},
 }
 

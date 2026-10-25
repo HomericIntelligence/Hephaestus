@@ -583,11 +583,13 @@ class InspectDirtyDirectPrStateRequest:
             or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository) is None
         ):
             raise ValueError("repository must be OWNER/REPOSITORY")
+        expected_prefix = f"{self.issue_number}-auto-impl-direct-"
         if (
             not isinstance(self.branch, str)
             or not self.branch
             or self.branch != self.branch.strip()
-            or re.fullmatch(r"[A-Za-z0-9._/-]+", self.branch) is None
+            or not self.branch.startswith(expected_prefix)
+            or re.fullmatch(r"[1-9][0-9]*-auto-impl-direct-[0-9a-f]{32}", self.branch) is None
         ):
             raise ValueError("branch must name the direct issue writer")
 
