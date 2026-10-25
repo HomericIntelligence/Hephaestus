@@ -40,7 +40,7 @@ jobs:
         run: >
           uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers
           -m "not performance and not contract"
-          -n auto
+          -n 2
           --cov=hephaestus --cov-report=term-missing --cov-report=xml
       - name: Check per-module coverage floors
         run: uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
