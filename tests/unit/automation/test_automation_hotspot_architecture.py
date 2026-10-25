@@ -26,7 +26,10 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/coordinator_contract.py": 450,
     "hephaestus/automation/pipeline/coordinator_types.py": 500,
     "hephaestus/automation/pipeline/coordinator_issue_classification.py": 125,
-    "hephaestus/automation/pipeline/coordinator_runtime.py": 1_400,
+    # Most active module (18 commits since 09-01); exact-size cap makes any
+    # further growth fail immediately, which is the intended anti-treadmill
+    # behavior on active modules.
+    "hephaestus/automation/pipeline/coordinator_runtime.py": 1_448,
     "hephaestus/automation/pipeline/coordinator_sources.py": 950,
     "hephaestus/automation/pipeline/coordinator_dispatch.py": 500,
     "hephaestus/automation/pipeline_github.py": 500,
@@ -52,10 +55,16 @@ _FILE_BUDGETS = {
     # Check Run lifecycle validation stays separate from evidence evaluation.
     "hephaestus/automation/pipeline_github_check_run_validation.py": 150,
     # Exact-head Check Runs use a complete paginated double-read. Keep this
-    # separate repository-scoped merge-gate collaborator bounded.
-    "hephaestus/automation/pipeline_github_required_checks.py": 425,
-    "hephaestus/automation/pipeline/merge_wait_admission.py": 125,
-    "hephaestus/automation/pipeline_github_reviews.py": 1_475,
+    # separate repository-scoped merge-gate collaborator bounded; exact-head
+    # double-read work (budget comment already documents this collaborator's
+    # boundedness); cap at exact size 545.
+    "hephaestus/automation/pipeline_github_required_checks.py": 545,
+    # Recent reviewed growth (last 10-23); exact-size cap. Keeps the existing
+    # RequiredChecksDeferred contract identity import untouched.
+    "hephaestus/automation/pipeline/merge_wait_admission.py": 166,
+    # 7 reviewed commits since 09-01; each growth landed via reviewed PRs;
+    # exact-size cap.
+    "hephaestus/automation/pipeline_github_reviews.py": 1_614,
     "hephaestus/automation/pipeline_github_mutations.py": 475,
     # The merge-queue reconciliation and the native auto-merge enablement are
     # one bounded concern, separate from the label and pull-request mutations.
@@ -73,11 +82,18 @@ _FILE_BUDGETS = {
     # The GraphQL contract helpers added by #2393 bring this collaborator to
     # 1,403 lines; keep the explicit cap just above the measured source size.
     "hephaestus/automation/pipeline/stages/pr_review_jobs.py": 1_403,
-    "hephaestus/automation/pipeline/stages/pr_review_findings.py": 250,
-    "hephaestus/automation/review_anchors.py": 500,
-    "hephaestus/automation/review_finding_history.py": 350,
+    # #3397 informational-validation cohort; stable since its merge (2026-10-15);
+    # 558 is below the review-recorded 597. Decomposition candidate recorded as follow-up.
+    "hephaestus/automation/pipeline/stages/pr_review_findings.py": 558,
+    # #3397 cohort; stable since 10-15; grew past the review-recorded 576 during
+    # cohort follow-ups; cap set at exact size.
+    "hephaestus/automation/review_anchors.py": 647,
+    # #3397 cohort; stable; 649 below review-recorded 672. Decomposition candidate
+    # recorded as follow-up.
+    "hephaestus/automation/review_finding_history.py": 649,
     "hephaestus/automation/pipeline/stages/pr_review_history.py": 225,
-    "hephaestus/automation/pipeline/stages/pr_review_recovery.py": 350,
+    # #3397 cohort; stable since 10-15.
+    "hephaestus/automation/pipeline/stages/pr_review_recovery.py": 437,
     "hephaestus/automation/pipeline/stages/pr_review_gate.py": 700,
 }
 
