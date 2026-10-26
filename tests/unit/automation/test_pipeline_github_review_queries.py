@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import Iterator
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -118,35 +116,6 @@ def test_complete_review_pagination_is_read_twice(
         {"number": 7},
         {"number": 7, "after": "c1"},
     ]
-
-
-def test_scope_expansion_publication_uses_generic_review_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The generic review snapshot prevents duplicate blocking reviews."""
-    call_mock = MagicMock(
-        return_value=subprocess.CompletedProcess(
-            args=[], returncode=0, stdout='{"id":2,"node_id":"R2"}', stderr=""
-        )
-    )
-    adapter = pg.PipelineGitHub("org", repo="repo", command_runner=call_mock)
-    marker = "<!-- hephaestus-scope-expansion:test -->"
-    body = f"{marker}\nBlocked by a child issue."
-    review = {"id": "R2", "body": body, "state": "COMMENTED", "viewerDidAuthor": True}
-    reviews = MagicMock(side_effect=[(), (review,)])
-    monkeypatch.setattr(adapter, "pull_request_reviews", reviews)
-
-    assert adapter.post_scope_expansion_blocking_review(7, body=body, marker=marker) == "R2"
-    assert reviews.call_count == 2
-    call_mock.assert_called_once()
-
-    reviews.reset_mock(side_effect=True)
-    reviews.side_effect = None
-    reviews.return_value = (review,)
-    call_mock.reset_mock()
-
-    assert adapter.post_scope_expansion_blocking_review(7, body=body, marker=marker) == "R2"
-    call_mock.assert_not_called()
 
 
 def test_changed_review_snapshot_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:

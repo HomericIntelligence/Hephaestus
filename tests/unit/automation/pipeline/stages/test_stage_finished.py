@@ -164,7 +164,6 @@ class TestRecord:
             lease,
             issue_number=42,
             reason=reason,
-            evidence_digest="b" * 64,
             repository_revision="a" * 40,
             extra_labels=("epic",),
         )

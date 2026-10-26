@@ -19,7 +19,6 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.requirements_recovery import (
     OBSOLETE_EXPLANATION_MARKER,
-    select_recovery_comment,
 )
 from hephaestus.automation.review_journal import (
     HISTORY_MARKER_PREFIX,
@@ -155,11 +154,6 @@ def plan_issue_timeline_compaction(
     planning marker on another comment is an identity conflict, so compaction
     stops before it creates or updates a shadow artifact.
     """
-    recovery_selection = select_recovery_comment(
-        comments,
-        body_of=lambda comment: comment.body,
-        owned_of=lambda comment: comment.viewer_did_author,
-    )
     validate_planning_comment_identities(
         comments,
         body_of=lambda comment: comment.body,
@@ -195,7 +189,6 @@ def plan_issue_timeline_compaction(
     # Parsing follows identity validation so no destructive compaction plan
     # can select a newest alias from an ambiguous journal.
     snapshot = journal_snapshot(owned)
-    target_recovery = recovery_selection.comment if recovery_selection is not None else None
     target_obsolete = _latest_owned_role(owned, OBSOLETE_EXPLANATION_MARKER)
 
     prior_fingerprints = list(snapshot.prior_plan_fingerprints)
@@ -208,7 +201,6 @@ def plan_issue_timeline_compaction(
             revision=snapshot.revision,
             prior_fingerprints=tuple(dict.fromkeys(prior_fingerprints)),
             forced_planning_epoch=snapshot.forced_planning_epoch,
-            recovery_source_digest=snapshot.recovery_source_digest,
         )
         if target_plan is not None
         else None
@@ -224,7 +216,7 @@ def plan_issue_timeline_compaction(
 
     keep_ids = {
         comment.database_id
-        for comment in (target_plan, target_review, target_recovery, target_obsolete)
+        for comment in (target_plan, target_review, target_obsolete)
         if comment is not None and comment.database_id is not None
     }
     delete_ids = _obsolete_comment_ids(

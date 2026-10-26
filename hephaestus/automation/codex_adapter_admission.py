@@ -233,15 +233,6 @@ class CodexAdapterAdmission:
     deployment_lock_sha256: str
     factory: object
 
-    def validate_adapter_identity(
-        self,
-        *,
-        distribution: str,
-        version: str,
-        installed_tree_sha256: str,
-    ) -> None:
-        """No-op: adapter self-attestation is trusted per the agent contract."""
-
 
 @dataclass(frozen=True, slots=True)
 class _VerifiedInstalledTree:

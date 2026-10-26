@@ -22,50 +22,29 @@ import pytest
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.github_api import issue_body_digest
-from hephaestus.automation.github_api.diff import normalize_review_finding_collection
-from hephaestus.automation.implementation_go_audit_receipt import (
-    PendingImplementationGoAudit,
-    PendingReviewFindingJournal,
-)
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.github_jobs import (
-    MergeQueueReconciliation,
     ReadRepositoryValidationCIRequest,
     RepositoryValidationCIRead,
-)
-from hephaestus.automation.pipeline.merge_wait_admission import (
-    VerifiedRepositoryDefaultBranch,
 )
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
     AutoMergeEnableResult,
-    ConditionalMergeResult,
-    ImplementationThreadReplyResult,
-    ReviewerThreadReconciliationResult,
     StageContext,
     StageGitHub,
 )
 from hephaestus.automation.pipeline.stages.base import (
     BranchWorktreeOwnerStatus,
-    ImplementationReplyProgress,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from hephaestus.automation.pipeline_github_check_policy import (
-    EffectiveMergePolicy,
-    RequiredCheck,
-)
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
-    PLAN_REVIEW_CANONICAL_MARKER,
 )
-from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
-from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
     PlanDiscoveryResult,
-    blocked_audit_recovery_body,
     render_current_plan,
     render_current_review,
     render_pending_review,
@@ -120,9 +99,7 @@ class FakeStageGitHub(FakeGitHub):
         pr_review_context: dict[str, str] | None = None,
         plan_read_error: str | None = None,
         journal_read_error: str | None = None,
-        issue_body_owned_by_viewer: bool = True,
         dependency_fact_batches: list[tuple[DependencyFact, ...] | Exception] | None = None,
-        queue_reconciliation: MergeQueueReconciliation = (MergeQueueReconciliation.UNAVAILABLE),
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -160,7 +137,6 @@ class FakeStageGitHub(FakeGitHub):
                 discovery.
             dependency_fact_batches: Optional live dependency results. The
                 final result repeats after the scripted transitions finish.
-            queue_reconciliation: Canned live queue-entry result.
 
         """
         super().__init__()
@@ -174,7 +150,6 @@ class FakeStageGitHub(FakeGitHub):
         self._has_plan = has_plan
         self._plan_read_error = plan_read_error
         self._journal_read_error = journal_read_error
-        self._issue_body_owned_by_viewer = issue_body_owned_by_viewer
         self._pr_head_branch = pr_head_branch
         self._pr_head_writable = pr_head_writable
         self._pr_impl_state = pr_impl_state
@@ -209,16 +184,12 @@ class FakeStageGitHub(FakeGitHub):
             }
         )
         self._posted_thread_ids: dict[int, list[str]] = {}
-        self.demoted_findings: dict[int, list[Any]] = {}
         self._thread_replies: dict[str, list[dict[str, str]]] = {}
-        self.review_rebase_records: dict[int, RebaseReviewRecord] = {}
-        self.pending_go_audits: dict[int, PendingImplementationGoAudit] = {}
-        self.pending_finding_journals: dict[int, PendingReviewFindingJournal] = {}
+        self.body_only_findings: dict[int, list[dict[str, Any]]] = {}
+        self.review_summaries: dict[int, str] = {}
         self.operation_deadlines: list[tuple[float, threading.Event | None]] = []
         self._dependency_fact_batches = deque(dependency_fact_batches or [])
         self.dependency_fact_requests: list[tuple[int, ...]] = []
-        self._queue_reconciliation = queue_reconciliation
-        self.queue_reconciliation_calls: list[tuple[int, str, str, float]] = []
 
     @contextmanager
     def operation_deadline(
@@ -285,10 +256,6 @@ class FakeStageGitHub(FakeGitHub):
             raise result
         return result
 
-    def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
-        """Return whether the current actor owns the latest issue-body edit."""
-        return self._issue_body_owned_by_viewer
-
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Mirror _review_utils.find_merged_closing_pr."""
         return self._merged_pr
@@ -339,16 +306,6 @@ class FakeStageGitHub(FakeGitHub):
             )
             for comment in comments
         ]
-
-    def ensure_blocked_audit(self, issue_number: int) -> None:
-        """Mirror recovery of a missing actor-owned BLOCKED explanation."""
-        body = blocked_audit_recovery_body(self.issue_comments(issue_number))
-        if body is not None:
-            self.upsert_issue_comment(
-                issue_number,
-                PLAN_REVIEW_CANONICAL_MARKER,
-                body,
-            )
 
     def get_pr_head_branch(self, pr_number: int) -> str | None:
         """Mirror _review_utils.get_pr_head_branch (canned answer)."""
@@ -557,262 +514,39 @@ class FakeStageGitHub(FakeGitHub):
         self.prs[number]["issue_number"] = issue_number
         return number
 
-    def post_review_threads(
+    def post_review(
         self,
         pr_number: int,
-        threads: list[dict[str, Any]],
-        *,
-        expected_head_sha: str,
-        review_diff: str,
-        demoted_findings: Sequence[Any] = (),
-    ) -> list[dict[str, Any]]:
-        """Mirror a post-time immutable receipt returned by the coordinator."""
-        del expected_head_sha, review_diff
-        self.demoted_findings[pr_number] = list(demoted_findings)
-        ids = self.gh_pr_review_post(pr_number, threads, "")
+        inline: list[dict[str, Any]],
+        body_only: list[dict[str, Any]],
+        summary: str = "",
+    ) -> None:
+        """Record one posted review and the findings kept in its body."""
+        self.review_summaries[pr_number] = summary
+        ids = self.gh_pr_review_post(pr_number, inline, "")
         self._posted_thread_ids[pr_number] = list(ids)
-        review_id = f"review-{pr_number}-{len(self.reviews.get(pr_number, []))}"
-        return [
-            {
-                "id": thread_id,
-                "path": str(thread.get("path") or "a.py"),
-                "line": thread.get("line"),
-                "side": str(thread.get("side") or "RIGHT"),
-                "body": str(thread.get("body") or "finding"),
-                "author": "hephaestus[bot]",
-                "authors": ["hephaestus[bot]"],
-                "comments": [
-                    {
-                        "id": f"comment-{thread_id}",
-                        "author": "hephaestus[bot]",
-                        "body": str(thread.get("body") or "finding"),
-                        "review_id": review_id,
-                    }
-                ],
-                "review_id": review_id,
-            }
-            for thread_id, thread in zip(ids, threads, strict=True)
-        ]
+        self.body_only_findings[pr_number] = list(body_only)
+        self._log("post_review", pr_number, len(inline), len(body_only))
 
-    def post_implementation_thread_replies(
+    def apply_review_thread_decisions(
         self,
         pr_number: int,
         *,
-        expected_head_sha: str,
-        threads: list[dict[str, Any]],
-        replies: dict[str, str],
-        batch_nonce: str,
-        progress: ImplementationReplyProgress | None = None,
-        recover_pending_review: bool = False,
-    ) -> ImplementationThreadReplyResult:
-        """Record head-gated implementation replies for stage tests."""
-        del expected_head_sha, batch_nonce, progress, recover_pending_review
-        by_id = {
-            str(thread.get("thread_id") or thread.get("id") or ""): thread for thread in threads
-        }
-        receipts: list[dict[str, Any]] = []
-        for thread_id, reply in replies.items():
-            thread = by_id.get(thread_id)
-            if not isinstance(thread, dict):
-                continue
-            reply_record = {
-                "id": f"implementation-reply-{thread_id}",
-                "author": "hephaestus[bot]",
-                "body": reply,
-            }
-            self._thread_replies.setdefault(thread_id, []).append(reply_record)
-            receipts.append(
-                {
-                    **thread,
-                    "id": thread_id,
-                    "comments": [*thread.get("comments", []), reply_record],
-                    "implementation_reply_id": reply_record["id"],
-                    "implementation_reply_body": reply,
-                    "implementation_head_sha": "a" * 40,
-                }
-            )
-        self._log("post_implementation_thread_replies", pr_number, tuple(sorted(replies)))
-        replied = tuple(sorted(str(thread_id) for thread_id in replies if thread_id in by_id))
-        blocked = tuple(sorted(set(replies) - set(replied)))
-        return ImplementationThreadReplyResult(replied, blocked, tuple(receipts))
-
-    def reconcile_implementation_thread_replies(
-        self,
-        pr_number: int,
-        *,
-        expected_head_sha: str,
-        threads: list[dict[str, Any]],
-        replies: dict[str, str],
-        batch_nonce: str,
-    ) -> ImplementationThreadReplyResult:
-        """Keep journal recovery read-only in the stage fake."""
-        del pr_number, expected_head_sha, threads, batch_nonce
-        return ImplementationThreadReplyResult(
-            blocked_thread_ids=tuple(sorted(replies)),
-        )
-
-    def reviewer_validation_receipts(
-        self,
-        pr_number: int,
-        *,
-        reviewed_head_sha: str,
-        threads: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Derive test receipts from the current live thread conversation.
-
-        The production adapter validates the signed marker.  The stage fake
-        instead preserves the same durable property needed here: only a final
-        host-posted implementation reply for the current reviewed head may
-        reach reconciliation, never a process-local payload receipt.
-        """
-        del pr_number
-        receipts: list[dict[str, Any]] = []
-        for thread in threads:
-            if not isinstance(thread, dict):
-                continue
-            comments = thread.get("comments")
-            if not isinstance(comments, list) or not comments:
-                continue
-            final_comment = comments[-1]
-            if not isinstance(final_comment, dict):
-                continue
-            reply_id = final_comment.get("id")
-            reply_body = final_comment.get("body")
-            if not (
-                isinstance(reply_id, str)
-                and reply_id.startswith("implementation-reply-")
-                and isinstance(reply_body, str)
-            ):
-                continue
-            receipts.append(
-                {
-                    **thread,
-                    "implementation_reply_id": reply_id,
-                    "implementation_reply_body": reply_body,
-                    "implementation_head_sha": reviewed_head_sha,
-                }
-            )
-        return receipts
-
-    def reconcile_reviewer_validated_threads(
-        self,
-        pr_number: int,
-        *,
-        reviewed_head_sha: str,
-        receipts: list[dict[str, Any]],
-        resolved_thread_ids: set[str],
+        resolved_thread_ids: tuple[str, ...],
         feedback: dict[str, str],
-    ) -> ReviewerThreadReconciliationResult:
-        """Record the reviewer's fresh resolution/rejection decision for tests."""
-        del reviewed_head_sha, receipts
+    ) -> None:
+        """Record the reviewer's decisions on open threads."""
         self._log(
-            "reconcile_reviewer_validated_threads",
+            "apply_review_thread_decisions",
             pr_number,
             tuple(sorted(resolved_thread_ids)),
             tuple(sorted(feedback)),
-        )
-        return ReviewerThreadReconciliationResult(
-            resolved_thread_ids=tuple(sorted(resolved_thread_ids)),
-            feedback_thread_ids=tuple(sorted(feedback)),
         )
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""
         self._pr_impl_state = (True, False)
         self._log("mark_pr_implementation_go", pr_number)
-
-    def publish_implementation_go_audit(
-        self,
-        pr_number: int,
-        head_sha: str,
-        audit: ReviewAudit,
-        *,
-        finding_records: object = (),
-    ) -> None:
-        """Mirror public audit publication and exact-head handoff cleanup."""
-        marker, body = render_implementation_go_audit(
-            audit,
-            pr_number=pr_number,
-            head_sha=head_sha,
-            finding_records=finding_records,
-        )
-        self.upsert_issue_comment(pr_number, marker, body)
-        handoff_prefix = (
-            f"<!-- hephaestus-implementation-reply-handoff:pr={pr_number}:head={head_sha}:"
-        )
-        self.comments[pr_number] = [
-            comment
-            for comment in self.comments.get(pr_number, [])
-            if not (
-                isinstance(comment, str) and comment.split("\n", 1)[0].startswith(handoff_prefix)
-            )
-        ]
-        self._log("publish_implementation_go_audit", pr_number, head_sha)
-
-    def persist_pending_implementation_go_audit(
-        self,
-        pr_number: int,
-        head_sha: str,
-        audit: ReviewAudit,
-        *,
-        finding_records: object = (),
-    ) -> None:
-        """Persist the exact-head recovery record before the label transition."""
-        records, compacted = normalize_review_finding_collection(finding_records)
-        self.pending_go_audits[pr_number] = PendingImplementationGoAudit(
-            pr_number=pr_number,
-            head_sha=head_sha,
-            audit=audit,
-            finding_records=records,
-            compacted_outcomes=compacted,
-        )
-        self._log("persist_pending_implementation_go_audit", pr_number, head_sha)
-
-    def persist_review_finding_journal(
-        self, pr_number: int, head_sha: str, finding_records: object
-    ) -> None:
-        """Persist the fake exact-head finding journal."""
-        records, compacted = normalize_review_finding_collection(finding_records)
-        self.pending_finding_journals[pr_number] = PendingReviewFindingJournal(
-            pr_number=pr_number,
-            head_sha=head_sha,
-            finding_records=records,
-            compacted_outcomes=compacted,
-        )
-        self._log("persist_review_finding_journal", pr_number, head_sha)
-
-    def pending_review_finding_journal(self, pr_number: int) -> PendingReviewFindingJournal | None:
-        """Return the fake exact-head finding journal."""
-        return self.pending_finding_journals.get(pr_number)
-
-    def clear_review_finding_journal(self, pr_number: int, head_sha: str) -> None:
-        """Clear one matching fake finding journal."""
-        journal = self.pending_finding_journals.get(pr_number)
-        if journal is not None and journal.head_sha == head_sha:
-            del self.pending_finding_journals[pr_number]
-        self._log("clear_review_finding_journal", pr_number, head_sha)
-
-    def pending_implementation_go_audit(
-        self, pr_number: int
-    ) -> PendingImplementationGoAudit | None:
-        """Return the fake durable recovery record."""
-        return self.pending_go_audits.get(pr_number)
-
-    def publish_review_rebase_record(self, record: RebaseReviewRecord) -> None:
-        """Store the fake durable rebase record."""
-        self.review_rebase_records[record.pr_number] = record
-        self._log("publish_review_rebase_record", record.pr_number, record.resulting_head_sha)
-
-    def read_review_rebase_record(self, pr_number: int) -> RebaseReviewRecord | None:
-        """Return retained facts without a process proof."""
-        return self.review_rebase_records.get(pr_number)
-
-    def clear_pending_implementation_go_audit(self, pr_number: int, head_sha: str) -> None:
-        """Clear only a matching exact-head fake recovery record."""
-        receipt = self.pending_go_audits.get(pr_number)
-        if receipt is not None and receipt.head_sha == head_sha:
-            del self.pending_go_audits[pr_number]
-        self._log("clear_pending_implementation_go_audit", pr_number, head_sha)
 
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_no_go (records mutation)."""
@@ -828,45 +562,10 @@ class FakeStageGitHub(FakeGitHub):
         del pr_number  # single canned answer; not per-PR keyed
         return self._pr_state
 
-    def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
-        """Return the default complete repository record for stage tests."""
-        return VerifiedRepositoryDefaultBranch(
-            "HomericIntelligence",
-            "Hephaestus",
-            "HomericIntelligence/Hephaestus",
-            "main",
-        )
-
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
         """Mirror the post-405 operational readiness lookup."""
         del pr_number
         return dict(self._pr_state) if isinstance(self._pr_state, dict) else self._pr_state
-
-    def effective_merge_policy(
-        self, pr_number: int, base_branch: str, **_kwargs: Any
-    ) -> EffectiveMergePolicy:
-        """Return the canned effective merge policy."""
-        return EffectiveMergePolicy(
-            base_branch=base_branch,
-            default_branch="main",
-            conversation_resolution_enforced=self._conversation_resolution,
-            required_checks=(RequiredCheck("required-ci", 1),),
-            bypassable_ruleset_ids=(),
-            strict_update_enforced=True,
-            merge_queue_method=None,
-        )
-
-    def required_checks_pass_for_head(
-        self,
-        head_sha: str,
-        policy: Any,
-        *,
-        deadline_s: float,
-        cancellation: threading.Event,
-    ) -> bool:
-        """Return a green result for the requested exact head by default."""
-        del head_sha, policy, deadline_s, cancellation
-        return True
 
     @property
     def _repo_slug(self) -> str:
@@ -886,34 +585,6 @@ class FakeStageGitHub(FakeGitHub):
         self.auto_merge_attempts.append(pr_number)
         self.merge_attempts.append((pr_number, ""))
         return AutoMergeEnableResult(enabled=True)
-
-    def merge_pr_if_head(
-        self,
-        pr_number: int,
-        reviewed_sha: str,
-        **_kwargs: Any,
-    ) -> ConditionalMergeResult:
-        """Mirror one successful SHA-conditional normal merge request."""
-        self.merge_attempts.append((pr_number, reviewed_sha))
-        self._log("merge_pr_if_head", pr_number, reviewed_sha)
-        self._pr_state = {"state": "MERGED"}
-        return ConditionalMergeResult(status=200, body={"merged": True})
-
-    def reconcile_merge_queue_entry(
-        self,
-        pr_number: int,
-        pull_request_id: str,
-        reviewed_sha: str,
-        *,
-        deadline_s: float,
-        cancellation: threading.Event,
-    ) -> MergeQueueReconciliation:
-        """Return and record the configured queue-entry result."""
-        del cancellation
-        self.queue_reconciliation_calls.append(
-            (pr_number, pull_request_id, reviewed_sha, deadline_s)
-        )
-        return self._queue_reconciliation
 
     def ensure_state_labels(self) -> None:
         """Mirror the repo-stage label-vocabulary ensure (records mutation)."""

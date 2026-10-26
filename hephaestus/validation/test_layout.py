@@ -507,7 +507,6 @@ def check_test_structure(
     src_root = repo_root / src_package
     tests_root = repo_root / "tests"
     test_root = tests_root / "unit"
-    scripts_root = repo_root / "scripts"
 
     if not src_root.is_dir():
         print(text("ERROR: Source root not found: %(path)s", path=src_root), file=sys.stderr)
@@ -518,15 +517,12 @@ def check_test_structure(
         return False
 
     results = [
-        _report_mirror_check(src_root, test_root, src_package, verbose),
         _report_loose_files_check(test_root, verbose),
         _report_unsanctioned_dirs_check(src_root, test_root, verbose),
         _report_ghost_packages_check(src_root, test_root, verbose),
         _report_phantom_test_dirs_check(test_root, verbose),
         _report_stray_tests_root_files_check(tests_root, verbose),
     ]
-    if scripts_root.is_dir():
-        results.append(_report_scripts_coverage_check(scripts_root, test_root, verbose))
     return all(results)
 
 

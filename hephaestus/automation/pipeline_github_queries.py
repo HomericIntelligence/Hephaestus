@@ -11,7 +11,6 @@ from .github_api.graphql import batch_dependency_facts_query, reviewed_pr_state_
 from .github_api.issues import issue_read_error
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
-from .remediation_recovery import REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES
 from .review_journal import (
     CommentJournalReadError,
     IssueComment,
@@ -21,6 +20,7 @@ from .review_journal import (
 )
 
 _THREAD_PAGE_MAX = 100
+THREAD_SNAPSHOT_MAX_BYTES = 192 * 1024
 
 
 class PipelineGitHubQueries(_PipelineGitHubHost):
@@ -252,7 +252,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                         raise RuntimeError("could not fetch all PR review threads")
                     seen.add(thread_id)
                     thread_id_bytes += len(thread_id.encode("utf-8")) + 1
-                    if thread_id_bytes > REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES:
+                    if thread_id_bytes > THREAD_SNAPSHOT_MAX_BYTES:
                         raise RuntimeError("could not fetch all PR review threads")
                     thread_ids.append((thread_id, is_resolved))
                     if len(thread_ids) > 10_000:
@@ -348,7 +348,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                     )
                     + 1
                 )
-                if snapshot_bytes > REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES:
+                if snapshot_bytes > THREAD_SNAPSHOT_MAX_BYTES:
                     raise RuntimeError("complete PR review thread snapshot is too large")
                 threads.append(normalized)
             after = read_pr_identity()
@@ -360,7 +360,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                 separators=(",", ":"),
                 sort_keys=True,
             )
-            if len(canonical.encode("utf-8")) > REMEDIATION_THREAD_SNAPSHOT_MAX_BYTES:
+            if len(canonical.encode("utf-8")) > THREAD_SNAPSHOT_MAX_BYTES:
                 raise RuntimeError("complete PR review thread snapshot is too large")
             return before, canonical
 
@@ -397,17 +397,6 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                 f"failed to read issue #{issue_number} comments: {exc}"
             ) from exc
 
-    def ensure_blocked_audit(self, issue_number: int) -> None:
-        """Repair an interrupted BLOCKED explanation without touching its label."""
-        body = blocked_audit_recovery_body(self.issue_comments(issue_number))
-        if body is None:
-            return
-        self.upsert_issue_comment(
-            issue_number,
-            PLAN_REVIEW_CANONICAL_MARKER,
-            body,
-        )
-
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
         """Fetch issue JSON (``github_api.issues.gh_issue_json``)."""
         if self._repo_slug is not None:
@@ -440,28 +429,6 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                 data["bodyDigest"] = github_api.issue_body_digest(raw_body)
             return data
         return github_api.gh_issue_json(issue_number)
-
-    def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
-        """Authenticate the body editor before trusting a finalized-plan seal."""
-        if (
-            isinstance(issue_number, bool)
-            or not isinstance(issue_number, int)
-            or issue_number <= 0
-            or issue_number > 2_147_483_647
-        ):
-            raise ValueError("issue_number must be a positive integer")
-        try:
-            if self._repo_slug is None:
-                return github_api.gh_issue_body_edited_by_viewer(issue_number)
-            owner, name = self._owner_name()
-            return self._graphql(
-                github_api.issue_body_editor_query(owner, name, issue_number),
-                number=issue_number,
-            )
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"Failed to authenticate issue body editor for #{issue_number}: {exc}"
-            ) from exc
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue (``_review_utils``)."""

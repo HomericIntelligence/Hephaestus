@@ -27,7 +27,6 @@ block a PR because it uses another branch naming format.
 | 10 | Coverage gate satisfied: `--cov-fail-under=85` (configured in `pyproject.toml [tool.coverage.report].fail_under`) | Nightly CI job `unit-coverage` |
 | 11 | No new warnings introduced (pytest, deprecation, ruff) | PR reviewer |
 | 12 | Full integration tests pass | Nightly CI job `functional-tests` |
-| 13 | Shell tests pass: `just test-shell` | Nightly CI job `shell-tests` |
 | 14 | Schema validation passes (CLI inventory, YAML/Markdown structure) | CI job `schema-validation` |
 | 15 | The lockfile is current: `uv lock --check` | CI job `uv-lock-check` |
 | 16 | Secrets scan finds no leaks | CI jobs `security/secrets-scan`, gitleaks in `_required.yml` |

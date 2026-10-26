@@ -34,7 +34,6 @@ from hephaestus.automation.pipeline.work_item import (
     PreservedWorktree,
     WorkItem,
 )
-from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED
 
 from .athena_skill_jobs import AthenaSkillExecutor
 from .coordinator_dispatch import ImplementationDispatcher
@@ -165,14 +164,10 @@ class Coordinator(
                 rebase_policy_selector=partial(select_rebase_policy, config.org),
                 evidence_receipt_dir=config.evidence_receipt_dir,
                 host_verification_pyxis_image=config.host_verification_pyxis_image,
-                host_verification_pyxis_sha256=config.host_verification_pyxis_sha256,
-                host_verification_pyxis_authority=config.host_verification_pyxis_authority,
                 host_verification_pyxis_quota_root=config.host_verification_pyxis_quota_root,
                 host_capabilities=WorkerCapabilities(
                     quota_backend=select_quota_backend(
                         image=config.host_verification_pyxis_image,
-                        image_sha256=config.host_verification_pyxis_sha256,
-                        authority=config.host_verification_pyxis_authority,
                         quota_root=config.host_verification_pyxis_quota_root,
                         runtime_available=partial(
                             _pyxis_runtime_available, shutdown=self._worker_shutdown
@@ -410,8 +405,6 @@ class Coordinator(
         """Classify a direct issue through its target repository accessor."""
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
         facts = _seeding.seed_issue_from_github(issue, github)
-        if STATE_PLAN_BLOCKED in facts.labels:
-            github.ensure_blocked_audit(issue)
         entry = _seeding.seed_entry_from_facts(facts)
         stage, reason, passed = self._scope_seed_decision(
             issue, entry.stage, entry.reason, scope_stages, repo=repo

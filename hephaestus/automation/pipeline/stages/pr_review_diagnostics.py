@@ -8,10 +8,17 @@ from logging import Logger
 from typing import Protocol
 
 from ..diagnostics import redact_diagnostic_text
-from .pr_review_verification import (
-    HOST_VERIFICATION_DIAGNOSTIC_MAX,
-    _HostVerificationSpec,
-)
+
+HOST_VERIFICATION_DIAGNOSTIC_MAX = 4_000
+
+
+class _HostVerificationSpec(Protocol):
+    """The part of a fixed host check that a diagnostic names."""
+
+    descr: str
+    argv: tuple[str, ...]
+    changed_path: str | None
+
 
 _HOST_VERIFICATION_FAILURE_COMMENT_PREFIX = "<!-- hephaestus-host-verification-failure:"
 

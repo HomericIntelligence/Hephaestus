@@ -125,8 +125,6 @@ def test_completed_rebase_keeps_local_receipt_when_validation_fails(
         monkeypatch.setattr(
             pool, method, Mock(return_value=failure if kind == failed_gate else None)
         )
-    publication = Mock(side_effect=AssertionError("Failed validation must prevent publication"))
-    monkeypatch.setattr(pool, "_prepare_rebase_review_publication", publication)
     job = GitJob(
         "org/repo",
         "continue_rebase",
@@ -159,7 +157,6 @@ def test_completed_rebase_keeps_local_receipt_when_validation_fails(
         assert current_head != writer_head
         assert not result.ok and result.error == failure.error
         getattr(pool, gates[failed_gate]).assert_called_once()
-        publication.assert_not_called()
         assert manager._require_receipt(42, SourceLane.IMPLEMENTATION).revision == current_head
         assert isinstance(result.value, dict)
         current = WorkspaceBinding.from_dict(result.value["source_workspace"])

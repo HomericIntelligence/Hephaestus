@@ -918,7 +918,7 @@ def verify_capability_inventory(
     inventory: InventoryResult,
     catalog: PiPackageCatalog,
 ) -> CapabilityResult:
-    """Require every command and active tool to occur exactly once in the verified inventory."""
+    """Require every command and active tool to originate in its verified package root."""
     if not inventory.ready:
         return CapabilityResult(False, "package_inventory_mismatch", inventory.detail)
     commands = payload.get("commands")
@@ -945,11 +945,11 @@ def verify_capability_inventory(
             candidates = [entry for entry in command_entries if entry.get("name") == name]
             reported = [entry for entry in reported_command_entries if entry.get("name") == name]
             if len(candidates) != 1 or len(reported) != 1:
-                return CapabilityResult(False, "capability_provenance_mismatch", name)
+                return CapabilityResult(False, "capability_count_mismatch", name)
         for name in package.tools:
             known = [entry for entry in all_entries if entry.get("name") == name]
             if active_names.count(name) != 1 or len(known) != 1:
-                return CapabilityResult(False, "capability_provenance_mismatch", name)
+                return CapabilityResult(False, "capability_count_mismatch", name)
     return CapabilityResult(True, "ready")
 
 
@@ -1173,7 +1173,7 @@ def preflight_pi_environment(
     timeout: float = 30.0,
     trust_override: str | None = None,
 ) -> PiPreflightResult:
-    """Verify CLI, settings, package roots, and capability inventory counts in order."""
+    """Verify CLI, settings, package roots, and provenance-bound capabilities in order."""
     catalog = load_pi_package_catalog() if catalog is None else catalog
     discovered = pi_bin or (Path(found) if (found := shutil.which("pi")) else Path("pi"))
     identity = probe_pi_cli_identity(discovered, catalog, runner=runner, timeout=timeout)

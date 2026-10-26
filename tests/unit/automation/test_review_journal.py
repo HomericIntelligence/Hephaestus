@@ -12,7 +12,6 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     PlanDiscoveryResult,
     PlanDiscoveryStatus,
-    blocked_audit_recovery_body,
     current_plan_context,
     current_revision_context,
     discover_plan_from_comments,
@@ -24,7 +23,6 @@ from hephaestus.automation.review_journal import (
     render_current_review,
     top_level_marker_occurrences,
 )
-from hephaestus.automation.review_warnings import ReviewWarning
 
 
 def _owned(body: str) -> IssueComment:
@@ -264,45 +262,6 @@ def test_normalization_reports_foreign_planning_marker_as_identity_conflict() ->
     assert result.error is not None
 
 
-@pytest.mark.parametrize("body", [None, 1, {}, []])
-def test_normalization_quarantines_non_string_body(body: object) -> None:
-    """A malformed comment is quarantined with a warning, not a hard failure."""
-    warnings: list[ReviewWarning] = []
-
-    assert (
-        normalize_issue_comments(
-            [{"body": body, "user": {"login": "bot"}}],
-            viewer_login="bot",
-            warnings=warnings,
-        )
-        == []
-    )
-    assert [warning.code for warning in warnings] == ["journal_comment_quarantined"]
-    assert all(warning.message and warning.recovery for warning in warnings)
-
-
-@pytest.mark.parametrize("database_id", [True, 1.5, 0, -1])
-def test_normalization_quarantines_invalid_database_id(database_id: object) -> None:
-    """A comment without a usable identity is quarantined with a warning."""
-    warnings: list[ReviewWarning] = []
-
-    assert (
-        normalize_issue_comments(
-            [
-                {
-                    "body": "Comment",
-                    "databaseId": database_id,
-                    "user": {"login": "bot"},
-                }
-            ],
-            viewer_login="bot",
-            warnings=warnings,
-        )
-        == []
-    )
-    assert [warning.code for warning in warnings] == ["journal_comment_quarantined"]
-
-
 def test_normalization_rejects_malformed_state_changing_comment() -> None:
     """A malformed automation comment stays all-or-nothing."""
     with pytest.raises(CommentJournalReadError):
@@ -484,28 +443,3 @@ def test_history_markers_are_revision_and_kind_specific() -> None:
         revision=4,
         kind="review",
     )
-
-
-def test_blocked_audit_recovery_repairs_missing_current_explanation() -> None:
-    """A durable BLOCKED label can recover audit context without agent output."""
-    body = blocked_audit_recovery_body([_owned(render_current_plan("Plan", revision=3))])
-
-    assert body is not None
-    assert "revision: 3" in body
-    assert "interrupted audit write" in body
-    assert body.endswith("state:plan-blocked")
-
-
-def test_blocked_audit_recovery_preserves_existing_detailed_explanation() -> None:
-    """Recovery never overwrites an already valid actor-owned BLOCKED review."""
-    comments = [
-        _owned(render_current_plan("Plan", revision=3)),
-        _owned(
-            render_current_review(
-                "Waiting for the API owner to choose REST or GraphQL.\n\nstate:plan-blocked",
-                revision=3,
-            )
-        ),
-    ]
-
-    assert blocked_audit_recovery_body(comments) is None

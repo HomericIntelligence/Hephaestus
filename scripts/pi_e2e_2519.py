@@ -1387,64 +1387,6 @@ def _stable_live_issue(repo_root: Path, issue_number: int) -> dict[str, Any]:
     }
 
 
-def _stable_live_pull_request(repo_root: Path, pr_number: int) -> dict[str, Any]:
-    """Return a stabilized live PR/head/review authority snapshot."""
-    github = _github(repo_root)
-
-    def read() -> dict[str, Any]:
-        state = github.gh_pr_state(pr_number)
-        context = github.pr_review_context(pr_number)
-        labels = github.pr_has_implementation_state_label(pr_number)
-        threads = github.list_unresolved_review_threads(pr_number)
-        if (
-            not isinstance(state, dict)
-            or not isinstance(context, dict)
-            or not isinstance(labels, tuple)
-            or len(labels) != 2
-            or any(not isinstance(value, bool) for value in labels)
-            or not isinstance(threads, list)
-        ):
-            raise ValueError("live GitHub pull-request readback is incomplete")
-        thread_ids = [thread.get("id") for thread in threads if isinstance(thread, dict)]
-        if len(thread_ids) != len(threads) or any(
-            not isinstance(thread_id, str) or not thread_id for thread_id in thread_ids
-        ):
-            raise ValueError("live GitHub review-thread readback is malformed")
-        return {
-            "repository": PROJECT_REPOSITORY,
-            "number": pr_number,
-            "url": f"https://github.com/{PROJECT_REPOSITORY}/pull/{pr_number}",
-            "state": state.get("state"),
-            "head_sha": state.get("headRefOid"),
-            "base_branch": state.get("baseRefName"),
-            "closes_issue": github.find_issue_for_pr(pr_number),
-            "implementation_go": labels[0],
-            "implementation_no_go": labels[1],
-            "unresolved_thread_ids": sorted(cast(list[str], thread_ids)),
-            "native_auto_merge": state.get("autoMergeRequest") is not None,
-            "reviewed_head_sha": context.get("pr_head_sha"),
-        }
-
-    initial = read()
-    final = read()
-    if initial != final:
-        raise ValueError("live GitHub pull-request readback did not stabilize")
-    if (
-        final["state"] != "OPEN"
-        or not isinstance(final["head_sha"], str)
-        or FULL_COMMIT_SHA_RE.fullmatch(final["head_sha"]) is None
-        or final["reviewed_head_sha"] != final["head_sha"]
-        or final["base_branch"] != "main"
-        or final["closes_issue"] != ISSUE_NUMBER
-        or final["implementation_go"] is not True
-        or final["implementation_no_go"] is not False
-        or final["unresolved_thread_ids"]
-        or final["native_auto_merge"] is not False
-    ):
-        raise ValueError("live GitHub pull request is not exact-head review-complete evidence")
-    return final
-
-
 def _live_mnemosyne_head(root: Path) -> str:
     """Read the current immutable commit of the canonical Mnemosyne checkout."""
     result = subprocess.run(
@@ -1762,11 +1704,6 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
                 f"uv run python scripts/{script_name} verify --run-id <run-id> "
                 f"--criterion completion --report {DEFAULT_REPORT_PATH} "
                 f"--runbook {DEFAULT_RUNBOOK_PATH}"
-            ),
-            (
-                f"uv run python scripts/{script_name} attest-publication --run-id <run-id> "
-                "--repo HomericIntelligence/Hephaestus --ref <commit-sha> "
-                "--pr <pr-number> --verify-defects"
             ),
             "```",
             "",
@@ -2205,89 +2142,6 @@ def _captured_lifecycle_prs(run_dir: Path, manifest: dict[str, Any]) -> set[int]
     return lifecycle_prs
 
 
-def _verify_committed_publication_documents(
-    repo_root: Path, ref: str, paths: Sequence[Path]
-) -> None:
-    """Require rendered publication bytes to be blobs at the attested commit."""
-    resolved_root = repo_root.resolve()
-    for path in paths:
-        resolved = (resolved_root / path).resolve() if not path.is_absolute() else path.resolve()
-        if not resolved.is_relative_to(resolved_root) or not resolved.is_file():
-            raise ValueError("publication document is outside the repository")
-        relative = resolved.relative_to(resolved_root).as_posix()
-        committed = subprocess.run(
-            ["git", "show", f"{ref}:{relative}"],
-            cwd=resolved_root,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=DEFAULT_INVENTORY_TIMEOUT_SECONDS,
-        )
-        if committed.returncode != 0 or committed.stdout != resolved.read_text(encoding="utf-8"):
-            raise ValueError("publication document is not committed at the attested ref")
-
-
-def _attest_publication(
-    run_dir: Path,
-    *,
-    repo: str,
-    ref: str,
-    pr_number: int,
-    report_path: Path,
-    runbook_path: Path,
-    verify_defects: bool,
-) -> int:
-    manifest = _load_manifest(run_dir)
-    _verify_completion(manifest, run_dir)
-    _verify_publication(manifest, run_dir, report_path, runbook_path)
-    _verify_athena_host_receipts(manifest, run_dir)
-    if repo != PROJECT_REPOSITORY:
-        raise ValueError(f"publication repository must be {PROJECT_REPOSITORY}")
-    if FULL_COMMIT_SHA_RE.fullmatch(ref) is None:
-        raise ValueError("publication ref must be a full immutable commit SHA")
-    snapshot_heads = {
-        entry.get("head") for entry in manifest.get("snapshots", []) if isinstance(entry, dict)
-    }
-    if ref not in snapshot_heads:
-        raise ValueError("publication ref must match a recorded repository snapshot")
-    if _captured_lifecycle_prs(run_dir, manifest) != {pr_number}:
-        raise ValueError("publication pull request does not match the captured lifecycle")
-    live_pr = _stable_live_pull_request(Path(manifest["repo_root"]), pr_number)
-    if live_pr["head_sha"] != ref:
-        raise ValueError("publication ref does not match the live pull-request head")
-    _verify_committed_publication_documents(
-        Path(manifest["repo_root"]), ref, (report_path, runbook_path)
-    )
-    if verify_defects:
-        defects = cast(list[dict[str, Any]], manifest.get("defects", []))
-        seen: set[int] = set()
-        for entry in defects:
-            issue_number = entry.get("follow_up_issue")
-            if (
-                isinstance(issue_number, bool)
-                or not isinstance(issue_number, int)
-                or issue_number <= 0
-                or issue_number in seen
-            ):
-                raise ValueError("one or more defects lacks a unique follow-up issue")
-            seen.add(issue_number)
-            if entry.get("github") != _stable_live_issue(Path(manifest["repo_root"]), issue_number):
-                raise ValueError(f"follow-up issue #{issue_number} no longer matches its receipt")
-    publication = {
-        "repo": repo,
-        "ref": ref,
-        "commit_sha": ref,
-        "pull_request": live_pr,
-        "report": str(report_path),
-        "runbook": str(runbook_path),
-        "verified_defects": verify_defects,
-        "attested_at": _utc_now(),
-    }
-    _update_manifest(run_dir, {"publication": publication})
-    _write_json(run_dir / ARTIFACTS_DIR_NAME / "publication.json", publication)
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     """Build the issue-specific Pi evidence collector parser."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -2363,14 +2217,6 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH)
     verify.add_argument("--runbook", type=Path, default=DEFAULT_RUNBOOK_PATH)
 
-    attest = subparsers.add_parser("attest-publication", help="attest report/runbook publication")
-    attest.add_argument("--run-id", required=True)
-    attest.add_argument("--repo", required=True)
-    attest.add_argument("--ref", required=True)
-    attest.add_argument("--pr", type=int, required=True)
-    attest.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH)
-    attest.add_argument("--runbook", type=Path, default=DEFAULT_RUNBOOK_PATH)
-    attest.add_argument("--verify-defects", action="store_true")
     return parser
 
 
@@ -2436,16 +2282,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 criterion=args.criterion,
                 report_path=args.report,
                 runbook_path=args.runbook,
-            )
-        if args.command == "attest-publication":
-            return _attest_publication(
-                run_dir,
-                repo=args.repo,
-                ref=args.ref,
-                pr_number=args.pr,
-                report_path=args.report,
-                runbook_path=args.runbook,
-                verify_defects=args.verify_defects,
             )
         raise ValueError(f"unsupported command: {args.command}")
     except (OSError, subprocess.SubprocessError, ValueError) as exc:

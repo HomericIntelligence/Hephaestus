@@ -82,35 +82,6 @@ def test_review_pipeline_modules_are_import_order_independent(
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-@pytest.mark.parametrize(
-    "modules",
-    [
-        (
-            "hephaestus.automation.pipeline.reply_handoff",
-            "hephaestus.automation.pipeline.stages",
-        ),
-        (
-            "hephaestus.automation.pipeline.stages",
-            "hephaestus.automation.pipeline.reply_handoff",
-        ),
-    ],
-)
-def test_reply_handoff_and_stages_are_import_order_independent(
-    modules: tuple[str, ...],
-) -> None:
-    """Reply handoff and stages must load in either order with the canonical progress type."""
-    code = "import importlib\n" + "\n".join(
-        f"importlib.import_module({module!r})" for module in modules
-    )
-    code += """
-from hephaestus.automation.pipeline.github_jobs import ImplementationReplyProgress
-assert ImplementationReplyProgress.__module__ == "hephaestus.automation.pipeline.github_jobs"
-"""
-    result = _run_python(code)
-
-    assert result.returncode == 0, result.stderr + result.stdout
-
-
 def test_all_matches_expected() -> None:
     """Assert __all__ exactly matches the expected public API."""
     assert set(automation.__all__) == set(EXPECTED_PUBLIC_SYMBOLS)

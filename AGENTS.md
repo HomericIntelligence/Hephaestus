@@ -6,6 +6,29 @@ branch naming, version model), the skill catalog, and the AI-agent topology map
 used by Hephaestus and the wider HomericIntelligence ecosystem. For enabled skill
 plugins see [`.claude/settings.json`](.claude/settings.json).
 
+## Goals
+
+Hephaestus exists to get every change reviewed fully before it merges. These
+are the outcomes we want. They are goals, not gates: the agents decide how to
+reach them.
+
+- **Fully reviewed pull requests.** A pull request merges only after a review
+  has run and every review thread is answered and resolved.
+- **GitHub is the source of truth.** Read labels, review threads, check runs,
+  and merge state from GitHub. Do not keep a second record to validate them: no
+  attestation, provenance, hash, nonce, or exact-head proof.
+- **Agents handle the working tree.** A dirty worktree, a stale branch, a
+  rebase, or a merge conflict is work for the agent, not a reason for the host
+  to stop. The agent inspects what it finds, keeps its own changes, and
+  continues. Use the `$athena:realign` skill when the plan and the architecture
+  disagree.
+- **Flexible over rigid.** Prefer a warning and a recovery over a refusal.
+  Review comments are free-form text. A reviewer may add a grade and a
+  per-comment severity. The host only shows them. Never gate on them, and do
+  not add finding identities or format checks that can fail a review.
+- **Small and simple.** Handle errors at module boundaries, test the core
+  library, and delete code that guards a case no caller can reach.
+
 ## Project Overview
 
 Hephaestus is the shared utilities and tooling repository of the
@@ -429,6 +452,9 @@ repository-local source of truth for which skill plugins are enabled.
 | `athena:skill-advisor` | `<task description>` | Optional aid after consulting the installed skill catalog |
 | `athena:advise` | `<task description>` | Before starting work — search Mnemosyne for prior learnings |
 | `athena:learn` | — | After completing work — capture session learnings in Mnemosyne |
+| `athena:implement` | `<issue number>` | Implement an approved plan, handling a dirty worktree or stale branch yourself |
+| `athena:address-review` | `<PR number>` | Reply to and resolve every review thread on a PR |
+| `athena:realign` | `<plan or issue>` | When a plan conflicts with the architecture — bring the plan back into alignment |
 | `athena:myrmidon-swarm` | `<task description>` | Complex multi-step tasks requiring parallel agent coordination |
 | `athena:brainstorm` | `<idea or feature description>` | Before implementing a new feature — design before code |
 | `athena:test-driven-development` | `<feature or bugfix description>` | Before writing implementation code — RED-GREEN-REFACTOR |
@@ -504,76 +530,36 @@ use this format. Do not request a naming exception or require a branch rename.
 Keep the exact branch-identity checks that protect automation ownership and
 recovery.
 
-#### PR policy
+#### Pull-request flow
 
-The required CI gate `pr-policy` and the PR reviewer enforce:
+1. The PR body contains `Closes #<issue-number>` on its own line.
+2. Commit subjects follow Conventional Commits and carry a DCO `Signed-off-by`
+   trailer. The active ruleset requires signed commits.
+3. PR titles follow `type(scope)!: description` because the title becomes the
+   squash-merge subject.
 
-1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital
-   `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
-   `Closes:` are NOT accepted.
-2. Commit subjects MUST follow Conventional Commits.
-3. Every commit MUST carry a DCO `Signed-off-by` trailer.
+The `pr_review` stage runs `$athena:pr-review`. The reviewer posts ordinary
+GitHub review comments. The author agent runs `$athena:address-review`, which
+replies to every thread and resolves it.
 
-The active `homeric-main-baseline` ruleset requires cryptographically signed
-commits (`required_signatures`).
-
-PR titles MUST follow `type(scope)!: description` because the title becomes the
-squash-merge subject on `main`. Scope and `!` are optional; Check 2 also
-validates every branch commit subject. See the [Definition of Done](docs/DEFINITION_OF_DONE.md)
-for accepted forms and the grandfathered pre-#2157 history policy.
-
-`pr-policy` blocks PRs that fail those checks. The queue runs
-`$athena:pr-review` in its normal default profile when available. Its prose,
-grades, and decision-shaped output are audit evidence, not authorization.
-
-`state:implementation-go` is a claim about state, not about who wrote it. Write
-it only when every condition below holds, and read it back before acting on it.
-The conditions are the contract; any actor that can satisfy them is qualified.
-
-- A completed structural audit on the current head. Its review prose, grade, and
-  decision-shaped text are not the evidence. A workflow run, a status check, an
-  artifact, or a prior label never substitutes for the audit.
-- The audit records an explicit `GO` verdict. A missing or malformed verdict
-  invalidates the audit. Never infer `GO` from a grade, a summary, or warning
-  text.
-- The pull request is open and unarmed, with native auto-merge not yet enabled.
-- No unresolved review thread remains.
-- The label transition is exclusive, and a readback confirms it.
-
-Any of these failing means no `GO`. A demoted or reported finding is not a
-clean sign-off and prevents the label. A finding at `critical` or `major`
-severity publishes inline and blocks the sign-off until its thread is resolved.
-A `minor` or `nitpick` finding publishes on the review body as an advisory
-record and does not block the sign-off. Required CI/CD checks stay green as a
-separate merge gate; passing them never produces a `GO` by itself.
-
-`merge_wait` enables GitHub native auto-merge once the GO label is present. It
-does not revalidate the head, does not gate on required status evidence, and
-does not rebase first. It rebases only when the merge reports a real conflict.
-GitHub applies branch protection, the required CI/CD checks, and any merge queue;
-those remain the merge contract. This single-maintainer repository
-intentionally keeps the GitHub required-approving-review count at zero.
+When no review thread is unresolved, the reviewer applies
+`state:implementation-go`. Hephaestus then runs `gh pr merge --squash --auto`
+unless the agent already armed auto-merge. If `state:implementation-no-go` is
+applied, Hephaestus runs `gh pr merge --disable-auto`. GitHub applies branch
+protection, the required checks, and any merge queue. If the merge reports a
+real conflict, the agent rebases and continues.
 
 ```bash
-# 1. Create feature branch
 git checkout -b <issue-number>-description
-
-# 2. Make changes and commit (cryptographically signed and DCO-signed)
 git add <files>
 git commit -s -S -m "type(scope): description"
-git log --show-signature -1   # verify the signature took
-
-# 3. Push feature branch
 git push -u origin <branch-name>
-
-# 4. Create pull request
-gh pr create \
-  --title "[Type] Brief description" \
+gh pr create --title "type(scope): description" \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
-
-# 5. Do not use --admin or bypass branch protection. Queue stages do not mutate
-#    native auto-merge. merge_wait uses the server route that policy requires.
 ```
+
+Branch naming is a recommendation. Prefer `<issue-number>-<description>`, and
+never block work over a branch name.
 
 ### Commit Message Format
 
@@ -737,26 +723,17 @@ optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 Pi is never auto-selected.
 
-**Approval conditions:** `pr_review` invokes `$athena:pr-review` with its
-normal default behavior when available, otherwise uses its inline-review
-fallback. It posts inline findings and, after a clean Go-label proof, one
-ordinary public PR comment containing an informational audit summary.
+**Approval:** `pr_review` invokes `$athena:pr-review`. Its comments are
+posted as written. A pull request with no unresolved review thread gets
+`state:implementation-go`; otherwise it gets `state:implementation-no-go` and
+the author agent addresses the threads. Any actor that follows this flow, human
+or agent, may apply the label.
 
-`state:implementation-go` may be written by any actor that satisfies every
-condition listed under [PR policy](#pr-policy). There is no separate actor
-list. The queue's `pr_review` stage satisfies them in normal operation; a
-maintainer applying them by hand after their own review satisfies them too, and
-must say so on the pull request. What is never sufficient is review prose, a
-grade, a decision-shaped sentence, a CI status, an artifact, or a stale label
-from an earlier head.
+A reviewer can report that a fix must ship as its own child issue. The host
+creates that child issue and the source PR stays in `state:implementation-no-go`
+until the child merges.
 
-Once `state:implementation-go` is written and read back, `merge_wait` enables
-GitHub native auto-merge and stops. It does not revalidate the head before the
-merge and does not rebase first. It rebases only when the merge reports a real
-conflict, then lets GitHub merge. Agents must not invoke `gh pr merge`, manage
-a merge queue, or use an administrator bypass.
-
-**Error handling:** gates belong at module boundaries. Inside a helper, raise
+**Error handling:** handle errors at module boundaries. Inside a helper, raise
 plainly instead of catching and guarding. A dirty worktree is data, not a
 fault: the agent classifies what it finds, stages only its own files, and
 continues. Do not add a refusal for a dirty tree. Do not add a provenance,
@@ -767,62 +744,13 @@ module under `hephaestus/`. Do not add tests for documentation text, prompt
 strings, repository configuration, exact message wording, or impossible
 states. Cover the real error cases a caller can reach.
 
-**These approval conditions are unchanged.** The informational validation
-described below changes only how the host shows one finding. It does not relax
-any condition. The following still hold:
-
-- The plan-review `GO` verdict and the implementation-review `GO` verdict stay
-  required. A missing or malformed verdict invalidates the audit before any
-  label write. Never infer a verdict from a grade, a summary, or warning text.
-- Every exact-head proof, the retry budgets, and the bounded per-round budgets
-  stay in force. An expired budget cannot be renewed.
-- Prompt fencing for untrusted GitHub content stays mandatory, and the
-  transport size caps on every published body stay in force.
-
-A reviewer can report a required scope expansion in its structural audit. The
-host creates one deterministic child issue and keeps the source PR in the
-exclusive implementation-NO-GO state. The host reconciles that child before a
-later review checkout. An open child parks the source PR without review-budget
-cost. A closed child without merged implementation needs operator action. A
-merged child that is absent from the source branch requires a manual rebase.
-The source PR then needs a fresh broad review. No agent receives the expansion as source-branch implementation
-work. In a mixed audit, only a validated scope retraction can go to the writer
-before the source PR parks.
-
-**Review validation is informational.** Validation of one finding never
-invalidates the surrounding review. The host keeps every usable finding,
-quarantines the malformed ones, and reports each one.
-
-- A finding whose anchor is not in the reviewed immutable diff is not discarded
-  and does not fail publication. The host demotes it from the inline surface and
-  renders it in the visible review body under a warning marker, with its
-  location, its finding ID, its text, and a recovery instruction. GitHub renders
-  that body as an unanchored general comment, so the feedback stays on the pull
-  request.
-- A malformed finding is reported, not skipped. The host keeps the other
-  findings, emits a warning for the malformed one, and carries its content as
-  bounded text.
-- Every warning carries three parts: a stable machine-readable code, a short
-  message, and a recovery instruction that states the operator action. A warning
-  without a recovery instruction is not a valid warning.
-- The reviewer never invents an anchor it cannot justify, and it still prefers a
-  changed line in the diff.
-- A demoted or reported finding is not a clean sign-off. It prevents
-  `state:implementation-go` and routes the item through the ordinary non-GO
-  review path. It does not raise and it does not fail open.
-
-The host no longer runs a second reviewer turn to repair an invalid anchor. A
-durable item that still holds the wait state of that removed review round
-reroutes to a fresh review step instead of failing closed on a state the host
-no longer owns.
-
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
 | repo | `hephaestus.automation.pipeline.stages.repo` | Clone/discover, classify issues/PRs, and seed entry queues |
 | planning | `hephaestus.automation.pipeline.stages.planning` | Advise and produce an implementation plan |
 | plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | PR-writer worktree, rebase, implementation, tests, commit/push, and PR creation |
-| pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Scope-dependency reconciliation, detached read-only review, informational finding validation, one batched inline review, and implementation labels |
+| pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Detached read-only review with an informational grade and per-comment severity, one batched inline review, and implementation labels from the open threads |
 | merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Enables native auto-merge after GO approval, waits for the merge, and emits post-merge learning intent |
 | learning | `hephaestus.automation.pipeline.stages.learning` | Claims durable intents and submits host-owned learning work |
 | finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and auxiliary worktree cleanup/preservation |
@@ -853,11 +781,9 @@ through implementation, review, and merge. Source jobs use an explicit
 workspace binding. The worker checks source ownership under the workspace
 lease before execution. One deadline covers lock waits, checks, and execution.
 
-Current journals preserve plan pointers, publication repair, learning claims,
-issue-wave checkpoints, source ownership, and reply recovery. A recovered GO
-publication receipt cannot grant current-process review proof. On restart,
-review must obtain fresh source and review evidence before merge. Reply
-handoffs support armed format 2 and remediation format 3.
+Current journals preserve plan pointers, learning claims, issue-wave
+checkpoints, and source ownership. On restart, the coordinator reads GitHub for
+the current labels and review threads and continues from there.
 
 Stop old coordinators before cutover or rollback. Preserve uncertain effects,
 local commits, worktrees, and current journals. Do not run old and new owners
@@ -943,9 +869,9 @@ Hephaestus's shared tooling. Those principles, applied to agent design, are:
   an explicit `--allowedTools` scope (see the permission-policy table below),
   runs in a scoped worktree, and defers irreversible actions to explicit
   repository policy gates.
-- **CI/CD-gated merges.** Merge eligibility is enforced by branch protection
-  and required CI/CD checks, especially the `pr-policy` gate. Review prose and
-  optional review signals are audit evidence, not merge authorization.
+- **Reviewed merges.** Every pull request is reviewed and its threads are
+  resolved before it merges. GitHub branch protection and the required checks
+  stay the merge contract.
 
 For the full, non-agent-specific statement of these principles see
 [Key Development Principles](#key-development-principles).
@@ -988,8 +914,6 @@ This prevents a hostile issue body from forging a verdict line or injecting
 instructions that bypass the PR review loop.
 `hephaestus/prompts/fencing.py` holds the single definition of the fence.
 `shared/untrusted_notice.j2` in the packaged catalog supplies the notice.
-`tests/unit/prompts/test_writing_standard.py` renders the fenced templates and
-guards the packaged prompt contract.
 
 ## Agent safety checkpoints
 

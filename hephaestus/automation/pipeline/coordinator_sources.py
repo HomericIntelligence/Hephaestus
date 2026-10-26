@@ -154,7 +154,6 @@ class SourceCoordinator(_CoordinatorHost):
                         new_item.payload[issue_waves_mod.WAVE_NON_CODE_INTENT_PAYLOAD] = {
                             "reason": entry.reason,
                             "extra_labels": list(entry.non_code_labels),
-                            "evidence_digest": entry.non_code_evidence_digest,
                             "repository_revision": entry.non_code_repository_revision,
                             "explanation": entry.non_code_explanation,
                             "retired": entry.non_code_retired,
@@ -455,7 +454,6 @@ class SourceCoordinator(_CoordinatorHost):
                     item.payload[issue_waves_mod.WAVE_NON_CODE_INTENT_PAYLOAD] = {
                         "reason": entry.reason,
                         "extra_labels": list(entry.non_code_labels),
-                        "evidence_digest": entry.non_code_evidence_digest,
                         "repository_revision": entry.non_code_repository_revision,
                         "explanation": entry.non_code_explanation,
                         "retired": entry.non_code_retired,
@@ -689,21 +687,10 @@ class SourceCoordinator(_CoordinatorHost):
                 passed=False,
             )
         has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
-        pending_audit = _seeding.read_pending_implementation_go_audit(github, pr)
-        finding_journal = _seeding.read_pending_review_finding_journal(github, pr)
-        rebase_record = _seeding.read_review_rebase_record(github, pr)
-        if rebase_record is not None and rebase_record.issue_number != issue_number:
-            raise _seeding.IssueClassificationError("rebase review issue does not match")
-        if pending_audit is not None or has_go or rebase_record is not None:
-            stage_name = _seeding.pending_review_entry_stage(pending_audit, rebase_record)
-            if pending_audit is not None:
-                reason = f"PR #{pr} has a pending implementation-go audit"
-            elif rebase_record is not None:
-                reason = f"PR #{pr} retained rebase requires host verification"
-            else:
-                reason = f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}"
+        if has_go:
+            reason = f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}"
             stage, reason, passed = self._scope_seed_decision(
-                scope_identifier, stage_name, reason, scope_stages, repo=repo
+                scope_identifier, ct.StageName.MERGE_WAIT, reason, scope_stages, repo=repo
             )
             return _seeding.SeedEntry(
                 kind="pr",
@@ -713,10 +700,6 @@ class SourceCoordinator(_CoordinatorHost):
                 pr_number=pr,
                 issue_number=issue_number,
                 passed=passed,
-                pending_implementation_go_audit=pending_audit,
-                pending_review_finding_journal=finding_journal,
-                pending_review_rebase_record=rebase_record,
-                pending_implementation_go_label_confirmed=has_go,
             )
         else:
             issue_facts: _seeding.IssueFacts | None
@@ -756,7 +739,6 @@ class SourceCoordinator(_CoordinatorHost):
                 issue_body=issue_facts.body,
                 pr_description=review_context["pr_description"],
                 passed=passed,
-                pending_review_finding_journal=finding_journal,
             )
 
     @staticmethod
@@ -788,34 +770,6 @@ class SourceCoordinator(_CoordinatorHost):
             item.payload["issue_title"] = entry.issue_title
             item.payload["issue_body"] = entry.issue_body
             item.payload["pr_description"] = entry.pr_description
-            if entry.pending_implementation_go_audit is not None:
-                item.payload["pending_implementation_go_audit"] = (
-                    entry.pending_implementation_go_audit.audit
-                )
-                item.payload["pending_implementation_go_audit_head"] = (
-                    entry.pending_implementation_go_audit.head_sha
-                )
-                item.payload["pending_implementation_go_audit_findings"] = [
-                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
-                ]
-                item.payload["pending_implementation_go_audit_compacted_outcomes"] = dict(
-                    entry.pending_implementation_go_audit.compacted_outcomes
-                )
-                item.payload["review_finding_records"] = [
-                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
-                ]
-                item.payload["review_finding_compacted_outcomes"] = dict(
-                    entry.pending_implementation_go_audit.compacted_outcomes
-                )
-                item.payload["carried_review_finding_records"] = [
-                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
-                ]
-                item.payload["carried_review_finding_compacted_outcomes"] = dict(
-                    entry.pending_implementation_go_audit.compacted_outcomes
-                )
-                item.payload["pending_implementation_go_label_confirmed"] = (
-                    entry.pending_implementation_go_label_confirmed
-                )
         else:
             item = ct.WorkItem(
                 repo=default_repo,
@@ -832,52 +786,6 @@ class SourceCoordinator(_CoordinatorHost):
             # repository root.
             if entry.stage is ct.StageName.PR_REVIEW and entry.pr_number is not None:
                 item.payload["existing_pr"] = True
-            if entry.pending_implementation_go_audit is not None:
-                item.payload["pending_implementation_go_audit"] = (
-                    entry.pending_implementation_go_audit.audit
-                )
-                item.payload["pending_implementation_go_audit_head"] = (
-                    entry.pending_implementation_go_audit.head_sha
-                )
-                item.payload["pending_implementation_go_audit_findings"] = [
-                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
-                ]
-                item.payload["pending_implementation_go_audit_compacted_outcomes"] = dict(
-                    entry.pending_implementation_go_audit.compacted_outcomes
-                )
-                item.payload["review_finding_records"] = [
-                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
-                ]
-                item.payload["review_finding_compacted_outcomes"] = dict(
-                    entry.pending_implementation_go_audit.compacted_outcomes
-                )
-                item.payload["carried_review_finding_records"] = [
-                    dict(record) for record in entry.pending_implementation_go_audit.finding_records
-                ]
-                item.payload["carried_review_finding_compacted_outcomes"] = dict(
-                    entry.pending_implementation_go_audit.compacted_outcomes
-                )
-                item.payload["pending_implementation_go_label_confirmed"] = (
-                    entry.pending_implementation_go_label_confirmed
-                )
-        if entry.pending_review_rebase_record is not None:
-            item.payload["pending_review_rebase_record"] = entry.pending_review_rebase_record
-        if entry.pending_review_finding_journal is not None:
-            item.payload["carried_review_finding_records"] = [
-                dict(record) for record in entry.pending_review_finding_journal.finding_records
-            ]
-            item.payload["carried_review_finding_compacted_outcomes"] = dict(
-                entry.pending_review_finding_journal.compacted_outcomes
-            )
-            item.payload["review_finding_records"] = [
-                dict(record) for record in entry.pending_review_finding_journal.finding_records
-            ]
-            item.payload["review_finding_compacted_outcomes"] = dict(
-                entry.pending_review_finding_journal.compacted_outcomes
-            )
-            item.payload["review_finding_journal_head"] = (
-                entry.pending_review_finding_journal.head_sha
-            )
         item.state = "ENTER"
         if item.issue is not None:
             item.payload["dependencies"] = parse_issue_dependencies(entry.issue_body)

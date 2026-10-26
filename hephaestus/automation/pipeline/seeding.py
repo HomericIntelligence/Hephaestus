@@ -11,8 +11,7 @@ Entry routing (the binding contract is the classification table in
 ``docs/architecture.md`` §7 "Seeding and restart reconstruction"):
 
 - ``state:skip`` → excluded (stage ``None``, logged)
-- ``state:implementation-blocked`` → excluded until a human resolves the
-  implementation hold
+- ``state:blocked`` → excluded until the external hold is resolved
 - Closed issue + merged PR carrying an exact ``Closes #N`` line → finished
   (pass, idempotent)
 - Open PR without an exclusive issue-level ``state:plan-go`` → planning
@@ -20,8 +19,6 @@ Entry routing (the binding contract is the classification table in
 - Any other open PR with issue plan-GO → pr_review
 - No PR, at-or-past ``state:plan-go`` → implementation
 - No PR, ``state:plan-no-go`` → planning (amend path)
-- No PR, ``state:plan-blocked`` → excluded until an external operator resolves
-  the block and replaces the label with exactly one eligible plan state
 - ``state:needs-plan`` / no state label → planning
 
 Tracker labels and title inference are candidates, not skip authority. Seeding
@@ -36,28 +33,18 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Literal
 
-from hephaestus.automation.implementation_go_audit_receipt import (
-    PendingImplementationGoAudit,
-    PendingReviewFindingJournal,
-)
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
-from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 from hephaestus.automation.requirements_recovery import (
     has_contaminated_issue_body,
+    has_finalized_plan_candidate,
     is_semantic_disposition_candidate,
-    verified_finalized_plan,
 )
-from hephaestus.automation.review_audit import is_clean_go_review
-from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.state_labels import (
-    ATHENA_FINALIZED_PLAN_LABEL,
     STATE_BLOCKED,
-    STATE_IMPLEMENTATION_BLOCKED,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
-    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
@@ -84,76 +71,9 @@ class IssueClassificationError(ValueError):
     """A permanent issue snapshot or state classification failure."""
 
 
-def read_pending_implementation_go_audit(
-    github: Any, pr_number: int
-) -> PendingImplementationGoAudit | None:
-    """Read and validate the pending audit receipt from the repository adapter."""
-    receipt = github.pending_implementation_go_audit(pr_number)
-    if receipt is not None and not isinstance(receipt, PendingImplementationGoAudit):
-        raise IssueClassificationError("pending implementation-go audit receipt has invalid type")
-    return receipt
-
-
-def read_pending_review_finding_journal(
-    github: Any, pr_number: int
-) -> PendingReviewFindingJournal | None:
-    """Read and validate the actor-owned finding journal."""
-    reader = getattr(github, "pending_review_finding_journal", None)
-    if reader is None:
-        return None
-    try:
-        journal = reader(pr_number)
-    except (ValueError, RuntimeError) as error:
-        raise IssueClassificationError(f"review finding recovery blocked: {error}") from error
-    if journal is not None and (
-        not isinstance(journal, PendingReviewFindingJournal) or journal.pr_number != pr_number
-    ):
-        raise IssueClassificationError("review finding journal is invalid")
-    return journal
-
-
-def read_review_rebase_record(github: Any, pr_number: int) -> RebaseReviewRecord | None:
-    """Read retained facts without accepting a serialized process proof."""
-    try:
-        record = github.read_review_rebase_record(pr_number)
-    except CommentJournalReadError:
-        raise
-    except (ValueError, RuntimeError) as error:
-        raise IssueClassificationError(f"rebase review recovery blocked: {error}") from error
-    if record is not None and (
-        not isinstance(record, RebaseReviewRecord)
-        or record.pr_number != pr_number
-        or record.state != "active"
-    ):
-        raise IssueClassificationError("rebase review record is invalid")
-    return record
-
-
-def pending_review_supersedes_rebase(
-    audit: PendingImplementationGoAudit | None, record: RebaseReviewRecord | None
-) -> bool:
-    """Resume fresh clean GO publication before retiring old rebase facts."""
-    return (
-        audit is not None
-        and record is not None
-        and audit.pr_number == record.pr_number
-        and audit.head_sha != record.reviewed_head_sha
-        and is_clean_go_review(audit.audit)
-    )
-
-
-def pending_review_entry_stage(
-    audit: PendingImplementationGoAudit | None, record: RebaseReviewRecord | None
-) -> StageName:
-    """Select audit publication or host verification for a pending review."""
-    if audit is not None and (record is None or pending_review_supersedes_rebase(audit, record)):
-        return StageName.PR_REVIEW
-    return StageName.MERGE_WAIT
-
-
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
 #: issue is EXCLUDED from the pipeline (for example, ``state:skip`` or
-#: ``state:implementation-blocked``) — exclusion is NOT completion, so it is
+#: ``state:blocked``) — exclusion is NOT completion, so it is
 #: deliberately distinct from ``StageName.FINISHED``.
 Classification = tuple[StageName | None, str]
 
@@ -200,10 +120,6 @@ class IssueFacts:
     issue_is_closed: bool = False
     pr_has_implementation_go: bool = False
     pr_has_implementation_no_go: bool = False
-    pending_implementation_go_audit: PendingImplementationGoAudit | None = None
-    pending_review_finding_journal: PendingReviewFindingJournal | None = None
-    pending_implementation_go_label_confirmed: bool = False
-    pending_review_rebase_record: RebaseReviewRecord | None = None
     body: str = ""
     authority_sanitized: bool = False
 
@@ -231,7 +147,6 @@ class SeedEntry:
             as non-code and therefore needs no merge receipt.
         non_code_labels: Supplemental labels required by a pending reviewed
             non-code disposition; ``state:skip`` is implicit.
-        non_code_evidence_digest: Digest binding a pending non-code disposition
             to its independently reviewed issue and repository evidence.
         non_code_repository_revision: Exact repository revision included in
             the pending non-code evidence binding.
@@ -252,13 +167,8 @@ class SeedEntry:
     issue_body: str = ""
     pr_description: str = ""
     passed: bool = True
-    pending_implementation_go_audit: PendingImplementationGoAudit | None = None
-    pending_review_finding_journal: PendingReviewFindingJournal | None = None
-    pending_implementation_go_label_confirmed: bool = False
-    pending_review_rebase_record: RebaseReviewRecord | None = None
     non_code: bool = False
     non_code_labels: tuple[str, ...] = ()
-    non_code_evidence_digest: str = ""
     non_code_repository_revision: str = ""
     non_code_explanation: str = ""
     non_code_retired: bool = False
@@ -346,15 +256,8 @@ def _requirements_recovery_reason(
         return f"#{facts.number} requires unsanitized authority authentication"
     issue_body = facts.body if isinstance(facts.body, str) else ""
     issue_title = facts.title if isinstance(facts.title, str) else ""
-    finalized = verified_finalized_plan(issue_body)
-    has_finalized_evidence = ATHENA_FINALIZED_PLAN_LABEL in facts.labels
-    if finalized is not None:
-        # Seeding cannot authenticate the latest issue-body editor. Always
-        # enter planning's no-model verification fast path, even after an
-        # earlier observation added the metadata label.
-        return f"#{facts.number} requires finalized-plan authentication"
-    if finalized is None and has_finalized_evidence:
-        return f"#{facts.number} finalized planning epoch changed"
+    if has_finalized_plan_candidate(issue_body):
+        return f"#{facts.number} carries a finalized plan"
     if has_contaminated_issue_body(issue_body):
         return f"#{facts.number} requires autonomous requirements recovery"
     if facts.is_epic or is_semantic_disposition_candidate(issue_title, issue_body):
@@ -366,12 +269,8 @@ def _issue_exclusion_reason(facts: IssueFacts) -> str | None:
     """Return an operator/external exclusion reason before state routing."""
     if STATE_SKIP in facts.labels:
         return f"#{facts.number} tagged {STATE_SKIP}"
-    if STATE_PLAN_BLOCKED in facts.labels and verified_finalized_plan(facts.body) is None:
-        return f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
     if STATE_BLOCKED in facts.labels:
         return f"#{facts.number} tagged {STATE_BLOCKED} awaiting external intervention"
-    if STATE_IMPLEMENTATION_BLOCKED in facts.labels:
-        return f"#{facts.number} tagged {STATE_IMPLEMENTATION_BLOCKED} awaiting human direction"
     return None
 
 
@@ -387,14 +286,6 @@ def _classify_open_pr(facts: IssueFacts, state_label: str | None) -> Classificat
     # unarmed PR before returning to review; a matching current-process
     # proof attempts one ordinary conditional merge. No queue stage
     # creates, disables, adopts, or polls automatic merge.
-    if pending_review_supersedes_rebase(
-        facts.pending_implementation_go_audit, facts.pending_review_rebase_record
-    ):
-        return StageName.PR_REVIEW, f"#{facts.number} fresh review supersedes rebase recovery"
-    if facts.pending_review_rebase_record is not None:
-        return StageName.MERGE_WAIT, f"#{facts.number} retained rebase requires host verification"
-    if facts.pending_implementation_go_audit is not None:
-        return StageName.PR_REVIEW, f"#{facts.number} pending implementation-go audit"
     if facts.pr_has_implementation_go:
         return (
             StageName.MERGE_WAIT,
@@ -410,7 +301,7 @@ def _classify_open_pr(facts: IssueFacts, state_label: str | None) -> Classificat
 def classify_issue(facts: IssueFacts) -> Classification:
     """Classify an issue into a single entry stage based on GitHub state.
 
-    Exclusion (``state:skip`` or ``state:implementation-blocked``) is distinct
+    Exclusion (``state:skip`` or ``state:blocked``) is distinct
     from completion: excluded issues return ``stage=None`` (and are logged),
     while genuinely finished work (merged PR) returns
     :attr:`StageName.FINISHED`.
@@ -429,11 +320,11 @@ def classify_issue(facts: IssueFacts) -> Classification:
         LOG.info("issue excluded: %s", reason)
         return None, reason
 
-    if verified_finalized_plan(facts.body) is not None:
-        # A self-verifying finalized body must reach planning's authenticated
-        # no-model path even when a stale sibling label survived an earlier
-        # interrupted normalization. Planning owns the atomic label repair.
-        return StageName.PLANNING, f"#{facts.number} requires finalized-plan authentication"
+    if has_finalized_plan_candidate(facts.body):
+        # A finalized body reaches planning's no-model path even when a stale
+        # sibling label survived an earlier interrupted normalization.
+        # Planning owns the atomic label repair.
+        return StageName.PLANNING, f"#{facts.number} carries a finalized plan"
 
     active_states = sorted(label for label in facts.labels if label in _ISSUE_PLAN_STATE_LABELS)
     if len(active_states) > 1:
@@ -524,22 +415,12 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     pr_is_merged = False
     pr_has_implementation_go = False
     pr_has_implementation_no_go = False
-    pending_implementation_go_audit = None
-    pending_review_finding_journal = None
-    pending_review_rebase_record = None
     pr_number: int | None = github.find_pr_for_issue(issue_number)
     if pr_number is not None:
         pr_is_open = True
         pr_has_implementation_go, pr_has_implementation_no_go = (
             github.pr_has_implementation_state_label(pr_number)
         )
-        pending_implementation_go_audit = read_pending_implementation_go_audit(github, pr_number)
-        pending_review_finding_journal = read_pending_review_finding_journal(github, pr_number)
-        pending_review_rebase_record = read_review_rebase_record(github, pr_number)
-        if pending_review_rebase_record is not None and (
-            pending_review_rebase_record.issue_number != issue_number
-        ):
-            raise IssueClassificationError("rebase review issue does not match")
     else:
         pr_number = github.find_merged_pr_for_issue(issue_number)
         if pr_number is not None:
@@ -557,9 +438,6 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         issue_is_closed=issue_is_closed,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
-        pending_implementation_go_audit=pending_implementation_go_audit,
-        pending_review_finding_journal=pending_review_finding_journal,
-        pending_review_rebase_record=pending_review_rebase_record,
         authority_sanitized=issue_data.get("authoritySanitized") is True,
     )
 
@@ -575,12 +453,6 @@ def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
         pr_number=facts.pr_number if facts.pr_is_open else None,
         issue_title=facts.title,
         issue_body=facts.body,
-        pending_implementation_go_audit=facts.pending_implementation_go_audit,
-        pending_review_finding_journal=facts.pending_review_finding_journal,
-        pending_review_rebase_record=facts.pending_review_rebase_record,
-        pending_implementation_go_label_confirmed=bool(
-            facts.pending_implementation_go_audit is not None and facts.pr_has_implementation_go
-        ),
     )
 
 

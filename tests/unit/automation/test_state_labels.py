@@ -13,10 +13,8 @@ from hephaestus.automation import state_labels
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
-    ATHENA_FINALIZED_PLAN_LABEL,
     EPIC_LABELS,
     STATE_BLOCKED,
-    STATE_IMPLEMENTATION_BLOCKED,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_LABEL_SPECS,
@@ -40,21 +38,11 @@ from hephaestus.automation.state_labels import (
 class TestLabelVocabulary:
     """The three state-label names + the ALL tuple are stable identifiers."""
 
-    def test_four_distinct_state_labels(self) -> None:
-        assert (
-            len(
-                {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO, state_labels.STATE_PLAN_BLOCKED}
-            )
-            == 4
-        )
+    def test_three_distinct_state_labels(self) -> None:
+        assert len({STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}) == 3
 
     def test_all_state_labels_covers_each(self) -> None:
-        assert set(ALL_STATE_LABELS) == {
-            STATE_NEEDS_PLAN,
-            STATE_PLAN_NO_GO,
-            STATE_PLAN_GO,
-            state_labels.STATE_PLAN_BLOCKED,
-        }
+        assert set(ALL_STATE_LABELS) == {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}
 
     def test_state_prefix(self) -> None:
         """Every state label uses the ``state:`` family prefix."""
@@ -71,10 +59,7 @@ class TestLabelVocabulary:
         assert set(ALL_STATE_LABELS) <= set(STATE_LABEL_SPECS.keys())
         assert set(ALL_IMPLEMENTATION_STATE_LABELS) <= set(STATE_LABEL_SPECS.keys())
         assert STATE_SKIP in STATE_LABEL_SPECS
-        assert STATE_IMPLEMENTATION_BLOCKED in STATE_LABEL_SPECS
-        assert getattr(state_labels, "STATE_IMPLEMENTATION_BLOCKED", None) == (
-            STATE_IMPLEMENTATION_BLOCKED
-        )
+        assert STATE_BLOCKED in STATE_LABEL_SPECS
         for spec in STATE_LABEL_SPECS.values():
             assert "color" in spec
             assert "description" in spec
@@ -83,26 +68,14 @@ class TestLabelVocabulary:
             assert len(spec["color"]) == 6
             int(spec["color"], 16)
 
-    def test_provisioning_excludes_removed_issue_ownership_label(self) -> None:
-        """State provisioning must not restore the removed ownership guard."""
-        assert "state:in-progress" not in STATE_LABEL_SPECS
+    def test_provisioning_excludes_removed_labels(self) -> None:
+        """State provisioning must not restore a label automation no longer uses."""
+        assert not set(state_labels.REMOVED_LABELS) & set(STATE_LABEL_SPECS)
 
     def test_skip_label_is_independent_of_plan_state(self) -> None:
         """``state:skip`` is an override, not a plan-state label."""
         assert STATE_SKIP not in ALL_STATE_LABELS
         assert STATE_SKIP.startswith("state:")
-
-    def test_implementation_blocked_is_independent_of_plan_state(self) -> None:
-        """The human implementation latch preserves the approved plan state."""
-        assert STATE_IMPLEMENTATION_BLOCKED not in ALL_STATE_LABELS
-        assert STATE_IMPLEMENTATION_BLOCKED.startswith("state:")
-        assert STATE_IMPLEMENTATION_BLOCKED != STATE_BLOCKED
-
-    def test_finalized_plan_label_is_evidence_not_a_third_plan_state(self) -> None:
-        """Finalization survives restarts without expanding the state machine."""
-        assert ATHENA_FINALIZED_PLAN_LABEL in STATE_LABEL_SPECS
-        assert ATHENA_FINALIZED_PLAN_LABEL not in ALL_STATE_LABELS
-        assert not ATHENA_FINALIZED_PLAN_LABEL.startswith("state:")
 
     def test_implementation_labels_are_independent_of_plan_state(self) -> None:
         """Implementation-review state is PR-scoped, not part of issue plan state."""
@@ -208,9 +181,6 @@ class TestNeedsPlan:
     def test_plan_no_go_does_not_need_plan(self) -> None:
         """A NOGO issue has a plan; it's just being re-iterated. Not needs-plan."""
         assert needs_plan([STATE_PLAN_NO_GO]) is False
-
-    def test_plan_blocked_does_not_need_plan(self) -> None:
-        assert needs_plan([state_labels.STATE_PLAN_BLOCKED]) is False
 
     @pytest.mark.parametrize(
         "labels",

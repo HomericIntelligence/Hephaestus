@@ -79,7 +79,6 @@ class _AutoMergeGitHub(FakeStageGitHub):
         self._result = result if result is not None else AutoMergeEnableResult(enabled=True)
         self._raises = raises
         self.enable_calls: list[int] = []
-        self.merge_calls: list[int] = []
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Return each scripted state once, then repeat the last one."""
@@ -93,11 +92,6 @@ class _AutoMergeGitHub(FakeStageGitHub):
         if self._raises:
             raise RuntimeError("transport exploded")
         return self._result
-
-    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str, **kwargs: Any) -> Any:
-        """Record that the removed conditional merge was never called."""
-        self.merge_calls.append(pr_number)
-        raise AssertionError("merge_pr_if_head must not be called")
 
 
 def _run_cycle(github: _AutoMergeGitHub, job: GitHubJob) -> Any:
@@ -115,7 +109,6 @@ def _job(repo_root: Any) -> GitHubJob:
         request=RunMergeWaitCycleRequest(
             issue_number=1,
             pr_number=7,
-            reviewed_head_sha="a" * 40,
             deadline_s=60.0,
             cancellation=__import__("threading").Event(),
         ),
@@ -129,22 +122,8 @@ def test_open_go_labelled_pr_enables_auto_merge(tmp_path: Any) -> None:
     receipt = _run_cycle(github, _job(tmp_path))
 
     assert github.enable_calls == [7]
-    assert github.merge_calls == []
     assert receipt.outcome == "auto_merge_enabled"
     assert receipt.attempted is True
-
-
-def test_auto_merge_is_enabled_even_when_required_checks_are_not_green(
-    tmp_path: Any,
-) -> None:
-    """Required status evidence is GitHub's gate, not this stage's."""
-    github = _AutoMergeGitHub(result=AutoMergeEnableResult(enabled=True))
-    github.required_checks_pass_for_head = lambda *a, **k: False  # type: ignore[method-assign]
-
-    receipt = _run_cycle(github, _job(tmp_path))
-
-    assert receipt.outcome == "auto_merge_enabled"
-    assert github.enable_calls == [7]
 
 
 def test_a_conflicting_pull_request_still_enables_auto_merge(tmp_path: Any) -> None:
@@ -280,7 +259,6 @@ def test_stage_parks_after_a_successful_enablement(make_ctx: Any, make_work_item
     request = RunMergeWaitCycleRequest(
         issue_number=1,
         pr_number=7,
-        reviewed_head_sha="a" * 40,
         deadline_s=60.0,
         cancellation=threading.Event(),
     )
@@ -306,7 +284,6 @@ def test_stage_finishes_once_github_reports_merged(make_ctx: Any, make_work_item
     request = RunMergeWaitCycleRequest(
         issue_number=1,
         pr_number=7,
-        reviewed_head_sha="a" * 40,
         deadline_s=60.0,
         cancellation=threading.Event(),
     )
@@ -334,7 +311,6 @@ def test_an_armed_auto_merge_is_observed_and_not_enabled_again(
     request = RunMergeWaitCycleRequest(
         issue_number=1,
         pr_number=7,
-        reviewed_head_sha="a" * 40,
         deadline_s=60.0,
         cancellation=threading.Event(),
     )
@@ -370,7 +346,6 @@ def test_an_armed_auto_merge_is_not_enabled_again(tmp_path: Any) -> None:
     request = RunMergeWaitCycleRequest(
         issue_number=source.issue_number,
         pr_number=source.pr_number,
-        reviewed_head_sha=source.reviewed_head_sha,
         deadline_s=source.deadline_s,
         cancellation=source.cancellation,
         auto_merge_armed=True,
@@ -378,6 +353,6 @@ def test_an_armed_auto_merge_is_not_enabled_again(tmp_path: Any) -> None:
 
     receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(request, github)
 
-    assert receipt.outcome == "auto_merge_already_armed"
+    assert receipt.outcome == "auto_merge_enabled"
     assert receipt.attempted is False
     assert github.enable_calls == []

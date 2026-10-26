@@ -15,19 +15,6 @@ from hephaestus.prompts import PromptCatalog
 from ._review_rubric import get_pr_review_rubric
 from ._shared import FencedContent, fence_content, get_terse_output_directive
 
-#: Severities that BLOCK a GO when their automation thread is unresolved (#1856).
-#: ``minor``/``nitpick`` are advisory — a clean audit must not
-#: deadlock to state:skip over a nit it declined to block on. An unmarked or
-#: unknown severity is treated as BLOCKING (fail-safe), which reproduces the
-#: pre-#1856 all-blocking behavior when severity is not yet seeded.
-BLOCKING_SEVERITIES: frozenset[str] = frozenset({"critical", "major"})
-VALID_SEVERITIES: frozenset[str] = frozenset({"critical", "major", "minor", "nitpick"})
-
-#: HTML-comment marker prepended to each posted review-thread body so the GO
-#: gate can recover the reviewer's severity after the GitHub round-trip.
-#: Anchored as a full marker line — never matched by a free substring scan.
-SEVERITY_MARKER_PREFIX = "<!-- hephaestus-severity:"
-
 #: Maximum size of a fully rendered direct PR-review prompt. The provider
 #: request also contains agent and repository instructions. Keep sufficient
 #: space below the provider's 1 MiB request limit.
@@ -388,10 +375,7 @@ def _render_pr_review_analysis_prompt(
             if reviewer_provider == "opencode"
             else get_terse_output_directive(
                 terminal_output_contract=(
-                    "End with exactly one fenced structural review-audit JSON object "
-                    "that includes a typed verdict field (`GO`, `NOGO`, or `BLOCKED`); "
-                    "missing or malformed verdicts are invalid. Do not emit a Verdict "
-                    "line or any other textual decision token."
+                    "End with one fenced JSON object that has a `verdict` of `GO` or `NOGO`."
                 )
             )
         ),

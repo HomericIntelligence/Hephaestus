@@ -36,13 +36,9 @@ def _skill_reference(skills_dir: Path | None = None) -> str:
 def build_review_rubric(skills_dir: Path | None = None) -> str:
     """Render the review rubric with its runtime skill reference."""
     skill_ref = _skill_reference(skills_dir)
-    if skill_ref:
-        skill_line = (
-            "`$athena:pr-review` skill (rubric summarized below — refer to the full skill at\n"
-            f"`{skill_ref}`\nif available):"
-        )
-    else:
-        skill_line = "`$athena:pr-review` skill (rubric summarized below):"
+    skill_line = (
+        f"`$athena:pr-review` (full skill at `{skill_ref}`)" if skill_ref else "`$athena:pr-review`"
+    )
     return PromptCatalog.current().render("review_rubrics/reviewer.j2", skill_line=skill_line)
 
 

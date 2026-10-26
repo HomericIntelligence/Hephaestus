@@ -1,22 +1,17 @@
 {{ untrusted_notice }}
 
-Recover the original requirements for issue #{{ issue_number }} in {{ repository }}.
-Inspect the repository checkout and the fenced GitHub evidence below. Do not ask
-a human to select a source.
+Run `$athena:plan-issue` to recover the original requirements for issue #{{ issue_number }}
+in {{ repository }}. Inspect the repository checkout and the fenced GitHub text below.
 
 {{ issue_title_block }}
 
 {{ issue_body_block }}
 
-Return exactly one JSON object with these fields:
+Return one JSON object:
 `{"disposition":"REQUIREMENTS|TRACKER|OBSOLETE","requirements":"...","reason":"...","evidence":"..."}`.
 
-Put concise human-readable evidence in `reason` and in `evidence`.
-
-- REQUIREMENTS reconstructs user-visible intent, constraints, acceptance criteria, and
-  verification. Keep implementation detail proportional to available evidence.
-- TRACKER is only for an issue whose deliverable is tracking child work rather than a code change.
-- OBSOLETE is only when evidence proves the requested outcome is already supplied or superseded.
-- For TRACKER or OBSOLETE, `requirements` must be empty.
-- Do not include diffs. Keep code snippets minimal, especially when source text already contains them.
-- Do not invent facts. Explain uncertainty in `reason` and cite concise repository evidence.
+- REQUIREMENTS: the intent, constraints, acceptance criteria, and verification.
+- TRACKER: the deliverable is tracking child work, not a code change.
+- OBSOLETE: the outcome is already delivered or superseded. Cite the evidence.
+- For TRACKER or OBSOLETE, leave `requirements` empty.
+- Do not invent facts. Say what is uncertain in `reason`.

@@ -269,46 +269,6 @@ def test_live_conflict_requires_same_base_and_exclusive_go() -> None:
         github.merge_pr.assert_not_called()
 
 
-def test_legacy_branch_without_start_provenance_does_not_rebase(
-    tmp_path: Path, worker_factory: Callable[[], WorkerPool]
-) -> None:
-    """Unknown implementation history must stop before a base fetch."""
-    state = tmp_path / "host-state"
-    state.mkdir()
-    manager = SimpleNamespace(
-        state_dir=state, repository_identity="test/repo:local", common_dir=tmp_path
-    )
-    job = GitJob(
-        repo="repo",
-        expected_repository="test/repo",
-        op="rebase",
-        timeout_s=60,
-        deadline_s=monotonic() + 60,
-        kwargs={
-            "cwd": tmp_path,
-            "repo_root": str(tmp_path),
-            "issue_number": 7,
-            "branch": "issue-branch",
-            "rebase_reason": "implementation_start",
-            "expected_head_sha": "a" * 40,
-        },
-    )
-    with (
-        patch(f"{WP}.SourceWorkspaceManager", return_value=manager),
-        patch(f"{WP}.WorktreeManager.git_metadata_lock_path", return_value=tmp_path / "git.lock"),
-        patch(f"{WP}.git_utils.run", return_value=MagicMock(stdout="issue-branch\n")),
-        patch.object(
-            WorkerPool,
-            "_git_rebase_once",
-            return_value=JobResult(ok=True, value={"head_sha": "a" * 40}),
-        ) as replay,
-    ):
-        result = worker_factory()._git_rebase(job, record_source=MagicMock())
-    assert not result.ok
-    assert result.value == {"initial_implementation_ambiguous": True}
-    replay.assert_not_called()
-
-
 def test_fresh_creation_requires_local_remote_and_owner_absence(
     tmp_path: Path, worker_factory: Callable[[], WorkerPool]
 ) -> None:

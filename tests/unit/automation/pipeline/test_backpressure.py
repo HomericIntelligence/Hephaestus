@@ -35,8 +35,6 @@ class _RecordingWorkerPool(FakeWorkerPool):
         rebase_policy_selector: Any = None,
         evidence_receipt_dir: Path | None = None,
         host_verification_pyxis_image: Path | None = None,
-        host_verification_pyxis_sha256: str | None = None,
-        host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
         host_capabilities: WorkerCapabilities | None = None,
         podman_machine: str | None = None,
@@ -54,8 +52,6 @@ class _RecordingWorkerPool(FakeWorkerPool):
         self.rebase_policy_selector = rebase_policy_selector
         self.evidence_receipt_dir = evidence_receipt_dir
         self.host_verification_pyxis_image = host_verification_pyxis_image
-        self.host_verification_pyxis_sha256 = host_verification_pyxis_sha256
-        self.host_verification_pyxis_authority = host_verification_pyxis_authority
         self.host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
         self.host_capabilities = host_capabilities
         self.podman_machine = podman_machine
@@ -109,8 +105,6 @@ def test_coordinator_uses_independent_main_and_learning_capacities(
     assert coordinator.pool.athena_skill_executor is not None
     assert coordinator.pool.evidence_receipt_dir is None
     assert coordinator.pool.host_verification_pyxis_image == config.host_verification_pyxis_image
-    assert coordinator.pool.host_verification_pyxis_sha256 is None
-    assert coordinator.pool.host_verification_pyxis_authority is None
     assert coordinator.pool.host_verification_pyxis_quota_root is None
     assert isinstance(coordinator.pool.host_capabilities, WorkerCapabilities)
     assert coordinator.pool.host_capabilities.execution_boundary_id == config.run_identity

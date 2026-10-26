@@ -32,7 +32,6 @@ from hephaestus.automation.repo_intake import (
     RepoIntakeManager,
     RepoIntakeReceipt,
 )
-from hephaestus.automation.source_worktree import SourceWorkspaceReceipt
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.automation.worktree_snapshot import _controlled_git_env
 from hephaestus.utils.file_lock import file_lock
@@ -68,7 +67,7 @@ def _make_repository(tmp_path: Path) -> tuple[Path, Path]:
     return caller, remote
 
 
-def _manager(caller: Path, remote: Path, relaxed: bool = False) -> RepoIntakeManager:
+def _manager(caller: Path, remote: Path) -> RepoIntakeManager:
     """Build a manager with a local transport test double."""
 
     def runner(
@@ -106,7 +105,6 @@ def _manager(caller: Path, remote: Path, relaxed: bool = False) -> RepoIntakeMan
         git_runner=runner,
         git_env=_controlled_git_env(),
         remote_config=(),
-        allow_automation_interrupted_operations=relaxed,
     )
 
 
@@ -282,14 +280,8 @@ def test_rebind_preserves_registered_descendant_worktree(
     caller_state = _caller_state(caller)
     _advance_remote(tmp_path, remote)
 
-    # A clean child stops the rebind because it is a registered descendant.
-    # A dirty child stops it earlier, because a modified tracked file in a
-    # registered worktree is the one blocking condition of the intake contract.
-    expected_message = (
-        "clean tracked tree" if descendant_is_dirty else "registered descendant worktree"
-    )
-
-    with pytest.raises(RepoIntakeError, match=expected_message):
+    # A registered descendant stops the rebind whether it is clean or dirty.
+    with pytest.raises(RepoIntakeError, match="registered descendant worktree"):
         _manager(caller, remote).prepare()
 
     assert child.is_dir()
@@ -671,206 +663,18 @@ def test_dirty_caller_checkout_does_not_block_intake(tmp_path: Path) -> None:
     assert (caller / "untracked.txt").read_text(encoding="utf-8") == "keep\n"
 
 
-def test_modified_tracked_files_in_a_worktree_block_intake(tmp_path: Path) -> None:
-    """Modified tracked files in a registered worktree are another agent's work."""
+def test_modified_tracked_files_in_a_worktree_do_not_block_intake(tmp_path: Path) -> None:
+    """Another agent's uncommitted work in a registered worktree is left alone."""
     caller, remote = _make_repository(tmp_path)
     linked = tmp_path / "linked-caller"
     _run_git(caller, "worktree", "add", "-b", "feature", str(linked), "HEAD")
     (linked / "tracked.txt").write_text("agent work\n", encoding="utf-8")
     manager = _manager(caller, remote)
 
-    with pytest.raises(RepoIntakeError, match="clean tracked tree"):
-        manager.prepare()
-
-    assert not manager.worktree_path.exists()
-
-
-def _make_interrupted_rebase(caller: Path, tmp_path: Path, branch: str) -> Path:
-    """Create a linked worktree left mid-rebase with a dirty tracked tree.
-
-    This mirrors the state an interrupted automation run leaves: the rebase
-    metadata records the branch and the conflict dirties the tracked tree.
-    """
-    root = tmp_path / f"rebase-{branch}"
-    _run_git(caller, "worktree", "add", "-b", branch, str(root), "HEAD")
-    (caller / "tracked.txt").write_text("master side\n", encoding="utf-8")
-    _run_git(caller, "add", "tracked.txt")
-    _run_git(caller, "commit", "-m", "master edit")
-    (root / "tracked.txt").write_text("branch side\n", encoding="utf-8")
-    _run_git(root, "add", "tracked.txt")
-    _run_git(root, "commit", "-m", "branch edit")
-    _run_git(root, "rebase", "master", check=False)
-    return root
-
-
-def _write_source_workspace_receipt(
-    manager: RepoIntakeManager,
-    *,
-    item: int,
-    lane: str,
-    path: Path,
-    branch: str,
-    revision: str,
-) -> Path:
-    """Write a closed-schema v1 source-workspace receipt for *path*."""
-    payload = {
-        "schema_version": 1,
-        "repository": manager.repository,
-        "repository_identity": manager.repository_identity,
-        "ownership_key": f"{manager.repository_identity}:{item}:{lane}",
-        "item_number": item,
-        "lane": lane,
-        "path": str(path.resolve()),
-        "revision": revision,
-        "generation": 1,
-        "detached": False,
-        "branch": branch,
-        "obligations": [],
-    }
-    # Keep the fixture honest: the canonical parser must accept the payload
-    # that the intake-side closed-schema check accepts.
-    SourceWorkspaceReceipt.from_dict(dict(payload))
-    receipts_dir = manager.common_dir / "hephaestus-source-workspaces"
-    receipts_dir.mkdir(parents=True, exist_ok=True)
-    receipt_path = receipts_dir / f"{item}-{lane}.json"
-    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
-    return receipt_path
-
-
-def _rebase_state(root: Path) -> tuple[bytes, bytes, str]:
-    """Return the tracked content, rebase metadata, and dirty status of *root*."""
-    head_name = _run_git(
-        root,
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-path",
-        "rebase-merge/head-name",
-    ).stdout.strip()
-    status = _run_git(root, "status", "--porcelain", "--untracked-files=no").stdout
-    return (
-        (root / "tracked.txt").read_bytes(),
-        Path(head_name).read_bytes(),
-        status,
-    )
-
-
-def test_interrupted_rebase_blocks_with_actionable_message(tmp_path: Path) -> None:
-    """An interrupted rebase blocks by default with recovery guidance."""
-    caller, remote = _make_repository(tmp_path)
-    root = _make_interrupted_rebase(caller, tmp_path, "auto-7777-impl")
-    manager = _manager(caller, remote)
-
-    with pytest.raises(RepoIntakeError) as captured:
-        manager.prepare()
-
-    message = str(captured.value)
-    assert "clean tracked tree" in message
-    assert "interrupted rebase" in message
-    assert str(root) in message
-    assert "refs/heads/auto-7777-impl" in message
-    assert "rebase --continue" in message
-    assert "rebase --abort" in message
-    assert not manager.worktree_path.exists()
-
-
-def test_relaxed_mode_without_a_receipt_still_blocks(tmp_path: Path) -> None:
-    """Relaxation without receipt proof keeps the strict block."""
-    caller, remote = _make_repository(tmp_path)
-    _make_interrupted_rebase(caller, tmp_path, "auto-6666-impl")
-    manager = _manager(caller, remote, relaxed=True)
-
-    with pytest.raises(RepoIntakeError, match="interrupted rebase"):
-        manager.prepare()
-
-    assert not manager.worktree_path.exists()
-
-
-def test_relaxed_mode_with_a_mismatched_receipt_branch_blocks(tmp_path: Path) -> None:
-    """A branch name alone never proves ownership of the rebase."""
-    caller, remote = _make_repository(tmp_path)
-    root = _make_interrupted_rebase(caller, tmp_path, "auto-5555-impl")
-    manager = _manager(caller, remote, relaxed=True)
-    revision = _run_git(root, "rev-parse", "HEAD").stdout.strip()
-    _write_source_workspace_receipt(
-        manager,
-        item=5555,
-        lane="impl",
-        path=root,
-        branch="some-other-branch",
-        revision=revision,
-    )
-
-    with pytest.raises(RepoIntakeError, match="interrupted rebase"):
-        manager.prepare()
-
-    assert not manager.worktree_path.exists()
-
-
-def test_proven_interrupted_rebase_is_tolerated_without_mutation(tmp_path: Path) -> None:
-    """A proven interrupted rebase is tolerated and never adopted or overwritten."""
-    caller, remote = _make_repository(tmp_path)
-    branch = "auto-9999-impl"
-    root = _make_interrupted_rebase(caller, tmp_path, branch)
-    manager = _manager(caller, remote, relaxed=True)
-    revision = _run_git(root, "rev-parse", "HEAD").stdout.strip()
-    _write_source_workspace_receipt(
-        manager,
-        item=9999,
-        lane="impl",
-        path=root,
-        branch=branch,
-        revision=revision,
-    )
-    before = _rebase_state(root)
-
     manager.prepare()
 
-    assert _rebase_state(root) == before
     assert manager.worktree_path.exists()
-
-
-def test_plain_dirty_worktree_still_blocks_in_relaxed_mode(tmp_path: Path) -> None:
-    """A plain dirty tree is not an interrupted operation even when relaxed."""
-    caller, remote = _make_repository(tmp_path)
-    linked = tmp_path / "linked-dirty"
-    _run_git(caller, "worktree", "add", "-b", "dirty-feature", str(linked), "HEAD")
-    (linked / "tracked.txt").write_text("agent work\n", encoding="utf-8")
-    manager = _manager(caller, remote, relaxed=True)
-
-    with pytest.raises(RepoIntakeError, match="commit or stash"):
-        manager.prepare()
-
-    assert not manager.worktree_path.exists()
-
-
-@pytest.mark.parametrize("receipt_kind", ["malformed", "symlink"])
-def test_invalid_receipt_is_not_ownership_proof(tmp_path: Path, receipt_kind: str) -> None:
-    """A malformed or symlinked receipt never proves automation ownership."""
-    caller, remote = _make_repository(tmp_path)
-    branch = "auto-8888-impl"
-    root = _make_interrupted_rebase(caller, tmp_path, branch)
-    manager = _manager(caller, remote, relaxed=True)
-    revision = _run_git(root, "rev-parse", "HEAD").stdout.strip()
-    receipt_path = _write_source_workspace_receipt(
-        manager,
-        item=8888,
-        lane="impl",
-        path=root,
-        branch=branch,
-        revision=revision,
-    )
-    if receipt_kind == "malformed":
-        receipt_path.write_text("{not json", encoding="utf-8")
-    else:
-        target = tmp_path / "receipt-target.json"
-        target.write_bytes(receipt_path.read_bytes())
-        receipt_path.unlink()
-        receipt_path.symlink_to(target)
-
-    with pytest.raises(RepoIntakeError, match="interrupted rebase"):
-        manager.prepare()
-
-    assert not manager.worktree_path.exists()
+    assert (linked / "tracked.txt").read_text(encoding="utf-8") == "agent work\n"
 
 
 @pytest.mark.parametrize("stale_registration", [False, True])

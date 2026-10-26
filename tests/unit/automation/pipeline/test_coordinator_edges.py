@@ -178,8 +178,6 @@ class TestWiring:
                 rebase_policy_selector: Any = None,
                 evidence_receipt_dir: Path | None = None,
                 host_verification_pyxis_image: Path | None = None,
-                host_verification_pyxis_sha256: str | None = None,
-                host_verification_pyxis_authority: Path | None = None,
                 host_verification_pyxis_quota_root: Path | None = None,
                 host_capabilities: Any = None,
                 podman_machine: str | None = None,
@@ -195,8 +193,6 @@ class TestWiring:
                 created["rebase_policy_selector"] = rebase_policy_selector
                 created["evidence_receipt_dir"] = evidence_receipt_dir
                 created["host_verification_pyxis_image"] = host_verification_pyxis_image
-                created["host_verification_pyxis_sha256"] = host_verification_pyxis_sha256
-                created["host_verification_pyxis_authority"] = host_verification_pyxis_authority
                 created["host_verification_pyxis_quota_root"] = host_verification_pyxis_quota_root
                 created["host_capabilities"] = host_capabilities
                 created["podman_machine"] = podman_machine
@@ -218,8 +214,6 @@ class TestWiring:
             rate_guard_enabled=False,
             git_lock_timeout=7201,
             host_verification_pyxis_quota_root=tmp_path / "quota" if configured else None,
-            host_verification_pyxis_sha256="a" * 64 if configured else None,
-            host_verification_pyxis_authority=tmp_path / "authority.json" if configured else None,
         )
         coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
@@ -236,10 +230,6 @@ class TestWiring:
         assert created["rebase_policy_selector"]("Ledger") is None
         assert created["evidence_receipt_dir"] is None
         assert created["host_verification_pyxis_image"] == config.host_verification_pyxis_image
-        assert created["host_verification_pyxis_sha256"] == config.host_verification_pyxis_sha256
-        assert (
-            created["host_verification_pyxis_authority"] == config.host_verification_pyxis_authority
-        )
         assert (
             created["host_verification_pyxis_quota_root"]
             == config.host_verification_pyxis_quota_root

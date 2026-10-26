@@ -34,8 +34,6 @@ from hephaestus.automation.pipeline.stages.repo import (
     RepoStage,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from hephaestus.automation.requirements_recovery import evidence_digest
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_BLOCKED
 
 BASE = "a" * 40
 HEAD = "b" * 40
@@ -67,7 +65,6 @@ def test_partial_two_issue_wave_resumes_after_first_merge_advances_main(
         first,
         issue_number=7,
         pr_number=17,
-        reviewed_head_sha=HEAD,
         merge_sha=NEXT_BASE,
     )
     store.record_terminal_outcome(first, issue_number=7, passed=True, reason="merged", pr_number=17)
@@ -78,7 +75,6 @@ def test_partial_two_issue_wave_resumes_after_first_merge_advances_main(
         second,
         issue_number=19,
         pr_number=29,
-        reviewed_head_sha=HEAD,
         merge_sha=NEXT_MERGE,
     )
 
@@ -164,7 +160,6 @@ def test_wave_limits_progress_and_require_receipts(tmp_path: Path) -> None:
         lease,
         issue_number=19,
         pr_number=23,
-        reviewed_head_sha=HEAD,
         merge_sha=MERGE,
     )
     store.record_terminal_outcome(
@@ -231,13 +226,11 @@ def test_wave_value_objects_fail_closed_on_invalid_data() -> None:
     with pytest.raises(IssueWaveValidationError):
         WaveLease("org", "repo", 0, 1, (1,), BASE, "")
     with pytest.raises(IssueWaveValidationError):
-        WaveMergeReceipt(0, 1, HEAD, MERGE)
+        WaveMergeReceipt(0, 1, MERGE)
     with pytest.raises(IssueWaveValidationError):
-        WaveMergeReceipt(1, 0, HEAD, MERGE)
+        WaveMergeReceipt(1, 0, MERGE)
     with pytest.raises(IssueWaveValidationError):
-        WaveMergeReceipt(1, 1, "bad", MERGE)
-    with pytest.raises(IssueWaveValidationError):
-        WaveMergeReceipt(1, 1, HEAD, "bad")
+        WaveMergeReceipt(1, 1, "bad")
     with pytest.raises(IssueWaveValidationError):
         WaveIssueOutcome(0, True, "done")
     with pytest.raises(IssueWaveValidationError):
@@ -256,7 +249,7 @@ def test_wave_record_and_checkpoint_invariants_are_strict() -> None:
     """Selections, receipts, generations, and completion pins cannot drift."""
     invalid_status: Any = "unknown"
     outcome = WaveIssueOutcome(1, True, "done")
-    receipt = WaveMergeReceipt(1, 2, HEAD, MERGE)
+    receipt = WaveMergeReceipt(1, 2, MERGE)
     with pytest.raises(IssueWaveValidationError):
         WaveRecord(0, 1, (), BASE, "nonce", outcomes=(outcome,))
     with pytest.raises(IssueWaveValidationError):
@@ -315,7 +308,6 @@ def test_non_code_intent_retired_field_is_backward_compatible_and_strict(
         lease,
         issue_number=19,
         reason="independently confirmed tracker",
-        evidence_digest=evidence_digest("hephaestus", 19, BASE, "A task", ""),
         repository_revision=BASE,
         extra_labels=("epic",),
     )
@@ -346,13 +338,9 @@ def test_wave_receipts_facts_and_ancestry_are_reconciled(tmp_path: Path) -> None
     """Fresh GitHub facts and ancestry callbacks gate durable advancement."""
     store = IssueWaveStore(tmp_path, "acme", "hephaestus")
     lease = store.seal_selection(store.plan_admission(BASE, 1), [19])
-    store.record_merge_receipt(
-        lease, issue_number=19, pr_number=23, reviewed_head_sha=HEAD, merge_sha=MERGE
-    )
+    store.record_merge_receipt(lease, issue_number=19, pr_number=23, merge_sha=MERGE)
     assert store.receipt_for(lease, 19) is not None
-    store.record_merge_receipt(
-        lease, issue_number=19, pr_number=23, reviewed_head_sha=HEAD, merge_sha=MERGE
-    )
+    store.record_merge_receipt(lease, issue_number=19, pr_number=23, merge_sha=MERGE)
     facts = SimpleNamespace(
         number=19,
         labels=set(),
@@ -379,11 +367,6 @@ def test_wave_receipts_facts_and_ancestry_are_reconciled(tmp_path: Path) -> None
         store.validate_prior_wave_facts(
             lease, {19: SimpleNamespace(**{**vars(facts), "labels": {"state:skip"}})}
         )
-    with pytest.raises(IssueWaveBlockedError, match="skip/block"):
-        store.validate_prior_wave_facts(
-            lease,
-            {19: SimpleNamespace(**{**vars(facts), "labels": {STATE_IMPLEMENTATION_BLOCKED}})},
-        )
 
 
 def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: Path) -> None:
@@ -395,7 +378,6 @@ def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: 
         lease,
         issue_number=19,
         reason=reason,
-        evidence_digest=evidence_digest("hephaestus", 19, BASE, "A task", ""),
         repository_revision=BASE,
         extra_labels=("epic",),
     )
@@ -506,7 +488,6 @@ def test_retired_non_code_intent_reopens_only_for_cleanup(tmp_path: Path) -> Non
         lease,
         issue_number=21,
         reason="independently confirmed tracker",
-        evidence_digest=evidence_digest("hephaestus", 21, BASE, "A task", "Old body"),
         repository_revision=BASE,
         extra_labels=("epic",),
     )
@@ -562,9 +543,7 @@ def test_wave_entry_reconciles_post_seal_drift_without_mutation(tmp_path: Path) 
         IssueWaveStore(tmp_path, "acme", "hephaestus").plan_admission(BASE, 1), [19]
     )
     store = IssueWaveStore(tmp_path, "acme", "hephaestus")
-    store.record_merge_receipt(
-        lease, issue_number=19, pr_number=23, reviewed_head_sha=HEAD, merge_sha=MERGE
-    )
+    store.record_merge_receipt(lease, issue_number=19, pr_number=23, merge_sha=MERGE)
     merged = wave_entry_from_facts(
         lease,
         SimpleNamespace(

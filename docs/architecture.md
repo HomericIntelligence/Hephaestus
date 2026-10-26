@@ -626,20 +626,18 @@ value would be a static `TypeError` and a safe routing table edit.
 ### State-label vocabulary
 
 Defined in [`state_labels.py`](../hephaestus/automation/state_labels.py) and
-imported throughout the pipeline. Nine labels: four mutually exclusive
-planning states, two mutually exclusive implementation-review states, two
-independent blocked states, and one absolute operator state:
+imported throughout the pipeline. Seven labels: three mutually exclusive
+planning states, two mutually exclusive implementation-review states, one
+independent blocked state, and one absolute operator state:
 
 | Label | Group | Authoritative stage |
 |--------------------------------|--------------|---------------------------------|
 | `state:needs-plan` | planner-scope| [`planning.on_enter`](../hephaestus/automation/pipeline/stages/planning.py) |
 | `state:plan-no-go` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:plan-go` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
-| `state:plan-blocked` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:implementation-no-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) |
 | `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) — automated implementation eligibility |
 | `state:blocked` | independent latch | external dependency or operator action |
-| `state:implementation-blocked` | independent latch | [`implementation._record_no_commit_block`](../hephaestus/automation/pipeline/stages/implementation.py) |
 | `state:skip` | absolute | operator / confirmed semantic disposition in [`planning`](../hephaestus/automation/pipeline/stages/planning.py) / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) |
 
 Every **stage-issued** `state:skip` write uses the label as its durable
@@ -676,73 +674,28 @@ are:
 
 ```text
 state:implementation-go ────────► automated eligibility
-current-process head proof ─────► reviewed checkout identity
-exact-head status evidence ─────► current CI merge gate
                                  │
                                  ▼
-                      SHA-conditional squash merge
+                    gh pr merge --squash --auto
+                                 │
+                                 ▼
+          GitHub applies protection, checks, and merge queue
 ```
 
-`merge_wait` requires the implementation-GO label without
-`state:implementation-no-go`, on an open PR whose base equals the verified
-repository default branch. The approval label is the merge contract: the stage
-does not compare the head at merge time, so a new commit between review and
-merge does not restart it. GitHub applies branch protection, the required
-checks, and any merge queue to whatever head is current. An untrusted merge
-state blocks without a label mutation. A matching set permits a bounded
-sequence (default: five) of policy-selected server requests. A read-only
-readiness wait may park for the `--poll-max-wait` period. Its default is 1,200
-seconds (20 minutes) for each fresh proof. Readiness and review prose never
-authorize merging, and fresh admission precedes every request
+`merge_wait` runs for an open PR that carries `state:implementation-go`. It
+arms GitHub native auto-merge once and then waits for GitHub to merge. The
+approval label is the merge contract. The stage does not compare the head,
+read check runs, or evaluate merge policy. GitHub applies branch protection,
+the required checks, and any merge queue to whatever head is current. If the
+merge reports a real conflict, the agent rebases and continues. When
+`state:implementation-no-go` is applied, Hephaestus runs
+`gh pr merge --disable-auto`
 ([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
 
-### Merge admission diagnostics
-
-When a merge admission cycle completes, the coordinator records the outcome
-and bounded required-check evidence in the durable event journal before
-applying the receipt. The terminal summary renders one diagnostic line for
-each item that recorded negative evidence.
-
-The evidence is diagnostic. A required check that is not green yet, or a
-check read that fails, does not stop the merge wait: the stage keeps waiting
-with exponential backoff and fails closed only when its wait deadline expires.
-The gate reads the current pull-request head, because GitHub merges whatever
-head is current.
-
-Event journal fields (emitted in the `complete` event for a
-`merge_wait_admission_cycle` job):
+The coordinator records the cycle outcome in the durable event journal:
 
 - `merge_admission.outcome` — the cycle outcome, normally `auto_merge_enabled`.
 - `merge_admission.attempted` — whether an auto-merge enablement was attempted.
-- `merge_admission.required_checks` (present only for negative evidence) — a
-  bounded evidence object with:
-  - `boundary` — a closed vocabulary value identifying the failure boundary
-    (see below).
-  - `detail` — a fixed-token string (≤ 40 characters) with a concise reason.
-  - `contexts` — a list of up to eight redacted context names (≤ 80 characters
-    each) relevant to the boundary.
-
-Terminal summary line (printed for each item with negative evidence):
-
-```
-merge-admission: outcome=<outcome> boundary=<boundary> detail=<detail> contexts=[<ctx1>, <ctx2>, ...]
-```
-
-Boundary vocabulary (closed, enumerated in
-[`REQUIRED_CHECKS_EVIDENCE_BOUNDARIES`](../hephaestus/automation/pipeline/merge_wait_admission.py)):
-
-| Boundary | Meaning | Safe retry |
-|----------|---------|------------|
-| `invalid_request` | Input validation failed (e.g. malformed SHA, missing policy). | Fix the caller or escalate. |
-| `read_unavailable` | A GitHub read failed (network, transport, or timeout). | Rerun the loop; transient GitHub issue. |
-| `snapshot_unverifiable` | Check Run identity malformed or ambiguous. | Rerun; unstable GitHub evidence. |
-| `unstable_snapshot` | Check Suite or Check Run inventory changed between the two reads. | Rerun; unstable GitHub state. |
-| `pending_check_run` | At least one required check is still in progress. | None; GitHub completes the check. |
-| `nonpassing_check_run` | A required check concluded with a non-passing status (e.g. `failure`). | Rerun the failed named checks, or fix and push a new head. |
-| `missing_requirement` | A required check context is absent from the evidence. | Start the missing required workflow, then rerun. |
-| `no_required_checks` | The effective merge policy has no required checks configured. | Fix the branch protection, or escalate. |
-
-The diagnostic never grants merge authority.
 
 Plan-review labels remain durable routing state. Native review records remain
 part of review-thread and scope data, but a second user and a marked native
@@ -911,9 +864,8 @@ fresh plan/review epoch; it never replaces the issue body.
 Planning then produces one canonical implementation plan from the issue,
 latest canonical plan, and latest canonical review. Superseded revisions are
 replaced, not appended. Bounded hidden fingerprints preserve oscillation
-detection without exposing old plans or raw patches. A blocked plan is an
-automation stop: only an external actor may resolve the dependency and replace
-`state:plan-blocked` with exactly one next plan-state label.
+detection without exposing old plans or raw patches. A plan that cannot
+improve ends the item with a warning; it does not latch a label.
 
 #### Boundary diagram
 
@@ -945,9 +897,7 @@ stateDiagram-v2
     ReviewRecovery --> BuildContext: requirements GO; digest/readback confirmed
     Eligibility --> Skipped: state:skip
     Eligibility --> Ready: approved plan exists
-    Eligibility --> AwaitOperator: state:plan-blocked present
     Eligibility --> BuildContext: eligible plan-state label
-    AwaitOperator --> Eligibility: external actor replaces blocked label
     BuildContext --> SourceWorkspace
     SourceWorkspace --> Draft: exact revision and locks confirmed
     SourceWorkspace --> SourceWorkspace: bounded lock or Git retry
@@ -994,8 +944,7 @@ Architectural contract:
   comment beside the label; it is audit context only, and labels remain the
   restart-routing authority. The issue remains open.
 - Ordinary recovery-review or plan-review exhaustion leaves
-  `state:plan-no-go`; `state:plan-blocked` remains exceptional rather than a
-  third ordinary review outcome.
+  `state:plan-no-go`.
 - Each durable state transition is published with its corresponding canonical
   artifact, and restart routing reads the label rather than comment prose.
 - Source-workspace preparation runs before each source-reading planning job. It
@@ -1007,16 +956,9 @@ Architectural contract:
   failed bounded attempt leaves the item at its current planning state. It
   writes no source-workspace receipt, and a later attempt can verify and reuse
   a clean partial checkout without weakening ownership or revision checks.
-- `state:plan-blocked` is never removed or replaced by ordinary planning. An
-  authenticated Athena-finalized body is the narrow exception because it
-  proves the planning decision already completed. Comments otherwise do
-  not revive it. After resolving the dependency, an external actor sets exactly
-  one next state: ordinarily `state:plan-no-go` to request amendment,
-  `state:plan-go` to approve, or `state:needs-plan` only when no canonical plan
-  should be reused.
 - File-overlap admission and publication scope use the shared current-plan
-  reader. A finalized issue body must have a valid seal, an authenticated
-  editor, and current plan-GO metadata. A second issue read must confirm the
+  reader. A finalized issue body must have a valid seal and an authenticated
+  editor. A second issue read must confirm the
   same open issue, body, and digest after the editor check. A failed check
   cannot use an older comment plan. Both consumers require complete, valid,
   nonempty file scope for finalized bodies, including top-level files. Ordinary
@@ -1026,9 +968,8 @@ Architectural contract:
 ### 5.3 Plan review
 
 Plan review decides whether the canonical plan is ready, can improve through a
-bounded revision, or needs external intervention. The GitHub issue label is the
-sole durable authority: `state:plan-go`, `state:plan-no-go`, or
-`state:plan-blocked`. Reviewer output proposes one of those labels, but routing
+bounded revision. The GitHub issue label is the sole durable authority:
+`state:plan-go` or `state:plan-no-go`. Reviewer output proposes one of those labels, but routing
 occurs only after GitHub confirms the label write. The canonical review remains
 an audit record and context source, never an authorization fallback.
 
@@ -1040,11 +981,8 @@ flowchart LR
     History["Current plan and direct critique"] --> Review
     Review -->|"plan-go / plan-no-go"| CanonicalReview["Canonical review comment"]
     CanonicalReview --> Label["Confirmed GitHub plan-state label"]
-    Review -->|"plan-blocked"| BlockLatch["Confirmed blocked label"]
-    BlockLatch --> BlockAudit["Canonical blocked explanation"]
     Label -->|"plan-go"| Implementation
     Label -->|"plan-no-go"| Planning
-    BlockAudit --> External["Human or dependency"]
 ```
 
 #### State machine
@@ -1060,22 +998,16 @@ stateDiagram-v2
     RetryReview --> Review: retry available
     RetryReview --> Failed: reviewer failures exhausted
     Review --> PublishAudit: plan-go or plan-no-go proposal
-    Review --> ApplyBlocked: plan-blocked proposal
-    ApplyBlocked --> ApplyBlocked: bounded publication retry
-    ApplyBlocked --> PublishBlockedAudit: state:plan-blocked confirmed
-    PublishBlockedAudit --> Blocked: explanation stored; latch remains on audit failure
     PublishAudit --> ApplyLabel: review comment stored
     ApplyLabel --> ApplyLabel: bounded publication retry; accepted round retained
     ApplyLabel --> Approved: state:plan-go confirmed
     ApplyLabel --> AssessRevision: state:plan-no-go confirmed
     AssessRevision --> Amend: improvement remains possible
-    AssessRevision --> Blocked: no improvement and planning is stuck
-    AssessRevision --> Blocked: external decision or dependency required
+    AssessRevision --> Failed: no improvement and planning is stuck
     AssessRevision --> Failed: revision limit reached
     Amend --> PublishRevision: revised plan produced
     PublishRevision --> Review: canonical comments updated
     Approved --> [*]
-    Blocked --> [*]
     Failed --> [*]
 ```
 
@@ -1094,17 +1026,8 @@ Architectural contract:
   receives the bounded current canonical plan and direct critique. Superseded
   revisions are summarized only as cumulative high-level bullets in the
   current plan's `Changes from Review` section.
-- A blocked verdict states exactly what decision or dependency is required.
-  Because BLOCKED is the safety latch, its label is confirmed before the
-  fallible explanatory write; an audit-write failure can never leave the item
-  eligible for autonomous work.
-  On restart, automation may repair a missing explanation with a generic,
-  actionable audit comment, but it does not change the blocked label or invoke
-  a planning agent.
-  Automation remains stopped until an external actor resolves it and replaces
-  the blocked label; a comment by itself has no routing effect.
-- No-improvement detection exits early as blocked instead of spending further
-  planning iterations.
+- No-improvement detection ends the item with a warning instead of spending
+  further planning iterations.
 - Planning advances only after a fresh current-plan lookup returns `FOUND`.
   Read failures use the bounded lookup retry budget.
 - Plan review binds an accepted verdict to its plan revision, fingerprint,
@@ -1115,13 +1038,12 @@ Architectural contract:
   parser on the exact canonical plan. The plan must declare at least one safe
   path under `## Files to Modify`, `## Files to Create`, or `## File Changes`.
   A changed canonical plan returns to planning before scope validation. An
-  invalid scope blocks admission. The blocked audit states the accepted form
-  and the required operator recovery steps.
+  invalid scope turns a GO into a NOGO. The review comment states the accepted
+  form, and the plan amends within the normal review budget.
 - The stage checks plan identity before it checks Codex scope admission. A
   changed plan returns to planning, including when a Codex implementation GO is
   pending. If this review wrote a proposed label, the stage restores exclusive
-  `state:needs-plan` with readback. An existing `state:plan-blocked` label stops
-  automatic recovery and has priority.
+  `state:needs-plan` with readback.
 - Invalid output and reviewer-session replacement share a bounded error
   sequence. Two consecutive retries are allowed; the third failure stops the
   item. Session replacement preserves logical review rounds.
@@ -1132,22 +1054,9 @@ Implementation converts an approved plan into a published pull request. It may
 adopt an existing pull request, but it cannot approve its own work or authorize
 a merge.
 
-An ordinary implementation with no commits is incomplete work. The host first
-adds and confirms `state:implementation-blocked`. It then writes and confirms
-one marker-owned comment with the bounded, redacted implementation-agent
-summary. The comment uses a fixed fallback when the agent supplied no usable
-summary. It does not include raw process, test, rebase, remediation, or
-transport output. A normal process exit or a claim that work is already
-complete does not prove implementation.
-
-The latch is independent of the planning labels. The transition preserves an
-existing `state:plan-go` label and rejects a concurrent `state:skip` label. A
-failed label or comment write, an unclear readback, a lost plan approval, or a
-conflicting skip stops the item without rollback. The host clears its local
-no-commit marker only after the final state readback succeeds. A restart cannot
-seed another implementation while the latch remains. A human must select the
-next action and remove the latch. Existing PR remediation can still complete
-its validated reply-only path.
+An ordinary implementation with no commits is incomplete work. The host logs
+a warning and retries the implementation within the implement budget. It writes
+no label and no comment.
 
 For an unchanged direct writer, the host releases the unused remote branch
 reservation once. It verifies the local worktree and ownership receipt without
@@ -1395,8 +1304,7 @@ reviewed isolation backend exists.
 Capability-dependent Hephaestus execution uses the boundary above. Ordinary
 source review does not execute these checks or require their image and quota
 filesystem. The completed PR #3006 bootstrap is retired. There is no
-target-specific grant, comment selector, or skip-to-pass path. Generic host receipts remain in
-[`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
+target-specific grant, comment selector, or skip-to-pass path.
 
 For a repository with an installed validation profile, the coordinator first
 binds the detached source workspace.
@@ -1441,10 +1349,6 @@ creates a terminal gap. A foreign callback cannot replace an active request.
 
 The pure contracts are in
 [`repository_validation_preparation.py`](../hephaestus/automation/pipeline/repository_validation_preparation.py).
-The stage owner is
-[`pr_review_repository_validation.py`](../hephaestus/automation/pipeline/stages/pr_review_repository_validation.py).
-Pure coverage and prompt summaries are in
-[`pr_review_repository_validation_state.py`](../hephaestus/automation/pipeline/stages/pr_review_repository_validation_state.py).
 The effectful runtime adapter is outside the pure pipeline, in
 [`repository_validation_runtime.py`](../hephaestus/automation/repository_validation_runtime.py).
 
@@ -1827,9 +1731,6 @@ Architectural contract:
 - A retained rebase proof keeps that original review identity and binds a
   separate resulting commit. The host compares the complete resulting tree
   with the original reviewed change applied to the recorded new base.
-- CI/CD, merge queue admission, and conditional merge requests use the resulting
-  commit after a verified rebase. Readiness and queue state cannot transfer
-  from the previous merge head.
 - Unverified rebase evidence stops the continuation. A rebase alone does not require another
   source review. If conflict corrections prevent proof of the same change,
   the host keeps the corrected source unpublished. A separate source decision
@@ -1837,19 +1738,10 @@ Architectural contract:
 - Existing external merge ownership is preserved.
 - Missing ordinary review proof returns approval to PR review with zero label
   writes. Invalid retained rebase evidence stops recovery without a review retry.
-- A matching eligibility label, current-process proof, and passing exact-head
-  required status evidence can submit a bounded sequence of policy-selected
-  server merge requests, each only after fresh admission.
-- A required merge queue uses exact-head queue admission. A typed exact
-  already-enqueued rejection permits one bounded, read-only reconciliation for
-  the same open pull request and reviewed head. It never permits another
-  mutation. Direct merge requires strict-update protection from a source that
-  the current actor cannot bypass.
+- A matching eligibility label arms native auto-merge once. GitHub owns the
+  required checks, the merge queue, and conflicts.
 - Read-only readiness polling may wait for the `--poll-max-wait` period. Its
-  default is 1,200 seconds (20 minutes) for each fresh reviewed-head proof. The
-  wait does not spend the request budget or authorize a merge. HTTP 409,
-  transport ambiguity, and every actual request remain subject to fresh
-  lifecycle, head, label, thread, and protection checks.
+  default is 1,200 seconds (20 minutes). The wait does not authorize a merge.
 
 ### 5.7 `learning`
 
@@ -2020,9 +1912,7 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 | Any other open PR with plan-GO | `PR_REVIEW` |
 | No PR, at-or-past `state:plan-go` | `IMPLEMENTATION` |
 | No PR, `state:plan-no-go` | `PLANNING` (amend path) |
-| No PR, `state:plan-blocked` | excluded until an external actor resolves the block; an authenticated Athena-finalized body is the sole automatic exception |
 | `state:blocked` | excluded until an external dependency or operator hold is resolved |
-| `state:implementation-blocked` | excluded until a human selects the no-commit recovery action |
 | No state label / `state:needs-plan` | `PLANNING` |
 
 Seeding is read-only. Explicit tracker labels are semantic candidates rather
@@ -2845,12 +2735,6 @@ collaborators. Collaborators must not import their assembly module. Tests inject
 the transport command runner or patch the actual external boundary. Facade symbol
 copies and runtime monkeypatch translators are removed.
 
-`pipeline_github_merge_policy.py` owns the immutable `EffectiveMergePolicy`
-value and its derived queue wait limits. `pipeline_github_check_policy.py`
-keeps the public type import and owns the stable classic and ruleset reads.
-The value module has no reader, transport, or process dependency. Existing
-consumers share one type, so policy equality and identity checks are unchanged.
-
 `review_anchors.py` owns review finding values, bounds, and diff validation.
 `review_finding_history.py` validates compacted outcomes and bounded history
 collections. Both modules have no transport or logging dependency.
@@ -2862,17 +2746,10 @@ diagnostic node data. `pr_review_verification_paths.py` imports these data
 through a one-way dependency. The data module has no runtime dependencies.
 Architecture tests enforce this boundary and its 150-line source cap.
 `github_api.diff` keeps its compatibility exports and emits transport diagnostics.
-The review stage uses the value modules directly. `pr_review_findings.py` builds
-finding records and applies ordinary review receipts. `pr_review_history.py`
-retains finding provenance and reserves space for the next review batch.
-`pr_review_recovery.py` reconciles pending publications and applies exact-request
-receipts before a new review. `coordinator_observability.py` records bounded
-finding outcome events without review text. These owners retain the existing
-identity, deadline, recovery, and source-size limits. The host now owns the
-worker-side review publication partition and the warning contract in
-[`review_warnings.py`](../hephaestus/automation/review_warnings.py). That module
-has no transport dependency and refuses a warning without a recovery
-instruction.
+The review stage reads the reviewer's text and optional JSON block through
+`review_audit.py` and places each comment on the diff with `review_anchors.py`.
+A comment that cannot be placed goes into the review body. GitHub review threads
+decide the outcome, and the grade and severity are informational.
 
 ## 12. Interrupt semantics and exit codes
 

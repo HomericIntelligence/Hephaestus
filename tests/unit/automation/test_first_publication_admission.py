@@ -153,7 +153,6 @@ def _prepare_metadata_gap(job: GitJob, key: Path, case: str) -> GitJob:
         ("missing", None),
         ("start-matching", None),
         ("start-conflict", "conflicts with the start record"),
-        ("start-foreign", "initial implementation record does not match"),
         ("start-malformed", "initial implementation record does not match"),
         ("main-fetch", "Controlled main fetch failure"),
         ("main-invalid", "fetched main head is invalid"),

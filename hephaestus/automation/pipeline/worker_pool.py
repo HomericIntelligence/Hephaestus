@@ -127,11 +127,9 @@ from hephaestus.automation.pipeline.git_jobs import (
     validate_git_repository_validation,
 )
 from hephaestus.automation.pipeline.github_jobs import (
-    AdoptedRemediationPrStateRead,
     DirtyDirectPrStateRead,
     GitHubJob,
     GitHubJobRunner,
-    InspectAdoptedRemediationPrStateRequest,
     InspectDirtyDirectPrStateRequest,
     InspectRebaseConflictRequest,
     RebaseConflictInspected,
@@ -168,8 +166,6 @@ from hephaestus.automation.pipeline.jobs import (
     JobHandle,
     JobResult,
     ProcessFailureMetadata,
-    RemediationPretestInput,
-    remediation_pretest_result_digest,
     validate_build_test_repository_validation,
     validate_job_workspace,
 )
@@ -177,14 +173,6 @@ from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.rebase_policy import (
     RebasePolicySelector,
     RebaseValidationPolicy,
-)
-from hephaestus.automation.pipeline.rebase_review import (
-    REBASE_REVIEW_PROOF_KEY,
-    RebaseReviewProof,
-)
-from hephaestus.automation.pipeline.reply_handoff import (
-    implementation_remediation_reply_handoff,
-    implementation_remediation_reply_handoff_journal_entry,
 )
 from hephaestus.automation.pipeline.repository_lock import (
     LockMetadataError,
@@ -223,25 +211,6 @@ from hephaestus.automation.pyxis_artifact_io import (
     bind_cross_node_root,
 )
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
-from hephaestus.automation.rebase_review_verification import verify_rebase_tree
-from hephaestus.automation.remediation_prepublication import (
-    RemediationPretestCandidate,
-    canonical_source_receipt_json,
-    load_prepublication_intent,
-    load_prepublication_receipt,
-    load_pretest_candidate,
-    prepublication_private_git_dir,
-    read_prepublication_private_head,
-    save_prepublication_intent,
-    save_prepublication_receipt,
-    save_pretest_candidate,
-)
-from hephaestus.automation.remediation_recovery import (
-    RemediationRecoveryReceipt,
-    RemediationReplyResult,
-    RemediationReviewInput,
-    encode_remediation_review_input,
-)
 from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
@@ -256,7 +225,6 @@ from hephaestus.automation.repository_validation_runtime import (
     admit_execution_runtime,
     admit_runtime,
 )
-from hephaestus.automation.review_audit import ReviewAudit, is_clean_go_review
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
@@ -278,7 +246,6 @@ from hephaestus.automation.source_worktree import (
     _terminal_read_bytes,
     normalize_source_workspace_creation_failure,
 )
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_BLOCKED
 from hephaestus.automation.verified_runner import (
     bind_verified_runner_git_executable,
     build_verified_runner_argv,
@@ -459,112 +426,6 @@ def _retain_publication_failure(result: JobResult, prior: JobResult | None) -> J
         stderr_tail=_ordered_git_diagnostics(prior.stderr_tail, result.stderr_tail),
         process_failure=result.process_failure or prior.process_failure,
     )
-
-
-def _remediation_review_input(
-    job: GitJob,
-    *,
-    repo_root: Path,
-    worktree: Path,
-    branch: str,
-    parent_sha: str,
-    candidate_tree_sha: str,
-    recovery_commit_sha: str,
-    paths: CommitPaths,
-    committed_diff: str,
-    committed_diff_sha256: str,
-) -> RemediationReviewInput:
-    """Build the exact immutable input for one prepared recovery commit."""
-    repository = job.kwargs.get("remediation_repository")
-    issue_number = job.kwargs.get("issue_number")
-    pr_number = job.kwargs.get("remediation_pr_number")
-    diagnostic = job.kwargs.get("remediation_failure_diagnostic")
-    threads = job.kwargs.get("remediation_thread_snapshots")
-    if (
-        not isinstance(repository, str)
-        or isinstance(issue_number, bool)
-        or not isinstance(issue_number, int)
-        or isinstance(pr_number, bool)
-        or not isinstance(pr_number, int)
-        or not isinstance(diagnostic, str)
-        or not isinstance(threads, list)
-    ):
-        raise ValueError("remediation recovery input is incomplete")
-    return RemediationReviewInput(
-        format_version=3,
-        repository=repository,
-        issue_number=issue_number,
-        pr_number=pr_number,
-        repo_root=str(repo_root),
-        worktree_path=str(worktree),
-        branch=branch,
-        reviewed_parent_sha=parent_sha,
-        candidate_tree_sha=candidate_tree_sha,
-        recovery_commit_sha=recovery_commit_sha,
-        changed_paths=(*paths.add_paths, *paths.update_paths),
-        committed_diff_sha256=committed_diff_sha256,
-        committed_diff=committed_diff,
-        failure_diagnostic=diagnostic,
-        thread_snapshot_sha256=RemediationReviewInput.thread_snapshot_digest(threads),
-        thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(threads),
-    )
-
-
-def _remediation_recovery_artifacts(
-    job: GitJob,
-    *,
-    repo_root: Path,
-    worktree: Path,
-    branch: str,
-    parent_sha: str,
-    candidate_tree_sha: str,
-    recovery_commit_sha: str,
-    paths: CommitPaths,
-    committed_diff: str,
-    committed_diff_sha256: str,
-) -> tuple[dict[str, Any], tuple[str, str]]:
-    """Build and verify the complete durable record before publication."""
-    review_input = _remediation_review_input(
-        job,
-        repo_root=repo_root,
-        worktree=worktree,
-        branch=branch,
-        parent_sha=parent_sha,
-        candidate_tree_sha=candidate_tree_sha,
-        recovery_commit_sha=recovery_commit_sha,
-        paths=paths,
-        committed_diff=committed_diff,
-        committed_diff_sha256=committed_diff_sha256,
-    )
-    replies = job.kwargs.get("remediation_replies")
-    batch_nonce = job.kwargs.get("remediation_batch_nonce")
-    if (
-        not isinstance(replies, dict)
-        or not all(
-            isinstance(key, str) and isinstance(value, str) for key, value in replies.items()
-        )
-        or not isinstance(batch_nonce, str)
-    ):
-        raise ValueError("remediation recovery reply input is incomplete")
-    reply_result = RemediationReplyResult.create(
-        review_input_sha256=review_input.review_input_sha256,
-        replies=cast(dict[str, str], replies),
-        thread_snapshot_json=review_input.thread_snapshot_json,
-    )
-    handoff = implementation_remediation_reply_handoff(
-        review_input,
-        reply_result,
-        batch_nonce,
-        journal_input_encoding=job.kwargs.get("remediation_journal_input_encoding"),
-        journal_input_data=job.kwargs.get("remediation_journal_input_data"),
-    )
-    journal = implementation_remediation_reply_handoff_journal_entry(
-        review_input.pr_number,
-        handoff,
-    )
-    if handoff is None or journal is None:
-        raise ValueError("remediation recovery journal is not encodable")
-    return handoff, journal
 
 
 def _invoke_claude_commit_message(
@@ -938,14 +799,8 @@ def _dirty_plan_from_read(receipt: DirtyDirectPrStateRead) -> DirtyDirectPlanInp
     if (
         not receipt.absent
         or receipt.issue_state != "OPEN"
-        or bool(
-            set(receipt.issue_labels).intersection(
-                {"state:skip", "state:blocked", STATE_IMPLEMENTATION_BLOCKED}
-            )
-        )
-        or set(receipt.issue_labels).intersection(
-            {"state:plan-go", "state:plan-no-go", "state:plan-blocked"}
-        )
+        or bool(set(receipt.issue_labels).intersection({"state:skip", "state:blocked"}))
+        or set(receipt.issue_labels).intersection({"state:plan-go", "state:plan-no-go"})
         != {"state:plan-go"}
         or receipt.plan_journal is None
     ):
@@ -997,14 +852,6 @@ def _agent_workspace_lease(
         base_dir=binding.cwd.parent,
     )
     operation = job.source_operation
-    inputs = job.remediation_pretest_input
-    if operation is not None and operation.kind == "test-fix" and inputs is not None:
-        candidate = load_pretest_candidate(
-            repo_root=binding.reusable_root, pr_number=inputs.pr_number
-        )
-        if candidate is None:
-            raise SourceWorkspaceError("remediation pretest predecessor is unavailable")
-        operation = replace(operation, content_snapshot=candidate.content_snapshot)
     with manager.acquire(
         binding,
         allowed_tools=job.allowed_tools or "",
@@ -1104,6 +951,13 @@ _HOST_VERIFICATION_ARCHIVE_MAX_MEMBERS = 20_000
 # 512 MiB quota; the measured nested-runtime fixture peaks near 234 MiB, so
 # smaller HFS+ images leave insufficient filesystem and SQLite headroom.
 _HOST_VERIFICATION_SCRATCH_MAX_BYTES = 512 * 1024 * 1024
+
+
+def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
+    """Return the common fixed-size quota image command."""
+    return hdiutil_create_argv(image, _HOST_VERIFICATION_SCRATCH_MAX_BYTES)
+
+
 # macOS ``ulimit -f`` uses 512-byte blocks. Coverage's SQLite data file exceeds
 # 1 MiB for the full unit suite, so retain a per-file ceiling with enough room
 # for that verifier-owned artifact. The separately mounted 512 MiB volume is
@@ -2028,11 +1882,6 @@ def _linux_resource_limited_command(command: tuple[str, ...], *, timeout_s: int)
         str(_HOST_VERIFICATION_OPEN_FILES_MAX),
         *command,
     )
-
-
-def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
-    """Return the common fixed-size quota image command."""
-    return hdiutil_create_argv(image, _HOST_VERIFICATION_SCRATCH_MAX_BYTES)
 
 
 @contextmanager
@@ -3179,16 +3028,6 @@ def _regular_file_identity_at(parent_fd: int, name: str) -> _FilesystemIdentity:
         os.close(descriptor)
 
 
-def _read_bounded_git_pointer(path: Path) -> str:
-    """Read one small regular Git metadata pointer without following a link."""
-    parent_fd, _identity = _open_directory_no_follow(path.parent)
-    try:
-        value, _file_identity = _read_bounded_git_pointer_at(parent_fd, path.name)
-    finally:
-        os.close(parent_fd)
-    return value
-
-
 def _read_branch_ref(
     common_fd: int,
     common_dir: Path,
@@ -3809,145 +3648,6 @@ def _linked_binding_matches(
     return all(expected_env.get(key) == current_env.get(key) for key in keys)
 
 
-def _refresh_verified_recovery_index(
-    repo_root: Path,
-    worktree: Path,
-    *,
-    expected_git_env: dict[str, str],
-    private_git_env: dict[str, str],
-    source_sha: str,
-    expected_tree: str,
-    timeout: int,
-) -> None:
-    """Refresh the real index from one verified child after an exact rebind."""
-    expected_linked = getattr(expected_git_env, "linked_env", expected_git_env)
-    rebound = _linked_worktree_git_env(repo_root, worktree)
-    if not _linked_binding_matches(expected_linked, rebound, include_index=True):
-        raise RuntimeError("remediation writer Git metadata identity changed")
-    expected_binding = getattr(expected_linked, "binding", None)
-    rebound_binding = getattr(rebound, "binding", None)
-    if (
-        not isinstance(expected_binding, _LinkedWorktreeBinding)
-        or not isinstance(rebound_binding, _LinkedWorktreeBinding)
-        or rebound_binding.branch_ref != expected_binding.branch_ref
-        or rebound_binding.branch_sha != expected_binding.branch_sha
-    ):
-        raise RuntimeError("remediation writer branch binding changed")
-    refresh_env = dict(private_git_env)
-    refresh_env.update(
-        {
-            "GIT_INDEX_FILE": str(rebound_binding.index),
-            "GIT_WORK_TREE": str(worktree),
-        }
-    )
-    git_utils.run(
-        ["git", "read-tree", source_sha],
-        cwd=worktree,
-        timeout=timeout,
-        env=refresh_env,
-    )
-    refreshed_tree = git_utils.run(
-        ["git", "write-tree"],
-        cwd=worktree,
-        timeout=timeout,
-        env=refresh_env,
-    ).stdout.strip()
-    if refreshed_tree != expected_tree:
-        raise RuntimeError("remediation writer refreshed index tree changed")
-    refreshed = _linked_worktree_git_env(repo_root, worktree)
-    refreshed_binding = getattr(refreshed, "binding", None)
-    if (
-        not _linked_binding_matches(rebound, refreshed, include_index=False)
-        or not isinstance(refreshed_binding, _LinkedWorktreeBinding)
-        or refreshed_binding.branch_ref != rebound_binding.branch_ref
-        or refreshed_binding.branch_sha != rebound_binding.branch_sha
-    ):
-        raise RuntimeError("remediation writer Git metadata identity changed")
-
-
-def _compare_and_swap_linked_branch(  # noqa: C901
-    binding: _LinkedWorktreeBinding,
-    *,
-    expected_sha: str,
-    new_sha: str,
-) -> None:
-    """Update one bound local branch without loading repository configuration."""
-    if not _is_full_commit_sha(expected_sha) or not _is_full_commit_sha(new_sha):
-        raise RuntimeError("remediation branch update has an invalid commit")
-    components = tuple(binding.branch_ref.split("/"))
-    if (
-        len(components) < 3
-        or components[:2] != ("refs", "heads")
-        or any(component in {"", ".", ".."} for component in components)
-    ):
-        raise RuntimeError("remediation branch update has an invalid reference")
-    if not _secure_dir_fd_supported():
-        raise RuntimeError("secure branch update is unavailable")
-    common_fd, common_identity = _open_directory_no_follow(binding.common_dir)
-    if common_identity != binding.common_identity:
-        os.close(common_fd)
-        raise RuntimeError("remediation branch metadata identity changed")
-    descriptors = [common_fd]
-    lock_name = f"{components[-1]}.lock"
-    lock_fd: int | None = None
-    lock_exists = False
-    try:
-        parent_fd = common_fd
-        for component in components[:-1]:
-            try:
-                next_fd, _identity = _open_directory_at_no_follow(parent_fd, component)
-            except FileNotFoundError:
-                with suppress(FileExistsError):
-                    os.mkdir(component, 0o755, dir_fd=parent_fd)
-                next_fd, _identity = _open_directory_at_no_follow(parent_fd, component)
-            parent_fd = next_fd
-            descriptors.append(parent_fd)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
-        if os.name == "posix":
-            flags |= getattr(os, "O_NOFOLLOW", 0)
-        try:
-            lock_fd = os.open(lock_name, flags, 0o644, dir_fd=parent_fd)
-        except FileExistsError as exc:
-            raise RuntimeError("remediation branch update is locked") from exc
-        lock_exists = True
-        observed = _read_branch_ref(common_fd, binding.common_dir, binding.branch_ref)
-        if observed == new_sha:
-            return
-        if observed != expected_sha:
-            raise RuntimeError("remediation branch changed before local update")
-        payload = f"{new_sha}\n".encode("ascii")
-        written = 0
-        while written < len(payload):
-            count = os.write(lock_fd, payload[written:])
-            if count <= 0:
-                raise RuntimeError("remediation branch update write failed")
-            written += count
-        os.fsync(lock_fd)
-        os.close(lock_fd)
-        lock_fd = None
-        os.replace(
-            lock_name,
-            components[-1],
-            src_dir_fd=parent_fd,
-            dst_dir_fd=parent_fd,
-        )
-        lock_exists = False
-        os.fsync(parent_fd)
-    finally:
-        if lock_fd is not None:
-            os.close(lock_fd)
-        if lock_exists:
-            with suppress(OSError):
-                os.unlink(lock_name, dir_fd=descriptors[-1])
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
-
-
-def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
-    """Return the shared primary repository-lock path."""
-    return repo_lock_path(repo, lock_dir)
-
-
 def _git_job_checkout_candidate(job: GitJob) -> Path | None:
     """Return one operation-supplied existing checkout candidate."""
     candidates: list[object] = []
@@ -4062,7 +3762,6 @@ class _PreparedGitLocks:
     expected_common_lock_path: Path | None = None
     common_parent_identity: tuple[int, int] | None = None
     validated_repository: str | None = None
-    remediation_receipt: RemediationRecoveryReceipt | None = None
 
 
 def _prepare_compatibility_lock_specs(
@@ -4179,6 +3878,7 @@ def _dirty_direct_failure_result(
         and exc.cause is SourceWorkspacePreparationCause.GIT_TIMEOUT
     ):
         return JobResult(ok=False, error="timeout", value=timeout_value)
+    logger.warning("dirty direct continuation was not claimed: %s", exc, exc_info=True)
     return JobResult(
         ok=False,
         error=fallback_error,
@@ -4507,11 +4207,6 @@ def _initialize_codex_adapter(
         raise CodexIsolationError("codex_adapter_protocol_mismatch")
     try:
         adapter = factory()
-        admission.validate_adapter_identity(
-            distribution=getattr(adapter, "adapter_distribution", ""),
-            version=getattr(adapter, "adapter_version", ""),
-            installed_tree_sha256=getattr(adapter, "installed_tree_sha256", ""),
-        )
     except CodexIsolationError:
         raise
     except BaseException:
@@ -4723,81 +4418,14 @@ def _codex_implementation_request(
     )
 
 
-@dataclass
-class _PretestSuccess:
-    """Keep one pool-owned completion separate from coordinator data."""
-
-    job: AgentJob
-    inputs: RemediationPretestInput
-    claim_key: str
-    owner_id: int
-    predecessor: RemediationPretestCandidate | None = None
-    replies: tuple[tuple[str, str], ...] | None = None
-    result_sha256: str | None = None
-    in_use: bool = False
-
-
-def _remediation_scope_paths(job: GitJob) -> frozenset[str]:
-    """Return the files that the review findings of one remediation name.
-
-    A review finding names the file that must change. The plan scope is stale
-    after the review, so the findings widen the scope of the remediation.
-
-    Args:
-        job: The job that continues one review remediation.
-
-    Returns:
-        The files that the reply targets anchor to.
-
-    """
-    snapshots = job.kwargs.get("remediation_thread_snapshots")
-    if isinstance(snapshots, (list, tuple)):
-        candidates: list[object] = list(snapshots)
-    else:
-        inputs = job.kwargs.get("remediation_pretest_input")
-        raw = getattr(inputs, "thread_snapshot_json", None)
-        if not isinstance(raw, str):
-            return frozenset()
-        try:
-            decoded = json.loads(raw)
-        except (TypeError, ValueError) as exc:
-            logger.warning(
-                "the remediation thread snapshot is not valid JSON (%s); the scope "
-                "of the remediation stays the plan scope",
-                type(exc).__name__,
-            )
-            return frozenset()
-        candidates = decoded if isinstance(decoded, list) else []
-    paths: set[str] = set()
-    for snapshot in candidates:
-        if not isinstance(snapshot, dict):
-            continue
-        path = snapshot.get("path")
-        # The predicate is a general path-safety check. The review finding
-        # paths use it for the same reason as a scope retraction path.
-        if isinstance(path, str) and is_safe_scope_retraction_path(path):
-            paths.add(path)
-    return frozenset(paths)
-
-
 def _is_remediation_job(job: GitJob) -> bool:
-    """Return whether one job continues a review remediation.
+    """Return whether one job publishes an address-review correction."""
+    return job.kwargs.get("implementation_remediation") is True
 
-    Args:
-        job: The job to inspect.
 
-    Returns:
-        True when the job answers review findings.
-
-    """
-    return any(
-        job.kwargs.get(key) is not None
-        for key in (
-            "remediation_pr_number",
-            "remediation_pretest_input",
-            "remediation_thread_snapshots",
-        )
-    )
+def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
+    """Return the shared primary repository-lock path."""
+    return repo_lock_path(repo, lock_dir)
 
 
 class WorkerPool:
@@ -4827,8 +4455,6 @@ class WorkerPool:
         rebase_policy_selector: RebasePolicySelector | None = None,
         evidence_receipt_dir: Path | None = None,
         host_verification_pyxis_image: Path | None = None,
-        host_verification_pyxis_sha256: str | None = None,
-        host_verification_pyxis_authority: Path | None = None,
         host_verification_pyxis_quota_root: Path | None = None,
         host_verification_pyxis_placement: PyxisExecutionPlacement | None = None,
         host_capabilities: WorkerCapabilities | None = None,
@@ -4858,8 +4484,6 @@ class WorkerPool:
                 agent and Athena result receipts.
             host_verification_pyxis_image: Local Enroot squashfs image for Linux
                 immutable host verification.
-            host_verification_pyxis_sha256: Independent expected image digest.
-            host_verification_pyxis_authority: Host-owned image provenance file.
             host_verification_pyxis_quota_root: Private capacity-bounded filesystem.
             host_verification_pyxis_placement: Optional host-selected allocation and node.
             host_capabilities: Explicit quota capability contract for host probes.
@@ -4895,13 +4519,7 @@ class WorkerPool:
         self._athena_skill_executor = athena_skill_executor
         self._rebase_policy_selector = rebase_policy_selector
         self._evidence_receipt_dir = evidence_receipt_dir
-        self._pretest_lock = threading.Lock()
-        self._pretest_successes: dict[str, _PretestSuccess] = {}
-        self._pretest_capacity = size
-        self._pretest_closed = False
         self._host_verification_pyxis_image = host_verification_pyxis_image
-        self._host_verification_pyxis_sha256 = host_verification_pyxis_sha256
-        self._host_verification_pyxis_authority = host_verification_pyxis_authority
         self._host_verification_pyxis_quota_root = host_verification_pyxis_quota_root
         self._host_verification_pyxis_placement = host_verification_pyxis_placement
         self._host_capabilities = host_capabilities
@@ -5027,7 +4645,6 @@ class WorkerPool:
         *,
         claim_key: str = "",
         claim_stage: str = "",
-        remediation_owner_id: int | None = None,
     ) -> JobHandle:
         """Submit a job for execution.
 
@@ -5048,9 +4665,7 @@ class WorkerPool:
         # Capture the caller's ContextVar snapshot so worker-thread prompt
         # builders see the same CLI-selected prompt catalog as the coordinator.
         context = copy_context()
-        future = self._executor.submit(
-            context.run, self._run, job, claim_key, claim_stage, remediation_owner_id
-        )
+        future = self._executor.submit(context.run, self._run, job, claim_key, claim_stage)
         future.add_done_callback(lambda f: self._on_future_done(handle, f))
         return handle
 
@@ -5068,9 +4683,6 @@ class WorkerPool:
         groups frees those workers promptly. An interrupted shutdown waits for
         active workers before the coordinator releases their ownership records.
         """
-        with self._pretest_lock:
-            self._pretest_closed = True
-            self._pretest_successes.clear()
         if mark_interrupted:
             self._shutdown.set()
         if self._athena_skill_executor is not None:
@@ -5157,7 +4769,6 @@ class WorkerPool:
         | HostCapabilityJob,
         claim_key: str = "",
         claim_stage: str = "",
-        remediation_owner_id: int | None = None,
     ) -> JobResult:
         """Execute a job and return its result.
 
@@ -5169,7 +4780,6 @@ class WorkerPool:
         killed job as success).
         """
         start = time.monotonic()
-        pretest_entry: _PretestSuccess | None = None
         worker_id = threading.current_thread().name
         logger.info(
             "worker_claim: worker_id=%s item=%s stage=%s job=%s repo=%s descr=%s",
@@ -5181,12 +4791,6 @@ class WorkerPool:
             getattr(job, "descr", ""),
         )
 
-        def reserve_pretest() -> None:
-            """Keep this invocation's reservation through completion or failure."""
-            nonlocal pretest_entry
-            if isinstance(job, AgentJob):
-                pretest_entry = self._reserve_pretest_success(job, claim_key, remediation_owner_id)
-
         # Pre-check: do not start a queued job if shutdown is set.
         if self._shutdown.is_set():
             result = JobResult(
@@ -5196,7 +4800,7 @@ class WorkerPool:
             )
         else:
             try:
-                result = self._execute_job(job, start, reserve_pretest)
+                result = self._execute_job(job, start)
             except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
                 # Preserve the executing worker identity for process-control
                 # escapes. The future callback may run outside the worker
@@ -5231,7 +4835,6 @@ class WorkerPool:
             logger.error("failed to persist pipeline evidence receipt: %s", type(exc).__name__)
             result = replace(result, ok=False, error="evidence_receipt_failed")
 
-        result = self._complete_pretest_success(job, result, pretest_entry)
         return replace(
             result,
             duration_s=time.monotonic() - start,
@@ -5250,16 +4853,15 @@ class WorkerPool:
         | AthenaSkillJob
         | HostCapabilityJob,
         start: float,
-        reserve_pretest: Callable[[], None],
     ) -> JobResult:
-        """Dispatch one job with its local pretest reservation."""
+        """Dispatch one job."""
         if isinstance(job, AthenaSkillJob):
             result = self._run_athena_skill(job)
         elif isinstance(job, AgentJob):
             deadline_s = start + job.timeout_s
             if job.deadline_s is not None:
                 deadline_s = min(deadline_s, job.deadline_s)
-            result = self._run_agent(job, deadline_s=deadline_s, reserve_pretest=reserve_pretest)
+            result = self._run_agent(job, deadline_s=deadline_s)
         elif isinstance(job, BuildTestJob):
             result = self._run_build_test(job)
         elif isinstance(job, HostCapabilityJob):
@@ -5388,426 +4990,6 @@ class WorkerPool:
         if isinstance(environment, JobResult):
             raise _RebaseSigningEnvironmentError(environment.error or "Signing is unavailable.")
         return environment
-
-    def discard_remediation_pretest_successes(self, claim_key: str, *, owner_id: int) -> None:
-        """Release completion authority when its coordinator permit ends."""
-        with self._pretest_lock:
-            for nonce, entry in tuple(self._pretest_successes.items()):
-                if (
-                    entry.claim_key == claim_key
-                    and entry.owner_id == owner_id
-                    and entry.result_sha256 is not None
-                    and not entry.in_use
-                ):
-                    del self._pretest_successes[nonce]
-
-    def _reserve_pretest_success(
-        self, job: AgentJob, claim_key: str, owner_id: int | None
-    ) -> _PretestSuccess | None:
-        """Capture exact typed inputs before the provider can run."""
-        inputs = job.remediation_pretest_input
-        nonce = job.remediation_pretest_nonce
-        if inputs is None and nonce is None:
-            return None
-        if not isinstance(inputs, RemediationPretestInput) or not isinstance(nonce, str):
-            raise ValueError("remediation pretest job input is unavailable")
-        if not claim_key or type(owner_id) is not int or owner_id <= 0:
-            raise ValueError("remediation pretest permit owner is unavailable")
-        receipt = SourceWorkspaceReceipt.from_dict(json.loads(inputs.source_receipt_json))
-        workspace = job.workspace
-        request = job.execution_request
-        if (
-            type(job.issue) is not int
-            or job.issue != inputs.issue_number
-            or job.repo.casefold() not in {inputs.repository, inputs.repository.rsplit("/", 1)[-1]}
-            or request is None
-            or request.role is not AgentRole.IMPLEMENTER
-            or request.operation not in {AgentOperation.ADDRESS_REVIEW, AgentOperation.TEST_FIX}
-            or workspace is None
-            or workspace.cwd != receipt.path
-            or job.cwd != receipt.path
-            or workspace.revision != receipt.revision
-            or workspace.generation != receipt.generation
-            or workspace.repository != receipt.repository
-            or workspace.item_number != receipt.item_number
-            or workspace.lane != receipt.lane
-            or workspace.detached != receipt.detached
-            or workspace.ownership_key != receipt.ownership_key
-            or workspace.reusable_root is None
-        ):
-            raise ValueError("remediation pretest job does not match its source")
-        manager = SourceWorkspaceManager(workspace.reusable_root, repository=receipt.repository)
-        current = manager._require_receipt(inputs.issue_number, SourceLane.IMPLEMENTATION)
-        manager._reject_foreign_owner(current, inputs.issue_number, SourceLane.IMPLEMENTATION)
-        if canonical_source_receipt_json(current) != inputs.source_receipt_json:
-            raise ValueError("remediation pretest source changed before provider")
-        predecessor = None
-        if request.operation is AgentOperation.TEST_FIX:
-            if inputs.candidate_sequence <= 1 or inputs.expected_previous_record_sha256 is None:
-                raise ValueError("remediation pretest fix predecessor is unavailable")
-            predecessor = load_pretest_candidate(
-                repo_root=workspace.reusable_root, pr_number=inputs.pr_number
-            )
-            if (
-                predecessor is None
-                or predecessor.phase != "invalidated"
-                or predecessor.digest != inputs.expected_previous_record_sha256
-                or not self._pretest_candidate_matches_input(
-                    predecessor, inputs, sequence=inputs.candidate_sequence - 1
-                )
-            ):
-                raise ValueError("remediation pretest predecessor is unavailable")
-        elif inputs.candidate_sequence != 1:
-            raise ValueError("remediation pretest first completion has a predecessor")
-        with self._pretest_lock:
-            if (
-                self._pretest_closed
-                or nonce in self._pretest_successes
-                or len(self._pretest_successes) >= self._pretest_capacity
-            ):
-                raise ValueError("remediation pretest success capacity is unavailable")
-            entry = _PretestSuccess(job, inputs, claim_key, owner_id, predecessor=predecessor)
-            self._pretest_successes[nonce] = entry
-            return entry
-
-    @staticmethod
-    def _pretest_candidate_matches_input(
-        candidate: RemediationPretestCandidate,
-        inputs: RemediationPretestInput,
-        *,
-        sequence: int,
-    ) -> bool:
-        """Compare the frozen host pins with one durable candidate."""
-        return (
-            candidate.repository == inputs.repository
-            and candidate.issue_number == inputs.issue_number
-            and candidate.pr_number == inputs.pr_number
-            and candidate.branch == inputs.branch
-            and candidate.expected_remote_sha == inputs.expected_remote_sha
-            and canonical_source_receipt_json(candidate.source_receipt)
-            == inputs.source_receipt_json
-            and candidate.source_receipt_sha256 == inputs.source_receipt_sha256
-            and candidate.thread_snapshot_json == inputs.thread_snapshot_json
-            and candidate.batch_nonce == inputs.batch_nonce
-            and candidate.candidate_sequence == sequence
-        )
-
-    def _complete_pretest_success(
-        self, job: object, result: JobResult, reserved: _PretestSuccess | None
-    ) -> JobResult:
-        """Register only the actual bounded successful parsed completion."""
-        if not isinstance(job, AgentJob) or reserved is None:
-            return result
-        nonce = job.remediation_pretest_nonce
-        if nonce is None:
-            return result
-        from hephaestus.automation.address_review_core import parse_addressed_replies
-
-        with self._pretest_lock:
-            entry = self._pretest_successes.get(nonce)
-            if entry is not reserved or entry.job is not job:
-                return replace(result, ok=False, error="remediation_pretest_success_unavailable")
-            if not result.ok or result.interrupted or self._pretest_closed:
-                del self._pretest_successes[nonce]
-                return result
-            threads = json.loads(entry.inputs.thread_snapshot_json)
-            replies = (
-                dict(entry.predecessor.addressed_replies)
-                if entry.predecessor is not None
-                else parse_addressed_replies(result.value, threads)
-            )
-            if replies is None:
-                del self._pretest_successes[nonce]
-                return replace(result, ok=False, error="remediation_pretest_reply_invalid")
-            values = tuple(sorted(replies.items()))
-            try:
-                digest = remediation_pretest_result_digest(result.value)
-            except ValueError:
-                del self._pretest_successes[nonce]
-                return replace(result, ok=False, error="remediation_pretest_result_limit")
-            entry.replies = values
-            entry.result_sha256 = digest
-            return result
-
-    def _pretest_source(
-        self, manager: SourceWorkspaceManager, inputs: RemediationPretestInput
-    ) -> SourceWorkspaceReceipt:
-        """Require the exact attached writer while its lane lock is held."""
-        receipt = manager._require_receipt(inputs.issue_number, SourceLane.IMPLEMENTATION)
-        manager._reject_foreign_owner(receipt, inputs.issue_number, SourceLane.IMPLEMENTATION)
-        if (
-            canonical_source_receipt_json(receipt) != inputs.source_receipt_json
-            or receipt.path != manager.path_for(inputs.issue_number, SourceLane.IMPLEMENTATION)
-            or receipt.path.is_symlink()
-            or not manager._path_is_registered_to_repository(receipt.path)
-            or manager._head_branch(receipt.path) != f"refs/heads/{inputs.branch}"
-            or manager._head_revision(receipt.path) != inputs.expected_remote_sha
-        ):
-            raise SourceWorkspaceError("remediation pretest source changed")
-        return receipt
-
-    def _pretest_live_pr(
-        self, job: GitJob, repo_root: Path, inputs: RemediationPretestInput
-    ) -> None:
-        """Require complete fresh PR facts through the closed host runner."""
-        if self._github_job_runner is None:
-            raise SourceWorkspaceError("remediation pretest GitHub runner is unavailable")
-        receipt = self._github_job_runner.run(
-            GitHubJob(
-                repo=job.repo,
-                repo_root=repo_root,
-                descr="inspect_adopted_remediation_pr_state",
-                request=InspectAdoptedRemediationPrStateRequest(
-                    inputs.repository,
-                    inputs.issue_number,
-                    inputs.pr_number,
-                    inputs.branch,
-                    inputs.expected_remote_sha,
-                    inputs.thread_snapshot_json,
-                ),
-            ),
-            shutdown=self._shutdown,
-        )
-        expected = AdoptedRemediationPrStateRead(
-            inputs.repository,
-            inputs.issue_number,
-            inputs.pr_number,
-            inputs.branch,
-            inputs.expected_remote_sha,
-            "OPEN",
-            True,
-            inputs.thread_snapshot_json,
-            True,
-        )
-        if not isinstance(receipt, AdoptedRemediationPrStateRead) or receipt != expected:
-            raise SourceWorkspaceError("remediation pretest PR facts changed")
-
-    def _pretest_inspect(
-        self,
-        job: GitJob,
-        manager: SourceWorkspaceManager,
-        inputs: RemediationPretestInput,
-        *,
-        allow_clean: bool = False,
-    ) -> tuple[SourceWorkspaceReceipt, _DirtySnapshotEvidence, str, _BoundedGitOutput, CommitPaths]:
-        """Inspect exact local bytes and recheck source after fresh remote facts."""
-        source = self._pretest_source(manager, inputs)
-        scope_job = replace(
-            job,
-            kwargs={
-                **job.kwargs,
-                "scope_history_base_sha": inputs.expected_remote_sha,
-            },
-        )
-        if (
-            self._verify_implementation_edit_scope(
-                scope_job, source.path, allowed_paths=inputs.allowed_paths
-            )
-            is not None
-        ):
-            raise SourceWorkspaceError("remediation pretest scope changed")
-        linked = _linked_worktree_git_env(manager.repo_root, source.path)
-        before = _inspect_candidate_with_private_git(
-            source.path, source.revision, timeout=job.timeout_s, linked_env=linked
-        )
-        remote = self._read_remote_branch_head(
-            source.path,
-            remote="origin",
-            branch=inputs.branch,
-            expected_repo=inputs.repository,
-            timeout=job.timeout_s,
-        )
-        if remote != inputs.expected_remote_sha:
-            raise SourceWorkspaceError("remediation pretest remote head changed")
-        self._pretest_live_pr(job, manager.repo_root, inputs)
-        self._pretest_source(manager, inputs)
-        after = _inspect_candidate_with_private_git(
-            source.path, source.revision, timeout=job.timeout_s, linked_env=linked
-        )
-        if before != after:
-            raise SourceWorkspaceError("remediation pretest candidate changed")
-        if after[4] is None or after[0].changed_file_count == 0:
-            if (
-                not allow_clean
-                or after[4] is not None
-                or after[0].changed_file_count != 0
-                or after[1].text.strip()
-                or after[2] != source.revision
-                or after[3].text
-                or after[3].byte_count != 0
-            ):
-                raise SourceWorkspaceError("remediation pretest candidate is not clean")
-            tree = self._pretest_clean_tree(job, source, linked)
-            return source, after[0], tree, after[3], CommitPaths((), ())
-        if not after[4].add_paths and not after[4].update_paths:
-            raise SourceWorkspaceError("remediation pretest candidate changed or is empty")
-        return source, after[0], after[2], after[3], after[4]
-
-    @staticmethod
-    def _pretest_clean_tree(
-        job: GitJob, source: SourceWorkspaceReceipt, linked: dict[str, str]
-    ) -> str:
-        """Prove that the private index has the unchanged source tree."""
-        with _private_linked_worktree_git_env(linked, detached_head=source.revision) as env:
-            tree = git_utils.run(
-                ["git", "write-tree"],
-                cwd=source.path,
-                timeout=job.timeout_s,
-                env=env,
-            ).stdout.strip()
-            expected = git_utils.run(
-                ["git", "rev-parse", f"{source.revision}^{{tree}}"],
-                cwd=source.path,
-                timeout=job.timeout_s,
-                env=env,
-            ).stdout.strip()
-        if not _is_full_commit_sha(tree) or tree != expected:
-            raise SourceWorkspaceError("remediation pretest clean tree changed")
-        return tree
-
-    def _git_persist_pretest_candidate(self, job: GitJob) -> JobResult:
-        """Persist one actual completed job before the stage can submit tests."""
-        nonce = job.kwargs.get("remediation_pretest_nonce")
-        inputs = job.kwargs.get("remediation_pretest_input")
-        result_digest = job.kwargs.get("remediation_pretest_result_sha256")
-        if not isinstance(nonce, str) or not isinstance(inputs, RemediationPretestInput):
-            raise ValueError("remediation pretest persistence input is unavailable")
-        with self._pretest_lock:
-            entry = self._pretest_successes.get(nonce)
-            if (
-                self._pretest_closed
-                or entry is None
-                or entry.in_use
-                or entry.inputs != inputs
-                or entry.result_sha256 != result_digest
-                or entry.result_sha256 is None
-                or entry.replies is None
-                or entry.job.repo != job.repo
-            ):
-                raise ValueError("remediation pretest successful job is unavailable")
-            entry.in_use = True
-        try:
-            binding = entry.job.workspace
-            if binding is None or binding.reusable_root is None:
-                raise ValueError("remediation pretest source root is unavailable")
-            root = binding.reusable_root
-            manager = SourceWorkspaceManager(root, repository=job.repo)
-            with manager.implementation_writer_handoff(
-                inputs.issue_number,
-                deadline=_PreparationDeadline(
-                    cast(float, job.deadline_s), time.monotonic, self._shutdown
-                ),
-            ):
-                self._reject_pretest_legacy_conflict(root, inputs)
-                allow_clean = (
-                    inputs.candidate_sequence == 1
-                    and inputs.expected_previous_record_sha256 is None
-                    and load_pretest_candidate(repo_root=root, pr_number=inputs.pr_number) is None
-                )
-                source, snapshot, tree, diff, paths = self._pretest_inspect(
-                    job, manager, inputs, allow_clean=allow_clean
-                )
-                if not paths.add_paths and not paths.update_paths:
-                    if (
-                        load_pretest_candidate(repo_root=root, pr_number=inputs.pr_number)
-                        is not None
-                    ):
-                        raise SourceWorkspaceError("remediation pretest clean authority changed")
-                    with self._pretest_lock:
-                        if self._pretest_closed or self._pretest_successes.get(nonce) is not entry:
-                            raise SourceWorkspaceError("remediation pretest completion expired")
-                        del self._pretest_successes[nonce]
-                    return JobResult(
-                        ok=True,
-                        value={
-                            "outcome": "clean",
-                            "sequence": 1,
-                            "successful_job_id": nonce,
-                            "successful_result_sha256": entry.result_sha256,
-                            "source_receipt_sha256": inputs.source_receipt_sha256,
-                            "head_sha": source.revision,
-                        },
-                    )
-                candidate = RemediationPretestCandidate(
-                    phase="ready",
-                    repository=inputs.repository,
-                    issue_number=inputs.issue_number,
-                    pr_number=inputs.pr_number,
-                    repo_root=str(root),
-                    worktree_path=str(source.path),
-                    branch=inputs.branch,
-                    expected_remote_sha=inputs.expected_remote_sha,
-                    source_receipt=source,
-                    source_receipt_sha256=inputs.source_receipt_sha256,
-                    source_repository_identity=source.repository_identity,
-                    source_ownership_key=source.ownership_key,
-                    source_generation=source.generation,
-                    candidate_tree_sha=tree,
-                    add_paths=tuple(paths.add_paths),
-                    update_paths=tuple(paths.update_paths),
-                    diff=diff.text,
-                    diff_sha256=diff.sha256,
-                    content_snapshot=tuple(sorted(snapshot.snapshot.items())),
-                    thread_snapshot_json=inputs.thread_snapshot_json,
-                    batch_nonce=inputs.batch_nonce,
-                    candidate_sequence=inputs.candidate_sequence,
-                    successful_job_id=nonce,
-                    successful_result_sha256=entry.result_sha256,
-                    addressed_replies=entry.replies,
-                )
-                digest = save_pretest_candidate(
-                    repo_root=root,
-                    candidate=candidate,
-                    expected_digest=inputs.expected_previous_record_sha256,
-                    previous_successful_job_id=(
-                        entry.predecessor.successful_job_id if entry.predecessor else None
-                    ),
-                )
-                if load_pretest_candidate(repo_root=root, pr_number=inputs.pr_number) != candidate:
-                    raise ValueError("remediation pretest write readback failed")
-            with self._pretest_lock:
-                if self._pretest_successes.get(nonce) is entry:
-                    del self._pretest_successes[nonce]
-            return JobResult(
-                ok=True, value={"record_sha256": digest, "sequence": inputs.candidate_sequence}
-            )
-        finally:
-            with self._pretest_lock:
-                entry.in_use = False
-
-    def _git_invalidate_pretest_candidate(self, job: GitJob) -> JobResult:
-        """Retire exact ready recovery authority before intentional mutation."""
-        inputs = job.kwargs.get("remediation_pretest_input")
-        digest = job.kwargs.get("remediation_pretest_record_sha256")
-        root_value = job.kwargs.get("repo_root")
-        if not isinstance(inputs, RemediationPretestInput) or not isinstance(root_value, str):
-            raise ValueError("remediation pretest invalidation input is unavailable")
-        root = Path(root_value)
-        manager = SourceWorkspaceManager(root, repository=job.repo)
-        with manager.implementation_writer_handoff(
-            inputs.issue_number,
-            deadline=_PreparationDeadline(
-                cast(float, job.deadline_s), time.monotonic, self._shutdown
-            ),
-        ):
-            self._pretest_source(manager, inputs)
-            candidate = load_pretest_candidate(repo_root=root, pr_number=inputs.pr_number)
-            if (
-                candidate is None
-                or candidate.phase != "ready"
-                or candidate.digest != digest
-                or not self._pretest_candidate_matches_input(
-                    candidate, inputs, sequence=inputs.candidate_sequence
-                )
-            ):
-                raise ValueError("remediation pretest ready candidate changed")
-            invalidated = replace(candidate, phase="invalidated")
-            result = save_pretest_candidate(
-                repo_root=root, candidate=invalidated, expected_digest=digest
-            )
-            return JobResult(
-                ok=True, value={"record_sha256": result, "sequence": inputs.candidate_sequence}
-            )
 
     def _persist_evidence_receipt(
         self,
@@ -6075,7 +5257,6 @@ class WorkerPool:
         job: AgentJob,
         *,
         deadline_s: float | None = None,
-        reserve_pretest: Callable[[], None] | None = None,
     ) -> JobResult:
         """Run one agent job and return one result to the queue.
 
@@ -6106,8 +5287,6 @@ class WorkerPool:
             remaining_timeout()
             _validate_source_operation_job(job)
             with _agent_workspace_lease(job, deadline_s=deadline_s, shutdown=self._shutdown) as cwd:
-                if reserve_pretest is not None:
-                    reserve_pretest()
                 remaining_timeout()
                 return self._invoke_agent(
                     job, cwd, deadline_s=deadline_s, remaining_timeout=remaining_timeout
@@ -6809,14 +5988,9 @@ class WorkerPool:
         """Report whether the strict Pyxis sandbox inputs are all configured.
 
         The rule is the Linux rule that select_quota_backend applies:
-        the pinned image digest, the trust authority, and the writable
-        quota root are all present.
+        the image and the writable quota root are both present.
         """
-        return bool(
-            self._host_verification_pyxis_sha256
-            and self._host_verification_pyxis_authority is not None
-            and self._host_verification_pyxis_quota_root is not None
-        )
+        return self._host_verification_pyxis_quota_root is not None
 
     def _require_pyxis_quota_root(self) -> Path:
         """Return the writable quota root or reject the run."""
@@ -6848,11 +6022,7 @@ class WorkerPool:
         configured_image = self._host_verification_pyxis_image
         image_path = Path.cwd() / Path(configured_image or DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE)
         try:
-            image = _validate_pyxis_image(
-                image_path,
-                expected_sha256=self._host_verification_pyxis_sha256,
-                provenance=self._host_verification_pyxis_authority,
-            )
+            image = _validate_pyxis_image(image_path)
             quota_value = _validate_pyxis_quota_root(
                 self._require_pyxis_quota_root(),
                 retain_binding=True,
@@ -7000,10 +6170,6 @@ class WorkerPool:
                         **result_value,
                         "container_image": str(staged_image.path),
                         "container_image_sha256": staged_image.sha256,
-                        "container_image_id": staged_image.container_image_id,
-                        "container_image_reference": staged_image.container_image_reference,
-                        "containerfile_sha256": staged_image.containerfile_sha256,
-                        "container_source_revision": staged_image.source_revision,
                         "container_runtime": staged_image.container_runtime,
                         "head_sha": job.expected_head_sha,
                         "immutable_source": True,
@@ -7330,8 +6496,6 @@ class WorkerPool:
         """Return operation-specific paths after read-only authority checks."""
         if job.op == "prepare_intake":
             return self._prepare_intake_git_locks(job, lock_attempt_started_s)
-        if job.op == "publish_remediation_recovery":
-            return self._prepare_remediation_recovery_locks(job)
         if job.workspace is not None:
             binding = (
                 self._review_validation_binding(job)
@@ -7428,55 +6592,6 @@ class WorkerPool:
         except (OSError, RuntimeError, UnicodeError) as exc:
             raise _RemoteGitAuthenticationError("Git common directory is unavailable") from exc
         return checkout, lock_path, parent_identity
-
-    def _prepare_remediation_recovery_locks(self, job: GitJob) -> _PreparedGitLocks:
-        """Bind a recovery receipt to its authenticated checkout before writes."""
-        try:
-            receipt = RemediationRecoveryReceipt.from_dict(job.kwargs.get("recovery_receipt"))
-            review_input = receipt.review_input
-            repo_root = Path(review_input.repo_root)
-            checkout = Path(review_input.worktree_path)
-            resolved_root = repo_root.resolve(strict=True)
-            resolved_checkout = checkout.resolve(strict=True)
-            if (
-                repo_root.is_symlink()
-                or checkout.is_symlink()
-                or resolved_root != repo_root
-                or resolved_checkout != checkout
-                or (
-                    not repository_worker_path_is_valid(
-                        resolved_root,
-                        resolved_checkout,
-                        repository=review_input.repository,
-                        item_number=review_input.issue_number,
-                    )
-                )
-                or review_input.repository != job.transport_repository.casefold()
-            ):
-                raise ValueError("remediation recovery checkout identity changed")
-            root_lock = WorktreeManager.git_metadata_lock_path(resolved_root)
-            lock_path = WorktreeManager.git_metadata_lock_path(resolved_checkout)
-            if root_lock.parent.resolve(strict=True) != lock_path.parent.resolve(strict=True):
-                raise ValueError("remediation recovery checkout identity changed")
-            self._authenticated_remote_git_configuration(
-                cwd=resolved_checkout,
-                expected_repo=job.transport_repository,
-                timeout=job.timeout_s,
-            )
-            canonical_lock = lock_path.parent.resolve(strict=True) / lock_path.name
-            parent_identity = _git_common_parent_identity(canonical_lock)
-        except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
-            raise _GitCheckoutBindingError(
-                f"remediation publication receipt is invalid: {exc}"
-            ) from exc
-        return _PreparedGitLocks(
-            canonical_lock,
-            authoritative_checkout=resolved_checkout,
-            expected_common_lock_path=canonical_lock,
-            common_parent_identity=parent_identity,
-            validated_repository=job.transport_repository,
-            remediation_receipt=receipt,
-        )
 
     def _prepare_intake_git_locks(
         self,
@@ -7623,10 +6738,6 @@ class WorkerPool:
                     operational_state_paths=prepared.operational_state_paths,
                     admitted_metadata_lock=common_lock_path,
                     expected_compatibility_lock_paths=(prepared.validated_compatibility_paths),
-                )
-            if prepared.remediation_receipt is not None:
-                return self._git_publish_remediation_recovery(
-                    timed_job, receipt=prepared.remediation_receipt
                 )
             if timed_job.op == "sync_checkout" and common_lock_path is not None:
                 return self._git_sync_checkout(
@@ -8584,12 +7695,6 @@ class WorkerPool:
         if job.op == "create_worktree":
             return self._git_create_worktree(job)
 
-        elif job.op == "persist_remediation_pretest_candidate":
-            return self._git_persist_pretest_candidate(job)
-
-        elif job.op == "invalidate_remediation_pretest_candidate":
-            return self._git_invalidate_pretest_candidate(job)
-
         elif job.op == "publish_dirty_direct_continuation":
             return self._git_publish_dirty_direct_continuation(job)
 
@@ -8608,9 +7713,6 @@ class WorkerPool:
         elif job.op == "verify_pr_review_checkout":
             return self._git_verify_pr_review_checkout(job)
 
-        elif job.op == "verify_remediation_journal":
-            return self._git_verify_remediation_journal(job)
-
         elif job.op == "remove_worktree":
             from .git_cleanup import run_cleanup_job
 
@@ -8619,17 +7721,11 @@ class WorkerPool:
         elif job.op == "fetch_main":
             return self._git_fetch_main(job)
 
-        elif job.op == "verify_rebase_review":
-            return self._git_verify_rebase_review(job)
-
         elif job.op == "validate_rebase_conflict":
             return self._git_validate_rebase_conflict(job)
 
-        elif job.op == "commit_push" or job.op == "prepare_remediation_recovery":
+        elif job.op == "commit_push":
             return self._git_commit_push(job)
-
-        elif job.op == "publish_remediation_recovery":
-            return self._git_publish_remediation_recovery(job)
 
         elif job.op == "release_branch_reservation":
             from .git_cleanup import run_cleanup_job
@@ -8695,199 +7791,6 @@ class WorkerPool:
         else:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
-
-    def _git_publish_remediation_recovery(
-        self,
-        job: GitJob,
-        *,
-        receipt: RemediationRecoveryReceipt | None = None,
-    ) -> JobResult:
-        """Validate and publish one already-prepared remediation commit."""
-        try:
-            receipt = receipt or RemediationRecoveryReceipt.from_dict(
-                job.kwargs.get("recovery_receipt")
-            )
-            reply_result = RemediationReplyResult.from_dict(job.kwargs.get("reply_result"))
-        except ValueError as error:
-            return JobResult(ok=False, error=f"remediation publication receipt is invalid: {error}")
-        review_input = receipt.review_input
-        batch_nonce = job.kwargs.get("remediation_batch_nonce")
-        if (
-            reply_result.review_input_sha256 != receipt.review_input_sha256
-            or job.transport_repository.casefold() != review_input.repository
-            or not isinstance(batch_nonce, str)
-        ):
-            return JobResult(ok=False, error="remediation publication identity is invalid")
-        if job.kwargs.get("already_published") is True:
-            worktree = Path(review_input.worktree_path)
-            remote_head = self._read_remote_branch_head(
-                worktree,
-                remote="origin",
-                branch=review_input.branch,
-                expected_repo=job.transport_repository,
-                timeout=job.timeout_s,
-            )
-            exact_commit = self._is_exact_recovery_commit(
-                worktree,
-                review_input.recovery_commit_sha,
-                parent=review_input.reviewed_parent_sha,
-                tree=review_input.candidate_tree_sha,
-                timeout=job.timeout_s,
-            )
-            if remote_head != review_input.recovery_commit_sha or not exact_commit:
-                return JobResult(
-                    ok=False,
-                    error="published remediation recovery commit is not exact",
-                    value={"failure_kind": "publication_unavailable"},
-                )
-            artifact_job = replace(
-                job,
-                kwargs={
-                    **job.kwargs,
-                    "remediation_repository": review_input.repository,
-                    "remediation_pr_number": review_input.pr_number,
-                    "remediation_thread_snapshots": json.loads(review_input.thread_snapshot_json),
-                    "remediation_replies": dict(reply_result.replies),
-                    "remediation_failure_diagnostic": review_input.failure_diagnostic,
-                    "remediation_journal_input_encoding": receipt.journal_input_encoding,
-                    "remediation_journal_input_data": receipt.journal_input_data,
-                },
-            )
-            try:
-                handoff, journal = _remediation_recovery_artifacts(
-                    artifact_job,
-                    repo_root=Path(review_input.repo_root),
-                    worktree=worktree,
-                    branch=review_input.branch,
-                    parent_sha=review_input.reviewed_parent_sha,
-                    candidate_tree_sha=review_input.candidate_tree_sha,
-                    recovery_commit_sha=review_input.recovery_commit_sha,
-                    paths=CommitPaths(receipt.add_paths, receipt.update_paths),
-                    committed_diff=review_input.committed_diff,
-                    committed_diff_sha256=review_input.committed_diff_sha256,
-                )
-            except (TypeError, ValueError) as exc:
-                return JobResult(ok=False, error=f"remediation journal is unavailable: {exc}")
-            return JobResult(
-                ok=True,
-                value={
-                    "pushed": True,
-                    "head_sha": review_input.recovery_commit_sha,
-                    "remediation_handoff": handoff,
-                    "remediation_journal": {"marker": journal[0], "body": journal[1]},
-                },
-            )
-        retry_job = replace(
-            job,
-            kwargs={
-                "issue_number": review_input.issue_number,
-                "worktree_path": review_input.worktree_path,
-                "repo_root": review_input.repo_root,
-                "branch": review_input.branch,
-                "expected_recovery_head": receipt.expected_remote_sha,
-                "expected_recovery_content_snapshot": dict(receipt.content_snapshot),
-                "expected_recovery_tree_sha": review_input.candidate_tree_sha,
-                "expected_recovery_diff": review_input.committed_diff,
-                "expected_recovery_diff_sha256": review_input.committed_diff_sha256,
-                "expected_recovery_add_paths": receipt.add_paths,
-                "expected_recovery_update_paths": receipt.update_paths,
-                "expected_recovery_commit_sha": review_input.recovery_commit_sha,
-                "remediation_repository": review_input.repository,
-                "remediation_pr_number": review_input.pr_number,
-                "remediation_thread_snapshots": json.loads(review_input.thread_snapshot_json),
-                "remediation_replies": dict(reply_result.replies),
-                "remediation_batch_nonce": batch_nonce,
-                "remediation_failure_diagnostic": review_input.failure_diagnostic,
-                "remediation_journal_input_encoding": receipt.journal_input_encoding,
-                "remediation_journal_input_data": receipt.journal_input_data,
-            },
-        )
-        return self._git_commit_push(retry_job)
-
-    def _git_verify_remediation_journal(self, job: GitJob) -> JobResult:
-        """Prove one recovered journal against exact local Git objects."""
-        raw_handoff = job.kwargs.get("handoff")
-        raw_repo_root = job.kwargs.get("repo_root")
-        if not isinstance(raw_handoff, dict) or not isinstance(raw_repo_root, str):
-            return JobResult(ok=False, error="remediation journal Git identity is invalid")
-        try:
-            review_input_bytes = raw_handoff.get("review_input_bytes")
-            if not isinstance(review_input_bytes, str):
-                raise ValueError("remediation journal review input is unavailable")
-            review_input = RemediationReviewInput.from_canonical_bytes(
-                review_input_bytes.encode("utf-8")
-            )
-            repo_root = Path(raw_repo_root).resolve(strict=True)
-            if (
-                str(repo_root) != review_input.repo_root
-                or job.transport_repository.casefold() != review_input.repository
-                or raw_handoff.get("head_sha") != review_input.recovery_commit_sha
-            ):
-                raise ValueError("remediation journal repository binding is invalid")
-            git_env = _isolated_checkout_git_env()
-            if not self._is_exact_recovery_commit(
-                repo_root,
-                review_input.recovery_commit_sha,
-                parent=review_input.reviewed_parent_sha,
-                tree=review_input.candidate_tree_sha,
-                timeout=job.timeout_s,
-                git_env=git_env,
-            ):
-                raise ValueError("remediation journal commit identity is invalid")
-            committed_diff = _run_bounded_git_output(
-                (
-                    "git",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "diff",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--no-renames",
-                    "--binary",
-                    "--full-index",
-                    review_input.reviewed_parent_sha,
-                    review_input.candidate_tree_sha,
-                ),
-                cwd=repo_root,
-                timeout=job.timeout_s,
-                max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
-                retain_text=True,
-                env=git_env,
-            )
-            changed = _run_bounded_git_output(
-                (
-                    "git",
-                    "diff",
-                    "--name-only",
-                    "--no-renames",
-                    "-z",
-                    review_input.reviewed_parent_sha,
-                    review_input.candidate_tree_sha,
-                ),
-                cwd=repo_root,
-                timeout=job.timeout_s,
-                max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
-                retain_text=True,
-                env=git_env,
-            )
-            changed_paths = tuple(path for path in changed.text.split("\0") if path)
-            if (
-                committed_diff.text != review_input.committed_diff
-                or committed_diff.sha256 != review_input.committed_diff_sha256
-                or len(changed_paths) != len(review_input.changed_paths)
-                or set(changed_paths) != set(review_input.changed_paths)
-            ):
-                raise ValueError("remediation journal committed evidence is invalid")
-        except (OSError, RuntimeError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
-            return JobResult(ok=False, error=f"remediation journal Git verification failed: {exc}")
-        return JobResult(
-            ok=True,
-            value={
-                "verified": True,
-                "review_input_sha256": review_input.review_input_sha256,
-                "head_sha": review_input.recovery_commit_sha,
-            },
-        )
 
     def _git_verify_issue_wave_ancestry(self, job: GitJob) -> JobResult:
         """Verify checkpoint commits are ancestors of synchronized main."""
@@ -8988,12 +7891,23 @@ class WorkerPool:
         if not path.exists() and not path.is_symlink():
             return None
         stored = _terminal_json_object(_terminal_read_bytes(path))
-        if (
-            set(stored) != {*identity, "head_sha"}
-            or any(stored.get(key) != value for key, value in identity.items())
-            or not _is_full_commit_sha(stored.get("head_sha"))
+        if set(stored) != {*identity, "head_sha"} or not _is_full_commit_sha(
+            stored.get("head_sha")
         ):
             raise SourceWorkspaceError("initial implementation record does not match")
+        if any(stored.get(key) != value for key, value in identity.items() if key != "branch"):
+            raise SourceWorkspaceError("initial implementation record does not match")
+        if stored.get("branch") != identity["branch"]:
+            # The branch carries a per-run nonce, so a record from an earlier run
+            # names a different branch for the same item. That record cannot
+            # describe this run's preparation; the new run starts its own.
+            logger.warning(
+                "initial implementation record belongs to an earlier run "
+                "(%s != %s); treating it as absent",
+                stored.get("branch"),
+                identity["branch"],
+            )
+            return None
         return stored
 
     def _completed_initial_start(self, job: GitJob) -> bool:
@@ -9429,12 +8343,14 @@ class WorkerPool:
                         identity,
                     )
                 pending = self._initial_record_matches(path.with_suffix(".pending.json"), identity)
-                if pending is None or pending["head_sha"] != expected:
+                if pending is not None and pending["head_sha"] != expected:
                     return JobResult(
                         ok=False,
                         value={"initial_implementation_ambiguous": True},
                         error="initial implementation history is unknown; use --rebase to continue",
                     )
+                # Neither record describes this run, so nothing from this run has
+                # been prepared yet. Start it now instead of stopping the item.
                 return self._run_initial_rebase(job, path, identity, record_source=record_source)
         except InterruptedError:
             raise
@@ -9900,15 +8816,6 @@ class WorkerPool:
         structural = self._rebase_structural_receipts(job, resulting_workspace, source_sha)
         if structural is not None and not structural.ok:
             return structural
-        record = (
-            self._prepare_rebase_review_publication(
-                job, base_sha=base_sha, source_head=expected, resulting_head=source_sha
-            )
-            if publish
-            else None
-        )
-        if isinstance(record, JobResult):
-            return self._retain_rebase_execution(record, structural)
         if publish:
             revalidate = self._authenticated_remote_revalidator(
                 cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
@@ -9936,214 +8843,7 @@ class WorkerPool:
                 **(structural.value if structural is not None else {}),
             },
         )
-        return self._retain_rebase_execution(
-            self._retain_rebase_review(job, completed, record), structural
-        )
-
-    def _inspect_rebase_review_record(self, job: GitJob, record: object) -> bool:
-        """Read fresh authenticated audit, record, label, and PR evidence."""
-        from hephaestus.automation.pipeline.github_jobs import (
-            InspectRebaseReviewRequest,
-            RebaseReviewInspected,
-        )
-        from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
-
-        runner = self._github_job_runner
-        root = job.kwargs.get("repo_root")
-        if (
-            runner is None
-            or not isinstance(root, (str, Path))
-            or not isinstance(record, RebaseReviewRecord)
-        ):
-            return False
-        try:
-            request = InspectRebaseReviewRequest(record)
-            receipt = runner.run(
-                GitHubJob(
-                    repo=job.repo,
-                    repo_root=Path(root).resolve(strict=True),
-                    request=request,
-                    descr="inspect_rebase_review_record",
-                ),
-                shutdown=self._shutdown,
-                deadline_s=job.deadline_s,
-            )
-            return (
-                isinstance(receipt, RebaseReviewInspected)
-                and receipt.request == request
-                and receipt.verified
-            )
-        except Exception:
-            return False
-
-    def _git_verify_rebase_review(self, job: GitJob) -> JobResult:
-        """Check a durable record against fresh remote and tree evidence."""
-        from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
-
-        record = job.kwargs.get("record")
-        if (
-            not isinstance(record, RebaseReviewRecord)
-            or record.repository != job.transport_repository
-            or record.state != "active"
-            or not is_clean_go_review(record.audit)
-        ):
-            return JobResult(ok=False, error="rebase review record is invalid")
-        root = job.kwargs.get("repo_root")
-        if not isinstance(root, (str, Path)) or not Path(root).is_dir():
-            return JobResult(ok=False, error="rebase review repository is unavailable")
-        cwd = Path(root)
-        if not self._inspect_rebase_review_record(job, record):
-            return JobResult(ok=False, error="rebase review record or audit changed")
-        try:
-            env, config = self._authenticated_remote_git_configuration(
-                cwd=cwd, expected_repo=record.repository, timeout=job.timeout_s
-            )
-            ref = f"refs/pull/{record.pr_number}/head"
-
-            def read_head() -> bool:
-                fields = git_utils.run(
-                    ["git", *config, "ls-remote", "--refs", "origin", ref],
-                    cwd=cwd,
-                    timeout=job.timeout_s,
-                    env=env,
-                ).stdout.split()
-                return fields == [record.resulting_head_sha, ref]
-
-            if not read_head():
-                return JobResult(ok=False, error="rebase review remote head changed")
-            for revision in (
-                record.reviewed_head_sha,
-                record.reviewed_base_sha,
-                record.target_base_sha,
-                record.resulting_head_sha,
-            ):
-                git_utils.run(
-                    ["git", *config, "fetch", "--no-tags", "origin", revision],
-                    cwd=cwd,
-                    timeout=job.timeout_s,
-                    env=env,
-                )
-            tree = verify_rebase_tree(
-                cwd,
-                reviewed_head_sha=record.reviewed_head_sha,
-                reviewed_base_sha=record.reviewed_base_sha,
-                target_base_sha=record.target_base_sha,
-                resulting_head_sha=record.resulting_head_sha,
-                timeout=job.timeout_s,
-            )
-            if tree != record.resulting_tree_sha or not read_head():
-                return JobResult(ok=False, error="rebase review tree or remote head changed")
-            if not self._inspect_rebase_review_record(job, record):
-                return JobResult(ok=False, error="rebase review record or audit changed")
-            fields = {
-                name: getattr(record, name) for name in RebaseReviewProof.__dataclass_fields__
-            }
-            return JobResult(ok=True, value=RebaseReviewProof(**fields))
-        except (OSError, ValueError, subprocess.SubprocessError):
-            return JobResult(ok=False, error="rebase review verification failed")
-
-    def _prepare_rebase_review_publication(
-        self, job: GitJob, *, base_sha: str, source_head: str, resulting_head: str
-    ) -> object:
-        """Store exact rebase facts before the host publishes the new head."""
-        from hephaestus.automation.pipeline.github_jobs import (
-            PublishRebaseReviewRequest,
-            RebaseReviewPublished,
-        )
-        from hephaestus.automation.rebase_review_receipt import (
-            RebaseReviewRecord,
-            original_audit_identity,
-        )
-
-        if job.kwargs.get("reviewed_head_sha") is None:
-            return None
-        audit = job.kwargs.get("review_audit")
-        if not isinstance(audit, ReviewAudit) or not is_clean_go_review(audit):
-            return JobResult(ok=False, error="initial rebase review audit is invalid")
-        cwd = Path(str(job.kwargs.get("cwd") or ""))
-        reviewed = job.kwargs.get("reviewed_head_sha")
-        reviewed_base = job.kwargs.get("reviewed_base_sha")
-        if (
-            not isinstance(reviewed, str)
-            or not isinstance(reviewed_base, str)
-            or not all(_is_full_commit_sha(v) for v in (resulting_head, reviewed, reviewed_base))
-        ):
-            return JobResult(ok=False, error="rebase review identity is invalid")
-        tree = verify_rebase_tree(
-            cwd,
-            reviewed_head_sha=reviewed,
-            reviewed_base_sha=reviewed_base,
-            target_base_sha=base_sha,
-            resulting_head_sha=resulting_head,
-            timeout=job.timeout_s,
-        )
-        if tree is None:
-            return JobResult(ok=False, error="rebase tree changed; source decision required")
-        try:
-            pr = job.kwargs.get("pr_number")
-            issue = job.kwargs.get("issue_number")
-            if not isinstance(pr, int) or not isinstance(issue, int):
-                return JobResult(ok=False, error="rebase issue or PR identity is invalid")
-            record = RebaseReviewRecord(
-                repository=job.transport_repository,
-                issue_number=issue,
-                pr_number=pr,
-                reviewed_head_sha=reviewed,
-                reviewed_base_sha=reviewed_base,
-                source_head_sha=source_head,
-                target_base_sha=base_sha,
-                resulting_head_sha=resulting_head,
-                resulting_tree_sha=tree,
-                original_audit_id=original_audit_identity(pr, reviewed),
-                audit=audit,
-            )
-            runner = self._github_job_runner
-            root = job.kwargs.get("repo_root")
-            if runner is None or not isinstance(root, (str, Path)):
-                return JobResult(ok=False, error="rebase record publication is unavailable")
-            request = PublishRebaseReviewRequest(record)
-            receipt = runner.run(
-                GitHubJob(
-                    repo=job.repo,
-                    repo_root=Path(root).resolve(strict=True),
-                    request=request,
-                    descr="publish_rebase_review_record",
-                ),
-                shutdown=self._shutdown,
-                deadline_s=job.deadline_s,
-            )
-            if (
-                not isinstance(receipt, RebaseReviewPublished)
-                or receipt.request != request
-                or not receipt.published
-            ):
-                return JobResult(ok=False, error="rebase record publication failed")
-            return record
-        except Exception:
-            return JobResult(ok=False, error="rebase record publication failed")
-
-    def _retain_rebase_review(self, job: GitJob, result: JobResult, record: object) -> JobResult:
-        """Return a typed review proof only after the exact remote readback."""
-        from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
-
-        if record is None:
-            return result
-        if not isinstance(record, RebaseReviewRecord) or not isinstance(result.value, dict):
-            return JobResult(ok=False, error="rebase review record is invalid")
-        remote = self._read_remote_branch_head(
-            Path(str(job.kwargs.get("cwd") or "")),
-            remote="origin",
-            branch=str(job.kwargs.get("branch") or ""),
-            expected_repo=job.transport_repository,
-            timeout=job.timeout_s,
-        )
-        if result.value.get("published") is not True or remote != record.resulting_head_sha:
-            return JobResult(ok=False, error="rebase publication is unverified")
-        if not self._inspect_rebase_review_record(job, record):
-            return JobResult(ok=False, error="rebase review record or audit changed")
-        fields = {name: getattr(record, name) for name in RebaseReviewProof.__dataclass_fields__}
-        value = {**result.value, REBASE_REVIEW_PROOF_KEY: RebaseReviewProof(**fields)}
-        return replace(result, value=value)
+        return self._retain_rebase_execution(completed, structural)
 
     def _sync_writer_to_expected_remote_head(
         self,
@@ -11120,15 +9820,6 @@ class WorkerPool:
         )
         if metadata is not None:
             return self._retain_rebase_execution(metadata, structural)
-        record = (
-            self._prepare_rebase_review_publication(
-                job, base_sha=base_sha, source_head=expected_remote_sha, resulting_head=source_sha
-            )
-            if publish
-            else None
-        )
-        if isinstance(record, JobResult):
-            return self._retain_rebase_execution(record, structural)
         if publish:
             revalidate_remote = self._authenticated_remote_revalidator(
                 cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
@@ -11157,9 +9848,7 @@ class WorkerPool:
                 **(structural.value if structural is not None else {}),
             },
         )
-        return self._retain_rebase_execution(
-            self._retain_rebase_review(job, completed, record), structural
-        )
+        return self._retain_rebase_execution(completed, structural)
 
     def _completed_rebase_head(
         self,
@@ -12047,6 +10736,67 @@ class WorkerPool:
             raise SourceWorkspaceError("dirty direct PR absence is unconfirmed")
         return receipt
 
+    def _dirty_direct_probe_result(
+        self,
+        manager: SourceWorkspaceManager,
+        issue: int,
+        original: SourceWorkspaceReceipt | None,
+        deadline: _PreparationDeadline,
+    ) -> JobResult | None:
+        """Report whether a dirty continuation applies before a writer is created."""
+        if original is None:
+            path = manager.path_for(issue, SourceLane.IMPLEMENTATION)
+            if path.exists() or path.is_symlink():
+                raise SourceWorkspaceError("dirty direct writer owner is unavailable")
+            return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
+        manager._reject_foreign_owner(original, issue, SourceLane.IMPLEMENTATION)
+        if original.schema_version != 1:
+            return None
+        if self._dirty_predecessor_is_gone(manager, original, deadline):
+            logger.warning("dirty direct predecessor #%s is gone; preparing a fresh writer", issue)
+            return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
+        try:
+            dirty = manager._is_dirty(original.path)
+        except SourceWorkspaceError:
+            logger.warning(
+                "dirty direct predecessor #%s cannot be inspected; preparing a fresh writer",
+                issue,
+            )
+            return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
+        if not dirty:
+            return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
+        return None
+
+    def _release_dirty_claim_if_unadvanced(
+        self,
+        manager: SourceWorkspaceManager,
+        issue: int,
+        original: SourceWorkspaceReceipt,
+    ) -> SourceWorkspaceReceipt | None:
+        """Restore a plain receipt when a consumed claim published nothing."""
+        if original.schema_version != 2 or not manager._release_unadvanced_dirty_claim_locked(
+            issue
+        ):
+            return None
+        logger.warning(
+            "dirty direct claim for #%s published nothing; preparing a fresh writer", issue
+        )
+        return manager._read_receipt(issue, SourceLane.IMPLEMENTATION)
+
+    @staticmethod
+    def _dirty_predecessor_is_gone(
+        manager: SourceWorkspaceManager,
+        original: SourceWorkspaceReceipt | None,
+        deadline: _PreparationDeadline,
+    ) -> bool:
+        """Return whether the recorded writer checkout no longer exists."""
+        return (
+            original is None
+            or original.path.is_symlink()
+            or not original.path.exists()
+            or not manager._path_is_registered_to_repository(original.path, deadline=deadline)
+        )
+
     def _git_claim_dirty_direct_continuation(self, job: GitJob) -> JobResult:  # noqa: C901
         """Claim an existing dirty direct writer without a new reservation."""
         issue = job.kwargs.get("issue_number")
@@ -12062,24 +10812,21 @@ class WorkerPool:
             with manager._acquire_lane(issue, SourceLane.IMPLEMENTATION, deadline):
                 original = manager._read_receipt(issue, SourceLane.IMPLEMENTATION)
                 if job.kwargs.get("probe") is True:
-                    if original is None:
-                        path = manager.path_for(issue, SourceLane.IMPLEMENTATION)
-                        if path.exists() or path.is_symlink():
-                            raise SourceWorkspaceError("dirty direct writer owner is unavailable")
-                        return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
-                    manager._reject_foreign_owner(original, issue, SourceLane.IMPLEMENTATION)
-                    # A missing or unregistered worktree is not a dirty writer:
-                    # route it to normal worktree allocation instead of failing.
-                    if not original.path.exists() and not original.path.is_symlink():
-                        return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
-                    if not manager._path_is_registered_to_repository(original.path):
-                        return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
-                    if original.schema_version == 1 and not manager._is_dirty(original.path):
-                        return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
+                    probe = self._dirty_direct_probe_result(manager, issue, original, deadline)
+                    if probe is not None:
+                        return probe
                 if original is None:
                     raise SourceWorkspaceError("dirty direct predecessor is unavailable")
                 manager._reject_foreign_owner(original, issue, SourceLane.IMPLEMENTATION)
-                if original.schema_version != 1:
+                original = (
+                    self._release_dirty_claim_if_unadvanced(manager, issue, original) or original
+                )
+                if self._dirty_predecessor_is_gone(manager, original, deadline):
+                    logger.warning(
+                        "dirty direct predecessor #%s is gone; preparing a fresh writer", issue
+                    )
+                    return JobResult(ok=True, value={"dirty_direct_not_applicable": True})
+                if original.schema_version != 1 or original.branch is None:
                     raise SourceWorkspaceError("dirty direct predecessor is unavailable")
                 physical_branch = manager._head_branch(original.path)
                 if physical_branch is None or not physical_branch.startswith("refs/heads/"):
@@ -12493,14 +11240,10 @@ class WorkerPool:
         handoff: ImplementationWriterHandoff,
     ) -> JobResult:
         """Use current recovery records before a new writer is created."""
-        result = self._recover_pretest_candidate(job, source_manager)
-        if result is None:
-            fresh_initial = self._fresh_initial_creation(job, source_manager)
-            result = self._recover_prepared_remediation_worktree(job, source_manager.repo_root)
-            if result is None:
-                result = self._git_create_worktree_with_handoff(job, source_manager, handoff)
-                if fresh_initial:
-                    result = self._record_fresh_initial_creation(job, result)
+        fresh_initial = self._fresh_initial_creation(job, source_manager)
+        result = self._git_create_worktree_with_handoff(job, source_manager, handoff)
+        if fresh_initial:
+            result = self._record_fresh_initial_creation(job, result)
         return result
 
     @staticmethod
@@ -12664,454 +11407,6 @@ class WorkerPool:
                 error=f"source_workspace_ownership_unavailable: {exc}",
             )
 
-    def _reject_pretest_legacy_conflict(self, root: Path, inputs: RemediationPretestInput) -> None:
-        """Refuse concurrent old and new recovery authority for one PR."""
-        if (
-            load_prepublication_intent(
-                repo_root=root,
-                repository=inputs.repository,
-                issue_number=inputs.issue_number,
-                pr_number=inputs.pr_number,
-                branch=inputs.branch,
-                expected_remote_sha=inputs.expected_remote_sha,
-                thread_snapshot_json=inputs.thread_snapshot_json,
-            )
-            is not None
-            or load_prepublication_receipt(
-                repo_root=root,
-                repository=inputs.repository,
-                issue_number=inputs.issue_number,
-                pr_number=inputs.pr_number,
-                branch=inputs.branch,
-                expected_remote_sha=inputs.expected_remote_sha,
-                thread_snapshot_json=inputs.thread_snapshot_json,
-            )
-            is not None
-        ):
-            raise SourceWorkspaceError("remediation pretest recovery authority conflicts")
-
-    def _recover_pretest_candidate(
-        self, job: GitJob, manager: SourceWorkspaceManager
-    ) -> JobResult | None:
-        """Restore only exact ready evidence before normal adopted creation."""
-        if job.kwargs.get("recover_prepared_remediation") is not True:
-            return None
-        pr = job.kwargs.get("remediation_pr_number")
-        if type(pr) is not int or pr <= 0:
-            return None
-        preserved = manager.path_for(job.kwargs["issue_number"], SourceLane.IMPLEMENTATION)
-        try:
-            candidate = load_pretest_candidate(repo_root=manager.repo_root, pr_number=pr)
-            if candidate is None:
-                return None
-            if candidate.phase != "ready":
-                raise SourceWorkspaceError("remediation pretest candidate is not ready")
-            inputs = RemediationPretestInput(
-                repository=job.kwargs["remediation_repository"].casefold(),
-                issue_number=job.kwargs["issue_number"],
-                pr_number=pr,
-                branch=job.kwargs["branch_name"],
-                expected_remote_sha=job.kwargs["implementation_adoption_head"],
-                source_receipt_json=canonical_source_receipt_json(candidate.source_receipt),
-                source_receipt_sha256=candidate.source_receipt_sha256,
-                thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(
-                    job.kwargs["remediation_thread_snapshots"]
-                ),
-                batch_nonce=candidate.batch_nonce,
-                allowed_paths=job.kwargs["remediation_pretest_allowed_paths"],
-                approved_scope_sha256=job.kwargs["remediation_pretest_scope_sha256"],
-                candidate_sequence=candidate.candidate_sequence,
-                expected_previous_record_sha256=None,
-            )
-            self._reject_pretest_legacy_conflict(manager.repo_root, inputs)
-            source, snapshot, tree, diff, paths = self._pretest_inspect(job, manager, inputs)
-            if (
-                candidate.repo_root != str(manager.repo_root)
-                or not self._pretest_candidate_matches_input(
-                    candidate, inputs, sequence=inputs.candidate_sequence
-                )
-                or candidate.candidate_tree_sha != tree
-                or candidate.diff != diff.text
-                or candidate.diff_sha256 != diff.sha256
-                or candidate.add_paths != tuple(paths.add_paths)
-                or candidate.update_paths != tuple(paths.update_paths)
-                or candidate.content_snapshot != tuple(sorted(snapshot.snapshot.items()))
-                or load_pretest_candidate(repo_root=manager.repo_root, pr_number=pr) != candidate
-            ):
-                raise SourceWorkspaceError("remediation pretest recovery candidate changed")
-            return JobResult(
-                ok=True,
-                value={
-                    "path": str(source.path),
-                    "impl_source_revision": source.revision,
-                    "successful_remediation_pretest_recovery": {
-                        "worktree_path": str(source.path),
-                        "source_receipt": source.to_dict(),
-                        "remediation_pretest_input": inputs,
-                        "record_sha256": candidate.digest,
-                        "sequence": candidate.candidate_sequence,
-                        "addressed_replies": dict(candidate.addressed_replies),
-                    },
-                },
-            )
-        except (
-            OSError,
-            RuntimeError,
-            KeyError,
-            TypeError,
-            ValueError,
-            subprocess.SubprocessError,
-        ) as exc:
-            # Retain the cause. The bare code left an operator with a failed
-            # implementation stage and no way to learn which check refused.
-            return JobResult(
-                ok=False,
-                error=(
-                    "remediation_pretest_recovery_unavailable: "
-                    f"{redact_diagnostic_text(str(exc))[:_ERR_MAX]}"
-                ),
-                value={"source_workspace_preserve": True, "preserved_worktree": str(preserved)},
-            )
-
-    def _recover_prepared_remediation_worktree(  # noqa: C901
-        self,
-        job: GitJob,
-        repo_root: Path,
-    ) -> JobResult | None:
-        """Return one exact durable prepared child before adopted-branch sync."""
-        if job.kwargs.get("recover_prepared_remediation") is not True:
-            return None
-        issue_number = job.kwargs.get("issue_number")
-        pr_number = job.kwargs.get("remediation_pr_number")
-        repository = job.kwargs.get("remediation_repository")
-        branch = job.kwargs.get("branch_name")
-        remote_head = job.kwargs.get("implementation_adoption_head")
-        threads = job.kwargs.get("remediation_thread_snapshots")
-        if (
-            isinstance(issue_number, bool)
-            or not isinstance(issue_number, int)
-            or isinstance(pr_number, bool)
-            or not isinstance(pr_number, int)
-            or not isinstance(repository, str)
-            or not isinstance(branch, str)
-            or not _is_full_commit_sha(remote_head)
-            or not isinstance(threads, list)
-        ):
-            return JobResult(ok=False, error="prepared remediation recovery identity is invalid")
-        try:
-            thread_json = RemediationReviewInput.canonical_thread_snapshot(threads)
-            intent = load_prepublication_intent(
-                repo_root=repo_root,
-                repository=repository,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                branch=branch,
-                expected_remote_sha=remote_head,
-                thread_snapshot_json=thread_json,
-            )
-            if intent is not None:
-                child = read_prepublication_private_head(
-                    repo_root=repo_root,
-                    pr_number=pr_number,
-                )
-                worktree = Path(intent.worktree_path)
-                expected_path = (
-                    WorktreeManager.default_base_dir(repo_root)
-                    / source_worktree_name(issue_number, "impl")
-                ).resolve(strict=False)
-                if worktree.resolve(strict=True) != expected_path:
-                    raise ValueError("prepared remediation writer path is invalid")
-                linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
-                binding = getattr(linked_env, "binding", None)
-                if (
-                    not isinstance(binding, _LinkedWorktreeBinding)
-                    or binding.branch_ref != f"refs/heads/{intent.branch}"
-                    or binding.branch_sha != intent.expected_remote_sha
-                ):
-                    raise ValueError("prepared remediation writer binding is invalid")
-                if child == intent.expected_remote_sha:
-                    (
-                        current,
-                        status_result,
-                        candidate_tree,
-                        diff_result,
-                        selected_paths,
-                    ) = _inspect_candidate_with_private_git(
-                        worktree,
-                        intent.expected_remote_sha,
-                        timeout=job.timeout_s,
-                        linked_env=linked_env,
-                    )
-                    if (
-                        not status_result.text.strip()
-                        or selected_paths is None
-                        or current.snapshot != dict(intent.content_snapshot)
-                        or candidate_tree != intent.candidate_tree_sha
-                        or diff_result.text != intent.committed_diff
-                        or diff_result.sha256 != intent.committed_diff_sha256
-                        or selected_paths.add_paths != intent.add_paths
-                        or selected_paths.update_paths != intent.update_paths
-                    ):
-                        raise ValueError("prepared remediation intent candidate changed")
-                    inspection = {
-                        "outcome": "dirty",
-                        "branch": intent.branch,
-                        "worktree_path": intent.worktree_path,
-                        "head_sha": intent.expected_remote_sha,
-                        "status": status_result.text,
-                        "diff": diff_result.text,
-                        "status_sha256": status_result.sha256,
-                        "diff_sha256": diff_result.sha256,
-                        "candidate_tree_sha": candidate_tree,
-                        "content_snapshot": current.snapshot,
-                        "changed_file_count": current.changed_file_count,
-                        "candidate_add_paths": list(selected_paths.add_paths),
-                        "candidate_update_paths": list(selected_paths.update_paths),
-                    }
-                    return JobResult(
-                        ok=True,
-                        value={
-                            "path": str(worktree),
-                            "impl_source_revision": intent.expected_remote_sha,
-                            "branch": intent.branch,
-                            "head_sha": intent.expected_remote_sha,
-                            "dirty": True,
-                            "status": status_result.text,
-                            "diff": diff_result.text,
-                            "content_snapshot": current.snapshot,
-                            "incomplete_remediation_inspection": inspection,
-                            "remediation_batch_nonce": intent.batch_nonce,
-                        },
-                    )
-                with _private_linked_worktree_git_env(
-                    linked_env,
-                    detached_head=intent.expected_remote_sha,
-                ) as parent_env:
-                    current_snapshot = _dirty_worktree_content_snapshot(
-                        worktree,
-                        timeout=job.timeout_s,
-                        git_env=parent_env,
-                    )
-                linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
-                index_is_original = current_snapshot == dict(intent.content_snapshot)
-                index_tree = git_utils.run(
-                    ["git", "write-tree"],
-                    cwd=worktree,
-                    timeout=job.timeout_s,
-                    env=linked_env,
-                ).stdout.strip()
-                if not index_is_original and index_tree != intent.candidate_tree_sha:
-                    raise ValueError("prepared remediation writer index changed")
-                linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
-                durable_git_dir = prepublication_private_git_dir(
-                    repo_root=repo_root,
-                    pr_number=pr_number,
-                    create=False,
-                )
-                with _private_linked_worktree_git_env(
-                    linked_env,
-                    detached_head=child,
-                    durable_git_dir=durable_git_dir,
-                ) as child_env:
-                    if not self._is_exact_recovery_commit(
-                        worktree,
-                        child,
-                        parent=intent.expected_remote_sha,
-                        tree=intent.candidate_tree_sha,
-                        timeout=job.timeout_s,
-                        git_env=child_env,
-                    ):
-                        raise ValueError("prepared remediation private child is not exact")
-                    with tempfile.TemporaryDirectory(
-                        prefix="hephaestus-recovery-verify-index-"
-                    ) as temporary:
-                        verify_env = dict(child_env)
-                        verify_env["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
-                        git_utils.run(
-                            ["git", "read-tree", child],
-                            cwd=worktree,
-                            timeout=job.timeout_s,
-                            env=verify_env,
-                        )
-                        status = _run_bounded_git_output(
-                            (
-                                "git",
-                                "-c",
-                                "core.fsmonitor=false",
-                                "status",
-                                "--porcelain=v1",
-                                "-z",
-                                "--untracked-files=all",
-                                "--no-renames",
-                            ),
-                            cwd=worktree,
-                            timeout=job.timeout_s,
-                            max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
-                            retain_text=True,
-                            env=verify_env,
-                        ).text
-                    if status:
-                        raise ValueError("prepared remediation writer content changed")
-                    _refresh_verified_recovery_index(
-                        repo_root.resolve(strict=True),
-                        worktree,
-                        expected_git_env=child_env,
-                        private_git_env=child_env,
-                        source_sha=child,
-                        expected_tree=intent.candidate_tree_sha,
-                        timeout=job.timeout_s,
-                    )
-                recovered_receipt = intent.receipt(child)
-                save_prepublication_receipt(
-                    repo_root=repo_root,
-                    receipt=recovered_receipt,
-                    batch_nonce=intent.batch_nonce,
-                )
-            loaded = load_prepublication_receipt(
-                repo_root=repo_root,
-                repository=repository,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                branch=branch,
-                expected_remote_sha=remote_head,
-                thread_snapshot_json=thread_json,
-            )
-            if loaded is None:
-                expected_path = (
-                    WorktreeManager.default_base_dir(repo_root)
-                    / source_worktree_name(issue_number, "impl")
-                ).resolve(strict=False)
-                if expected_path.exists():
-                    linked_env = _linked_worktree_git_env(
-                        repo_root.resolve(strict=True),
-                        expected_path,
-                    )
-                    binding = getattr(linked_env, "binding", None)
-                    if not isinstance(binding, _LinkedWorktreeBinding):
-                        raise ValueError("prepared remediation writer binding is invalid")
-                    if (
-                        binding.branch_ref == f"refs/heads/{branch}"
-                        and binding.branch_sha != remote_head
-                    ):
-                        raise ValueError(
-                            "prepared remediation receipt is absent for a preserved local child"
-                        )
-                return None
-            receipt, batch_nonce, already_published = loaded
-            review_input = receipt.review_input
-            worktree = Path(review_input.worktree_path)
-            expected_path = (
-                WorktreeManager.default_base_dir(repo_root)
-                / source_worktree_name(issue_number, "impl")
-            ).resolve(strict=False)
-            if worktree.resolve(strict=True) != expected_path:
-                raise ValueError("prepared remediation writer path is invalid")
-            linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
-            binding = getattr(linked_env, "binding", None)
-            if (
-                not isinstance(binding, _LinkedWorktreeBinding)
-                or binding.branch_ref != f"refs/heads/{branch}"
-                or binding.branch_sha
-                not in {
-                    review_input.reviewed_parent_sha,
-                    review_input.recovery_commit_sha,
-                }
-                or not self._is_exact_recovery_commit(
-                    worktree,
-                    review_input.recovery_commit_sha,
-                    parent=review_input.reviewed_parent_sha,
-                    tree=review_input.candidate_tree_sha,
-                    timeout=job.timeout_s,
-                    git_env=linked_env,
-                )
-            ):
-                raise ValueError("prepared remediation commit is not exact")
-            if (
-                git_utils.run(
-                    ["git", "write-tree"],
-                    cwd=worktree,
-                    timeout=job.timeout_s,
-                    env=linked_env,
-                ).stdout.strip()
-                != review_input.candidate_tree_sha
-            ):
-                raise ValueError("prepared remediation writer index changed")
-            linked_env = _linked_worktree_git_env(repo_root.resolve(strict=True), worktree)
-            with _private_linked_worktree_git_env(
-                linked_env,
-                detached_head=review_input.recovery_commit_sha,
-            ) as child_env:
-                with tempfile.TemporaryDirectory(
-                    prefix="hephaestus-recovery-verify-index-"
-                ) as temporary:
-                    verify_env = dict(child_env)
-                    verify_env["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
-                    git_utils.run(
-                        ["git", "read-tree", review_input.recovery_commit_sha],
-                        cwd=worktree,
-                        timeout=job.timeout_s,
-                        env=verify_env,
-                    )
-                    status = _run_bounded_git_output(
-                        (
-                            "git",
-                            "-c",
-                            "core.fsmonitor=false",
-                            "status",
-                            "--porcelain=v1",
-                            "-z",
-                            "--untracked-files=all",
-                            "--no-renames",
-                        ),
-                        cwd=worktree,
-                        timeout=job.timeout_s,
-                        max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
-                        retain_text=True,
-                        env=verify_env,
-                    ).text
-                    if status:
-                        raise ValueError("prepared remediation writer content changed")
-                committed = _run_bounded_git_output(
-                    (
-                        "git",
-                        "-c",
-                        "core.fsmonitor=false",
-                        "diff",
-                        "--no-ext-diff",
-                        "--no-textconv",
-                        "--no-renames",
-                        "--binary",
-                        "--full-index",
-                        review_input.reviewed_parent_sha,
-                        review_input.candidate_tree_sha,
-                    ),
-                    cwd=worktree,
-                    timeout=job.timeout_s,
-                    max_bytes=IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES,
-                    retain_text=True,
-                    env=child_env,
-                )
-                if (
-                    committed.text != review_input.committed_diff
-                    or committed.sha256 != review_input.committed_diff_sha256
-                ):
-                    raise ValueError("prepared remediation committed diff changed")
-        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
-            return JobResult(ok=False, error=f"prepared remediation recovery failed: {exc}")
-        return JobResult(
-            ok=True,
-            value={
-                "path": str(worktree),
-                "impl_source_revision": review_input.reviewed_parent_sha,
-                "dirty": False,
-                "status": "",
-                "diff": "",
-                "prepared_remediation_receipt": receipt.as_dict(),
-                "remediation_batch_nonce": batch_nonce,
-                "remediation_recovery_already_published": already_published,
-            },
-        )
-
     def _git_create_worktree_with_handoff(  # noqa: C901
         self,
         job: GitJob,
@@ -13120,12 +11415,6 @@ class WorkerPool:
     ) -> JobResult:
         """Create a worktree and optionally sync an adopted PR branch."""
         kwargs = dict(job.kwargs)
-        kwargs.pop("recover_prepared_remediation", None)
-        kwargs.pop("remediation_repository", None)
-        kwargs.pop("remediation_pr_number", None)
-        kwargs.pop("remediation_thread_snapshots", None)
-        kwargs.pop("remediation_pretest_allowed_paths", None)
-        kwargs.pop("remediation_pretest_scope_sha256", None)
         kwargs.pop("record_initial_creation", None)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
         pr_number = kwargs.pop("pr_number", None)
@@ -14387,11 +12676,6 @@ class WorkerPool:
                 ):
                     with manager.acquire(binding, deadline=deadline):
                         return self._recover_first_publication(job, manager, deadline)
-                if (
-                    "remediation_pretest_input" in job.kwargs
-                    or "remediation_pretest_record_sha256" in job.kwargs
-                ):
-                    return self._git_commit_pretest_source_result(job, manager, recovery_stack)
                 record = recovery_stack.enter_context(
                     manager.implementation_local_commit(
                         issue,
@@ -14439,23 +12723,6 @@ class WorkerPool:
                     ok=False,
                     error="source_workspace_ownership_unavailable: publication binding invalid",
                 )
-
-    def _git_commit_pretest_source_result(
-        self, job: GitJob, manager: SourceWorkspaceManager, recovery_stack: ExitStack
-    ) -> JobResult:
-        """Return successful pretest publication with its current source receipt."""
-        result = self._git_commit_pretest_candidate(job, manager, recovery_stack)
-        if not result.ok or not isinstance(result.value, dict):
-            return result
-        receipt = manager._require_receipt(job.kwargs["issue_number"], SourceLane.IMPLEMENTATION)
-        return replace(
-            result,
-            value={
-                **result.value,
-                "source_workspace": manager._binding(receipt).to_dict(),
-                "source_receipt": receipt.to_dict(),
-            },
-        )
 
     def _git_commit_owned_ordinary_writer(
         self,
@@ -14550,118 +12817,6 @@ class WorkerPool:
             },
         )
 
-    def _git_commit_pretest_candidate(
-        self, job: GitJob, manager: SourceWorkspaceManager, recovery_stack: ExitStack
-    ) -> JobResult:
-        """Advance local accounting once before publication of a ready candidate."""
-        inputs = job.kwargs.get("remediation_pretest_input")
-        expected_digest = job.kwargs.get("remediation_pretest_record_sha256")
-        if (
-            not isinstance(inputs, RemediationPretestInput)
-            or job.kwargs.get("issue_number") != inputs.issue_number
-            or job.kwargs.get("branch") != inputs.branch
-            or job.transport_repository.casefold() != inputs.repository
-            or "expected_remote_sha" in job.kwargs
-            or "writer_refresh" in job.kwargs
-        ):
-            raise SourceWorkspaceError("remediation pretest publication input is invalid")
-        path = manager.path_for(inputs.issue_number, SourceLane.IMPLEMENTATION)
-        if str(path) != str(job.kwargs.get("worktree_path")):
-            raise SourceWorkspaceError("remediation pretest publication path changed")
-        advance = recovery_stack.enter_context(
-            manager.implementation_local_commit(
-                inputs.issue_number,
-                branch=inputs.branch,
-                path=path,
-                expected_binding=job.workspace,
-                deadline=_PreparationDeadline(
-                    job.deadline_s or time.monotonic() + job.timeout_s,
-                    time.monotonic,
-                    self._shutdown,
-                ),
-            )
-        )
-        self._reject_pretest_legacy_conflict(manager.repo_root, inputs)
-        source, snapshot, tree, diff, paths = self._pretest_inspect(job, manager, inputs)
-        candidate = load_pretest_candidate(repo_root=manager.repo_root, pr_number=inputs.pr_number)
-        if (
-            candidate is None
-            or candidate.phase != "ready"
-            or candidate.digest != expected_digest
-            or not self._pretest_candidate_matches_input(
-                candidate, inputs, sequence=inputs.candidate_sequence
-            )
-            or candidate.candidate_tree_sha != tree
-            or candidate.diff != diff.text
-            or candidate.diff_sha256 != diff.sha256
-            or candidate.add_paths != tuple(paths.add_paths)
-            or candidate.update_paths != tuple(paths.update_paths)
-            or candidate.content_snapshot != tuple(sorted(snapshot.snapshot.items()))
-        ):
-            raise SourceWorkspaceError("remediation pretest publication candidate changed")
-        committed_head: str | None = None
-
-        def before_publish(head: str) -> None:
-            """Consume exact ready evidence after one verified source advance."""
-            nonlocal committed_head
-            if committed_head is not None:
-                raise SourceWorkspaceError("remediation pretest callback was reused")
-            self._pretest_live_pr(job, manager.repo_root, inputs)
-            remote = self._read_remote_branch_head(
-                path,
-                remote="origin",
-                branch=inputs.branch,
-                expected_repo=inputs.repository,
-                timeout=job.timeout_s,
-            )
-            if (
-                remote != inputs.expected_remote_sha
-                or manager._require_receipt(inputs.issue_number, SourceLane.IMPLEMENTATION)
-                != source
-                or manager._head_revision(path) != head
-                or manager._head_branch(path) != f"refs/heads/{inputs.branch}"
-                or not self._is_exact_recovery_commit(
-                    path,
-                    head,
-                    parent=source.revision,
-                    tree=candidate.candidate_tree_sha,
-                    timeout=job.timeout_s,
-                )
-                or not git_utils.is_clean_working_tree(path, timeout=job.timeout_s)
-                or self._verify_implementation_edit_scope(
-                    replace(job, kwargs={"scope_history_base_sha": source.revision}),
-                    path,
-                    allowed_paths=inputs.allowed_paths,
-                )
-                is not None
-                or load_pretest_candidate(repo_root=manager.repo_root, pr_number=inputs.pr_number)
-                != candidate
-            ):
-                raise SourceWorkspaceError("remediation pretest signed child is unconfirmed")
-            # A failed advance or retirement must never permit a second callback.
-            committed_head = head
-            advance(head)
-            consumed = replace(candidate, phase="consumed", consumed_head=head)
-            save_pretest_candidate(
-                repo_root=manager.repo_root, candidate=consumed, expected_digest=candidate.digest
-            )
-            if (
-                load_pretest_candidate(repo_root=manager.repo_root, pr_number=inputs.pr_number)
-                != consumed
-            ):
-                raise SourceWorkspaceError("remediation pretest retirement readback failed")
-
-        result = self._git_commit_push_inner(job, recovery_stack, before_publish=before_publish)
-        if committed_head is None:
-            return JobResult(ok=False, error="remediation_pretest_candidate_was_not_committed")
-        if manager._head_revision(path) != committed_head:
-            raise SourceWorkspaceError("remediation pretest local publication head changed")
-        if result.ok and (
-            not isinstance(result.value, dict) or result.value.get("head_sha") != committed_head
-        ):
-            raise SourceWorkspaceError("remediation pretest publication result changed")
-        return result
-
     def _verify_direct_publication_head(
         self,
         job: GitJob,
@@ -14727,27 +12882,6 @@ class WorkerPool:
                 error="detached reviewer commit publication is unsupported",
             )
         branch = str(job.kwargs.get("branch") or "")
-        expected_recovery_head = job.kwargs.get("expected_recovery_head")
-        expected_recovery_snapshot = job.kwargs.get("expected_recovery_content_snapshot")
-        expected_recovery_tree = job.kwargs.get("expected_recovery_tree_sha")
-        expected_recovery_diff = job.kwargs.get("expected_recovery_diff")
-        expected_recovery_diff_sha256 = job.kwargs.get("expected_recovery_diff_sha256")
-        expected_recovery_add_paths = job.kwargs.get("expected_recovery_add_paths")
-        expected_recovery_update_paths = job.kwargs.get("expected_recovery_update_paths")
-        expected_recovery_commit = job.kwargs.get("expected_recovery_commit_sha")
-        prepare_only = job.op == "prepare_remediation_recovery"
-        recovery_bound = (
-            expected_recovery_head is not None
-            or expected_recovery_snapshot is not None
-            or expected_recovery_tree is not None
-            or expected_recovery_diff is not None
-            or expected_recovery_diff_sha256 is not None
-            or expected_recovery_add_paths is not None
-            or expected_recovery_update_paths is not None
-            or expected_recovery_commit is not None
-        )
-        if recovery_bound and not branch:
-            return JobResult(ok=False, error="commit publication branch is unavailable")
         worktree = Path(worktree_path)
         if "writer_refresh" in job.kwargs:
             return self._refresh_writer_publication(
@@ -14765,221 +12899,6 @@ class WorkerPool:
             allowed_paths = tuple(
                 sorted(set(allowed_paths).union(job.kwargs["scope_retraction_paths"]))
             )
-        retry_recovery_commit = False
-        selected_recovery_commit: str | None = None
-        recovery_paths: CommitPaths | None = None
-        recovery_git_env: dict[str, str] | None = None
-        recovery_commit_git_env: dict[str, str] | None = None
-        recovery_repo_root: Path | None = None
-        remediation_parent_sha: str | None = None
-        remediation_tree_sha: str | None = None
-        remediation_diff: _BoundedGitOutput | None = None
-        if recovery_bound:
-            raw_repo_root = job.kwargs.get("repo_root")
-            if (
-                not isinstance(raw_repo_root, str)
-                or not Path(raw_repo_root).is_absolute()
-                or not worktree.is_absolute()
-                or Path(raw_repo_root).is_symlink()
-                or worktree.is_symlink()
-            ):
-                return JobResult(ok=False, error="remediation writer binding invalid")
-            if not isinstance(expected_recovery_add_paths, tuple) or not isinstance(
-                expected_recovery_update_paths, tuple
-            ):
-                return JobResult(ok=False, error="remediation writer binding invalid")
-            recovery_paths = CommitPaths(
-                expected_recovery_add_paths,
-                expected_recovery_update_paths,
-            )
-            if (
-                not _is_full_commit_sha(expected_recovery_head)
-                or not (_valid_dirty_content_snapshot(expected_recovery_snapshot))
-                or not _is_full_commit_sha(expected_recovery_tree)
-                or not isinstance(expected_recovery_diff, str)
-                or len(expected_recovery_diff.encode("utf-8", "surrogateescape"))
-                > IMPLEMENTATION_INSPECTION_DIFF_MAX_BYTES
-                or not isinstance(expected_recovery_diff_sha256, str)
-                or expected_recovery_diff_sha256
-                != hashlib.sha256(
-                    expected_recovery_diff.encode("utf-8", "surrogateescape")
-                ).hexdigest()
-                or not is_bounded_commit_paths(
-                    recovery_paths,
-                    max_paths=DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
-                    max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
-                )
-                or (
-                    expected_recovery_commit is not None
-                    and not _is_full_commit_sha(expected_recovery_commit)
-                )
-            ):
-                return JobResult(ok=False, error="remediation writer binding invalid")
-            try:
-                if not _secure_dir_fd_supported():
-                    _portable_path_identity(Path(raw_repo_root), directory=True)
-                    _portable_path_identity(worktree, directory=True)
-                recovery_repo_root = Path(raw_repo_root).resolve(strict=True)
-                linked_env = _linked_worktree_git_env(recovery_repo_root, worktree)
-                linked_binding = getattr(linked_env, "binding", None)
-                if isinstance(linked_binding, _LinkedWorktreeBinding):
-                    expected_branch_ref = f"refs/heads/{branch}"
-                    allowed_branch_heads = {expected_recovery_head}
-                    if expected_recovery_commit is not None:
-                        allowed_branch_heads.add(expected_recovery_commit)
-                    if (
-                        linked_binding.branch_ref != expected_branch_ref
-                        or linked_binding.branch_sha not in allowed_branch_heads
-                    ):
-                        raise RuntimeError("remediation writer branch binding changed")
-                private_head = expected_recovery_commit or expected_recovery_head
-                durable_git_dir: Path | None = None
-                if prepare_only:
-                    private_pr_number = job.kwargs.get("remediation_pr_number")
-                    if isinstance(private_pr_number, bool) or not isinstance(
-                        private_pr_number, int
-                    ):
-                        raise RuntimeError("remediation PR identity is invalid")
-                    durable_git_dir = prepublication_private_git_dir(
-                        repo_root=recovery_repo_root,
-                        pr_number=private_pr_number,
-                        create=True,
-                    )
-                recovery_git_env = recovery_stack.enter_context(
-                    _private_linked_worktree_git_env(
-                        linked_env,
-                        detached_head=private_head,
-                        durable_git_dir=durable_git_dir,
-                    )
-                )
-            except (OSError, RuntimeError):
-                return JobResult(ok=False, error="remediation writer Git metadata binding invalid")
-            current_head = self._read_publish_head(
-                worktree,
-                timeout=job.timeout_s,
-                git_env=recovery_git_env,
-            )
-            if isinstance(current_head, JobResult):
-                return current_head
-            if expected_recovery_commit is not None:
-                retry_recovery_commit = current_head == expected_recovery_commit and (
-                    self._is_exact_recovery_commit(
-                        worktree,
-                        current_head,
-                        parent=expected_recovery_head,
-                        tree=expected_recovery_tree,
-                        timeout=job.timeout_s,
-                        git_env=recovery_git_env,
-                    )
-                )
-                if not retry_recovery_commit:
-                    return JobResult(
-                        ok=False,
-                        error="remediation writer retry commit is unavailable",
-                    )
-                selected_recovery_commit = current_head
-            elif current_head != expected_recovery_head:
-                return JobResult(
-                    ok=False,
-                    error="remediation writer head drift before commit",
-                )
-            else:
-                try:
-                    snapshot_parent = Path(
-                        recovery_stack.enter_context(
-                            tempfile.TemporaryDirectory(
-                                prefix="hephaestus-recovery-snapshot-",
-                            )
-                        )
-                    )
-                    snapshot_root = snapshot_parent / "worktree"
-                    private_index = snapshot_parent / "index"
-                    current_snapshot = _dirty_worktree_content_snapshot(
-                        worktree,
-                        timeout=job.timeout_s,
-                        git_env=recovery_git_env,
-                    )
-                    current_tree, current_diff = _candidate_commit_tree_evidence(
-                        worktree,
-                        current_head,
-                        timeout=job.timeout_s,
-                        selected=recovery_paths,
-                        git_env=recovery_git_env,
-                        snapshot_root=snapshot_root,
-                    )
-                    recovery_commit_git_env = _PrivateLinkedWorktreeGitEnvironment(
-                        {
-                            **recovery_git_env,
-                            "GIT_INDEX_FILE": str(private_index),
-                            "GIT_WORK_TREE": str(snapshot_root),
-                        },
-                        cast(
-                            _PrivateLinkedWorktreeGitEnvironment,
-                            recovery_git_env,
-                        ).linked_env,
-                    )
-                except _GitInspectionResourceLimitError:
-                    return JobResult(
-                        ok=False,
-                        value={"failure_kind": "resource_limit_exceeded"},
-                        error="remediation writer resource limit exceeded before commit",
-                    )
-                except (
-                    OSError,
-                    RuntimeError,
-                    subprocess.SubprocessError,
-                ):
-                    return JobResult(
-                        ok=False,
-                        error="remediation writer content binding unavailable before commit",
-                    )
-                same_content = all(
-                    current_snapshot[key] == expected_recovery_snapshot[key]
-                    for key in ("worktree_sha256", "untracked_sha256")
-                )
-                if not same_content or current_tree != expected_recovery_tree:
-                    return JobResult(
-                        ok=False,
-                        error="remediation writer content drift before commit",
-                    )
-                if (
-                    current_diff.text != expected_recovery_diff
-                    or current_diff.sha256 != expected_recovery_diff_sha256
-                ):
-                    return JobResult(
-                        ok=False,
-                        error="remediation writer diff drift before commit",
-                    )
-            remediation_parent_sha = expected_recovery_head
-            remediation_tree_sha = expected_recovery_tree
-            remediation_diff = _BoundedGitOutput(
-                text=expected_recovery_diff,
-                sha256=expected_recovery_diff_sha256,
-                byte_count=len(expected_recovery_diff.encode("utf-8", "surrogateescape")),
-            )
-        elif job.kwargs.get("remediation_repository") is not None:
-            try:
-                remediation_parent = self._read_publish_head(worktree, timeout=job.timeout_s)
-                if isinstance(remediation_parent, JobResult):
-                    return remediation_parent
-                remediation_paths = _bounded_candidate_commit_paths(
-                    worktree,
-                    remediation_parent,
-                    timeout=job.timeout_s,
-                )
-                remediation_tree_sha, remediation_diff = _candidate_commit_tree_evidence(
-                    worktree,
-                    remediation_parent,
-                    timeout=job.timeout_s,
-                    selected=remediation_paths,
-                )
-                recovery_paths = remediation_paths
-                remediation_parent_sha = remediation_parent
-            except RuntimeError:
-                if not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s):
-                    return JobResult(
-                        ok=False, error="remediation candidate evidence is unavailable"
-                    )
         # ``commit_if_changes`` returns False for a clean worktree.  An agent
         # is instructed to leave its edits uncommitted, but a defensive
         # recovery still recognizes a clean branch that is ahead of its
@@ -14993,91 +12912,16 @@ class WorkerPool:
         )
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
-        changed: bool | str | JobResult = False
-        if prepare_only and not retry_recovery_commit:
-            try:
-                intent_repository = job.kwargs.get("remediation_repository")
-                intent_pr_number = job.kwargs.get("remediation_pr_number")
-                intent_threads = job.kwargs.get("remediation_thread_snapshots")
-                intent_batch = job.kwargs.get("remediation_batch_nonce")
-                intent_diagnostic = job.kwargs.get("remediation_failure_diagnostic")
-                if (
-                    not isinstance(intent_repository, str)
-                    or isinstance(intent_pr_number, bool)
-                    or not isinstance(intent_pr_number, int)
-                    or not isinstance(intent_threads, list)
-                    or not isinstance(intent_batch, str)
-                    or not isinstance(intent_diagnostic, str)
-                ):
-                    raise ValueError("remediation prepublication intent is incomplete")
-                save_prepublication_intent(
-                    repo_root=cast(Path, recovery_repo_root),
-                    repository=intent_repository,
-                    issue_number=cast(int, issue_number),
-                    pr_number=intent_pr_number,
-                    worktree_path=worktree,
-                    branch=branch,
-                    expected_remote_sha=cast(str, expected_recovery_head),
-                    candidate_tree_sha=cast(str, expected_recovery_tree),
-                    add_paths=cast(CommitPaths, recovery_paths).add_paths,
-                    update_paths=cast(CommitPaths, recovery_paths).update_paths,
-                    committed_diff_sha256=cast(str, expected_recovery_diff_sha256),
-                    committed_diff=cast(str, expected_recovery_diff),
-                    failure_diagnostic=intent_diagnostic,
-                    thread_snapshot_json=RemediationReviewInput.canonical_thread_snapshot(
-                        intent_threads
-                    ),
-                    content_snapshot=tuple(
-                        sorted(cast(dict[str, str], expected_recovery_snapshot).items())
-                    ),
-                    batch_nonce=intent_batch,
-                )
-            except (OSError, TypeError, UnicodeError, ValueError) as exc:
-                return JobResult(
-                    ok=False,
-                    error=f"remediation prepublication intent is unavailable: {exc}",
-                )
-        if not retry_recovery_commit:
-            try:
-                changed = self._commit_if_changes_with_controlled_signing(
-                    job,
-                    commit_args,
-                    allowed_paths,
-                    agent_model,
-                    git_message_timeout,
-                    recovery_paths=recovery_paths,
-                    expected_tree_sha=remediation_tree_sha,
-                    git_env=recovery_commit_git_env or recovery_git_env,
-                )
-            except (OSError, subprocess.SubprocessError) as exc:
-                if recovery_bound:
-                    return self._classify_recovery_commit_failure(
-                        worktree,
-                        expected_head=cast(str, expected_recovery_head),
-                        expected_tree=cast(str, expected_recovery_tree),
-                        timeout=job.timeout_s,
-                        cause=exc,
-                        git_env=recovery_git_env,
-                    )
-                raise
-            if isinstance(changed, JobResult):
-                return changed
-            if isinstance(changed, str):
-                if not _is_full_commit_sha(changed):
-                    return JobResult(ok=False, error="remediation commit receipt is invalid")
-                selected_recovery_commit = changed
-        if not changed and recovery_bound and not retry_recovery_commit:
-            # The inspected writer was dirty immediately before this call.
-            # ``commit_if_changes`` also returns False when its commit helper
-            # catches RuntimeError, so False cannot prove a safe no-op here.
-            return self._classify_recovery_commit_failure(
-                worktree,
-                expected_head=cast(str, expected_recovery_head),
-                expected_tree=cast(str, expected_recovery_tree),
-                timeout=job.timeout_s,
-                git_env=recovery_git_env,
-            )
-        if not changed and not retry_recovery_commit:
+        changed = self._commit_if_changes_with_controlled_signing(
+            job,
+            commit_args,
+            allowed_paths,
+            agent_model,
+            git_message_timeout,
+        )
+        if isinstance(changed, JobResult):
+            return changed
+        if not changed:
             publish_state = self._commit_push_requires_publish(
                 job=job,
                 branch=branch,
@@ -15108,278 +12952,15 @@ class WorkerPool:
         )
         if scope_check is not None:
             return scope_check
-        if not recovery_bound:
-            scope_retraction = self._verify_scope_retraction(job, worktree)
-            if scope_retraction is not None:
-                return scope_retraction
-            remediation_artifacts: tuple[dict[str, Any], tuple[str, str]] | None = None
-            if (
-                selected_recovery_commit is not None
-                and remediation_parent_sha is not None
-                and remediation_tree_sha is not None
-                and remediation_diff is not None
-                and recovery_paths is not None
-            ):
-                try:
-                    raw_repo_root = job.kwargs.get("repo_root")
-                    if not isinstance(raw_repo_root, str):
-                        raise ValueError("remediation repository root is unavailable")
-                    remediation_artifacts = _remediation_recovery_artifacts(
-                        job,
-                        repo_root=Path(raw_repo_root).resolve(strict=True),
-                        worktree=worktree.resolve(strict=True),
-                        branch=branch,
-                        parent_sha=remediation_parent_sha,
-                        candidate_tree_sha=remediation_tree_sha,
-                        recovery_commit_sha=selected_recovery_commit,
-                        paths=recovery_paths,
-                        committed_diff=remediation_diff.text,
-                        committed_diff_sha256=remediation_diff.sha256,
-                    )
-                except (OSError, TypeError, ValueError) as exc:
-                    return JobResult(
-                        ok=False,
-                        value={"recovery_commit_sha": selected_recovery_commit},
-                        error=f"remediation recovery journal is unavailable: {exc}",
-                    )
-            if before_publish is not None:
-                publication_head = self._read_publish_head(worktree, timeout=job.timeout_s)
-                if isinstance(publication_head, JobResult):
-                    return publication_head
-                before_publish(publication_head)
-            publication = self._publish_commit_push(job, branch, worktree)
-            if not publication.ok or remediation_artifacts is None:
-                return publication
-            handoff, journal = remediation_artifacts
-            value = dict(publication.value) if isinstance(publication.value, dict) else {}
-            value["remediation_handoff"] = handoff
-            value["remediation_journal"] = {"marker": journal[0], "body": journal[1]}
-            return replace(publication, value=value)
-        publication_head = self._read_publish_head(
-            worktree,
-            timeout=job.timeout_s,
-            git_env=recovery_git_env,
-        )
-        if isinstance(publication_head, JobResult):
-            if selected_recovery_commit is not None:
-                value = (
-                    dict(publication_head.value) if isinstance(publication_head.value, dict) else {}
-                )
-                value["recovery_commit_sha"] = selected_recovery_commit
-                return replace(publication_head, value=value)
-            return publication_head
-        if selected_recovery_commit is not None and publication_head != selected_recovery_commit:
-            return JobResult(
-                ok=False,
-                value={"recovery_commit_sha": selected_recovery_commit},
-                error="remediation writer head changed after recovery selection",
-            )
-        selected_recovery_commit = publication_head
-
-        def recovery_failure(result: JobResult) -> JobResult:
-            """Attach the exact local child to each post-commit failure."""
-            value = dict(result.value) if isinstance(result.value, dict) else {}
-            value["recovery_commit_sha"] = selected_recovery_commit
-            return replace(result, value=value)
-
-        scope_retraction = self._verify_scope_retraction(
-            job,
-            worktree,
-            git_env=recovery_git_env,
-        )
+        scope_retraction = self._verify_scope_retraction(job, worktree)
         if scope_retraction is not None:
-            return recovery_failure(scope_retraction)
-        if not self._is_exact_recovery_commit(
-            worktree,
-            selected_recovery_commit,
-            parent=cast(str, expected_recovery_head),
-            tree=cast(str, expected_recovery_tree),
-            timeout=job.timeout_s,
-            git_env=recovery_git_env,
-        ):
-            return recovery_failure(
-                JobResult(
-                    ok=False,
-                    error="remediation writer commit does not match the inspected tree",
-                )
-            )
-        try:
-            _refresh_verified_recovery_index(
-                cast(Path, recovery_repo_root),
-                worktree,
-                expected_git_env=cast(dict[str, str], recovery_git_env),
-                private_git_env=cast(
-                    dict[str, str],
-                    recovery_commit_git_env or recovery_git_env,
-                ),
-                source_sha=selected_recovery_commit,
-                expected_tree=cast(str, expected_recovery_tree),
-                timeout=job.timeout_s,
-            )
-            clean = _run_bounded_git_output(
-                (
-                    "git",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "status",
-                    "--porcelain=v1",
-                    "-z",
-                    "--untracked-files=all",
-                    "--no-renames",
-                ),
-                cwd=worktree,
-                timeout=job.timeout_s,
-                max_bytes=IMPLEMENTATION_INSPECTION_STATUS_MAX_BYTES,
-                retain_text=True,
-                env=recovery_git_env,
-            ).text
-            from hephaestus.automation.commit_paths import parse_porcelain_status
-
-            clean_entries = parse_porcelain_status(clean)
-            if len({path for _status, path in clean_entries}) > DIRTY_SNAPSHOT_CHANGED_FILE_MAX:
-                raise _GitInspectionResourceLimitError("dirty snapshot file limit exceeded")
-        except _GitInspectionResourceLimitError as exc:
-            return recovery_failure(
-                JobResult(
-                    ok=False,
-                    value={"failure_kind": "resource_limit_exceeded"},
-                    error=f"remediation post-commit resource limit exceeded: {exc}",
-                )
-            )
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            return recovery_failure(
-                JobResult(ok=False, error=f"remediation post-commit check failed: {exc}")
-            )
-        if clean.strip():
-            return recovery_failure(
-                JobResult(ok=False, error="remediation writer changed after commit")
-            )
-        if prepare_only:
-            try:
-                review_input = _remediation_review_input(
-                    job,
-                    repo_root=cast(Path, recovery_repo_root),
-                    worktree=worktree,
-                    branch=branch,
-                    parent_sha=cast(str, expected_recovery_head),
-                    candidate_tree_sha=cast(str, expected_recovery_tree),
-                    recovery_commit_sha=selected_recovery_commit,
-                    paths=cast(CommitPaths, recovery_paths),
-                    committed_diff=cast(_BoundedGitOutput, remediation_diff).text,
-                    committed_diff_sha256=cast(_BoundedGitOutput, remediation_diff).sha256,
-                )
-                journal_input_encoding, journal_input_data = encode_remediation_review_input(
-                    review_input.canonical_bytes
-                )
-                receipt = RemediationRecoveryReceipt(
-                    review_input_bytes=review_input.canonical_bytes.decode("utf-8"),
-                    review_input_sha256=review_input.review_input_sha256,
-                    journal_input_encoding=journal_input_encoding,
-                    journal_input_data=journal_input_data,
-                    expected_remote_sha=cast(str, expected_recovery_head),
-                    content_snapshot=tuple(
-                        sorted(cast(dict[str, str], expected_recovery_snapshot).items())
-                    ),
-                    add_paths=cast(CommitPaths, recovery_paths).add_paths,
-                    update_paths=cast(CommitPaths, recovery_paths).update_paths,
-                )
-                batch_nonce = job.kwargs.get("remediation_batch_nonce")
-                if not isinstance(batch_nonce, str):
-                    raise ValueError("remediation recovery batch identity is unavailable")
-                save_prepublication_receipt(
-                    repo_root=cast(Path, recovery_repo_root),
-                    receipt=receipt,
-                    batch_nonce=batch_nonce,
-                )
-            except (OSError, TypeError, UnicodeError, ValueError) as exc:
-                return recovery_failure(
-                    JobResult(ok=False, error=f"remediation recovery receipt is unavailable: {exc}")
-                )
-            return JobResult(
-                ok=True,
-                value={
-                    "pushed": False,
-                    "head_sha": selected_recovery_commit,
-                    "recovery_receipt": receipt.as_dict(),
-                },
-            )
-        try:
-            remediation_handoff, remediation_journal = _remediation_recovery_artifacts(
-                job,
-                repo_root=cast(Path, recovery_repo_root),
-                worktree=worktree,
-                branch=branch,
-                parent_sha=cast(str, expected_recovery_head),
-                candidate_tree_sha=cast(str, expected_recovery_tree),
-                recovery_commit_sha=selected_recovery_commit,
-                paths=cast(CommitPaths, recovery_paths),
-                committed_diff=cast(_BoundedGitOutput, remediation_diff).text,
-                committed_diff_sha256=cast(_BoundedGitOutput, remediation_diff).sha256,
-            )
-        except (TypeError, ValueError) as exc:
-            return recovery_failure(
-                JobResult(
-                    ok=False,
-                    error=f"remediation recovery journal is unavailable: {exc}",
-                )
-            )
-        publication = self._publish_recovery_commit(
-            job,
-            branch,
-            worktree,
-            source_sha=selected_recovery_commit,
-            expected_remote_sha=cast(str, expected_recovery_head),
-            repo_root=cast(Path, recovery_repo_root),
-            expected_git_env=cast(dict[str, str], recovery_git_env),
-        )
-        if not publication.ok:
-            return publication
-        value = dict(publication.value) if isinstance(publication.value, dict) else {}
-        value["remediation_handoff"] = remediation_handoff
-        value["remediation_journal"] = {
-            "marker": remediation_journal[0],
-            "body": remediation_journal[1],
-        }
-        return replace(publication, value=value)
-
-    def _classify_recovery_commit_failure(
-        self,
-        worktree: Path,
-        *,
-        expected_head: str,
-        expected_tree: str,
-        timeout: int,
-        cause: BaseException | None = None,
-        git_env: dict[str, str] | None = None,
-    ) -> JobResult:
-        """Classify a failed commit without losing an exact completed child."""
-        current_head = self._read_publish_head(worktree, timeout=timeout, git_env=git_env)
-        if isinstance(current_head, str) and current_head != expected_head:
-            if self._is_exact_recovery_commit(
-                worktree,
-                current_head,
-                parent=expected_head,
-                tree=expected_tree,
-                timeout=timeout,
-                git_env=git_env,
-            ):
-                return JobResult(
-                    ok=False,
-                    value={
-                        "failure_kind": "commit_result_ambiguous",
-                        "recovery_commit_sha": current_head,
-                    },
-                    error="remediation writer commit result is ambiguous",
-                )
-            return JobResult(ok=False, error="remediation writer head drift after commit")
-        error = "remediation writer commit did not complete"
-        if cause is not None:
-            error = f"{error}: {cause}"
-        return JobResult(
-            ok=False,
-            value={"failure_kind": "commit_failed"},
-            error=error,
-        )
+            return scope_retraction
+        if before_publish is not None:
+            publication_head = self._read_publish_head(worktree, timeout=job.timeout_s)
+            if isinstance(publication_head, JobResult):
+                return publication_head
+            before_publish(publication_head)
+        return self._publish_commit_push(job, branch, worktree)
 
     @staticmethod
     def _is_exact_recovery_commit(
@@ -15414,120 +12995,6 @@ class WorkerPool:
             and any(line.startswith(signature_header) for line in raw.splitlines())
             and "Signed-off-by:" in raw
         )
-
-    def _publish_recovery_commit(  # noqa: C901
-        self,
-        job: GitJob,
-        branch: str,
-        worktree: Path,
-        *,
-        source_sha: str,
-        expected_remote_sha: str,
-        repo_root: Path,
-        expected_git_env: dict[str, str],
-    ) -> JobResult:
-        """Publish one inspected recovery commit with an exact remote lease."""
-        if not branch:
-            return JobResult(ok=False, error="commit publication branch is unavailable")
-        try:
-            expected_linked_env = getattr(expected_git_env, "linked_env", expected_git_env)
-            rebound = _linked_worktree_git_env(repo_root, worktree)
-            if not _linked_binding_matches(
-                expected_linked_env,
-                rebound,
-                include_index=False,
-            ):
-                raise RuntimeError("remediation writer Git metadata identity changed")
-            initial_binding = getattr(expected_linked_env, "binding", None)
-            publication_binding = getattr(rebound, "binding", None)
-            expected_branch_ref = f"refs/heads/{branch}"
-            if isinstance(initial_binding, _LinkedWorktreeBinding) and (
-                not isinstance(publication_binding, _LinkedWorktreeBinding)
-                or initial_binding.branch_ref != expected_branch_ref
-                or publication_binding.branch_ref != expected_branch_ref
-                or initial_binding.branch_sha not in {expected_remote_sha, source_sha}
-                or publication_binding.branch_sha != initial_binding.branch_sha
-            ):
-                raise RuntimeError("remediation writer branch binding changed")
-
-            def revalidate_remote() -> tuple[dict[str, str], tuple[str, ...]]:
-                """Rebind metadata and return one literal trusted remote."""
-                current = _linked_worktree_git_env(repo_root, worktree)
-                if not _linked_binding_matches(rebound, current, include_index=True):
-                    raise RuntimeError("remediation writer Git metadata identity changed")
-                current_binding = getattr(current, "binding", None)
-                if isinstance(publication_binding, _LinkedWorktreeBinding) and (
-                    not isinstance(current_binding, _LinkedWorktreeBinding)
-                    or current_binding.branch_ref != expected_branch_ref
-                    or current_binding.branch_sha != publication_binding.branch_sha
-                ):
-                    raise RuntimeError("remediation writer branch binding changed")
-                remote_env, remote_config = self._authenticated_remote_git_configuration()
-                remote_env.update(expected_git_env)
-                return remote_env, remote_config
-
-            remote_env, remote_config = revalidate_remote()
-            trusted_url = f"https://github.com/{job.transport_repository}.git"
-            git_utils.push_head_to_branch(
-                branch,
-                expected_remote_sha,
-                worktree,
-                source_sha=source_sha,
-                timeout=job.timeout_s,
-                env=remote_env,
-                remote_config=remote_config,
-                revalidate_remote=revalidate_remote,
-                disable_hooks=True,
-                remote=trusted_url,
-            )
-            post_push = _linked_worktree_git_env(repo_root, worktree)
-            if not _linked_binding_matches(rebound, post_push, include_index=True):
-                raise RuntimeError("remediation writer Git metadata identity changed")
-            post_push_binding = getattr(post_push, "binding", None)
-            if isinstance(publication_binding, _LinkedWorktreeBinding):
-                if (
-                    not isinstance(post_push_binding, _LinkedWorktreeBinding)
-                    or post_push_binding.branch_ref != expected_branch_ref
-                    or post_push_binding.branch_sha != publication_binding.branch_sha
-                ):
-                    raise RuntimeError("remediation writer branch binding changed")
-                _compare_and_swap_linked_branch(
-                    post_push_binding,
-                    expected_sha=publication_binding.branch_sha,
-                    new_sha=source_sha,
-                )
-                final_binding_env = _linked_worktree_git_env(repo_root, worktree)
-                final_binding = getattr(final_binding_env, "binding", None)
-                if (
-                    not _linked_binding_matches(post_push, final_binding_env, include_index=True)
-                    or not isinstance(final_binding, _LinkedWorktreeBinding)
-                    or final_binding.branch_ref != expected_branch_ref
-                    or final_binding.branch_sha != source_sha
-                ):
-                    raise RuntimeError("remediation writer local branch update is unavailable")
-        except (
-            git_utils.BranchPublicationRemoteHeadChangedError,
-            git_utils.BranchPublicationRemoteHeadUnchangedError,
-            git_utils.BranchPublicationRemoteProbeError,
-        ) as exc:
-            return JobResult(
-                ok=False,
-                error="recovery commit publication failed",
-                value={
-                    "failure_kind": exc.failure_kind,
-                    "recovery_commit_sha": source_sha,
-                },
-            )
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            return JobResult(
-                ok=False,
-                error=f"recovery commit publication unavailable: {exc}",
-                value={
-                    "failure_kind": "publication_unavailable",
-                    "recovery_commit_sha": source_sha,
-                },
-            )
-        return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 
     @staticmethod
     def _verify_implementation_edit_scope(
@@ -15593,7 +13060,6 @@ class WorkerPool:
             if restoration is not None:
                 return restoration
             permitted.update(retractions)
-        permitted.update(_remediation_scope_paths(job))
         if not changed.issubset(permitted):
             return WorkerPool._remediation_scope_outcome(job, changed, permitted)
         return None
@@ -16083,8 +13549,6 @@ class WorkerPool:
             for key in (
                 "expected_remote_sha",
                 "writer_refresh",
-                "remediation_pretest_input",
-                "remediation_pretest_record_sha256",
                 "scope_retraction_paths",
             )
         ):

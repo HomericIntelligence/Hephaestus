@@ -32,13 +32,8 @@ class MainWorker(WorkerLane, Protocol):
         *,
         claim_key: str = "",
         claim_stage: str = "",
-        remediation_owner_id: int | None = None,
     ) -> JobHandle:
         """Submit one ordinary job with its owner identity."""
-        ...
-
-    def discard_remediation_pretest_successes(self, claim_key: str, *, owner_id: int) -> None:
-        """Release authority when its owner no longer holds a work permit."""
         ...
 
     def run_cleanup_git(self, job: GitJob) -> JobResult:

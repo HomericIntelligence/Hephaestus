@@ -91,27 +91,6 @@ def test_compaction_preserves_forced_planning_epoch_marker() -> None:
     assert FORCED_PLANNING_EPOCH_MARKER in result.plan_body
 
 
-def test_compaction_preserves_recovery_source_epoch_marker() -> None:
-    """Compaction cannot make a recovered plan look older than its source."""
-    source_digest = "c" * 64
-    comments = [
-        _comment(
-            1,
-            render_current_plan(
-                "Recovered plan",
-                revision=2,
-                recovery_source_digest=source_digest,
-            ),
-        ),
-        _comment(2, render_current_review("Pending", revision=2)),
-    ]
-
-    result = plan_issue_timeline_compaction(comments)
-
-    assert result.plan_body is not None
-    assert source_digest in result.plan_body
-
-
 def test_compaction_rejects_foreign_marker_comments() -> None:
     """A foreign planning marker blocks compaction before a shadow write."""
     comments = [
@@ -289,9 +268,9 @@ def test_compaction_retains_history_without_a_canonical_pointer() -> None:
     assert result.delete_comment_ids == ()
 
 
-def test_compaction_keeps_one_recovery_and_obsolete_role_per_issue() -> None:
-    """Compaction keeps one recovery role and one obsolete explanation."""
-    recovery = render_recovered_requirements("derived body", "Recovered requirements", "a" * 64)
+def test_compaction_leaves_recovery_and_keeps_one_obsolete_role_per_issue() -> None:
+    """Compaction leaves the recovery comment and keeps one obsolete explanation."""
+    recovery = render_recovered_requirements("Recovered requirements")
     obsolete = render_obsolete_explanation("Superseded by #42")
     comments = [
         _comment(1, recovery),
@@ -303,25 +282,3 @@ def test_compaction_keeps_one_recovery_and_obsolete_role_per_issue() -> None:
 
     assert result.delete_comment_ids == (3,)
     assert OBSOLETE_EXPLANATION_MARKER in comments[2].body
-
-
-def test_compaction_rejects_duplicate_or_foreign_recovery_claims() -> None:
-    """Recovery identity conflicts stop compaction before a deletion plan."""
-    recovery = render_recovered_requirements("derived body", "Recovered requirements", "a" * 64)
-
-    with pytest.raises(RuntimeError, match="duplicate"):
-        plan_issue_timeline_compaction([_comment(1, recovery), _comment(2, recovery)])
-
-    with pytest.raises(RuntimeError, match="foreign"):
-        plan_issue_timeline_compaction([_comment(1, recovery, owned=False)])
-
-
-def test_malformed_owned_recovery_provenance_fails_before_deletion() -> None:
-    """A bad owned recovery marker requires manual review rather than deletion."""
-    comments = [
-        _comment(1, "<!-- hephaestus-recovered-requirements:v=1:source=bad -->\ntext"),
-        _comment(2, render_obsolete_explanation("Superseded by #42")),
-    ]
-
-    with pytest.raises(RuntimeError, match="malformed recovered requirements marker"):
-        plan_issue_timeline_compaction(comments)

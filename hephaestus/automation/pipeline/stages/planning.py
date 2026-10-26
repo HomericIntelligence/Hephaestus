@@ -47,7 +47,6 @@ from hephaestus.automation.agent_config import (
     planner_model,
     reviewer_model,
 )
-from hephaestus.automation.comment_identity import validate_planning_body_for_write
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
     WAVE_NON_CODE_INTENT_PAYLOAD,
@@ -61,28 +60,25 @@ from hephaestus.automation.issue_waves import (
 from hephaestus.automation.pipeline.summary import record_summary_action
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import get_plan_prompt
-from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER
 from hephaestus.automation.requirements_recovery import (
     OBSOLETE_EXPLANATION_MARKER,
-    RECOVERY_PROVENANCE_PREFIX,
+    RECOVERED_REQUIREMENTS_MARKER,
     RecoveredRequirements,
-    RecoveryCommentIdentityError,
     RecoveryDisposition,
     RecoveryReview,
     RecoveryVerdict,
     build_recovery_prompt,
     build_recovery_review_prompt,
-    evidence_digest,
     has_contaminated_issue_body,
+    has_finalized_plan_candidate,
     is_semantic_disposition_candidate,
     parse_recovered_requirements,
     parse_recovery_review,
-    recovered_requirements_for_context,
+    recovered_requirements,
     recovered_requirements_json,
     render_obsolete_explanation,
     render_recovered_requirements,
     select_recovery_comment,
-    verified_finalized_plan,
 )
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
@@ -93,17 +89,13 @@ from hephaestus.automation.review_journal import (
     current_revision_context,
     is_pending_review,
     journal_snapshot,
-    plan_fingerprint,
     render_current_plan,
-    render_current_review,
 )
 from hephaestus.automation.source_worktree import SourceWorkspacePreparationError
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
-    ATHENA_FINALIZED_PLAN_LABEL,
     STATE_NEEDS_PLAN,
-    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
@@ -142,7 +134,6 @@ from .base import (
     _require_issue_labels,
     agent_provider,
     athena_advise_failure_reason,
-    planning_source_revision,
     planning_source_workspace_binding,
     stage_model,
     stage_timeout,
@@ -253,55 +244,36 @@ def _refresh_requirements_recovery_context(
     ):
         raise RuntimeError("issue requirements snapshot is incomplete")
     contaminated = has_contaminated_issue_body(body)
-    finalized = verified_finalized_plan(body)
+    finalized = has_finalized_plan_candidate(body)
     labels = _issue_snapshot_labels(snapshot)
-    if finalized is not None and not ctx.github.issue_body_edited_by_viewer(item.issue):
-        finalized = None
-        contaminated = True
-    finalized_invalidated = ATHENA_FINALIZED_PLAN_LABEL in labels and finalized is None
-    recovery_selection = select_recovery_comment(
+    recovery_comment = select_recovery_comment(
         ctx.github.issue_comments(item.issue),
         body_of=lambda comment: comment.body,
         owned_of=lambda comment: comment.viewer_did_author,
     )
     recovered = (
-        recovered_requirements_for_context(
-            recovery_selection.comment.body,
-            repository=item.repo,
-            issue_number=item.issue,
-            issue_title=title,
-            source_body=body,
-            repository_revision=planning_source_revision(item),
-        )
-        if finalized is None and recovery_selection is not None
+        recovered_requirements(recovery_comment.body)
+        if not finalized and recovery_comment is not None
         else None
     )
     item.payload["issue_source_body"] = body
-    if finalized is not None:
+    if finalized:
         item.payload["issue_body"] = body
-        item.payload["athena_finalized_plan_digest"] = finalized.final_body_digest
+        item.payload["athena_finalized_plan"] = True
         item.payload.pop("requirements_recovered_comment", None)
-        item.payload.pop("requirements_recovery_source_digest", None)
         item.payload.pop("requires_plan_revision", None)
         contaminated = False
-        item.payload.pop("athena_finalized_plan_invalidated", None)
     elif recovered is not None:
-        item.payload.pop("athena_finalized_plan_digest", None)
+        item.payload.pop("athena_finalized_plan", None)
         item.payload["issue_body"] = recovered
         item.payload["requirements_recovered_comment"] = True
-        item.payload["requirements_recovery_source_digest"] = body_digest
         item.payload["requires_plan_revision"] = True
         contaminated = False
     else:
-        item.payload.pop("athena_finalized_plan_digest", None)
+        item.payload.pop("athena_finalized_plan", None)
         item.payload.pop("requirements_recovered_comment", None)
-        item.payload.pop("requirements_recovery_source_digest", None)
-        if finalized_invalidated:
-            item.payload["athena_finalized_plan_invalidated"] = True
-        else:
-            item.payload.pop("athena_finalized_plan_invalidated", None)
     semantic_candidate = (
-        finalized is None
+        not finalized
         and recovered is None
         and (is_epic(labels, title="") or is_semantic_disposition_candidate(title, body))
     )
@@ -333,10 +305,7 @@ def _try_rebind_finalized_authority(
     reason: str,
 ) -> tuple[bool, str]:
     """Return a fail-closed finalized-authority rebind and diagnostic."""
-    try:
-        return _finalized_plan_authority_is_current(item, ctx, snapshot), reason
-    except RuntimeError as exc:
-        return False, f"{reason}; finalized authority rebind failed: {exc}"
+    return _finalized_plan_authority_is_current(item, snapshot), reason
 
 
 def _retry_incomplete_requirements_snapshot(
@@ -344,7 +313,6 @@ def _retry_incomplete_requirements_snapshot(
     ctx: StageContext,
     reason: str,
     *,
-    honor_blocked: bool = True,
     preserve_finalized_authority: bool = False,
 ) -> StageOutcome:
     """Bound incomplete entry reads and fail closed with plan-no-go."""
@@ -373,11 +341,6 @@ def _retry_incomplete_requirements_snapshot(
                 )
         if is_skipped(live_labels):
             return StageOutcome(Disposition.SKIP, "state:skip")
-        if honor_blocked and STATE_PLAN_BLOCKED in live_labels:
-            return StageOutcome(
-                Disposition.BLOCKED,
-                "plan was blocked during requirements recovery",
-            )
     attempt = item.attempts.get("plan", 0) + 1
     item.attempts["plan"] = attempt
     if attempt < ctx.budget("plan"):
@@ -413,7 +376,6 @@ def _clear_recovery_results(item: WorkItem) -> None:
     """Discard one model/reviewer attempt without dropping refreshed evidence."""
     item.payload.pop("recovered_requirements", None)
     item.payload.pop("requirements_recovery_review", None)
-    item.payload.pop("requirements_evidence_digest", None)
 
 
 def _finish_recovery(item: WorkItem) -> None:
@@ -448,15 +410,13 @@ def _persist_wave_non_code_intent(
         return
     store, lease = binding
     assert item.issue is not None  # noqa: S101 - caller validates the issue
-    evidence = item.payload.get("requirements_evidence_digest")
     revision = item.payload.get("requirements_repository_revision")
-    if not isinstance(evidence, str) or not isinstance(revision, str):
-        raise IssueWaveError("non-code intent lacks reviewed evidence binding")
+    if not isinstance(revision, str):
+        raise IssueWaveError("non-code intent lacks its repository revision")
     store.record_non_code_intent(
         lease,
         issue_number=item.issue,
         reason=reason,
-        evidence_digest=evidence,
         repository_revision=revision,
         extra_labels=extra_labels,
         explanation=explanation,
@@ -464,7 +424,6 @@ def _persist_wave_non_code_intent(
     item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
         "reason": reason,
         "extra_labels": list(extra_labels),
-        "evidence_digest": evidence,
         "repository_revision": revision,
         "explanation": explanation,
         "retired": False,
@@ -501,7 +460,6 @@ def _pending_wave_non_code_intent(item: WorkItem) -> WaveNonCodeIntent | None:
         return None
     reason = raw.get("reason")
     extra_labels = raw.get("extra_labels")
-    evidence = raw.get("evidence_digest")
     revision = raw.get("repository_revision")
     explanation = raw.get("explanation", "")
     retired = raw.get("retired", False)
@@ -510,7 +468,6 @@ def _pending_wave_non_code_intent(item: WorkItem) -> WaveNonCodeIntent | None:
         or not isinstance(reason, str)
         or not reason
         or not isinstance(extra_labels, list)
-        or not isinstance(evidence, str)
         or not isinstance(revision, str)
         or not isinstance(explanation, str)
         or not isinstance(retired, bool)
@@ -522,7 +479,6 @@ def _pending_wave_non_code_intent(item: WorkItem) -> WaveNonCodeIntent | None:
         return WaveNonCodeIntent(
             issue_number=item.issue,
             reason=reason,
-            evidence_digest=evidence,
             repository_revision=revision,
             extra_labels=tuple(extra_labels),
             explanation=explanation,
@@ -544,72 +500,30 @@ def _finalized_plan_state_is_current(labels: Sequence[str]) -> bool:
     label_set = set(labels)
     return (
         is_exclusive_plan_state(labels, STATE_PLAN_GO)
-        and ATHENA_FINALIZED_PLAN_LABEL in label_set
         and STATE_SKIP not in label_set
         and not label_set.intersection(ALL_IMPLEMENTATION_STATE_LABELS)
     )
 
 
-def _finalized_plan_snapshot_matches_bound_authority(
+def _finalized_plan_authority_is_current(
     item: WorkItem,
     snapshot: object,
     *,
-    require_current_labels: bool,
+    require_current_labels: bool = True,
 ) -> bool:
-    """Match one fresh issue snapshot to the authenticated finalized body."""
+    """Return whether the issue is open, still finalized, and in the plan-go state."""
     if item.issue is None or not isinstance(snapshot, dict):
         return False
-    if snapshot.get("authoritySanitized") is True:
-        return False
     body = snapshot.get("body")
-    body_digest = snapshot.get("bodyDigest")
-    expected_body = item.payload.get("issue_body")
-    expected_body_digest = item.payload.get("issue_body_digest")
-    expected_final_digest = item.payload.get("athena_finalized_plan_digest")
-    finalized = verified_finalized_plan(body) if isinstance(body, str) else None
     if not (
         snapshot.get("number") == item.issue
-        and isinstance(snapshot.get("state"), str)
-        and str(snapshot["state"]).upper() == "OPEN"
-        and isinstance(expected_body, str)
-        and body == expected_body
-        and isinstance(expected_body_digest, str)
-        and body_digest == expected_body_digest
-        and isinstance(expected_final_digest, str)
-        and finalized is not None
-        and finalized.final_body_digest == expected_final_digest
+        and str(snapshot.get("state") or "").upper() == "OPEN"
+        and isinstance(body, str)
+        and has_finalized_plan_candidate(body)
     ):
         return False
     return not require_current_labels or _finalized_plan_state_is_current(
         _issue_snapshot_labels(snapshot)
-    )
-
-
-def _finalized_plan_authority_is_current(
-    item: WorkItem,
-    ctx: StageContext,
-    initial_snapshot: object,
-    *,
-    require_current_labels: bool = True,
-) -> bool:
-    """Rebind body, seal, editor, and labels immediately before advancement."""
-    if not _finalized_plan_snapshot_matches_bound_authority(
-        item,
-        initial_snapshot,
-        require_current_labels=require_current_labels,
-    ):
-        return False
-    assert item.issue is not None  # noqa: S101 - snapshot matching proves this
-    if not ctx.github.issue_body_edited_by_viewer(item.issue):
-        return False
-    # Editor authentication and issue reads are separate GitHub operations.
-    # Repeat the complete snapshot after the editor query so body drift during
-    # that interval cannot authorize stale finalized-plan labels.
-    confirmed = ctx.github.gh_issue_json(item.issue)
-    return _finalized_plan_snapshot_matches_bound_authority(
-        item,
-        confirmed,
-        require_current_labels=require_current_labels,
     )
 
 
@@ -619,7 +533,6 @@ def _apply_recovery_state_label(
     target: str,
     *,
     extra: Sequence[str] = (),
-    clear_blocked: bool = False,
 ) -> bool:
     """Atomically write and confirm one recovery-owned issue state.
 
@@ -639,10 +552,6 @@ def _apply_recovery_state_label(
     else:
         _add, removals = apply_plan_state(target)
         removals = [*removals, *ALL_IMPLEMENTATION_STATE_LABELS]
-    if clear_blocked:
-        removals = [*removals, STATE_PLAN_BLOCKED]
-    if ATHENA_FINALIZED_PLAN_LABEL not in extra:
-        removals = [*removals, ATHENA_FINALIZED_PLAN_LABEL]
     ctx.github.edit_labels(
         item.issue,
         add=[target, *extra],
@@ -660,18 +569,12 @@ def _apply_recovery_state_label(
             STATE_SKIP in live_labels
             and set(extra).issubset(live_labels)
             and not set(live_labels).intersection(ALL_STATE_LABELS)
-            and ATHENA_FINALIZED_PLAN_LABEL not in live_labels
         )
     return (
         is_exclusive_plan_state(live_labels, target)
         and set(extra).issubset(live_labels)
         and STATE_SKIP not in live_labels
         and not set(live_labels).intersection(ALL_IMPLEMENTATION_STATE_LABELS)
-        and (
-            ATHENA_FINALIZED_PLAN_LABEL in live_labels
-            if ATHENA_FINALIZED_PLAN_LABEL in extra
-            else ATHENA_FINALIZED_PLAN_LABEL not in live_labels
-        )
     )
 
 
@@ -705,23 +608,7 @@ def _resume_wave_non_code_intent(
         live = ctx.github.gh_issue_json(intent.issue_number)
     except RuntimeError as exc:
         return _retry_pending_non_code_intent(item, ctx, str(exc))
-    title = live.get("title") if isinstance(live, dict) else None
-    body = live.get("body") if isinstance(live, dict) else None
-    authority_sanitized = (
-        live.get("authoritySanitized") is True if isinstance(live, dict) else False
-    )
-    current_evidence = (
-        evidence_digest(
-            item.repo,
-            intent.issue_number,
-            intent.repository_revision,
-            title,
-            body,
-        )
-        if not authority_sanitized and isinstance(title, str) and isinstance(body, str)
-        else None
-    )
-    if intent.retired or current_evidence != intent.evidence_digest:
+    if intent.retired:
         binding = _wave_non_code_binding(item, ctx)
         if binding is None:
             return StageOutcome(
@@ -735,7 +622,6 @@ def _resume_wave_non_code_intent(
             item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
                 "reason": retired.reason,
                 "extra_labels": list(retired.extra_labels),
-                "evidence_digest": retired.evidence_digest,
                 "repository_revision": retired.repository_revision,
                 "explanation": retired.explanation,
                 "retired": True,
@@ -772,7 +658,7 @@ def _resume_wave_non_code_intent(
         _reenter_planning(item)
         return StageOutcome(
             Disposition.RETRY,
-            "non-code intent evidence changed; retired before finalized/semantic review",
+            "retired non-code intent cleared before finalized/semantic review",
         )
     try:
         if intent.explanation:
@@ -838,8 +724,6 @@ def _retry_requirements_recovery(
     live_labels = _issue_snapshot_labels(live)
     if honor_skip and is_skipped(live_labels):
         return StageOutcome(Disposition.SKIP, "state:skip")
-    if STATE_PLAN_BLOCKED in live_labels:
-        return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
     attempt = item.attempts.get("plan", 0) + 1
     item.attempts["plan"] = attempt
     if attempt < ctx.budget("plan"):
@@ -984,27 +868,17 @@ def _apply_confirmed_requirements(
         return _retry_requirements_recovery(item, ctx, f"recovery plan-no-go failed: {exc}")
     if not no_go_confirmed:
         return _retry_requirements_recovery(item, ctx, "recovery plan-no-go was not confirmed")
-    source_body = str(item.payload.get("issue_source_body", item.payload.get("issue_body")) or "")
-    source_digest = str(item.payload.get("issue_body_digest") or "")
-    recovered_body = render_recovered_requirements(
-        source_body,
-        proposal.requirements,
-        str(item.payload.get("requirements_evidence_digest") or ""),
-        source_digest=source_digest,
-        issue_title=str(item.payload.get("issue_title") or ""),
-        repository_revision=str(item.payload.get("requirements_repository_revision") or ""),
-    )
+    recovered_body = render_recovered_requirements(proposal.requirements)
     try:
-        ctx.github.upsert_issue_comment(item.issue, RECOVERY_PROVENANCE_PREFIX, recovered_body)
+        ctx.github.upsert_issue_comment(item.issue, RECOVERED_REQUIREMENTS_MARKER, recovered_body)
     except RuntimeError as exc:
         return _retry_requirements_recovery(
             item,
             ctx,
-            f"recovery provenance publication failed: {exc}",
+            f"recovered requirements publication failed: {exc}",
         )
     item.payload["issue_body"] = proposal.requirements
     item.payload["requirements_recovered_comment"] = True
-    item.payload["requirements_recovery_source_digest"] = source_digest
     item.payload["requires_plan_revision"] = True
     if bool(getattr(ctx.config, "force", False)):
         item.payload["forced_planning_epoch_started"] = True
@@ -1042,30 +916,8 @@ def _apply_requirements_recovery(
         return _resume_wave_non_code_intent(item, ctx, pending_intent)
     if is_skipped(live_labels):
         return StageOutcome(Disposition.SKIP, "state:skip")
-    if STATE_PLAN_BLOCKED in live_labels:
-        return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
     if not isinstance(proposal, RecoveredRequirements) or not isinstance(review, RecoveryReview):
         return _retry_requirements_recovery(item, ctx, "missing typed recovery result")
-    expected_title = item.payload.get("issue_title")
-    expected_body = item.payload.get("issue_source_body", item.payload.get("issue_body"))
-    expected_digest = item.payload.get("issue_body_digest")
-    if all(
-        isinstance(value, str) for value in (expected_title, expected_body, expected_digest)
-    ) and (
-        live.get("title") != expected_title
-        or live.get("body") != expected_body
-        or live.get("bodyDigest") != expected_digest
-    ):
-        _clear_recovery_results(item)
-        try:
-            _refresh_requirements_recovery_context(item, ctx)
-        except RuntimeError as exc:
-            return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
-        _reenter_planning(item)
-        return StageOutcome(
-            Disposition.RETRY,
-            "issue requirements changed after recovery review; refreshed evidence",
-        )
     if review.verdict is not RecoveryVerdict.GO or review.disposition is not proposal.disposition:
         return _retry_requirements_recovery(item, ctx, review.reason)
     if skip_outcome := _apply_confirmed_semantic_skip(item, ctx, proposal, review):
@@ -1129,14 +981,6 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
             return workspace
         revision = workspace.revision
         assert revision is not None  # noqa: S101 - the captured source has a full revision
-        binding = evidence_digest(
-            item.repo,
-            item.issue,
-            revision,
-            str(item.payload.get("issue_title") or ""),
-            str(item.payload.get("issue_body") or ""),
-        )
-        item.payload["requirements_evidence_digest"] = binding
         item.payload["requirements_repository_revision"] = revision
         job = AgentJob(
             repo=item.repo,
@@ -1150,7 +994,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
             sandbox="read-only",
             allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_PLANNER,
-            session_key=f"requirements-recovery:{item.issue}:{binding}",
+            session_key=f"requirements-recovery:{item.issue}:{revision}",
             execution_request=ExecutionRequest(
                 AgentRole.PLANNER,
                 AgentOperation.PLAN,
@@ -1162,7 +1006,6 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
                 "issue_body": item.payload.get("issue_body", ""),
                 "repository": item.repo,
                 "repository_revision": revision,
-                "evidence_binding": binding,
             },
             parse=parse_recovered_requirements,
             descr="recover_requirements",
@@ -1182,13 +1025,6 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
             return workspace
         revision = workspace.revision
         assert revision is not None  # noqa: S101 - the captured source has a full revision
-        binding = str(item.payload.get("requirements_evidence_digest") or "")
-        if proposal.evidence != binding:
-            return _retry_requirements_recovery(
-                item,
-                ctx,
-                "requirements proposal evidence binding did not match",
-            )
         job = AgentJob(
             repo=item.repo,
             issue=item.issue,
@@ -1201,7 +1037,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
             sandbox="read-only",
             allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_PLAN_REVIEWER,
-            session_key=f"requirements-recovery-review:{item.issue}:{binding}",
+            session_key=f"requirements-recovery-review:{item.issue}:{revision}",
             execution_request=ExecutionRequest(
                 AgentRole.PLAN_REVIEWER,
                 AgentOperation.PLAN_REVIEW,
@@ -1211,8 +1047,6 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
                 "issue_number": item.issue,
                 "issue_title": item.payload.get("issue_title", ""),
                 "issue_body": item.payload.get("issue_body", ""),
-                "source_body_digest": item.payload.get("issue_body_digest", ""),
-                "evidence_binding": binding,
                 "proposal_json": recovered_requirements_json(proposal),
                 "repository": item.repo,
                 "repository_revision": revision,
@@ -1270,96 +1104,6 @@ def _load_planning_journal(
     )
 
 
-def _recovered_successor_is_current(
-    comments: Sequence[IssueComment],
-    snapshot: JournalSnapshot,
-    *,
-    source_digest: str,
-) -> bool:
-    """Return whether recovery provenance binds this exact canonical successor.
-
-    A recovery marker starts a fresh planning epoch.  It stops doing so only
-    after its durable successor plan and paired pending review have both been
-    recorded.  This lets a newly seeded work item resume review without
-    trusting an unrelated canonical plan left by the contaminated epoch.
-    """
-    recovery_selection = select_recovery_comment(
-        comments,
-        body_of=lambda comment: comment.body,
-        owned_of=lambda comment: comment.viewer_did_author,
-    )
-    if recovery_selection is None:
-        return False
-    if not (
-        snapshot.current_plan
-        and snapshot.recovery_source_digest == source_digest
-        and snapshot.current_review_revision == snapshot.revision
-        and is_pending_review(snapshot.current_review, revision=snapshot.revision)
-    ):
-        return False
-    current_digest = plan_fingerprint(snapshot.current_plan)
-    provenance = recovery_selection.provenance
-    return (
-        provenance.source_digest == source_digest
-        and provenance.successor_revision == snapshot.revision
-        and provenance.successor_plan_digest == current_digest
-    )
-
-
-def _bind_recovered_successor(
-    item: WorkItem,
-    ctx: StageContext,
-    *,
-    plan: str,
-    revision: int,
-) -> None:
-    """Bind a published plan to its recovered-requirements provenance."""
-    assert item.issue is not None  # noqa: S101 - caller validates the work item
-    if not item.payload.get("requirements_recovered_comment"):
-        return
-    source_digest = item.payload.get("issue_body_digest")
-    source_body = item.payload.get("issue_source_body")
-    if not isinstance(source_digest, str) or not isinstance(source_body, str):
-        raise RecoveryCommentIdentityError("recovery successor source context is not correct")
-    recovery_selection = select_recovery_comment(
-        ctx.github.issue_comments(item.issue),
-        body_of=lambda comment: comment.body,
-        owned_of=lambda comment: comment.viewer_did_author,
-    )
-    if recovery_selection is None:
-        raise RecoveryCommentIdentityError("recovery successor comment is missing")
-    provenance = recovery_selection.provenance
-    requirements = recovered_requirements_for_context(
-        recovery_selection.comment.body,
-        repository=item.repo,
-        issue_number=item.issue,
-        issue_title=str(item.payload.get("issue_title") or ""),
-        source_body=source_body,
-        repository_revision=provenance.repository_revision or "",
-    )
-    if requirements is None:
-        raise RecoveryCommentIdentityError("recovery successor comment context is not correct")
-    try:
-        ctx.github.upsert_issue_comment(
-            item.issue,
-            RECOVERY_PROVENANCE_PREFIX,
-            render_recovered_requirements(
-                source_body,
-                requirements,
-                provenance.evidence_digest,
-                source_digest=source_digest,
-                successor_revision=revision,
-                successor_plan_digest=plan_fingerprint(plan),
-                issue_title=str(item.payload.get("issue_title") or ""),
-                repository_revision=provenance.repository_revision,
-            ),
-        )
-    except RuntimeError as exc:
-        raise RecoveryCommentIdentityError(
-            f"GitHub did not show the recovery successor comment write: {exc}"
-        ) from exc
-
-
 def _plan_is_ready_for_verify(
     snapshot: JournalSnapshot,
     *,
@@ -1395,7 +1139,7 @@ def _write_planning_entry_labels(
         ctx.github.edit_labels(
             issue_number,
             add=add,
-            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+            remove=remove,
         )
     elif force_replan:
         add, remove = enter_planning_transition()
@@ -1403,7 +1147,7 @@ def _write_planning_entry_labels(
         ctx.github.edit_labels(
             issue_number,
             add=add,
-            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+            remove=remove,
         )
     elif STATE_PLAN_NO_GO in labels and revision_already_published:
         add, remove = enter_planning_transition()
@@ -1411,7 +1155,7 @@ def _write_planning_entry_labels(
         ctx.github.edit_labels(
             issue_number,
             add=add,
-            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+            remove=remove,
         )
     elif is_replan_entry:
         # Keep state:plan-no-go authoritative until a revised canonical plan
@@ -1433,16 +1177,12 @@ def _write_planning_entry_labels(
         ctx.github.edit_labels(
             issue_number,
             add=add,
-            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+            remove=remove,
         )
     if ctx.dry_run:
         return True
     live_labels = _open_issue_labels_for_transition(issue_number, ctx)
-    return (
-        live_labels is not None
-        and is_exclusive_plan_state(live_labels, expected_state)
-        and ATHENA_FINALIZED_PLAN_LABEL not in live_labels
-    )
+    return live_labels is not None and is_exclusive_plan_state(live_labels, expected_state)
 
 
 def _issue_snapshot_labels(data: object) -> list[str]:
@@ -1495,54 +1235,10 @@ def _mark_published_plan_pending_review(
         ctx.github.edit_labels(
             issue_number,
             add=add,
-            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+            remove=remove,
         )
     live_labels = _open_issue_labels_for_transition(issue_number, ctx)
-    return (
-        live_labels is not None
-        and is_exclusive_plan_state(live_labels, STATE_NEEDS_PLAN)
-        and ATHENA_FINALIZED_PLAN_LABEL not in live_labels
-    )
-
-
-def _publish_plan_blocked(
-    issue_number: int,
-    ctx: StageContext,
-    *,
-    raw_review: str,
-    revision: int,
-) -> bool:
-    """Latch BLOCKED before publishing its required explanatory audit data."""
-    # Resolve the shared plan/review identity before the label write. A
-    # conflict is a human-recovery condition, not a reason to change state.
-    if journal_snapshot(ctx.github.issue_comments(issue_number)).revision != revision:
-        return False
-    comment_body = render_current_review(raw_review, revision=revision)
-    validate_planning_body_for_write(PLAN_REVIEW_CANONICAL_MARKER, comment_body)
-    ctx.github.edit_labels(
-        issue_number,
-        add=[STATE_PLAN_BLOCKED],
-        remove=[
-            STATE_NEEDS_PLAN,
-            STATE_PLAN_NO_GO,
-            STATE_PLAN_GO,
-            ATHENA_FINALIZED_PLAN_LABEL,
-        ],
-    )
-    live_labels = _open_issue_labels_for_transition(issue_number, ctx)
-    confirmed = (
-        live_labels is not None
-        and is_exclusive_plan_state(live_labels, STATE_PLAN_BLOCKED)
-        and ATHENA_FINALIZED_PLAN_LABEL not in live_labels
-    )
-    if not confirmed:
-        return False
-    ctx.github.upsert_issue_comment(
-        issue_number,
-        PLAN_REVIEW_CANONICAL_MARKER,
-        comment_body,
-    )
-    return True
+    return live_labels is not None and is_exclusive_plan_state(live_labels, STATE_NEEDS_PLAN)
 
 
 def _no_progress_outcome(
@@ -1552,20 +1248,11 @@ def _no_progress_outcome(
     reason: str,
     revision: int,
 ) -> StageOutcome:
-    """Persist one no-progress explanation and route solely from its label."""
-    assert item.issue is not None  # noqa: S101 - caller narrows the issue
-    raw_review = f"Planning is stuck and needs external feedback. {reason}\n\n{STATE_PLAN_BLOCKED}"
-    if not _publish_plan_blocked(
-        item.issue,
-        ctx,
-        raw_review=raw_review,
-        revision=revision,
-    ):
-        return StageOutcome(Disposition.RETRY, "blocked label was not confirmed")
-    return StageOutcome(
-        Disposition.BLOCKED,
-        "planning made no progress; external feedback required",
+    """Stop the item when planning produced no new plan."""
+    logger.warning(
+        "planning:%s: planning made no progress at revision %d: %s", item.issue, revision, reason
     )
+    return StageOutcome(Disposition.FINISH_FAIL, "planning made no progress")
 
 
 def _publish_candidate_plan(
@@ -1582,11 +1269,6 @@ def _publish_candidate_plan(
     live_labels = _issue_snapshot_labels(live)
     if is_skipped(live_labels):
         return StageOutcome(Disposition.SKIP, "state:skip")
-    if STATE_PLAN_BLOCKED in live_labels:
-        return StageOutcome(
-            Disposition.BLOCKED,
-            "plan was blocked externally while planning was in flight",
-        )
     try:
         publication = publish_plan_revision(
             item.issue,
@@ -1594,11 +1276,6 @@ def _publish_candidate_plan(
             ctx.github,
             require_change=requires_revision,
             forced_planning_epoch=bool(item.payload.get("forced_planning_epoch_started")),
-            recovery_source_digest=(
-                str(item.payload["requirements_recovery_source_digest"])
-                if item.payload.get("requirements_recovery_source_digest")
-                else None
-            ),
         )
     except PlanRevisionOwnershipError:
         note = "plan is being worked by another pipeline item; ejected from queue"
@@ -1619,12 +1296,6 @@ def _publish_candidate_plan(
         "was_revision": requires_revision,
     }
     item.payload.pop("requires_plan_revision", None)
-    _bind_recovered_successor(
-        item,
-        ctx,
-        plan=publication.plan,
-        revision=publication.revision,
-    )
     if not _mark_published_plan_pending_review(
         item.issue,
         ctx,
@@ -1654,7 +1325,6 @@ def _resume_published_plan_followup(
     was_revision = pending_followup.get("was_revision")
     if not (isinstance(plan, str) and isinstance(revision, int) and isinstance(was_revision, bool)):
         return StageOutcome(Disposition.FINISH_FAIL, "invalid plan publication receipt")
-    _bind_recovered_successor(item, ctx, plan=plan, revision=revision)
     if not _mark_published_plan_pending_review(
         item.issue,
         ctx,
@@ -1677,11 +1347,6 @@ def _verify_published_plan_state(item: WorkItem, ctx: StageContext) -> StageOutc
     labels = _issue_snapshot_labels(live)
     if is_skipped(labels):
         return StageOutcome(Disposition.SKIP, "state:skip")
-    if STATE_PLAN_BLOCKED in labels:
-        return StageOutcome(
-            Disposition.BLOCKED,
-            "plan was blocked externally before verification",
-        )
     if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
         return StageOutcome(
             Disposition.RETRY,
@@ -1718,11 +1383,11 @@ def _resume_published_plan_or_retry(
     """Resume a published plan and use the retry limit for successor conflicts."""
     try:
         return _resume_published_plan_followup(item, ctx)
-    except (CommentJournalReadError, RecoveryCommentIdentityError) as exc:
+    except CommentJournalReadError as exc:
         return _retry_incomplete_requirements_snapshot(
             item,
             ctx,
-            f"recovery successor publication had an error: {exc}",
+            f"plan publication follow-up had an error: {exc}",
         )
 
 
@@ -1740,12 +1405,6 @@ def _publish_candidate_plan_or_retry(
             item,
             ctx,
             f"plan journal read had an error: {exc}",
-        )
-    except RecoveryCommentIdentityError as exc:
-        return _retry_incomplete_requirements_snapshot(
-            item,
-            ctx,
-            f"recovery successor publication had an error: {exc}",
         )
 
 
@@ -1927,14 +1586,13 @@ class PlanningStage(Stage):
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         except RuntimeError as exc:
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
-        force_replan = force_replan or bool(item.payload.get("athena_finalized_plan_invalidated"))
 
         # Athena finalization seals one exact GO-reviewed planning epoch into
         # the issue body. Its self-verifying F digest is durable planning
         # authority even after the intermediate plan/review comments are
         # deleted, and --force must not reopen that completed epoch. Normalize
         # the loop-owned label so downstream restart routing remains ordinary.
-        if item.payload.get("athena_finalized_plan_digest"):
+        if item.payload.get("athena_finalized_plan"):
             finalized_state_current = _finalized_plan_state_is_current(labels)
             if not finalized_state_current:
                 try:
@@ -1942,15 +1600,12 @@ class PlanningStage(Stage):
                         item,
                         ctx,
                         STATE_PLAN_GO,
-                        extra=(ATHENA_FINALIZED_PLAN_LABEL,),
-                        clear_blocked=True,
                     )
                 except RuntimeError as exc:
                     return _retry_incomplete_requirements_snapshot(
                         item,
                         ctx,
                         f"finalized plan-go normalization failed: {exc}",
-                        honor_blocked=False,
                         preserve_finalized_authority=True,
                     )
                 if not finalized_state_confirmed:
@@ -1958,13 +1613,11 @@ class PlanningStage(Stage):
                         item,
                         ctx,
                         "finalized plan-go label was not confirmed",
-                        honor_blocked=False,
                         preserve_finalized_authority=True,
                     )
             try:
                 finalized_authority_current = _finalized_plan_authority_is_current(
                     item,
-                    ctx,
                     ctx.github.gh_issue_json(item.issue),
                     require_current_labels=not ctx.dry_run,
                 )
@@ -1973,28 +1626,18 @@ class PlanningStage(Stage):
                     item,
                     ctx,
                     f"finalized authority rebind failed: {exc}",
-                    honor_blocked=False,
                     preserve_finalized_authority=True,
                 )
             if not finalized_authority_current:
                 return _retry_incomplete_requirements_snapshot(
                     item,
                     ctx,
-                    "finalized body, editor, or labels drifted during normalization",
-                    honor_blocked=False,
+                    "finalized body or labels changed during normalization",
                     preserve_finalized_authority=True,
                 )
             record_summary_action(item, "finalized-plan-reused")
             logger.info("planning:%d: verified Athena finalized plan; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "Athena finalized plan already approved")
-
-        # BLOCKED is an operator-owned hold for ordinary planning. The one
-        # exception is an authenticated Athena finalization above: that body
-        # proves the external planning decision has already completed, so its
-        # stale hold is replaced atomically by exclusive plan-GO.
-        if STATE_PLAN_BLOCKED in labels:
-            ctx.github.ensure_blocked_audit(item.issue)
-            return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
 
         if recovery_required:
             logger.info("planning:%d: requirements recovery required", item.issue)
@@ -2028,53 +1671,14 @@ class PlanningStage(Stage):
                 exc,
             )
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
-        recovered_artifact = bool(item.payload.get("requirements_recovered_comment"))
-        recovered_source_digest = item.payload.get("requirements_recovery_source_digest")
-        try:
-            recovered_successor = recovered_artifact and _recovered_successor_is_current(
-                comments,
-                snapshot,
-                source_digest=str(item.payload.get("issue_body_digest") or ""),
-            )
-        except RecoveryCommentIdentityError as exc:
-            return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
-        recovered_restart = bool(
-            recovered_artifact
-            and snapshot.recovery_source_digest != recovered_source_digest
-            and not recovered_successor
-        )
-        pending_recovered_successor = bool(
-            recovered_artifact
-            and revision_already_published
-            and snapshot.recovery_source_digest == recovered_source_digest
-            and not recovered_successor
-        )
-        if pending_recovered_successor:
-            try:
-                _bind_recovered_successor(
-                    item,
-                    ctx,
-                    plan=snapshot.current_plan,
-                    revision=snapshot.revision,
-                )
-            except (CommentJournalReadError, RecoveryCommentIdentityError) as exc:
-                return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
-            recovered_successor = True
-        if recovered_restart:
-            # The source-bound recovery artifact authorizes a new planning
-            # epoch until it binds a successor plan to the recovered source.
+        if item.payload.get("requirements_recovered_comment") and STATE_PLAN_NO_GO in labels:
+            # Recovery sets plan-no-go before it publishes its comment, so a plan
+            # found now may predate the recovered requirements. Plan again.
             item.payload.pop("plan_text", None)
             item.payload.pop("plan_revision", None)
             item.payload.pop("issue_history", None)
             is_replan_entry = True
             revision_already_published = False
-        elif recovered_successor:
-            # The recovered successor and its pending review are both exact
-            # durable artifacts. Legacy recovery provenance may predate the
-            # successor fields, but the host-owned plan source marker plus its
-            # paired pending review still proves the publication completed. A
-            # fresh item resumes review rather than republishing identical text.
-            item.payload.pop("requires_plan_revision", None)
         if force_replan:
             if snapshot.forced_planning_epoch and not is_exclusive_plan_state(
                 labels, STATE_PLAN_GO
@@ -2116,9 +1720,7 @@ class PlanningStage(Stage):
         # Restart fast-forward: journal reconciliation already found a current
         # plan, so re-entry must not redo advise + plan.
         # Jump straight to VERIFY; idempotent on repeated on_enter calls.
-        if (not recovered_restart or recovered_successor) and _plan_is_ready_for_verify(
-            snapshot, is_replan_entry=is_replan_entry
-        ):
+        if _plan_is_ready_for_verify(snapshot, is_replan_entry=is_replan_entry):
             logger.info(
                 "planning:%d: plan comment already exists; fast-forward to VERIFY", item.issue
             )

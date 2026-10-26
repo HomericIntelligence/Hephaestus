@@ -11,29 +11,10 @@ GitHub Actions validates repository code independently. Normal
 its prose, grades, and decision-shaped output do not authorize the loop. The
 automation loop does not change checks, workflows, statuses, artifacts, leases,
 or `pull_request_target` events. `pr_review` applies
-`state:implementation-go` only after a structural audit and fresh live GitHub
-facts confirm the exact open, unarmed reviewed head, complete thread state, and
-exclusive label transition by readback. `merge_wait` consumes that loop-owned
-label with its process-local reviewed-head proof and complete passing required
-status evidence for that exact SHA. Restarted labels re-enter review because
-the process-local proof is not durable. A required Check Run must have the
-`completed` status and a `success`, `neutral`, or `skipped` conclusion. A
-required commit status must have the `success` state. An unbound required
-context can use either source. A positive GitHub App binding requires a Check
-Run from that exact application; a commit status cannot satisfy it. The gate
-selects required Check Runs by name before it validates the application and
-result fields. Thus, an optional Check Run with a schema-valid null application
-does not revoke merge eligibility. The gate still validates all page and run
-identities. If both
-sources use the same required context, both sources must pass. Each required
-Check Run uses its completion time. Each required commit status uses its update
-time. The time must be in the inclusive seven-day period before the controlled
-UTC read time. A missing, malformed, future, or expired time fails closed.
-Required status evidence does not create review authorization or replace the
-structural review. The merge gate does not require a second GitHub user or a
-marked `APPROVED` review. The effective policy selects exact-head merge-queue
-admission when a ruleset requires it. A direct merge requires strict-update
-protection from a source that the current actor cannot bypass.
+`state:implementation-go` when no review thread is unresolved. `merge_wait` then
+arms native auto-merge once. GitHub applies branch protection, the required
+checks below, and any merge queue, and it merges when they pass. Hephaestus
+does not read check runs or commit statuses and does not compare heads.
 
 ## Queue pre-PR source checks
 
@@ -257,16 +238,14 @@ visible at the same absolute path on each Slurm compute node:
 just host-verification-pyxis-image
 ```
 
-The command prints the exact digest and authority path. Supply them with
-`--host-verification-pyxis-sha256 SHA256` and
-`--host-verification-pyxis-authority PATH`. Supply a capacity-bounded shared
-filesystem with `--host-verification-pyxis-quota-root PATH`. The worker verifies
-the authority. It puts the authorized image, immutable source, and Git metadata
+The command prints the image path and digest. Supply the image with
+`--host-verification-pyxis-image PATH` and a capacity-bounded shared
+filesystem with `--host-verification-pyxis-quota-root PATH`. The worker loads
+the image. It puts the image, immutable source, and Git metadata
 in one private directory beside the source image. It executes only the copied
 image. It does not mount a host virtual environment.
 
-The Pyxis boundary is optional for local lanes. When the pinned image digest,
-the trust authority, and the writable quota root are not all configured — the
+The Pyxis boundary is optional for local lanes. When the image and the writable quota root are not both configured — the
 Linux rule `select_quota_backend` applies — a Linux worker runs the fixed
 immutable check directly from a disposable archive of the proven commit, with
 a scrubbed environment (no inherited credentials), bounded wall time, and a

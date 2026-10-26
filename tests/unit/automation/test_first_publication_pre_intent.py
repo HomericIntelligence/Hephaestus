@@ -31,7 +31,6 @@ pytestmark = [
         ("pending", True, False),
         ("dirty", True, False),
         ("malformed", False, None),
-        ("foreign", False, None),
     ],
 )
 def test_discovery_requires_matching_start_without_publication_intent(

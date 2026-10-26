@@ -18,28 +18,12 @@ PipelineGitHub mapping tests.
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable
-from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, get_args, get_origin, get_type_hints
 
 import pytest
 
 import hephaestus
 import hephaestus.automation.github_api as github_api
-from hephaestus.automation.pipeline.github_jobs import (
-    AppendReplyJournalRequest,
-    DeliverReplyHandoffRequest,
-    GitHubJob,
-    MergeWaitCycleCompleted,
-    PrReviewReconciled,
-    ReconcilePrReviewRequest,
-    RecoverReplyJournalRequest,
-    ReplyHandoffAttempted,
-    ReplyJournalAppended,
-    ReplyJournalRecovered,
-    RunMergeWaitCycleRequest,
-)
 
 _PIPELINE = Path(hephaestus.__file__).parent / "automation" / "pipeline"
 _AUTOMATION = _PIPELINE.parent
@@ -183,60 +167,6 @@ def test_admission_uses_the_pipeline_dependency_facts_boundary() -> None:
     assert not any(imported == "hephaestus.automation.github_api" for imported in imports)
 
 
-def test_scope_expansion_adapter_does_not_mix_github_api_module_and_star_import() -> None:
-    """Keep direct GitHub imports distinct from the transport star namespace."""
-    path = _AUTOMATION / "pipeline_github_scope_expansion.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    module_imports = {
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    }
-
-    assert "hephaestus.automation.github_api" not in module_imports
-
-
-def test_github_worker_boundary_is_closed_frozen_and_non_callable() -> None:
-    """Requests cannot smuggle coordinator state, callables, or mutable kwargs."""
-    request_types = (
-        RecoverReplyJournalRequest,
-        AppendReplyJournalRequest,
-        DeliverReplyHandoffRequest,
-        ReconcilePrReviewRequest,
-        RunMergeWaitCycleRequest,
-    )
-    receipt_types = (
-        ReplyJournalRecovered,
-        ReplyJournalAppended,
-        ReplyHandoffAttempted,
-        PrReviewReconciled,
-        MergeWaitCycleCompleted,
-    )
-    assert {field.name for field in fields(GitHubJob)} == {
-        "repo",
-        "repo_root",
-        "request",
-        "descr",
-    }
-    assert vars(GitHubJob)["__dataclass_params__"].frozen
-    forbidden_origins = {list, dict, set, Callable}
-    for request_type in request_types:
-        assert is_dataclass(request_type)
-        assert vars(request_type)["__dataclass_params__"].frozen
-        for annotation in get_type_hints(request_type).values():
-            candidates = (annotation, *get_args(annotation))
-            assert Any not in candidates
-            assert not any(get_origin(candidate) in forbidden_origins for candidate in candidates)
-            assert not any(
-                getattr(candidate, "__name__", "") in {"WorkItem", "StageContext", "Queue"}
-                for candidate in candidates
-            )
-    for receipt_type in receipt_types:
-        assert is_dataclass(receipt_type)
-        assert vars(receipt_type)["__dataclass_params__"].frozen
-
-
 def test_worker_pool_does_not_import_the_github_implementation() -> None:
     """The generic dispatcher depends only on the typed runner protocol."""
     tree = ast.parse((_PIPELINE / "worker_pool.py").read_text(encoding="utf-8"))
@@ -361,26 +291,6 @@ def test_auto_merge_has_one_production_call_site() -> None:
 
     assert len(calls) == 1, f"unexpected auto-merge call sites: {calls}"
     assert calls[0][0] == "pipeline_github_jobs.py"
-
-
-def test_no_production_conditional_merge_call_sites() -> None:
-    """The SHA-conditional merge is no longer part of the merge contract.
-
-    GitHub merges whatever is current once the approval label is present, so a
-    direct conditional merge request would contradict that.
-    """
-    calls: list[tuple[str, int]] = []
-    for path in sorted(_AUTOMATION.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "merge_pr_if_head"
-            ):
-                calls.append((str(path.relative_to(_AUTOMATION)), node.lineno))
-
-    assert calls == [], f"conditional merge call sites must be gone: {calls}"
 
 
 def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:

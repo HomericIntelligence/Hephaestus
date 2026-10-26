@@ -27,7 +27,6 @@ def _request() -> RunMergeWaitCycleRequest:
     return RunMergeWaitCycleRequest(
         issue_number=1,
         pr_number=7,
-        reviewed_head_sha="a" * 40,
         deadline_s=60.0,
         cancellation=threading.Event(),
     )
@@ -36,7 +35,6 @@ def _request() -> RunMergeWaitCycleRequest:
 def _item_with_receipt(make_work_item: Any, outcome: str, **kwargs: Any) -> Any:
     """Park an item with one correlated cycle receipt."""
     item = make_work_item(kind="pr", pr=7, issue=1)
-    item.payload["reviewed_pr_head_sha"] = "a" * 40
     item.state = MERGE_APPLY
     request = _request()
     item.payload["_pending_github_request"] = request
@@ -54,7 +52,7 @@ def test_enabled_auto_merge_parks_and_retries(make_ctx: Any, make_work_item: Any
 
     assert isinstance(outcome, StageOutcome)
     assert outcome.disposition is Disposition.RETRY
-    assert outcome.note == "merge_readiness_wait"
+    assert outcome.note == "merge_wait_poll"
 
 
 def test_wait_backoff_grows_and_stays_bounded(make_ctx: Any, make_work_item: Any) -> None:
@@ -76,20 +74,19 @@ def test_wait_fails_closed_when_its_deadline_expires(make_ctx: Any, make_work_it
     item = _item_with_receipt(make_work_item, "auto_merge_enabled", attempted=True)
     stage = MergeWaitStage()
 
-    # The first poll establishes the wait. A new reviewed head must not inherit
-    # a prior proof's deadline, so the deadline is set on the first poll. The
-    # next cycle re-enters MERGE, which is where expiry is enforced.
+    # The first poll establishes the wait. A later poll after the deadline fails.
     first = stage._merge_apply(item, make_ctx(now_fn=lambda: 1_000.0))
     assert isinstance(first, StageOutcome)
     assert first.disposition is Disposition.RETRY
-    deadline = item.payload["merge_readiness_deadline_s"]
+    deadline = item.payload["merge_poll_deadline_s"]
 
-    item.state = "MERGE"
-    outcome = stage._merge(item, make_ctx(now_fn=lambda: deadline + 1.0))
+    later = _item_with_receipt(make_work_item, "auto_merge_enabled", attempted=True)
+    later.payload["merge_poll_deadline_s"] = deadline
+    outcome = stage._merge_apply(later, make_ctx(now_fn=lambda: deadline + 1.0))
 
     assert isinstance(outcome, StageOutcome)
     assert outcome.disposition is Disposition.FINISH_FAIL
-    assert outcome.note == "merge_readiness_timeout"
+    assert outcome.note == "merge_poll_timeout"
 
 
 def test_retryable_transport_error_retries_the_enablement(
@@ -152,7 +149,6 @@ def test_a_receipt_for_a_different_request_is_refused(make_ctx: Any, make_work_i
     item.payload["_pending_github_request"] = RunMergeWaitCycleRequest(
         issue_number=2,
         pr_number=8,
-        reviewed_head_sha="d" * 40,
         deadline_s=60.0,
         cancellation=threading.Event(),
     )
@@ -192,7 +188,6 @@ def test_a_pull_request_without_an_issue_fails_on_enter(make_ctx: Any, make_work
 def test_known_states_are_handled(state: str, make_ctx: Any, make_work_item: Any) -> None:
     """Every declared state has a defined transition."""
     item = make_work_item(kind="pr", pr=7, issue=1)
-    item.payload["reviewed_pr_head_sha"] = "a" * 40
     item.state = state
 
     assert MergeWaitStage().step(item, make_ctx()) is not None

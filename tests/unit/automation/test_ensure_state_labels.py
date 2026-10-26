@@ -21,6 +21,7 @@ import pytest
 from hephaestus.automation.ensure_state_labels import (
     _detect_current_repo_slug,
     _gh_list_org_repos,
+    delete_removed_labels_on_repo,
     ensure_labels_on_repo,
     main,
 )
@@ -30,6 +31,7 @@ from hephaestus.automation.label_taxonomy import (
     WONTFIX_LABEL,
 )
 from hephaestus.automation.state_labels import (
+    REMOVED_LABELS,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -52,6 +54,30 @@ def _ok_proc(stdout: str = "") -> MagicMock:
     proc.stdout = stdout
     proc.stderr = ""
     return proc
+
+
+class TestDeleteRemovedLabelsOnRepo:
+    """``delete_removed_labels_on_repo`` deletes each retired label from a repo."""
+
+    def test_deletes_every_removed_label(self, mock_gh_call: MagicMock) -> None:
+        deleted = delete_removed_labels_on_repo("o/r")
+
+        assert deleted == len(REMOVED_LABELS)
+        assert [call.args[0] for call in mock_gh_call.call_args_list] == [
+            ["label", "delete", label, "--repo", "o/r", "--yes"] for label in REMOVED_LABELS
+        ]
+
+    def test_dry_run_deletes_nothing(self, mock_gh_call: MagicMock) -> None:
+        assert delete_removed_labels_on_repo("o/r", dry_run=True) == 0
+        mock_gh_call.assert_not_called()
+
+    def test_a_missing_label_does_not_stop_the_rest(self, mock_gh_call: MagicMock) -> None:
+        mock_gh_call.side_effect = [
+            subprocess.CalledProcessError(1, "gh", stderr="label not found"),
+            *[_ok_proc() for _ in REMOVED_LABELS[1:]],
+        ]
+
+        assert delete_removed_labels_on_repo("o/r") == len(REMOVED_LABELS) - 1
 
 
 class TestEnsureLabelsOnRepo:

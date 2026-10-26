@@ -1,27 +1,22 @@
-"""Merge-wait: admit a GO pull request and let GitHub merge it.
+"""Merge-wait: arm native auto-merge for a GO pull request and let GitHub merge it.
 
-``pr_review`` owns the loop's automated implementation-eligibility decision.
-This stage admits an open pull request that carries the current-process
-reviewed-head proof and the exclusive ``state:implementation-go`` label, then
-enables GitHub native auto-merge. GitHub owns everything after that: branch
-protection, the required checks, any merge queue, and a rebase when the merge
-reports a real conflict.
-
-The stage does not revalidate the head before the merge request, does not gate
-on required status evidence, and does not rebase before arming. A recovered
-proof from an earlier process cannot grant merge authority; only a review in
-the current process can.
+``pr_review`` applies ``state:implementation-go`` when no review thread is
+unresolved. This stage arms GitHub native auto-merge for an open pull request
+that carries the label, unless an agent already armed it. GitHub owns
+everything after that: branch protection, the required checks, any merge
+queue, and a rebase when the merge reports a real conflict. The stage compares
+no head, checks no status evidence, and does not rebase before arming. It
+polls the pull request, with a bounded wait, until GitHub reports it merged or
+closed.
 
 The implemented mini-state graph is:
 
-- ``ENTER -> MERGE``. An open PR is admitted only with the current-process
-  reviewed-head proof and the PR-level implementation-GO label. Readiness may
-  retry ``MERGE`` within its bounded wait.
-- A PR observed as already merged, or a conditional merge freshly confirmed as
-  merged, emits one immutable post-merge learning intent. The coordinator
-  transfers that intent to the auxiliary lane after the confirmed pass.
-- Live admission, readiness, and conditional-merge failures exit safely or
-  fail back to fresh PR review when the head-bound proof is absent or stale.
+- ``ENTER -> MERGE``. An open PR with the PR-level implementation-GO label is
+  armed once. The stage then polls with a bounded backoff.
+- A PR observed as already merged, or confirmed as merged, emits one
+  immutable post-merge learning intent. The coordinator transfers that intent
+  to the auxiliary lane after the confirmed pass.
+- A PR that lost its GO label fails back to PR review.
 """
 
 from __future__ import annotations
@@ -56,7 +51,6 @@ from .base import (
     WorkItem,
     _repo_state_root,
 )
-from .rebase_review_recovery import receive_rebase_review
 
 logger = logging.getLogger(__name__)
 
@@ -66,27 +60,19 @@ MERGE_APPLY = "MERGE_APPLY"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
 
-_READINESS_WAIT_INITIAL_S = 5.0
-_READINESS_WAIT_TIMEOUT_S = 30 * 60.0
-_READINESS_WAIT_DELAY_CAP_S = 60.0
+_POLL_INITIAL_S = 5.0
+_POLL_TIMEOUT_S = 30 * 60.0
+_POLL_DELAY_CAP_S = 60.0
 _MERGE_CYCLE_OPERATION_TIMEOUT_S = 120.0
-_DECLINED_READINESS_FINGERPRINT = "merge_readiness_declined_fingerprint"
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _MERGE_CYCLE_DEADLINE_S = "_merge_cycle_deadline_s"
 _MERGE_CYCLE_RECEIPT = "_merge_wait_cycle_receipt"
 _MERGE_CYCLE_RECEIPT_ERROR = "_merge_wait_cycle_receipt_error"
 _AUTO_MERGE_ARMED = "merge_auto_merge_armed"
-_QUEUE_RESIDENCE_DEADLINE_S = "merge_queue_residence_deadline_s"
-_QUEUE_RESIDENCE_POLLS = "merge_queue_residence_polls"
-
-
-def _merge_head(item: WorkItem) -> object:
-    """Keep readiness state bound to the reviewed head."""
-    return item.payload.get("reviewed_pr_head_sha")
 
 
 class MergeWaitStage(Stage):
-    """Attempt a bounded SHA-conditional merge after final live admission."""
+    """Arm native auto-merge after the GO label and wait for GitHub to merge."""
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
         """Reject an unscoped PR without touching any GitHub state."""
@@ -117,34 +103,24 @@ class MergeWaitStage(Stage):
         """Dispatch one auto-merge enablement cycle.
 
         The pull request number and the approval label are the whole contract.
-        The head is observed for the merge receipt and never compared, so a new
-        commit between review and merge does not restart this stage.
+        No head is compared, so a new commit between review and merge does not
+        restart this stage.
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        reviewed_head = item.payload.get("reviewed_pr_head_sha")
-        if not isinstance(reviewed_head, str) or not reviewed_head:
-            return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
-        deadline = self._matching_readiness_deadline_outcome(item, ctx)
-        if deadline is not None:
-            return deadline
         if item.attempts["merge"] >= ctx.budget("merge"):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
-        try:
-            operation_deadline = item.payload.get(_MERGE_CYCLE_DEADLINE_S)
-            if operation_deadline is None:
-                operation_deadline = ctx.now() + _MERGE_CYCLE_OPERATION_TIMEOUT_S
-                item.payload[_MERGE_CYCLE_DEADLINE_S] = operation_deadline
-            request = RunMergeWaitCycleRequest(
-                issue_number=item.issue,
-                pr_number=item.pr,
-                reviewed_head_sha=reviewed_head,
-                deadline_s=operation_deadline,
-                cancellation=ctx.cancellation,
-                auto_merge_armed=bool(item.payload.get(_AUTO_MERGE_ARMED)),
-            )
-        except ValueError:
-            return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
+        operation_deadline = item.payload.get(_MERGE_CYCLE_DEADLINE_S)
+        if operation_deadline is None:
+            operation_deadline = ctx.now() + _MERGE_CYCLE_OPERATION_TIMEOUT_S
+            item.payload[_MERGE_CYCLE_DEADLINE_S] = operation_deadline
+        request = RunMergeWaitCycleRequest(
+            issue_number=item.issue,
+            pr_number=item.pr,
+            deadline_s=operation_deadline,
+            cancellation=ctx.cancellation,
+            auto_merge_armed=bool(item.payload.get(_AUTO_MERGE_ARMED)),
+        )
         pending = item.payload.get(_PENDING_GITHUB_REQUEST)
         if pending is None:
             item.payload[_PENDING_GITHUB_REQUEST] = request
@@ -194,7 +170,6 @@ class MergeWaitStage(Stage):
                         lease,
                         issue_number=item.issue,
                         pr_number=item.pr,
-                        reviewed_head_sha=receipt.request.reviewed_head_sha,
                         merge_sha=receipt.merge_sha,
                     )
                 except IssueWaveError as exc:
@@ -206,26 +181,14 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "closed")
         if outcome == "auto_merge_enabled":
             # GitHub owns the merge from here. Wait for the terminal result.
-            evidence = receipt.required_checks_evidence
-            if evidence is not None:
-                item.payload["merge_admission_evidence"] = {
-                    "outcome": outcome,
-                    "boundary": evidence.boundary,
-                    "detail": evidence.detail,
-                    "contexts": list(evidence.contexts),
-                }
             item.payload[_AUTO_MERGE_ARMED] = True
             item.state = MERGE
-            return self._park_for_readiness(item, ctx)
-        if outcome in {"not_implementation_go", "reviewed_head_drift"}:
+            return self._poll(item, ctx)
+        if outcome == "not_implementation_go":
+            item.payload.pop(_AUTO_MERGE_ARMED, None)
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome == "merge_conflicting":
             return self._post_review_rebase(item, outcome)
-        if outcome == "readiness_wait":
-            if receipt.attempted and item.attempts["merge"] >= ctx.budget("merge"):
-                return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
-            item.state = MERGE
-            return self._park_for_readiness(item, ctx)
         if (
             outcome
             in {
@@ -250,94 +213,27 @@ class MergeWaitStage(Stage):
 
     @staticmethod
     def _post_review_rebase(item: WorkItem, reason: str) -> StageOutcome:
-        """Send an exact-head review conflict to the implementation stage."""
+        """Send a merge conflict to the implementation stage."""
         item.payload["post_review_rebase_required"] = True
         item.payload["rebase_reason"] = "review_conflict"
         return StageOutcome(Disposition.FAIL_BACK, reason)
 
     @staticmethod
-    def _matching_readiness_deadline_outcome(
-        item: WorkItem, ctx: StageContext
-    ) -> StageOutcome | None:
-        """Fail closed when an existing matching readiness wait has already expired."""
-        reviewed_head = _merge_head(item)
-        if not isinstance(reviewed_head, str) or not reviewed_head:
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
-        proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
-        if isinstance(proof_generation, bool) or not isinstance(proof_generation, int):
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
-        if (
-            item.payload.get("merge_readiness_head_sha") != reviewed_head
-            or item.payload.get("merge_readiness_proof_generation") != proof_generation
-        ):
-            return None
-        deadline = item.payload.get("merge_readiness_deadline_s")
-        if isinstance(deadline, bool) or (
-            deadline is not None and not isinstance(deadline, (int, float))
-        ):
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
-        if deadline is None:
-            return None
-        if ctx.now() >= deadline:
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
-        return None
-
-    @staticmethod
-    def _clear_readiness_wait(item: WorkItem) -> None:
-        """Remove the shorter pre-admission readiness wait."""
-        for key in (
-            "merge_readiness_head_sha",
-            "merge_readiness_proof_generation",
-            "merge_readiness_deadline_s",
-            "merge_readiness_polls",
-        ):
-            item.payload.pop(key, None)
-
-    @staticmethod
-    def _park_for_readiness(item: WorkItem, ctx: StageContext) -> StageOutcome:
-        """Record one bounded non-mutating readiness wait on the timer heap."""
-        reviewed_head = _merge_head(item)
-        if not isinstance(reviewed_head, str) or not reviewed_head:
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
-        proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
-        if isinstance(proof_generation, bool) or not isinstance(proof_generation, int):
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
-        if (
-            item.payload.get("merge_readiness_head_sha") != reviewed_head
-            or item.payload.get("merge_readiness_proof_generation") != proof_generation
-        ):
-            # A fresh review creates a new process-local proof. Do not carry a
-            # prior proof's operational waiting deadline onto that new proof.
-            item.payload.pop("merge_readiness_deadline_s", None)
-            item.payload.pop("merge_readiness_polls", None)
-            item.payload["merge_readiness_head_sha"] = reviewed_head
-            item.payload["merge_readiness_proof_generation"] = proof_generation
-
-        deadline = item.payload.get("merge_readiness_deadline_s")
-        polls = item.payload.get("merge_readiness_polls", 0)
+    def _poll(item: WorkItem, ctx: StageContext) -> StageOutcome:
+        """Wait on the timer heap for GitHub to merge, within a bounded time."""
+        deadline = item.payload.get("merge_poll_deadline_s")
+        polls = item.payload.get("merge_poll_count", 0)
         now = ctx.now()
-        if (
-            isinstance(deadline, bool)
-            or (deadline is not None and not isinstance(deadline, (int, float)))
-            or isinstance(polls, bool)
-            or not isinstance(polls, int)
-            or polls < 0
-        ):
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
         if deadline is None:
-            poll_max_wait = getattr(ctx.config, "poll_max_wait", _READINESS_WAIT_TIMEOUT_S)
+            poll_max_wait = getattr(ctx.config, "poll_max_wait", _POLL_TIMEOUT_S)
             deadline = now + int(poll_max_wait)
-            item.payload["merge_readiness_deadline_s"] = deadline
+            item.payload["merge_poll_deadline_s"] = deadline
         if now >= deadline:
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
-        delay = min(
-            _READINESS_WAIT_INITIAL_S * (2**polls),
-            _READINESS_WAIT_DELAY_CAP_S,
-            deadline - now,
-        )
-        item.payload["merge_readiness_polls"] = polls + 1
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_poll_timeout")
+        delay = min(_POLL_INITIAL_S * (2**polls), _POLL_DELAY_CAP_S, deadline - now)
+        item.payload["merge_poll_count"] = polls + 1
         item.payload["retry_delay_s"] = delay
-        return StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+        return StageOutcome(Disposition.RETRY, "merge_wait_poll")
 
     def _route_merged(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Record post-merge learning without changing confirmed merge success."""
@@ -366,8 +262,6 @@ class MergeWaitStage(Stage):
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Store one immutable merge-cycle receipt."""
-        if receive_rebase_review(item, result):
-            return
         if item.state == MERGE:
             if not result.ok:
                 item.payload[_MERGE_CYCLE_RECEIPT_ERROR] = result.error or "merge cycle failed"

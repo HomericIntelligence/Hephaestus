@@ -7,11 +7,8 @@ stage-local state machine. The base protocol and step-result types live in
 
 from .base import (
     AutoMergeEnableResult,
-    ConditionalMergeResult,
     Continue,
-    ImplementationThreadReplyResult,
     JobRequest,
-    ReviewerThreadReconciliationResult,
     Stage,
     StageContext,
     StageGitHub,
@@ -29,11 +26,9 @@ from .repo import RepoStage
 
 __all__ = [
     "AutoMergeEnableResult",
-    "ConditionalMergeResult",
     "Continue",
     "FinishedStage",
     "ImplementationStage",
-    "ImplementationThreadReplyResult",
     "JobRequest",
     "LearningStage",
     "MergeWaitStage",
@@ -41,7 +36,6 @@ __all__ = [
     "PlanningStage",
     "PrReviewStage",
     "RepoStage",
-    "ReviewerThreadReconciliationResult",
     "Stage",
     "StageContext",
     "StageGitHub",

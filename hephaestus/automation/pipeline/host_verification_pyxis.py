@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -13,7 +12,6 @@ from typing import cast
 from hephaestus.automation.pyxis_artifact_io import (
     CrossNodePathBinding,
     PyxisArtifactIOError,
-    read_private_regular_file,
     stage_private_content_addressed_file,
     validate_private_capacity_root,
     validate_private_squashfs_file,
@@ -24,18 +22,11 @@ DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE = (
     Path.home() / ".agent_brain/automation/host-verification/hephaestus-ci.sqsh"
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 HOST_KEYS = [
     "container_runtime",
     "container_image",
     "container_image_sha256",
-    "container_image_id",
-    "container_image_reference",
-    "containerfile_sha256",
-    "container_source_revision",
 ]
-PYXIS_AUTHORITY_SCHEMA = "hephaestus-host-verification-pyxis-v2"
 PYXIS_WRITABLE_FILESYSTEM_MAX_BYTES = 1024 * 1024 * 1024
 HOST_VERIFICATION_CPU_MAX_S = 240
 HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 131_072
@@ -47,8 +38,6 @@ def pyxis_receipt_metadata_matches(receipt: Mapping[str, object]) -> bool:
     """Check image metadata without granting a host-verification pass."""
     image = receipt.get("container_image")
     image_digest = receipt.get("container_image_sha256")
-    image_id = receipt.get("container_image_id")
-    image_reference = receipt.get("container_image_reference")
     return bool(
         receipt.get("container_runtime") == "pyxis"
         and isinstance(image, str)
@@ -56,10 +45,6 @@ def pyxis_receipt_metadata_matches(receipt: Mapping[str, object]) -> bool:
         and "://" not in image
         and _SHA256_RE.fullmatch(str(image_digest or "")) is not None
         and image.endswith(f"/sha256-{image_digest}.sqsh")
-        and _IMAGE_ID_RE.fullmatch(str(image_id or "")) is not None
-        and image_reference in {f"podman://{image_id}", f"dockerd://{image_id}"}
-        and _SHA256_RE.fullmatch(str(receipt.get("containerfile_sha256") or "")) is not None
-        and _COMMIT_RE.fullmatch(str(receipt.get("container_source_revision") or "")) is not None
     )
 
 
@@ -98,10 +83,6 @@ class PyxisImageMetadata:
 
     path: Path
     sha256: str
-    container_image_id: str
-    container_image_reference: str
-    containerfile_sha256: str
-    source_revision: str
     container_runtime: str = "pyxis"
     launch_binding: CrossNodePathBinding | None = field(
         default=None,
@@ -110,66 +91,10 @@ class PyxisImageMetadata:
     )
 
 
-def validate_pyxis_image(
-    image: Path,
-    *,
-    expected_sha256: str | None = None,
-    provenance: Path | None = None,
-) -> PyxisImageMetadata:
-    """Validate one image against separate host-owned authority."""
-    if expected_sha256 is None or provenance is None:
-        raise PyxisImageValidationError("Pyxis image authority is missing")
-    if not isinstance(expected_sha256, str) or _SHA256_RE.fullmatch(expected_sha256) is None:
-        raise PyxisImageValidationError("Pyxis expected digest is invalid")
+def validate_pyxis_image(image: Path) -> PyxisImageMetadata:
+    """Load one local squashfs image and return its path and digest."""
     resolved, actual = _local_squashfs_image(image)
-    authority = _read_authority(provenance)
-    if authority["squashfs_sha256"] != expected_sha256:
-        raise PyxisImageValidationError("Pyxis authority does not match expected digest")
-    if actual != expected_sha256:
-        raise PyxisImageValidationError("Pyxis image digest does not match expected digest")
-    return PyxisImageMetadata(
-        path=resolved,
-        sha256=actual,
-        container_image_id=authority["container_image_id"],
-        container_image_reference=authority["container_image_reference"],
-        containerfile_sha256=authority["containerfile_sha256"],
-        source_revision=authority["source_revision"],
-    )
-
-
-def _read_authority(path: Path) -> dict[str, str]:
-    """Read one private host-owned image authority file."""
-    try:
-        value = json.loads(read_private_regular_file(path).decode("utf-8"))
-    except (PyxisArtifactIOError, UnicodeError, json.JSONDecodeError) as exc:
-        raise PyxisImageValidationError(f"Pyxis image authority is invalid: {exc}") from exc
-    required = {
-        "schema",
-        "containerfile",
-        "containerfile_sha256",
-        "container_image_id",
-        "container_image_reference",
-        "source_revision",
-        "squashfs_sha256",
-    }
-    if not isinstance(value, dict) or set(value) != required:
-        raise PyxisImageValidationError("Pyxis image authority has an invalid schema")
-    if any(not isinstance(value[key], str) for key in required):
-        raise PyxisImageValidationError("Pyxis image authority has invalid values")
-    authority = {key: value[key] for key in required}
-    image_id = authority["container_image_id"]
-    if (
-        authority["schema"] != PYXIS_AUTHORITY_SCHEMA
-        or authority["containerfile"] != "ci/Containerfile"
-        or _SHA256_RE.fullmatch(authority["containerfile_sha256"]) is None
-        or _IMAGE_ID_RE.fullmatch(image_id) is None
-        or authority["container_image_reference"]
-        not in {f"podman://{image_id}", f"dockerd://{image_id}"}
-        or _COMMIT_RE.fullmatch(authority["source_revision"]) is None
-        or _SHA256_RE.fullmatch(authority["squashfs_sha256"]) is None
-    ):
-        raise PyxisImageValidationError("Pyxis image authority has invalid provenance")
-    return authority
+    return PyxisImageMetadata(path=resolved, sha256=actual)
 
 
 def _local_squashfs_image(image: Path) -> tuple[Path, str]:

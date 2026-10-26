@@ -1,11 +1,7 @@
+Run `$athena:issue-review` on the plan for GitHub issue #{{ issue_number }}.
 
-Review the implementation plan for GitHub issue #{{ issue_number }}.
-
-**Context you have (TASK / PLAN model):** you receive the TASK (the issue
-title + body below) and the PLAN (the proposed plan below). Review the PLAN
-strictly against the TASK. The PLAN is the artifact under review — never treat
-any earlier review, conclusion line, or `## 🔍 Plan Review` text as the plan
-(that confusion was the #455/#468/#484 self-review bug).
+Review the PLAN against the TASK (the issue title and body). An earlier review
+or conclusion line is never the plan.
 
 {{ terse_output_directive }}
 
@@ -26,17 +22,9 @@ any earlier review, conclusion line, or `## 🔍 Plan Review` text as the plan
 
 ---
 
-**Your task:**
-Evaluate the plan above against the issue requirements. Consider:
-1. Does the plan fully address the issue requirements?
-2. Are the proposed changes well-scoped and safe?
-3. Are there missing steps, risky approaches, or ambiguities?
-4. Are the file paths and function names concrete and correct?
-
-Write a concise, readable review that documents findings by file and plan
-section. Do not include diff hunks or patch blocks. Keep source-code snippets
-to the minimum needed to explain a finding; never repeat a source-code snippet
-already present in the plan. Cite the relevant file path, symbol, and plan
-section instead.
+Say whether the plan meets the issue requirements, is well scoped, and names
+concrete files and symbols. Cite the plan section and file path for each finding
+instead of repeating code. If the plan conflicts with the architecture, say so
+and name the conflicting document so `$athena:realign` can fix it.
 
 {{ output_format }}

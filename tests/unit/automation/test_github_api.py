@@ -21,7 +21,6 @@ from hephaestus.automation.github_api import (
     fetch_issue_info,
     gh_create_label,
     gh_issue_add_labels,
-    gh_issue_body_edited_by_viewer,
     gh_issue_comment,
     gh_issue_create,
     gh_issue_delete_comment,
@@ -42,55 +41,12 @@ from hephaestus.automation.github_api import (
 )
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER
-from hephaestus.automation.requirements_recovery import (
-    RECOVERY_PROVENANCE_PREFIX,
-    render_recovered_requirements,
-)
 from hephaestus.github.rate_limit import configure_gh_global_throttle
 from hephaestus.io import utils as io_utils
 
 # Circuit-breaker reset is now an autouse package-scope fixture in
 # ``tests/unit/automation/conftest.py`` (#708), so it applies to every test
 # under the automation package — not just this file.
-
-
-def _recovery_body(version: int = 3) -> str:
-    """Return a correct versioned recovery body for API tests."""
-    if version < 3:
-        body = render_recovered_requirements("source", "recovered", "b" * 64)
-        return body.replace(":v=2:", f":v={version}:", 1) if version == 1 else body
-    return render_recovered_requirements(
-        "source",
-        "recovered",
-        "b" * 64,
-        issue_title="title",
-        repository_revision="c" * 40,
-    )
-
-
-def _recovery_comment(
-    body: object,
-    *,
-    comment_id: object = 2,
-    login: str = "hephaestus-bot",
-) -> dict[str, Any]:
-    """Return production-shaped REST metadata for one recovery comment."""
-    return {"id": comment_id, "body": body, "user": {"login": login}}
-
-
-def _recovery_conflict(body: str, kind: str) -> list[dict[str, Any]]:
-    """Build one post-write recovery identity conflict."""
-    if kind == "foreign":
-        return [_recovery_comment(body, login="another-user")]
-    if kind == "malformed":
-        return [_recovery_comment(body.replace(":v=3:", ":v=9:", 1))]
-    if kind == "repeated":
-        marker = body.split("\n", 1)[0]
-        return [_recovery_comment(f"{body}\n\n{marker}\n\nrepeated")]
-    return [
-        _recovery_comment(body),
-        _recovery_comment(body, comment_id=3),
-    ]
 
 
 class TestGhIssueJson:
@@ -217,70 +173,6 @@ class TestGhIssueJson:
 
         assert data["title"] == 123
         assert "body" not in data
-
-
-@pytest.mark.parametrize(
-    ("editor", "expected"),
-    [("maintainer", True), ("contributor", False), (None, False)],
-)
-@patch("hephaestus.automation.github_api._gh_call")
-def test_issue_body_editor_matches_authenticated_viewer(
-    mock_gh_call: Any,
-    editor: str | None,
-    expected: bool,
-) -> None:
-    """Standalone finalization checks fail closed for foreign or absent editors."""
-    mock_gh_call.return_value = Mock(
-        returncode=0,
-        stdout=json.dumps(
-            {
-                "data": {
-                    "viewer": {"login": "maintainer"},
-                    "repository": {
-                        "owner": {"login": "owner"},
-                        "name": "repo",
-                        "issue": {
-                            "number": 2795,
-                            "editor": {"login": editor} if editor is not None else None,
-                        },
-                    },
-                }
-            }
-        ),
-    )
-
-    assert gh_issue_body_edited_by_viewer(2795, ("owner", "repo")) is expected
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [
-        subprocess.CalledProcessError(1, "gh"),
-        subprocess.TimeoutExpired("gh", 1),
-        OSError("transport unavailable"),
-        None,
-    ],
-)
-@patch("hephaestus.automation.github_api._gh_call")
-def test_issue_body_editor_normalizes_transport_and_json_failures(
-    mock_gh_call: Any,
-    failure: subprocess.SubprocessError | OSError | None,
-) -> None:
-    """Editor authentication exposes transport and decoding failures uniformly."""
-    if failure is not None:
-        mock_gh_call.side_effect = failure
-    else:
-        mock_gh_call.return_value = Mock(stdout="not-json")
-
-    with pytest.raises(RuntimeError, match="Failed to authenticate issue body editor"):
-        gh_issue_body_edited_by_viewer(2795, ("owner", "repo"))
-
-
-@patch("hephaestus.automation.github_api.get_repo_info", side_effect=OSError("no repository"))
-def test_issue_body_editor_normalizes_repository_resolution_failure(_repo_info: Any) -> None:
-    """Ambient repository lookup failures enter the same bounded error path."""
-    with pytest.raises(RuntimeError, match="Failed to authenticate issue body editor"):
-        gh_issue_body_edited_by_viewer(2795)
 
 
 class TestParseIssueDependencies:
@@ -3100,212 +2992,6 @@ class TestUpsertAndDeleteComment:
         )
         assert patched, mock_gh_call.call_args_list
 
-    @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
-    def test_recovery_create_rejects_post_write_identity_conflicts(self, conflict: str) -> None:
-        """A recovery create conflict stops without a second mutation."""
-        body = _recovery_body()
-        with (
-            patch(
-                "hephaestus.automation.github_api.gh_current_login",
-                return_value="hephaestus-bot",
-            ),
-            patch(
-                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
-                side_effect=[[], _recovery_conflict(body, conflict)],
-            ),
-            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
-            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
-            patch("hephaestus.automation.github_api.gh_issue_delete_comment") as mock_delete,
-        ):
-            with pytest.raises(
-                RuntimeError,
-                match=r"recovery|duplicate|foreign|malformed|repeated",
-            ):
-                gh_issue_upsert_comment(
-                    5,
-                    RECOVERY_PROVENANCE_PREFIX,
-                    body,
-                    repo=("o", "r"),
-                )
-
-        mock_create.assert_called_once_with(5, body, repo=("o", "r"))
-        mock_gh_call.assert_not_called()
-        mock_delete.assert_not_called()
-
-    def test_recovery_create_confirms_owned_exact_body_and_database_id(self) -> None:
-        """A recovery create returns only its actor-owned exact-body readback ID."""
-        body = _recovery_body()
-        created = _recovery_comment(body, comment_id=73)
-        with (
-            patch(
-                "hephaestus.automation.github_api.gh_current_login",
-                return_value="hephaestus-bot",
-            ),
-            patch(
-                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
-                side_effect=[[], [created]],
-            ) as mock_fetch,
-            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
-            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
-            patch("hephaestus.automation.github_api.gh_issue_delete_comment") as mock_delete,
-        ):
-            result = gh_issue_upsert_comment(
-                5,
-                RECOVERY_PROVENANCE_PREFIX,
-                body,
-                repo=("o", "r"),
-            )
-
-        assert result == 73
-        assert [entry.args for entry in mock_fetch.call_args_list] == [
-            (5, ("o", "r")),
-            (5, ("o", "r")),
-        ]
-        mock_create.assert_called_once_with(5, body, repo=("o", "r"))
-        mock_gh_call.assert_not_called()
-        mock_delete.assert_not_called()
-
-    @pytest.mark.parametrize("conflict", ["foreign", "malformed", "repeated", "duplicate"])
-    def test_recovery_update_rejects_post_write_identity_conflicts(self, conflict: str) -> None:
-        """A recovery update conflict stops without cleanup after one PATCH."""
-        old = _recovery_comment(_recovery_body(version=2), comment_id=1)
-        body = _recovery_body()
-        with (
-            patch(
-                "hephaestus.automation.github_api.gh_current_login",
-                return_value="hephaestus-bot",
-            ),
-            patch(
-                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
-                side_effect=[[old], _recovery_conflict(body, conflict)],
-            ),
-            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
-            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
-            patch("hephaestus.automation.github_api.gh_issue_delete_comment") as mock_delete,
-        ):
-            with pytest.raises(
-                RuntimeError,
-                match=r"recovery|duplicate|foreign|malformed|repeated",
-            ):
-                gh_issue_upsert_comment(
-                    5,
-                    RECOVERY_PROVENANCE_PREFIX,
-                    body,
-                    repo=("o", "r"),
-                )
-
-        mock_create.assert_not_called()
-        mock_gh_call.assert_called_once()
-        assert "/repos/o/r/issues/comments/1" in mock_gh_call.call_args.args[0]
-        mock_delete.assert_not_called()
-
-    def test_recovery_update_preserves_comment_id_across_version_migration(self) -> None:
-        """A correct v1 recovery comment updates in place to the v3 body."""
-        old = _recovery_comment(_recovery_body(version=1), comment_id=17)
-        body = _recovery_body()
-        with (
-            patch(
-                "hephaestus.automation.github_api.gh_current_login",
-                return_value="hephaestus-bot",
-            ),
-            patch(
-                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
-                side_effect=[[old], [{**old, "body": body}]],
-            ),
-            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
-            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
-        ):
-            result = gh_issue_upsert_comment(
-                5,
-                RECOVERY_PROVENANCE_PREFIX,
-                body,
-                repo=("o", "r"),
-            )
-
-        assert result == 17
-        mock_create.assert_not_called()
-        mock_gh_call.assert_called_once()
-
-    @pytest.mark.parametrize(
-        "comment",
-        [
-            _recovery_comment(_recovery_body(), comment_id="not-an-integer"),
-            _recovery_comment(_recovery_body(), comment_id=True),
-            _recovery_comment(_recovery_body(), comment_id=1.5),
-            _recovery_comment(_recovery_body(), comment_id=0),
-            _recovery_comment(_recovery_body(), comment_id=-1),
-            {"id": 2, "body": _recovery_body(), "user": {}},
-        ],
-        ids=[
-            "database-id-text",
-            "database-id-bool",
-            "database-id-fraction",
-            "database-id-zero",
-            "database-id-negative",
-            "author",
-        ],
-    )
-    def test_recovery_upsert_rejects_malformed_rest_metadata_before_mutation(
-        self,
-        comment: dict[str, Any],
-    ) -> None:
-        """A REST journal with missing data cannot authorize a recovery mutation."""
-        body = _recovery_body()
-        with (
-            patch(
-                "hephaestus.automation.github_api.gh_current_login",
-                return_value="hephaestus-bot",
-            ),
-            patch(
-                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
-                return_value=[comment],
-            ),
-            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
-            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
-        ):
-            with pytest.raises(RuntimeError, match=r"comment|journal|database|author|body"):
-                gh_issue_upsert_comment(
-                    5,
-                    RECOVERY_PROVENANCE_PREFIX,
-                    body,
-                    repo=("o", "r"),
-                )
-
-        mock_create.assert_not_called()
-        mock_gh_call.assert_not_called()
-
-    def test_recovery_upsert_treats_an_unreadable_body_as_not_the_canonical_pointer(self) -> None:
-        """An unreadable stored body cannot match the canonical marker.
-
-        The host reads the malformed body as absent, so the stored comment
-        does not carry the marker and cannot be the canonical pointer. The
-        host writes a fresh canonical comment instead of updating or
-        deleting an artifact it cannot identify.
-        """
-        body = _recovery_body()
-        with (
-            patch(
-                "hephaestus.automation.github_api.gh_current_login",
-                return_value="hephaestus-bot",
-            ),
-            patch(
-                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
-                return_value=[_recovery_comment(None)],
-            ),
-            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
-            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
-        ):
-            with pytest.raises(RuntimeError, match="actor-owned"):
-                gh_issue_upsert_comment(
-                    5,
-                    RECOVERY_PROVENANCE_PREFIX,
-                    body,
-                    repo=("o", "r"),
-                )
-
-        assert mock_create.call_count == 1
-        mock_gh_call.assert_not_called()
-
     def test_upsert_rejects_older_duplicates_without_deleting_them(self) -> None:
         """More than one matching canonical comment requires manual recovery."""
         comments = [
@@ -4449,24 +4135,6 @@ class TestValidReviewPositions:
         " context_b\n"
     )
 
-    def test_right_side_includes_added_and_context_lines(self) -> None:
-        from hephaestus.automation.github_api import _valid_review_positions
-
-        positions = _valid_review_positions(self._DIFF)
-        right = {line for (line, side) in positions["mod.py"] if side == "RIGHT"}
-        # New-file numbering starts at 10: context_a=10, added_new=11,
-        # added_new2=12, context_b=13.
-        assert right == {10, 11, 12, 13}
-
-    def test_left_side_includes_removed_and_context_lines(self) -> None:
-        from hephaestus.automation.github_api import _valid_review_positions
-
-        positions = _valid_review_positions(self._DIFF)
-        left = {line for (line, side) in positions["mod.py"] if side == "LEFT"}
-        # Old-file numbering starts at 10: context_a=10, removed_old=11,
-        # context_b=12.
-        assert left == {10, 11, 12}
-
     def test_filter_drops_unknown_path_and_line(self) -> None:
         from hephaestus.automation.github_api import _filter_comments_to_diff
 
@@ -4477,55 +4145,6 @@ class TestValidReviewPositions:
         ]
         kept = _filter_comments_to_diff(comments, self._DIFF)
         assert [c["body"] for c in kept] == ["ok"]
-
-    def test_validation_returns_typed_corrections_and_preserves_evidence(self) -> None:
-        from hephaestus.automation.github_api import _validate_comments_to_diff
-
-        comments = [
-            {"path": "mod.py", "line": 11, "side": "RIGHT", "body": "ok"},
-            {
-                "path": "mod.py",
-                "line": 500,
-                "side": "RIGHT",
-                "body": "bad line",
-                "evidence": "the state is not carried into the worker",
-            },
-        ]
-
-        validation = _validate_comments_to_diff(comments, self._DIFF)
-
-        assert [comment["body"] for comment in validation.valid] == ["ok"]
-        assert len(validation.corrections) == 1
-        correction = validation.corrections[0]
-        assert correction.path == "mod.py"
-        assert correction.line == 500
-        assert correction.side == "RIGHT"
-        assert correction.reason == "line_not_in_diff"
-        assert correction.finding["evidence"] == "the state is not carried into the worker"
-
-    def test_validation_gives_distinct_ids_to_same_content_at_different_anchors(self) -> None:
-        """Each original finding keeps its identity when only its anchor differs."""
-        from hephaestus.automation.github_api import _validate_comments_to_diff
-
-        shared = {
-            "side": "RIGHT",
-            "severity": "major",
-            "body": "worker state is not retained",
-            "evidence": "the child rebuilds state without the descriptor",
-        }
-        validation = _validate_comments_to_diff(
-            [
-                {**shared, "path": "mod.py", "line": 500},
-                {**shared, "path": "other.py", "line": 500},
-            ],
-            self._DIFF,
-        )
-
-        assert len(validation.corrections) == 2
-        first, second = validation.corrections
-        assert first.finding_id != second.finding_id
-        assert first.finding["finding_id"] == first.finding_id
-        assert second.finding["finding_id"] == second.finding_id
 
     def test_filter_defaults_side_to_right(self) -> None:
         from hephaestus.automation.github_api import _filter_comments_to_diff

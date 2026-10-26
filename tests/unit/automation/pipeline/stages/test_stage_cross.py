@@ -12,7 +12,6 @@ written along the dead cycle.
 
 from __future__ import annotations
 
-from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -21,10 +20,6 @@ import pytest
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
-from hephaestus.automation.pipeline.github_jobs import (
-    GitHubJob,
-    ReconcileScopeExpansionDependenciesRequest,
-)
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
@@ -33,7 +28,6 @@ from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
 from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
 from hephaestus.automation.pipeline.stages.planning import PlanningStage
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
-from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.review_journal import (
     IssueComment,
     render_current_plan,
@@ -245,16 +239,6 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             item.state = result.next_state
             continue
         if isinstance(result, JobRequest):
-            if isinstance(result.job, GitHubJob) and isinstance(
-                result.job.request, ReconcileScopeExpansionDependenciesRequest
-            ):
-                receipt = PipelineGitHubJobRunner._reconcile_scope_expansion_dependencies(
-                    result.job.request,
-                    ctx.github,
-                )
-                stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
-                item.state = result.on_done_state
-                continue
             if (
                 isinstance(result.job, GitJob)
                 and result.job.op == "create_worktree"
@@ -393,178 +377,6 @@ class TestAgentErrorPingPongTerminates:
         assert final.note == "agent_error_exhausted"
         label_writes = [name for name, _ in github.mutation_log if name in _LABEL_MUTATIONS]
         assert label_writes == []
-
-
-def test_pushed_remediation_head_survives_stale_review_entry_read(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """A fresh review waits for pushed head B instead of reconciling stale A."""
-
-    class SequencedHeadGitHub(FakeStageGitHub):
-        def __init__(self) -> None:
-            super().__init__()
-            self.heads = deque(("b" * 40, "a" * 40, "b" * 40))
-
-        def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-            del pr_number
-            head = self.heads.popleft() if len(self.heads) > 1 else self.heads[0]
-            return {
-                "state": "OPEN",
-                "headRefOid": head,
-                "autoMergeRequest": None,
-                "baseRefName": "main",
-            }
-
-    github = SequencedHeadGitHub()
-    ctx = make_ctx(github=github)
-    implementation = ImplementationStage()
-    implementation_item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
-    implementation_item.payload.update(
-        {
-            "implementation_remediation": True,
-            "remediation_thread_snapshots": [
-                {
-                    "id": "thread-1",
-                    "path": "a.py",
-                    "line": 3,
-                    "body": "fix it",
-                    "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
-                }
-            ],
-            "remediation_output": {
-                "addressed": ["thread-l"],
-                "replies": {"thread-l": "[Response] Fixed the missing guard."},
-            },
-        }
-    )
-
-    implementation.on_job_done(
-        implementation_item,
-        JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
-        ctx,
-    )
-
-    assert implementation_item.payload["_impl_source_revision"] == "b" * 40
-    assert implementation_item.payload["_post_remediation_review_head_sha"] == "b" * 40
-
-    review = PrReviewStage()
-    review_item = make_work_item(issue=1, pr=1001, state="ENTER")
-    review_item.payload.update(implementation_item.payload)
-    review_item.payload.update(
-        {
-            "review_audit": "stale",
-            "pr_diff": "stale diff",
-            "_scope_dependency_pending_request": "stale request",
-            "_scope_dependency_receipt": "stale receipt",
-            "_scope_dependency_receipt_error": "stale error",
-        }
-    )
-    assert review.on_enter(review_item, ctx) is None
-
-    first = review.step(review_item, ctx)
-
-    assert isinstance(first, StageOutcome)
-    assert first.disposition is Disposition.RETRY
-    assert not isinstance(first, JobRequest)
-    assert "_scope_dependency_pending_request" not in review_item.payload
-
-    second = review.step(review_item, ctx)
-
-    assert isinstance(second, JobRequest)
-    assert isinstance(second.job, GitHubJob)
-    request = second.job.request
-    assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
-    assert request.source_head_sha == "b" * 40
-
-
-@pytest.mark.parametrize("rebase_state", ["REBASE_WAIT", "REBASE_CONTINUE_WAIT"])
-def test_published_rebase_head_survives_stale_review_entry_read(
-    make_ctx: Any, make_work_item: Any, rebase_state: str
-) -> None:
-    """A published rebase head waits for visibility before dependency review."""
-
-    class SequencedHeadGitHub(FakeStageGitHub):
-        def __init__(self) -> None:
-            super().__init__()
-            self.heads = deque(("b" * 40, "a" * 40, "b" * 40))
-
-        def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-            del pr_number
-            head = self.heads.popleft() if len(self.heads) > 1 else self.heads[0]
-            return {
-                "state": "OPEN",
-                "headRefOid": head,
-                "autoMergeRequest": None,
-                "baseRefName": "main",
-            }
-
-    github = SequencedHeadGitHub()
-    ctx = make_ctx(github=github)
-    implementation = ImplementationStage()
-    implementation_item = make_work_item(issue=1, pr=1001, state=rebase_state)
-
-    implementation.on_job_done(
-        implementation_item,
-        JobResult(
-            ok=True,
-            value={"rebased": True, "published": True, "head_sha": "b" * 40},
-        ),
-        ctx,
-    )
-
-    assert implementation_item.payload["_post_remediation_review_head_sha"] == "b" * 40
-
-    review = PrReviewStage()
-    review_item = make_work_item(issue=1, pr=1001, state="ENTER")
-    review_item.payload.update(implementation_item.payload)
-    assert review.on_enter(review_item, ctx) is None
-
-    first = review.step(review_item, ctx)
-
-    assert first == StageOutcome(Disposition.RETRY, "post_remediation_head_visibility")
-    assert not isinstance(first, JobRequest)
-
-    second = review.step(review_item, ctx)
-
-    assert isinstance(second, JobRequest)
-    assert isinstance(second.job, GitHubJob)
-    request = second.job.request
-    assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
-    assert request.source_head_sha == "b" * 40
-
-
-def test_noop_rebase_does_not_wait_for_published_head_visibility(
-    make_ctx: Any, make_work_item: Any
-) -> None:
-    """An unchanged writer head enters review without a visibility wait."""
-    github = FakeStageGitHub()
-    ctx = make_ctx(github=github)
-    implementation = ImplementationStage()
-    implementation_item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
-
-    implementation.on_job_done(
-        implementation_item,
-        JobResult(
-            ok=True,
-            value={"rebased": False, "published": False, "head_sha": "a" * 40},
-        ),
-        ctx,
-    )
-
-    assert "_post_remediation_review_head_sha" not in implementation_item.payload
-
-    review = PrReviewStage()
-    review_item = make_work_item(issue=1, pr=1001, state="ENTER")
-    review_item.payload.update(implementation_item.payload)
-    assert review.on_enter(review_item, ctx) is None
-
-    result = review.step(review_item, ctx)
-
-    assert isinstance(result, JobRequest)
-    assert isinstance(result.job, GitHubJob)
-    request = result.job.request
-    assert isinstance(request, ReconcileScopeExpansionDependenciesRequest)
-    assert request.source_head_sha == "a" * 40
 
 
 class TestEmptyDiffReroutesToSubstantiveImplementation:

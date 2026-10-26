@@ -764,7 +764,6 @@ def _passing_wave_store(
         lease,
         issue_number=7,
         pr_number=17,
-        reviewed_head_sha=_WAVE_HEAD,
         merge_sha=_WAVE_MERGE,
     )
     store.record_terminal_outcome(lease, issue_number=7, passed=True, reason="merged", pr_number=17)
@@ -801,7 +800,7 @@ class TestIssueWaveRecovery:
         item = _wave_item()
         facts = {
             7: replace(_facts(7, pr=17, pr_merged=True), issue_is_closed=True),
-            8: _facts(8, labels={"state:plan-blocked"}),
+            8: _facts(8, labels={"state:blocked"}),
             9: _facts(9),
             10: _facts(10, labels={"state:skip"}),
             11: _facts(11),
