@@ -65,7 +65,7 @@ class DirtyDirectPlanInput:
 
     revision: int
     plan: str
-    review_revision: int
+    review_revision: int | None
     review: str
     allowed_paths: tuple[str, ...]
 

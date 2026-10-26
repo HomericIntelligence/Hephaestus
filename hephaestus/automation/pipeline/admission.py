@@ -101,9 +101,9 @@ def parse_publication_scope_files(plan_body: str) -> set[str]:
     """Return the complete file declarations from exact plan file sections.
 
     Read backticked paths at the start of list entries, table rows, and file
-    subheadings. Ignore prose references and fenced examples. Return an empty
-    set if a declared path is invalid. Keep this parser separate from the
-    file-overlap parser because publication requires complete paths.
+    subheadings. Ignore prose references, fenced examples, and a declaration
+    that names a path the host cannot use. Keep this parser separate from the
+    file-overlap parser because publication needs each declared path.
     """
     files: set[str] = set()
     in_section = False
@@ -135,8 +135,11 @@ def parse_publication_scope_files(plan_body: str) -> set[str]:
         if not declaration.startswith("`"):
             continue
         token = re.match(r"`([^`]*)`", declaration)
-        if token is None or not is_safe_scope_retraction_path(token[1]):
-            return set()
+        if token is None:
+            continue
+        if not is_safe_scope_retraction_path(token[1]):
+            LOG.warning("plan declares an unusable source path %r; ignoring it", token[1])
+            continue
         files.add(token[1])
     return files
 
@@ -172,7 +175,12 @@ def _fetch_planned_files(
     if current.finalized_body:
         paths = parse_publication_scope_files(discovered.plan_text)
         if not paths:
-            raise CommentJournalReadError("finalized plan scope is empty or invalid")
+            LOG.warning(
+                "issue #%s finalized plan declares no usable source path; "
+                "the agent decides the files and the review judges the diff",
+                issue,
+            )
+            return _parse_planned_files(discovered.plan_text)
         return paths
     return _parse_planned_files(discovered.plan_text)
 

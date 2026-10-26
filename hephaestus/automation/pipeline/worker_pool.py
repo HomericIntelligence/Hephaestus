@@ -777,12 +777,12 @@ def _dirty_plan_input_identity(plan: DirtyDirectPlanInput) -> DirtyPlanIdentity:
     if (
         type(plan.revision) is not int
         or plan.revision < 1
-        or plan.review_revision != plan.revision
+        or (plan.review_revision is not None and plan.review_revision != plan.revision)
         or parse_plan_review_state(plan.review) != "state:plan-go"
     ):
         raise SourceWorkspaceError("dirty direct job plan is not approved")
     allowed = tuple(sorted(parse_publication_scope_files(plan.plan)))
-    if not allowed or allowed != plan.allowed_paths:
+    if allowed != plan.allowed_paths:
         raise SourceWorkspaceError("dirty direct job plan scope changed")
     return DirtyPlanIdentity(
         plan.revision,
@@ -814,7 +814,10 @@ def _dirty_plan_from_read(receipt: DirtyDirectPrStateRead) -> DirtyDirectPlanInp
             raise ValueError("invalid journal row")
         snapshot = journal_snapshot(comments)
         if snapshot.current_review_revision is None:
-            raise ValueError("missing reviewed revision")
+            logger.warning(
+                "dirty direct plan review for the current lane carries no revision "
+                "marker; binding the review by its text"
+            )
         inputs = DirtyDirectPlanInput(
             snapshot.revision,
             snapshot.current_plan,
@@ -13003,17 +13006,23 @@ class WorkerPool:
         *,
         allowed_paths: Collection[str] | None,
     ) -> JobResult | None:
-        """Reject dirty and committed edits outside the host-approved scope."""
-        if allowed_paths is None:
-            if agent_runtime.requires_codex_implementation_isolation(
-                str(job.kwargs.get("agent", ""))
-            ):
+        """Report dirty and committed edits outside the host-approved scope.
+
+        The plan scope guides the work. A path the plan does not name is a
+        warning, because the next review round judges the diff. Codex isolation
+        remains the one boundary that needs a declared scope.
+        """
+        codex_isolated = agent_runtime.requires_codex_implementation_isolation(
+            str(job.kwargs.get("agent", ""))
+        )
+        requested = tuple(allowed_paths or ())
+        declared = tuple(path for path in requested if is_safe_scope_retraction_path(path))
+        if len(declared) != len(requested):
+            logger.warning("implementation plan scope declares unusable paths; ignoring them")
+        if not declared:
+            if codex_isolated:
                 return JobResult(ok=False, error="implementation approved scope is unavailable")
             return None
-        if not allowed_paths or not all(
-            is_safe_scope_retraction_path(path) for path in allowed_paths
-        ):
-            return JobResult(ok=False, error="implementation approved scope is unavailable")
         history_base_sha = job.kwargs.get("scope_history_base_sha")
         if not _is_full_commit_sha(history_base_sha):
             return JobResult(ok=False, error="cannot validate implementation edit scope")
@@ -13046,7 +13055,7 @@ class WorkerPool:
                     untracked = paths
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return JobResult(ok=False, error="cannot validate implementation edit scope")
-        permitted = set(allowed_paths)
+        permitted = set(declared)
         retractions = job.kwargs.get("scope_retraction_paths")
         if retractions is not None:
             if (
@@ -13068,11 +13077,12 @@ class WorkerPool:
     def _remediation_scope_outcome(
         job: GitJob, changed: set[str], permitted: set[str]
     ) -> JobResult | None:
-        """Return the outcome for one edit that the plan scope does not cover.
+        """Warn about one edit that the plan scope does not cover.
 
-        A review finding names the file that must change. The plan scope is
-        stale after the review, so a remediation warns and continues. The next
-        review round judges the change. Every other job keeps the refusal.
+        The plan is a guide. A review finding, and an agent that keeps the
+        working tree, can both change a file the plan did not name. Warn and
+        continue; the next review round judges the diff. Codex isolation stays
+        the one boundary that needs the declared scope.
 
         Args:
             job: The job that owns the edit.
@@ -13080,16 +13090,16 @@ class WorkerPool:
             permitted: The paths that the job may change.
 
         Returns:
-            The failure for a job outside a remediation, else None.
+            The failure for an isolated Codex job, else None.
 
         """
-        if not _is_remediation_job(job):
+        if agent_runtime.requires_codex_implementation_isolation(str(job.kwargs.get("agent", ""))):
             return JobResult(
                 ok=False,
                 error="implementation changed paths outside approved scope",
             )
         logger.warning(
-            "implementation changed paths outside the plan scope during a remediation: %s",
+            "implementation changed paths outside the plan scope: %s",
             ",".join(sorted(changed - permitted)),
         )
         return None
