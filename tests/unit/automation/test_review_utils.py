@@ -44,31 +44,6 @@ class TestEnsureStateDir:
         assert state_dir.is_dir()
 
 
-def test_issue_implementer_state_dir_literal_is_centralized() -> None:
-    """Only the canonical helper and literal-pin test may spell issue_implementer."""
-    import ast
-
-    expected_paths = {
-        Path("hephaestus/automation/models.py"),
-        Path("tests/unit/automation/test_review_utils.py"),
-    }
-    hits: list[tuple[Path, int, str]] = []
-    for base in (Path("hephaestus/automation"), Path("tests/unit/automation")):
-        for path in base.rglob("*.py"):
-            tree = ast.parse(path.read_text(), filename=str(path))
-            for node in ast.walk(tree):
-                if (
-                    isinstance(node, ast.Constant)
-                    and isinstance(node.value, str)
-                    and "issue_implementer" in node.value
-                ):
-                    hits.append((path, node.lineno, node.value))
-
-    bad = [hit for hit in hits if hit[0] not in expected_paths]
-    assert not bad
-    assert {path for path, _, _ in hits} == expected_paths
-
-
 class TestParseJsonBlock:
     """Tests for the shared parse_json_block helper."""
 

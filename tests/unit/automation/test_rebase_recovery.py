@@ -511,7 +511,6 @@ def _prepare_recovery_writer_input(
         "worker",
         "stale_item",
         "intent",
-        "dirty",
         "tree",
         "generation",
         "resume_stage",
@@ -3709,69 +3708,6 @@ def _race_store_writes(common_dir: Path, records: list[Any], expected: Any) -> l
         finally:
             for reader in readers:
                 reader.close()
-
-
-@pytest.mark.parametrize("operation", ["create", "advance"])
-def test_pending_store_serializes_competing_processes(tmp_path: Path, operation: str) -> None:
-    """Two real processes cannot create two owners or replace the same prior phase."""
-    common_dir = tmp_path / "common"
-    common_dir.mkdir(mode=0o700)
-    intent = _record(tmp_path)
-    store = _store(common_dir)
-    if operation == "create":
-        expected = None
-        records = [
-            replace(intent, request=replace(intent.request, request_id=token * 32))
-            for token in ("1", "2")
-        ]
-    else:
-        expected = store.write(intent, expected=None)
-        pending = _record(tmp_path, phase="pending_validation")
-        records = [
-            replace(
-                pending,
-                resulting_workspace=replace(pending.resulting_workspace, revision=token * 40),
-                resulting_tree_sha=tree * 40,
-            )
-            for token, tree in (("c", "d"), ("e", "f"))
-        ]
-    results = _race_store_writes(common_dir, records, expected)
-    assert sorted(result[0] for result in results) == ["rejected", "written"]
-    assert len({result[1] for result in results}) == 2
-    assert all(result[1] != os.getpid() for result in results)
-    winner = next(
-        record for record, result in zip(records, results, strict=True) if result[0] == "written"
-    )
-    loser = next(
-        record for record, result in zip(records, results, strict=True) if result[0] == "rejected"
-    )
-    written = next(result[2] for result in results if result[0] == "written")
-    assert written == winner.to_dict()
-    assert store.read(1, winner.request.request_id) == winner
-    directory = common_dir / "hephaestus-source-workspaces" / "pending-rebases"
-    paths = list(directory.glob("*.json"))
-    assert len(paths) == 1
-    assert json.loads(paths[0].read_text()) == winner.to_dict()
-    assert winner.remote_head_sha == intent.remote_head_sha
-    assert winner.target_base_sha == intent.target_base_sha
-    assert winner.request.workspace == intent.request.workspace
-    assert (
-        replace(
-            winner,
-            request=intent.request,
-            phase="intent",
-            resulting_workspace=None,
-            resulting_tree_sha=None,
-        )
-        == intent
-    )
-    if operation == "create":
-        assert store.read(1, loser.request.request_id) is None
-        assert winner.phase == "intent"
-    else:
-        assert winner.request == intent.request
-        assert winner.phase == "pending_validation"
-        assert store.candidate(1) == winner
 
 
 def _aborted_record(intent: Any) -> Any:

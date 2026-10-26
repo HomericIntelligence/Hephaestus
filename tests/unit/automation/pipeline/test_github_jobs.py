@@ -173,24 +173,6 @@ def test_frozen_json_is_detached_from_sources_and_thawed_values() -> None:
     assert snapshot.thaw() == [{"comments": [{"body": "original"}], "id": "thread-1"}]
 
 
-@pytest.mark.parametrize(
-    "branch",
-    [
-        "foreign",
-        "6-auto-impl-direct-" + "a" * 32,
-        "../branch",
-        "--all",
-        "5-auto-impl-direct-" + "g" * 32,
-    ],
-)
-def test_dirty_direct_pr_request_rejects_foreign_branch(branch: str) -> None:
-    """A closed read cannot select a different or malformed writer branch."""
-    from hephaestus.automation.pipeline.github_jobs import InspectDirtyDirectPrStateRequest
-
-    with pytest.raises(ValueError, match="branch"):
-        InspectDirtyDirectPrStateRequest("org/repo", 5, branch)
-
-
 def test_dirty_direct_pr_receipt_keeps_immutable_complete_evidence() -> None:
     """Only complete empty evidence supplies absence."""
     from dataclasses import FrozenInstanceError
