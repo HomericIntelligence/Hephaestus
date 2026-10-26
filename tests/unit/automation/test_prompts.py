@@ -2,28 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from typing import Any
 
 import pytest
 
-from hephaestus.automation import address_review_core, prompts
-from hephaestus.automation.address_review_core import (
-    _parse_addressed_block,
-    parse_addressed_replies,
-)
-from hephaestus.automation.pipeline.stages.pr_review_threads import (
-    _parse_validation_result,
-    _reviewer_thread_decisions,
-)
+from hephaestus.automation import prompts
 from hephaestus.automation.prompts._review_rubric import get_full_sweep_suffix
 from hephaestus.automation.prompts._shared import get_untrusted_notice
-from hephaestus.automation.remediation_recovery import (
-    RemediationReplyResult,
-    RemediationReviewInput,
-)
 from hephaestus.automation.review_audit import parse_review_audit
 
 _FENCE_RE = re.compile(
@@ -71,19 +58,6 @@ def test_implementation_prompt_round_trips_host_inputs() -> None:
     assert "/tmp/wt" in rendered
 
 
-def test_implementation_prompt_does_not_activate_the_review_skill() -> None:
-    """The writer prompt must not activate a skill owned by the later reviewer."""
-    rendered = prompts.get_implementation_prompt(
-        issue_number=42,
-        issue_title="Fix the cache",
-        issue_body="Keep cache entries separate for each repository.",
-        branch_name="42-cache",
-        worktree_path="/tmp/wt",
-    )
-    trusted_text = _FENCE_RE.sub("", rendered)
-    assert "$athena:pr-review" not in trusted_text
-
-
 def test_pr_review_prompt_example_is_accepted_by_review_parser() -> None:
     """The implementation-loop JSON example satisfies its production parser."""
     rendered = prompts.get_impl_loop_review_prompt(
@@ -97,7 +71,6 @@ def test_pr_review_prompt_example_is_accepted_by_review_parser() -> None:
     )
     audit = parse_review_audit(rendered)
     assert audit.valid
-    assert audit.grade == "A"
     assert audit.findings
 
 
@@ -106,28 +79,7 @@ def test_pr_analysis_prompt_example_is_accepted_by_review_parser() -> None:
     audit = parse_review_audit(prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1))
 
     assert audit.valid
-    assert audit.grade == "A"
     assert audit.findings
-
-
-@pytest.mark.parametrize("reviewer_provider", ["claude", "opencode"])
-def test_pr_analysis_prompt_limits_findings_to_the_fixed_host_plan(
-    reviewer_provider: str,
-) -> None:
-    """All reviewers stay within the coordinator's fixed host plan."""
-    rendered = prompts.get_pr_review_analysis_prompt(
-        pr_number=1,
-        issue_number=1,
-        reviewer_provider=reviewer_provider,
-    )
-    normalized = " ".join(rendered.split())
-
-    # The reviewer must treat the supplied receipts as the whole host plan, must
-    # not invent evidence requirements beyond them, and must treat an evidence gap
-    # as something to report rather than a reason to fail. Assert the substance;
-    # do not pin the exact wording.
-    assert "complete coordinator-bound host plan" in normalized
-    assert "an evidence gap is not by itself a reason to fail" in normalized.lower()
 
 
 def test_opencode_pr_analysis_prompt_is_compact_fenced_and_json_only() -> None:
@@ -151,9 +103,6 @@ def test_opencode_pr_analysis_prompt_is_compact_fenced_and_json_only() -> None:
     )
 
     _assert_fenced(rendered, inputs)
-    trusted_text = _FENCE_RE.sub("", rendered)
-    assert "$athena:pr-review" not in trusted_text
-    assert "invoke external plugins" not in trusted_text.lower()
     assert len(rendered) <= 5_000
     assert parse_review_audit(rendered).valid
 
@@ -175,161 +124,7 @@ def test_opencode_bounded_pr_analysis_prompt_limits_large_context() -> None:
 
     assert len(rendered) <= 5_000
     assert "[... PR diff truncated ...]" in rendered
-    assert "Inspect every changed path and its full source from the current checkout." in rendered
-    assert "Return `BLOCKED` if you cannot recover the full source or requirements." in rendered
     assert parse_review_audit(rendered).valid
-
-
-def test_address_prompt_example_is_accepted_by_address_parser() -> None:
-    """The address response example satisfies exhaustive reply validation."""
-    rendered = prompts.get_address_review_prompt(
-        pr_number=1,
-        issue_number=1,
-        worktree_path="/tmp/worktree",
-        threads_json="[]",
-    )
-    parsed = _parse_addressed_block(rendered)
-
-    assert parse_addressed_replies(
-        parsed,
-        [{"thread_id": "<thread_id>"}],
-    ) == {"<thread_id>": "what was fixed"}
-
-
-def test_remediation_reply_recovery_prompt_fences_only_canonical_input() -> None:
-    """Read-only recovery fences the canonical input and nothing else."""
-    review_input = _remediation_review_input()
-
-    rendered = prompts.get_remediation_reply_recovery_prompt(
-        review_input=review_input.canonical_bytes,
-        review_input_sha256=review_input.review_input_sha256,
-    )
-
-    _assert_fenced(
-        rendered,
-        {
-            "REMEDIATION_REVIEW_INPUT": review_input.canonical_bytes.decode("utf-8"),
-        },
-    )
-    assert {match.group("label") for match in _FENCE_RE.finditer(rendered)} == {
-        "REMEDIATION_REVIEW_INPUT"
-    }
-
-
-def _remediation_review_input() -> RemediationReviewInput:
-    """Return one canonical recovery input for prompt and parser tests."""
-    snapshots = [
-        {
-            "id": "T1",
-            "isResolved": False,
-            "comments": [{"id": "C1", "author": "reviewer", "body": "Fix this."}],
-        },
-        {
-            "id": "T2",
-            "isResolved": False,
-            "comments": [{"id": "C2", "author": "reviewer", "body": "Fix that."}],
-        },
-    ]
-    diff = "diff --git a/module.py b/module.py\n+fixed"
-    thread_json = RemediationReviewInput.canonical_thread_snapshot(snapshots)
-    return RemediationReviewInput(
-        format_version=3,
-        repository="owner/repository",
-        issue_number=2973,
-        pr_number=3010,
-        repo_root="/tmp/repository",
-        worktree_path="/tmp/repository/worktree",
-        branch="fix/recovery",
-        reviewed_parent_sha="a" * 40,
-        candidate_tree_sha="b" * 40,
-        recovery_commit_sha="c" * 40,
-        changed_paths=("module.py",),
-        committed_diff_sha256=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
-        committed_diff=diff,
-        failure_diagnostic="provider failed",
-        thread_snapshot_sha256=hashlib.sha256(thread_json.encode("utf-8")).hexdigest(),
-        thread_snapshot_json=thread_json,
-    )
-
-
-def test_remediation_reply_recovery_prompt_rejects_digest_mismatch() -> None:
-    """The prompt does not render an input with a different digest."""
-    review_input = _remediation_review_input()
-
-    with pytest.raises(ValueError, match="digest"):
-        prompts.get_remediation_reply_recovery_prompt(
-            review_input=review_input.canonical_bytes,
-            review_input_sha256="d" * 64,
-        )
-
-
-def test_remediation_reply_parser_binds_exhaustive_replies_to_exact_input() -> None:
-    """The recovery parser returns one immutable digest-bound reply result."""
-    review_input = _remediation_review_input()
-
-    result = address_review_core.parse_remediation_reply_result(
-        {
-            "review_input_sha256": review_input.review_input_sha256,
-            "replies": {"T2": "Fixed that.", "T1": "Fixed this."},
-        },
-        review_input,
-    )
-
-    assert result == RemediationReplyResult.create(
-        review_input_sha256=review_input.review_input_sha256,
-        replies={"T1": "Fixed this.", "T2": "Fixed that."},
-        thread_snapshot_json=review_input.thread_snapshot_json,
-    )
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"addressed": ["T1", "T2"], "replies": {"T1": "one", "T2": "two"}},
-        {"review_input_sha256": "d" * 64, "replies": {"T1": "one", "T2": "two"}},
-        {"review_input_sha256": "EXPECTED", "replies": {"T1": "one"}},
-        {
-            "review_input_sha256": "EXPECTED",
-            "replies": {"T1": "one", "T2": "two"},
-            "addressed": ["T1", "T2"],
-        },
-    ],
-    ids=("legacy", "digest-mismatch", "incomplete", "extra-field"),
-)
-def test_remediation_reply_parser_rejects_unbound_or_incomplete_output(
-    payload: dict[str, object],
-) -> None:
-    """The recovery parser rejects output that does not bind all thread replies."""
-    review_input = _remediation_review_input()
-    if payload.get("review_input_sha256") == "EXPECTED":
-        payload["review_input_sha256"] = review_input.review_input_sha256
-
-    assert address_review_core.parse_remediation_reply_result(payload, review_input) is None
-
-
-def test_validation_example_is_accepted_by_thread_decision_parser() -> None:
-    """The extracted validation example partitions matching receipts exactly once."""
-    rendered = prompts.get_review_validation_prompt(
-        pr_number=1,
-        issue_number=1,
-        prior_comments_json="[]",
-        diff_text="diff",
-    )
-    match = _JSON_FENCE_RE.search(rendered)
-    assert match is not None
-    response = f"```json\n{match.group('body')}\n```"
-
-    parsed = _parse_validation_result(response)
-    assert parsed is not None
-    assert parsed["resolved"] == ["<resolved_thread_id>"]
-    assert parsed["unaddressed"][0]["thread_id"] == "<unaddressed_thread_id>"
-    assert _reviewer_thread_decisions(
-        [
-            {"thread_id": "<resolved_thread_id>"},
-            {"thread_id": "<unaddressed_thread_id>"},
-        ],
-        response,
-    ) == ({"<resolved_thread_id>"}, {"<unaddressed_thread_id>": "remaining problem"})
 
 
 def test_pr_description_preserves_issue_closure_and_content_round_trip() -> None:
@@ -391,39 +186,6 @@ def test_review_iteration_routes_final_sweep_fragment() -> None:
     assert full_sweep in plan_final
     assert full_sweep not in impl_first
     assert full_sweep in impl_final
-
-
-def test_plan_reviews_avoid_duplicate_diffs_and_source_snippets() -> None:
-    """Reviews reference the plan instead of reposting its source details."""
-    plan = prompts.get_plan_prompt(issue_number=1)
-    review = prompts.get_plan_review_prompt(
-        issue_number=1,
-        issue_title="title",
-        issue_body="body",
-        plan_text="plan",
-    )
-    loop_review = prompts.get_plan_loop_review_prompt(
-        issue_number=1,
-        issue_title="title",
-        issue_body="body",
-        plan_text="plan",
-        learnings="",
-        iteration=0,
-        prior_review=None,
-    )
-
-    rendered_contracts = [" ".join(rendered.split()) for rendered in (plan, review, loop_review)]
-
-    assert "Do not include patches, diff hunks, or source-code blocks" in rendered_contracts[0]
-    assert "one cumulative, high-level bullet list" in rendered_contracts[0]
-    assert all(
-        "Do not include diff hunks or patch blocks" in rendered
-        for rendered in rendered_contracts[1:]
-    )
-    assert all(
-        "never repeat a source-code snippet already present in the plan" in rendered.lower()
-        for rendered in rendered_contracts[1:]
-    )
 
 
 def test_untrusted_prompt_inputs_are_nonce_paired_and_contained() -> None:
@@ -564,26 +326,10 @@ def test_pr_review_analysis_prompt_keeps_legacy_positional_arguments(
 ) -> None:
     """New optional inputs do not change the established positional API."""
     rendered = builder(1, 2, "diff", "issue", "body", "advice", "[]", True, "task", "")
+    without_nitpicks = builder(1, 2, "diff", "issue", "body", "advice", "[]", False, "task", "")
 
-    assert "Nitpick mode is ENABLED" in rendered
+    assert rendered != without_nitpicks
     assert "task #2" in rendered
-
-
-def test_pr_review_prompts_classify_platform_skips_as_evidence_gaps() -> None:
-    """Unsupported-platform skips do not satisfy required host evidence."""
-    rendered = (
-        prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1),
-        prompts.get_review_validation_prompt(
-            pr_number=1,
-            issue_number=1,
-            prior_comments_json="[]",
-        ),
-    )
-
-    for prompt in rendered:
-        normalized = " ".join(prompt.split())
-        assert "`status: skipped`" in normalized
-        assert "evidence gap" in normalized
 
 
 @pytest.mark.parametrize(

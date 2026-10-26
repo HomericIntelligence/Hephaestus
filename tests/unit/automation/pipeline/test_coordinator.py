@@ -30,7 +30,6 @@ import pytest
 from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
-from hephaestus.automation.implementation_go_audit_receipt import PendingReviewFindingJournal
 from hephaestus.automation.pipeline import worker_pool as worker_pool_module
 from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
@@ -38,13 +37,9 @@ from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import _FAIL_BACK_CAP, PipelineConfig
 from hephaestus.automation.pipeline.events import RepositoryBusyEvent
 from hephaestus.automation.pipeline.github_jobs import (
-    AppendReplyJournalRequest,
     GitHubJob,
     MergeWaitCycleCompleted,
-    ReconcileScopeExpansionDependenciesRequest,
-    ReplyJournalAppended,
     RunMergeWaitCycleRequest,
-    ScopeExpansionDependenciesReconciled,
 )
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
@@ -54,7 +49,6 @@ from hephaestus.automation.pipeline.jobs import (
     JobHandle,
     JobResult,
 )
-from hephaestus.automation.pipeline.merge_wait_admission import RequiredChecksEvidence
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import (
     Disposition,
@@ -71,16 +65,8 @@ from hephaestus.automation.pipeline.stages.repo import (
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
-from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
-from hephaestus.automation.review_journal import (
-    CommentJournalReadError,
-    IssueComment,
-    render_current_plan,
-    render_pending_review,
-)
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
-from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED, STATE_PLAN_GO
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -312,15 +298,6 @@ class StubStage(Stage):
         self.calls.append(("job_done", result.ok))
 
 
-def _github_append_job(tmp_path: Path) -> tuple[GitHubJob, AppendReplyJournalRequest]:
-    """Build one valid typed GitHub job for coordinator completion tests."""
-    marker = (
-        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
-    )
-    request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
-    return GitHubJob("repo-a", tmp_path.resolve(), request, "append"), request
-
-
 def make_coordinator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -360,130 +337,6 @@ def make_coordinator(
     )
     script_source_passes(coordinator, monkeypatch, seed_entries or [[]])
     return coordinator, pool, gh
-
-
-@pytest.mark.parametrize("failure", ["audit_write", "label_confirmation"])
-def test_restart_scope_rejection_retries_publication_without_worker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
-) -> None:
-    """A restart retries scope publication failures without a reviewer job."""
-
-    class FailFirstPublicationGitHub(FakeStageGitHub):
-        edit_count = 0
-        audit_count = 0
-
-        def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
-            self.edit_count += 1
-            if failure == "label_confirmation" and self.edit_count == 1:
-                labels = self._issue_labels(issue_number)
-                labels.update(add)
-                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
-                return
-            super().edit_labels(issue_number, add=add, remove=remove)
-
-        def upsert_issue_comment(self, *args: Any, **kwargs: Any) -> None:
-            self.audit_count += 1
-            if failure == "audit_write" and self.audit_count == 1:
-                raise OSError("audit write failed")
-            super().upsert_issue_comment(*args, **kwargs)
-
-    github = FailFirstPublicationGitHub(labels=[STATE_PLAN_GO])
-    github.comments[41] = [
-        render_current_plan("## Exact file scope and ownership\n- `tests/unit/one.py`"),
-        render_pending_review(revision=1),
-    ]
-    coordinator, pool, _ = make_coordinator(
-        tmp_path,
-        monkeypatch,
-        github=github,
-        agent="codex",
-    )
-    item = _issue_item(41, StageName.PLAN_REVIEW)
-
-    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=True)
-    coordinator._drain_queues()
-
-    assert item.state == "EVAL"
-    expected_labels = (
-        {STATE_PLAN_GO, STATE_PLAN_BLOCKED}
-        if failure == "label_confirmation"
-        else {STATE_PLAN_BLOCKED}
-    )
-    assert github.labels[41] == expected_labels
-    assert len(coordinator.timers) == 1
-    assert pool.submitted == []
-
-    _deadline, sequence, parked_item = coordinator.timers[0]
-    coordinator.timers[0] = (0.0, sequence, parked_item)
-    coordinator._wake_timers()
-    coordinator._drain_queues()
-
-    assert item.result is not None
-    assert item.result.reason == "blocked: plan scope is invalid"
-    assert github.labels[41] == {STATE_PLAN_BLOCKED}
-    assert github.comments[41][-1].endswith(STATE_PLAN_BLOCKED)
-    assert "plan_scope_invalid" in github.comments[41][-1]
-    assert pool.submitted == []
-
-
-def test_restart_scope_rejection_retries_second_journal_read_without_worker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Retry a failed identity read without losing the scope rejection."""
-
-    class FailSecondReadGitHub(FakeStageGitHub):
-        read_count = 0
-
-        def issue_comments(self, issue_number: int) -> list[IssueComment]:
-            self.read_count += 1
-            if self.read_count == 2:
-                raise CommentJournalReadError("temporary journal read failure")
-            return super().issue_comments(issue_number)
-
-    github = FailSecondReadGitHub(labels=[STATE_PLAN_GO])
-    plan_body = render_current_plan("## Exact file scope and ownership\n- `tests/unit/one.py`")
-    github.comments[41] = [plan_body, render_pending_review(revision=1)]
-    coordinator, pool, _ = make_coordinator(
-        tmp_path,
-        monkeypatch,
-        github=github,
-        agent="codex",
-    )
-    item = _issue_item(41, StageName.PLAN_REVIEW)
-
-    coordinator._push_item(item, StageName.PLAN_REVIEW, enter=True)
-    coordinator._drain_queues()
-
-    assert github.read_count == 2
-    assert item.result is None
-    assert item.state == "EVAL"
-    assert len(coordinator.timers) == 1
-    assert github.labels[41] == {STATE_PLAN_GO}
-    assert github.mutation_log == []
-    assert pool.submitted == []
-    assert item.attempts.get("plan_review_iter", 0) == 0
-    assert item.payload.get("review_round", 0) == 0
-
-    _deadline, sequence, parked_item = coordinator.timers[0]
-    coordinator.timers[0] = (0.0, sequence, parked_item)
-    coordinator._wake_timers()
-    coordinator._drain_queues()
-
-    assert item.result is not None
-    assert item.result.reason == "blocked: plan scope is invalid"
-    assert github.labels[41] == {STATE_PLAN_BLOCKED}
-    assert github.comments[41][0] == plan_body
-    audit = github.comments[41][-1]
-    assert audit.endswith(STATE_PLAN_BLOCKED)
-    assert "plan_scope_invalid" in audit
-    assert "## Files to Modify" in audit
-    assert [entry[0] for entry in github.mutation_log] == [
-        "edit_labels",
-        "gh_issue_upsert_comment",
-    ]
-    assert pool.submitted == []
-    assert item.attempts.get("plan_review_iter", 0) == 0
-    assert item.payload.get("review_round", 0) == 0
 
 
 def _issue_item(
@@ -604,41 +457,6 @@ class TestCoordinatorHealth:
         assert "circuit-breaker snapshot provider failed" in caplog.text
 
 
-def test_github_receipt_applies_before_on_done_state_and_routing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The coordinator calls receipt application while the submitting state is intact."""
-    coordinator, _pool, _github = make_coordinator(tmp_path, monkeypatch)
-    calls: list[tuple[str, str]] = []
-
-    class ReceiptStage(StubStage):
-        def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
-            del result, ctx
-            calls.append(("on_job_done", item.state))
-
-        def step(self, item: WorkItem, ctx: Any) -> StageOutcome:
-            del ctx
-            calls.append(("step", item.state))
-            return StageOutcome(Disposition.FINISH_FAIL, "receipt_applied")
-
-    coordinator.stages[StageName.PR_REVIEW] = ReceiptStage()
-    item = _issue_item(3, StageName.PR_REVIEW)
-    item.state = "POST"
-    job, request = _github_append_job(tmp_path)
-    handle = JobHandle(job=job, on_done_state="POST_APPLY")
-    claim_test_item(coordinator, item)
-    coordinator.in_flight[handle] = item
-    coordinator.inflight_per_repo[item.repo] = 1
-
-    coordinator._handle_completion(
-        handle,
-        JobResult(ok=True, value=ReplyJournalAppended(request=request)),
-    )
-
-    assert calls == [("on_job_done", "POST"), ("step", "POST_APPLY")]
-
-
 def test_dirty_recovery_completion_is_stored_before_recovery_state_routing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -677,36 +495,6 @@ def test_dirty_recovery_completion_is_stored_before_recovery_state_routing(
     assert item.result is not None and item.result.passed is False
     assert item.result.reason == "dirty_recovery_remote_postflight_drift"
     assert "_impl_source_revision" not in item.payload
-
-
-def test_interrupted_github_job_never_applies_a_receipt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An interrupted operation remains resumable in its submitting state."""
-    coordinator, _pool, _github = make_coordinator(tmp_path, monkeypatch)
-    stage = StubStage()
-    coordinator.stages[StageName.PR_REVIEW] = stage
-    item = _issue_item(3, StageName.PR_REVIEW)
-    item.state = "POST"
-    job, _request = _github_append_job(tmp_path)
-    handle = JobHandle(job=job, on_done_state="POST_APPLY")
-    claim_test_item(coordinator, item)
-    coordinator.in_flight[handle] = item
-    coordinator.inflight_per_repo[item.repo] = 1
-
-    coordinator._handle_completion(
-        handle,
-        JobResult(ok=False, interrupted=True, error="shutdown"),
-    )
-
-    assert not any(name == "job_done" for name, _value in stage.calls)
-    assert item.state == "POST"
-    assert item.result == ItemResult(
-        passed=False,
-        reason="resumable at pr_review",
-        final_stage=StageName.PR_REVIEW,
-    )
 
 
 class TestQuiescence:
@@ -1097,55 +885,6 @@ class TestQuiescence:
             )
         ]
 
-    def test_pr_review_adoption_records_completion_before_wait_state(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Direct PR review honors the coordinator's callback-before-state order."""
-        github = FakeStageGitHub(pr_head_branch="review-pr")
-        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, github=github)
-        worktree = tmp_path / "build" / ".worktrees" / "pr-review-pr-601"
-        dependency_request = ReconcileScopeExpansionDependenciesRequest(
-            issue_number=1,
-            pr_number=601,
-            source_head_sha="a" * 40,
-        )
-        pool.queue_result(
-            JobResult(
-                ok=True,
-                value=ScopeExpansionDependenciesReconciled(
-                    request=dependency_request,
-                    status="none",
-                    child_issue_numbers=(),
-                ),
-            )
-        )
-        pool.queue_result(JobResult(ok=True, value={"path": str(worktree), "dirty": False}))
-        # Stop after the review job is submitted. This keeps the assertion at
-        # the adoption boundary while exercising the real completion drain.
-        pool.queue_result(JobResult(ok=False, interrupted=True, error="stop"))
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.PR,
-            issue=1,
-            pr=601,
-            stage=StageName.PR_REVIEW,
-            state="ENTER",
-            payload={"_enter_pending": True},
-        )
-
-        coordinator._run_item(claim_test_item(coordinator, item))
-        coordinator._drain_completions()
-        coordinator._drain_queues()
-        coordinator._drain_completions()
-
-        assert item.worktree == str(worktree)
-        assert item.payload["direct_pr_worktree"] == str(worktree)
-        assert item.state == "REVIEW_WAIT"
-        jobs = [handle.job for handle in pool.submitted]
-        assert isinstance(jobs[0], GitHubJob)
-        assert isinstance(jobs[1], GitJob)
-        assert jobs[1].kwargs["isolated"] is True
-
     def test_issue_seed_with_existing_pr_marks_pr_review_adoption(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1164,43 +903,6 @@ class TestQuiescence:
         assert item.kind is ItemKind.ISSUE
         assert item.pr == 701
         assert item.payload["existing_pr"] is True
-
-    def test_review_finding_seed_restores_compacted_outcomes(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A restarted item restores retained and compacted finding history."""
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
-        compacted = {
-            "counts": {"corrected": 0, "not_publishable": 0, "published": 1},
-            "identities": [["e" * 64, "9" * 40, "p", "a"]],
-        }
-        entry = SeedEntry(
-            kind="issue",
-            identifier=601,
-            stage=StageName.PR_REVIEW,
-            reason="open PR awaiting review",
-            pr_number=701,
-            pending_review_finding_journal=PendingReviewFindingJournal(
-                pr_number=701,
-                head_sha="a" * 40,
-                finding_records=(),
-                compacted_outcomes=compacted,
-            ),
-        )
-
-        item = coordinator._entry_to_item(entry, "repo-a")
-
-        assert item.payload["carried_review_finding_records"] == []
-        assert item.payload["carried_review_finding_compacted_outcomes"] == compacted
-        assert item.payload["review_finding_records"] == []
-        assert item.payload["review_finding_compacted_outcomes"] == compacted
-        item.result = ItemResult(
-            passed=True,
-            reason="ok",
-            final_stage=StageName.FINISHED,
-        )
-        coordinator._record_terminal_result(item)
-        assert coordinator._terminal_summary.review_finding_outcomes == {"published": 1}
 
     def test_direct_unlinked_pr_finishes_failed_before_review(self, tmp_path: Path) -> None:
         """A PR number cannot substitute for linked issue requirements."""
@@ -1585,100 +1287,6 @@ class TestAdmission:
 class TestReviewedHeadRestart:
     """A restart removes local proof and requires a fresh review."""
 
-    def test_restart_requires_fresh_review_proof_before_merge(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A restarted coordinator needs fresh process-local review proof."""
-        github = FakeStageGitHub(
-            pr_impl_state=(True, False),
-            pr_state={
-                "state": "OPEN",
-                "headRefOid": "a" * 40,
-                "baseRefName": "main",
-                "autoMergeRequest": None,
-                "mergeStateStatus": "CLEAN",
-                "mergeable": "MERGEABLE",
-            },
-        )
-        first, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
-        first.stages[StageName.PR_REVIEW] = StubStage(
-            StageOutcome(Disposition.FINISH_FAIL, "fresh review required")
-        )
-        without_proof = _issue_item(12, StageName.MERGE_WAIT)
-        without_proof.pr = 12
-        without_proof.state = "MERGE"
-        first._push_item(without_proof, StageName.MERGE_WAIT, enter=False)
-        first._drain_queues()
-
-        assert github.merge_attempts == []
-        assert without_proof.result is not None
-        assert without_proof.result.reason == "fresh review required"
-
-        runner = PipelineGitHubJobRunner(org="org", dry_run=False)
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline_github_jobs.PipelineGitHub",
-            lambda *args, **kwargs: github,
-        )
-        restarted, _, _ = make_coordinator(
-            tmp_path,
-            monkeypatch,
-            github=github,
-            github_job_runner=runner,
-            enable_learn=False,
-        )
-        reviewed = _issue_item(12, StageName.MERGE_WAIT)
-        reviewed.pr = 12
-        reviewed.state = "MERGE"
-        reviewed.payload["reviewed_pr_head_sha"] = "a" * 40
-        restarted._push_item(reviewed, StageName.MERGE_WAIT, enter=False)
-        restarted._drain_queues()
-        restarted._drain_completions()
-
-        assert github.auto_merge_attempts == [12]
-        # The stage parks and waits for GitHub to report the merge. It does not
-        # declare success in the same step that enables auto-merge.
-        assert reviewed.result is None
-        assert reviewed.payload["merge_readiness_polls"] == 1
-
-    def test_reviewed_head_merges_without_native_approval(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A current reviewed head does not require a native approval."""
-        github = FakeStageGitHub(
-            pr_impl_state=(True, False),
-            pr_state={
-                "state": "OPEN",
-                "headRefOid": "b" * 40,
-                "baseRefName": "main",
-                "autoMergeRequest": None,
-                "mergeStateStatus": "CLEAN",
-                "mergeable": "MERGEABLE",
-            },
-        )
-        runner = PipelineGitHubJobRunner(org="org", dry_run=False)
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline_github_jobs.PipelineGitHub",
-            lambda *args, **kwargs: github,
-        )
-        coordinator, _, _ = make_coordinator(
-            tmp_path,
-            monkeypatch,
-            github=github,
-            github_job_runner=runner,
-            enable_learn=False,
-        )
-        item = _issue_item(12, StageName.MERGE_WAIT)
-        item.pr = 12
-        item.state = "MERGE"
-        item.payload["reviewed_pr_head_sha"] = "b" * 40
-        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
-        coordinator._drain_queues()
-        coordinator._drain_completions()
-
-        assert github.auto_merge_attempts == [12]
-        assert item.result is None
-        assert item.payload["merge_readiness_polls"] == 1
-
 
 class TestDryRun:
     """Dry-run: stages' JobRequests are logged-and-advanced; _submit asserts."""
@@ -1802,7 +1410,6 @@ class TestFailBackRouting:
         request = RunMergeWaitCycleRequest(
             issue_number=3186,
             pr_number=42,
-            reviewed_head_sha="a" * 40,
             deadline_s=60.0,
             cancellation=threading.Event(),
         )
@@ -1811,11 +1418,6 @@ class TestFailBackRouting:
             request=request,
             outcome="auto_merge_enabled",
             attempted=True,
-            required_checks_evidence=RequiredChecksEvidence(
-                boundary="nonpassing_check_run",
-                contexts=("required-ci",),
-                detail="conclusion=failure",
-            ),
         )
         item.payload["_merge_wait_cycle_receipt"] = receipt
 
@@ -1843,10 +1445,6 @@ class TestFailBackRouting:
         assert "merge_admission" in event_text
         assert "auto_merge_enabled" in event_text
         assert "attempted" in event_text
-        assert "required_checks" in event_text
-        assert "nonpassing_check_run" in event_text
-        assert "required-ci" in event_text
-        assert "conclusion=failure" in event_text
         # No raw GitHub payload should appear
         assert "headRefOid" not in event_text
 
@@ -1869,93 +1467,6 @@ class TestFailBackRouting:
         assert item.result is not None
         assert item.result.reason == "unresolved_review_threads"
         assert not coordinator.queues[StageName.PR_REVIEW]
-
-    def test_unarmed_merge_wait_lost_approval_returns_to_pr_review(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An unarmed PR with a missing loop label returns for fresh review."""
-        github = FakeStageGitHub(
-            pr_impl_state=(False, False),
-            pr_state={
-                "state": "OPEN",
-                "headRefOid": "a" * 40,
-                "baseRefName": "main",
-                "autoMergeRequest": None,
-            },
-        )
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
-
-        class ReviewAfterMissingApproval(StubStage):
-            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
-                assert github.mutation_log == []
-                return super().on_enter(item, ctx)
-
-        coordinator.stages[StageName.PR_REVIEW] = ReviewAfterMissingApproval(
-            StageOutcome(Disposition.FINISH_FAIL, "stop")
-        )
-        item = _issue_item(3, StageName.MERGE_WAIT)
-        item.pr = 12
-        item.state = "MERGE"
-
-        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
-        coordinator._drain_queues()
-
-        assert item.stage is StageName.FINISHED
-        assert item.result is not None
-        assert item.result.reason == "stop"
-        assert github.mutation_log == []
-
-    def test_external_auto_merge_block_does_not_enter_pr_review(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An external arm without approval is terminal, never review-rerouted."""
-        github = FakeStageGitHub(
-            pr_impl_state=(False, False),
-            pr_state={
-                "state": "OPEN",
-                "headRefOid": "a" * 40,
-                "baseRefName": "main",
-                "autoMergeRequest": {"enabledAt": "elsewhere"},
-            },
-        )
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
-        item = _issue_item(3, StageName.MERGE_WAIT)
-        item.pr = 12
-        item.state = "MERGE"
-
-        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
-        coordinator._drain_queues()
-
-        assert item.stage is StageName.FINISHED
-        assert item.result is not None
-        assert item.result.reason == "blocked: auto_merge_already_armed"
-        assert not coordinator.queues[StageName.PR_REVIEW]
-        assert github.mutation_log == []
-
-    def test_partial_merge_wait_state_does_not_enter_pr_review(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An incomplete read is terminal rather than an unsafe fresh review."""
-        github = FakeStageGitHub(
-            pr_impl_state=(False, False),
-            pr_state={
-                "state": "OPEN",
-                "headRefOid": "a" * 40,
-            },
-        )
-        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
-        item = _issue_item(3, StageName.MERGE_WAIT)
-        item.pr = 12
-        item.state = "MERGE"
-
-        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
-        coordinator._drain_queues()
-
-        assert item.stage is StageName.FINISHED
-        assert item.result is not None
-        assert item.result.reason == "pr_state_unverified"
-        assert not coordinator.queues[StageName.PR_REVIEW]
-        assert github.mutation_log == []
 
     def test_named_reason_routes_to_mapped_stage(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

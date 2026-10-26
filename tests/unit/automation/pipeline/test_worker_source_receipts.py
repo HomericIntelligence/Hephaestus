@@ -68,8 +68,6 @@ def test_source_job_returns_its_full_receipt_from_the_held_lease(
     pool = WorkerPool(
         size=1, shutdown=threading.Event(), completion_q=queue.Queue(), lock_dir=tmp_path / "locks"
     )
-    monkeypatch.setattr(pool, "_recover_pretest_candidate", lambda *args: None)
-    monkeypatch.setattr(pool, "_recover_prepared_remediation_worktree", lambda *args: None)
     create = Mock(return_value=JobResult(ok=True, value={"path": str(binding.cwd)}))
     inspect = Mock(return_value=JobResult(ok=True, value={}))
     monkeypatch.setattr(pool, "_git_create_worktree_with_handoff", create)

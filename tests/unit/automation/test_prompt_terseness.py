@@ -18,33 +18,12 @@ from hephaestus.automation.prompts import (
     get_pr_review_analysis_prompt,
     get_review_validation_prompt,
 )
-from hephaestus.automation.prompts._shared import get_terse_output_directive
 
 # Distinctive phrase from the directive; verified at plan time to be absent
 # from every existing prompt file (grep -rnE "Output discipline|token budget"
 # hephaestus/automation/prompts/ returned no hits, exit 1).
 SENTINEL = "Output discipline (token budget)"
 WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
-
-
-def test_terse_directive_leads_with_github_carveout() -> None:
-    """Carve-out MUST be the first non-blank line so brevity never truncates pr-policy artifacts."""
-    directive = get_terse_output_directive()
-    first_line = directive.lstrip().splitlines()[0]
-    assert "GitHub-posted" in first_line
-    assert "retain full detail" in first_line
-    assert "do not emit a textual approval or rejection line" in directive
-    assert "Verdict:" not in directive
-
-
-def test_plan_terminal_contract_replaces_the_legacy_textual_decision_line() -> None:
-    """The shared directive supports label-only plan-review terminal output."""
-    directive = get_terse_output_directive(
-        terminal_output_contract="End with the plan-state label only."
-    )
-    assert SENTINEL in directive
-    assert "End with the plan-state label only." in directive
-    assert "Verdict:" not in directive
 
 
 # Each lambda's kwargs match the exact signature read from the source at plan

@@ -417,7 +417,6 @@ def test_issue_wave_classification_reads_receipt_owned_state_after_intake_adopti
         lease,
         issue_number=19,
         pr_number=23,
-        reviewed_head_sha="b" * 40,
         merge_sha="c" * 40,
     )
     store.record_terminal_outcome(

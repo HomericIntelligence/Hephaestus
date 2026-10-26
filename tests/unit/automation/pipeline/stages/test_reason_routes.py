@@ -24,8 +24,9 @@ from hephaestus.automation.pipeline.stages import (
     plan_review,
     planning,
     pr_review,
-    pr_review_findings,
+    pr_review_gate,
     pr_review_jobs,
+    pr_review_post,
 )
 
 _STAGE_MODULES: dict[StageName, ModuleType] = {
@@ -41,7 +42,7 @@ _STAGE_MODULES: dict[StageName, ModuleType] = {
 # rather than only the façade's source file.
 _STAGE_REASON_MODULES: dict[StageName, tuple[ModuleType, ...]] = {
     **{stage_name: (module,) for stage_name, module in _STAGE_MODULES.items()},
-    StageName.PR_REVIEW: (pr_review, pr_review_jobs, pr_review_findings),
+    StageName.PR_REVIEW: (pr_review, pr_review_gate, pr_review_jobs, pr_review_post),
 }
 
 #: Reasons each stage is EXPECTED to emit (lock: additions must edit this).
@@ -54,7 +55,7 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
         "review_retained_after_rebase",
     },
     StageName.PR_REVIEW: {"agent_error", "empty_pr_diff", "implementation_remediation"},
-    StageName.MERGE_WAIT: {"reviewed_head_missing"},
+    StageName.MERGE_WAIT: set(),
 }
 
 
@@ -117,9 +118,8 @@ def test_emitted_reason_set_is_pinned(stage_name: StageName) -> None:
 
 def test_scan_is_not_vacuous() -> None:
     """The AST scan finds real emissions (guards against a silent no-op scan)."""
-    assert "agent_error" in _fail_back_reason_literals(pr_review)
+    assert "agent_error" in _fail_back_reason_literals(pr_review_gate)
     assert "plan_not_go" in _fail_back_reason_literals(implementation)
-    assert "reviewed_head_missing" in _fail_back_reason_literals(merge_wait)
 
 
 def test_named_reasons_route_where_the_doc_says() -> None:
@@ -134,6 +134,4 @@ def test_named_reasons_route_where_the_doc_says() -> None:
         == StageName.MERGE_WAIT
     )
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["not_implementation_go"] == StageName.PR_REVIEW
-    assert ROUTES[StageName.MERGE_WAIT].fail_routes["reviewed_head_missing"] == StageName.PR_REVIEW
-    assert ROUTES[StageName.MERGE_WAIT].fail_routes["reviewed_head_drift"] == StageName.PR_REVIEW
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["closed"] == StageName.FINISHED

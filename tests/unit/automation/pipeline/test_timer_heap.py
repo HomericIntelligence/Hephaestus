@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from threading import Event
 from typing import Any
 
 import pytest
@@ -18,15 +17,9 @@ import pytest
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
-from hephaestus.automation.pipeline.github_jobs import (
-    GitHubJob,
-    MergeWaitCycleCompleted,
-    RunMergeWaitCycleRequest,
-)
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
-from hephaestus.automation.pipeline.stages.base import AutoMergeEnableResult, Stage
+from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.automation.pipeline.conftest import (
@@ -211,175 +204,6 @@ class TestRetryDelayConsumption:
         assert item.stage is StageName.PR_REVIEW
         assert item.state == "POLL"
         assert item.payload.get("_enter_pending") is not True
-
-    def test_merge_wait_readiness_timer_reentry_is_bounded_without_conditional_puts(
-        self, clocked: tuple[Coordinator, FakeClock]
-    ) -> None:
-        """A wait for GitHub to merge reaches its deadline and then fails closed."""
-
-        class NotReadyGitHub(FakeStageGitHub):
-            def __init__(self) -> None:
-                super().__init__(
-                    pr_impl_state=(True, False),
-                    pr_state={
-                        "state": "OPEN",
-                        "headRefOid": "a" * 40,
-                        "baseRefName": "main",
-                        "autoMergeRequest": None,
-                    },
-                )
-                self.puts = 0
-
-            def enable_auto_merge(self, pr_number: int, **_kwargs: Any) -> AutoMergeEnableResult:
-                self.puts += 1
-                return AutoMergeEnableResult(enabled=True)
-
-        coordinator, clock = clocked
-        github = NotReadyGitHub()
-        coordinator.github = github
-        coordinator._ctx_cache.clear()
-        pool = coordinator.pool
-        assert isinstance(pool, FakeWorkerPool)
-
-        class Runner:
-            gh_timeout = 120
-
-            def run(
-                self,
-                job: GitHubJob,
-                *,
-                shutdown: Event | None = None,
-                deadline_s: float | None = None,
-            ) -> MergeWaitCycleCompleted:
-                del shutdown, deadline_s
-                assert isinstance(job, GitHubJob)
-                assert isinstance(job.request, RunMergeWaitCycleRequest)
-                return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
-
-        pool.github_job_runner = Runner()
-        coordinator.config.budget_overrides["merge"] = 2
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.ISSUE,
-            issue=88,
-            pr=12,
-            stage=StageName.MERGE_WAIT,
-            state="MERGE",
-            payload={
-                "reviewed_pr_head_sha": "a" * 40,
-                "reviewed_pr_proof_generation": 0,
-                "merge_readiness_head_sha": "a" * 40,
-                "merge_readiness_proof_generation": 0,
-                "merge_readiness_deadline_s": 1001.0,
-                "merge_readiness_polls": 17,
-            },
-        )
-
-        coordinator._run_item(claim_test_item(coordinator, item))
-        coordinator._drain_completions()
-
-        # One enablement, then a bounded wait. The enablement is not repeated.
-        assert github.puts == 1
-        assert item.result is None
-        assert len(coordinator.timers) == 1
-        clock.now += 2.0
-        coordinator._wake_timers()
-        coordinator._drain_queues()
-        coordinator._drain_completions()
-
-        assert github.puts == 1
-        assert item.result is not None
-        assert item.result.reason == "merge_readiness_timeout"
-        assert coordinator.timers == []
-        coordinator._wake_timers()
-        coordinator._drain_queues()
-        assert github.puts == 1
-
-    def test_merge_wait_transport_ambiguity_timer_reentry_is_bounded(
-        self, clocked: tuple[Coordinator, FakeClock]
-    ) -> None:
-        """An unknown PUT result gets delayed retries and exactly consumes the budget."""
-
-        class AmbiguousGitHub(FakeStageGitHub):
-            def __init__(self) -> None:
-                super().__init__(
-                    pr_impl_state=(True, False),
-                    pr_state={
-                        "state": "OPEN",
-                        "headRefOid": "a" * 40,
-                        "baseRefName": "main",
-                        "autoMergeRequest": None,
-                    },
-                )
-                self.puts = 0
-
-            def enable_auto_merge(self, pr_number: int, **_kwargs: Any) -> AutoMergeEnableResult:
-                self.puts += 1
-                return AutoMergeEnableResult(enabled=False, transport_error=True)
-
-            def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
-                return {
-                    "state": "OPEN",
-                    "headRefOid": "a" * 40,
-                    "baseRefName": "main",
-                    "autoMergeRequest": None,
-                    "mergeable": "MERGEABLE",
-                    "mergeStateStatus": "CLEAN",
-                }
-
-        coordinator, clock = clocked
-        github = AmbiguousGitHub()
-        coordinator.github = github
-        coordinator._ctx_cache.clear()
-        pool = coordinator.pool
-        assert isinstance(pool, FakeWorkerPool)
-
-        class Runner:
-            gh_timeout = 120
-
-            def run(
-                self,
-                job: GitHubJob,
-                *,
-                shutdown: Event | None = None,
-                deadline_s: float | None = None,
-            ) -> MergeWaitCycleCompleted:
-                del shutdown, deadline_s
-                assert isinstance(job, GitHubJob)
-                assert isinstance(job.request, RunMergeWaitCycleRequest)
-                return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
-
-        pool.github_job_runner = Runner()
-        coordinator.config.budget_overrides["merge"] = 2
-        item = WorkItem(
-            repo="repo-a",
-            kind=ItemKind.ISSUE,
-            issue=89,
-            pr=12,
-            stage=StageName.MERGE_WAIT,
-            state="MERGE",
-            payload={"reviewed_pr_head_sha": "a" * 40},
-        )
-
-        coordinator._run_item(claim_test_item(coordinator, item))
-        coordinator._drain_completions()
-
-        assert github.puts == 1
-        assert item.attempts["merge"] == 1
-        assert len(coordinator.timers) == 1
-        clock.now += 2.0
-        coordinator._wake_timers()
-        coordinator._drain_queues()
-        coordinator._drain_completions()
-
-        assert github.puts == 2
-        assert item.attempts["merge"] == 2
-        assert item.result is not None
-        assert item.result.reason == "merge_attempts_exhausted"
-        assert coordinator.timers == []
-        coordinator._wake_timers()
-        coordinator._drain_queues()
-        assert github.puts == 2
 
 
 class TestStepWatchdog:

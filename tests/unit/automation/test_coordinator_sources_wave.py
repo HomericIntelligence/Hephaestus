@@ -25,7 +25,6 @@ from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.base import Stage
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from hephaestus.automation.requirements_recovery import evidence_digest
 from hephaestus.automation.review_journal import CommentJournalReadError
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -305,7 +304,7 @@ def test_repo_source_does_not_misclassify_queue_failure_as_issue_failure(
     assert failures == []
 
 
-@pytest.mark.parametrize("label", ["state:skip", "state:plan-blocked"])
+@pytest.mark.parametrize("label", ["state:skip", "state:blocked"])
 def test_lease_backed_direct_exclusion_reaches_finished_and_records_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -369,7 +368,6 @@ def test_lease_backed_non_code_intent_reenters_planning_for_label_repair(
         lease,
         issue_number=2453,
         reason=reason,
-        evidence_digest=evidence_digest("repo-a", 2453, BASE_SHA, "A task", ""),
         repository_revision=BASE_SHA,
         extra_labels=("epic",),
     )
@@ -399,7 +397,6 @@ def test_lease_backed_non_code_intent_reenters_planning_for_label_repair(
     assert item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] == {
         "reason": reason,
         "extra_labels": ["epic"],
-        "evidence_digest": evidence_digest("repo-a", 2453, BASE_SHA, "A task", ""),
         "repository_revision": BASE_SHA,
         "explanation": "",
         "retired": False,
@@ -419,7 +416,6 @@ def test_lease_backed_retired_intent_projects_cleanup_provenance(
         lease,
         issue_number=2454,
         reason="independently confirmed tracker",
-        evidence_digest=evidence_digest("repo-a", 2454, BASE_SHA, "A task", "Old body"),
         repository_revision=BASE_SHA,
         extra_labels=("epic",),
     )

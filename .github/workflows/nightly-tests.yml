@@ -125,19 +125,6 @@ jobs:
           export PATH="$PWD/build/cli-venv/bin:$PATH"
           build/cli-venv/bin/pytest tests/integration/test_cli_entry_points.py --require-cli --override-ini="addopts=" -v --strict-markers
 
-  shell-tests:
-    name: Shell tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Build CI image
-        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
-      - name: Run Bats
-        run: bash scripts/run_ci_local.sh shell-tests
-
   build:
     name: Artifact and package tests
     runs-on: ubuntu-24.04
@@ -203,7 +190,7 @@ jobs:
 
   notify-failure:
     name: Open or update failure tracking issue
-    needs: [unit-coverage, functional-tests, pi-conformance, installed-cli-tests, shell-tests, build, nats-integration]
+    needs: [unit-coverage, functional-tests, pi-conformance, installed-cli-tests, build, nats-integration]
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

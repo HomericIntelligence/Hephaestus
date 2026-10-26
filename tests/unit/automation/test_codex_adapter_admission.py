@@ -641,23 +641,6 @@ def test_lock_rejects_wheel_tags_that_do_not_match_filename(tmp_path: Path) -> N
         _admit(module, lock, _sha256(lock))
 
 
-def test_adapter_self_attestation_is_not_a_trust_anchor(tmp_path: Path) -> None:
-    """An adapter identity must equal the host-verified lock identity."""
-    lock, digest, _ = _deployment(tmp_path)
-    module = _module()
-    parsed = module.CodexAdapterDeploymentLockV1.from_bytes(lock.read_bytes())
-    admission = module.CodexAdapterAdmission(
-        lock=parsed,
-        deployment_lock_sha256=digest,
-        factory=object(),
-    )
-
-    with pytest.raises(module.CodexAdapterAdmissionError, match="adapter identity"):
-        admission.validate_adapter_identity(
-            distribution="other", version="1.0", installed_tree_sha256="0" * 64
-        )
-
-
 def test_production_admission_parses_the_version_1_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

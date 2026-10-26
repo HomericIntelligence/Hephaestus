@@ -396,7 +396,6 @@ def _resume_at_b(
     assert completed.target_base_sha == prior.target_base_sha
     assert completed.publication_mode == "existing"
     assert result.value["head_sha"] == binding.revision
-    assert "retained_rebase_review_proof" not in result.value
     assert "review_audit" not in result.value
 
 

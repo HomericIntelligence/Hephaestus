@@ -9,7 +9,6 @@ from typing import Any, Literal
 
 import pytest
 
-from hephaestus.automation.comment_identity import CommentAliasConflictError
 from hephaestus.automation.pipeline.admission import _fetch_planned_files
 from hephaestus.automation.pipeline.github_jobs import ReadCurrentPlanScopeRequest
 from hephaestus.automation.pipeline_github import PipelineGitHub
@@ -23,11 +22,7 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     render_current_plan,
 )
-from hephaestus.automation.state_labels import (
-    ATHENA_FINALIZED_PLAN_LABEL,
-    STATE_IMPLEMENTATION_BLOCKED,
-    STATE_PLAN_GO,
-)
+from hephaestus.automation.state_labels import STATE_PLAN_GO
 
 
 def _finalized_body(
@@ -55,10 +50,9 @@ def test_finalized_body_without_comments_supplies_scope(
         "title": "Use the current plan",
         "body": body,
         "bodyDigest": hashlib.sha256(body.encode()).hexdigest(),
-        "labels": [{"name": STATE_PLAN_GO}, {"name": ATHENA_FINALIZED_PLAN_LABEL}],
+        "labels": [{"name": STATE_PLAN_GO}],
     }
     monkeypatch.setattr(github, "gh_issue_json", lambda _issue: dict(snapshot))
-    monkeypatch.setattr(github, "issue_body_edited_by_viewer", lambda _issue: True)
     monkeypatch.setattr(github, "issue_comments", lambda _issue: [])
     deadline = time.monotonic() + 10
 
@@ -98,10 +92,9 @@ def _github(monkeypatch: pytest.MonkeyPatch, body: str) -> tuple[PipelineGitHub,
         "title": "Use the current plan",
         "body": body,
         "bodyDigest": hashlib.sha256(body.encode()).hexdigest(),
-        "labels": [{"name": STATE_PLAN_GO}, {"name": ATHENA_FINALIZED_PLAN_LABEL}],
+        "labels": [{"name": STATE_PLAN_GO}],
     }
     monkeypatch.setattr(github, "gh_issue_json", lambda _issue: dict(snapshot))
-    monkeypatch.setattr(github, "issue_body_edited_by_viewer", lambda _issue: True)
     monkeypatch.setattr(
         github,
         "issue_comments",
@@ -126,8 +119,7 @@ def test_finalized_scope_contains_complete_declared_paths(
         f"## {heading}\n- `AGENTS.md`\n- `.pre-commit-config.yaml`\n- `src/service.py`",
         prefix=HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
     )
-    github, snapshot = _github(monkeypatch, body)
-    snapshot["labels"].append({"name": STATE_IMPLEMENTATION_BLOCKED})
+    github, _snapshot = _github(monkeypatch, body)
     assert _scope(consumer, github) == {"AGENTS.md", ".pre-commit-config.yaml", "src/service.py"}
 
 
@@ -147,51 +139,20 @@ def test_finalized_scope_requires_nonempty_valid_paths(
 
 
 @pytest.mark.parametrize("consumer", ["overlap", "publication"])
-@pytest.mark.parametrize("fault", ["malformed-seal", "foreign-editor", "removed-seal"])
-def test_invalid_finalized_authority_cannot_fall_back_to_comments(
-    consumer: str, fault: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Rejected finalized authority cannot grant the old comment scope."""
-    body = _finalized_body()
-    if fault == "malformed-seal":
-        body += "\nChanged after finalization."
-    elif fault == "removed-seal":
-        body = "## Files to Modify\n- `src/service.py`"
-    github, _snapshot = _github(monkeypatch, body)
-    if fault == "foreign-editor":
-        monkeypatch.setattr(github, "issue_body_edited_by_viewer", lambda _issue: False)
-    with pytest.raises(CommentAliasConflictError):
-        _scope(consumer, github)
-
-
-@pytest.mark.parametrize("consumer", ["overlap", "publication"])
-@pytest.mark.parametrize(
-    "fault", ["body-drift", "closed-readback", "read-failure", "bad-shape", "sanitized"]
-)
+@pytest.mark.parametrize("fault", ["read-failure", "bad-shape"])
 def test_unavailable_finalized_read_cannot_grant_scope(
     consumer: str, fault: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Incomplete or changed reads cannot use an older comment plan."""
-    github, snapshot = _github(monkeypatch, _finalized_body())
-    if fault in {"body-drift", "closed-readback"}:
-        confirmed = dict(snapshot)
-        if fault == "body-drift":
-            confirmed["body"] = _finalized_body("## Files to Modify\n- `replacement/scope.py`")
-            confirmed["bodyDigest"] = hashlib.sha256(confirmed["body"].encode()).hexdigest()
-        else:
-            confirmed["state"] = "CLOSED"
-        reads = iter([snapshot, confirmed])
-        monkeypatch.setattr(github, "gh_issue_json", lambda _issue: next(reads))
-    elif fault == "read-failure":
+    github, _snapshot = _github(monkeypatch, _finalized_body())
+    if fault == "read-failure":
 
         def failed_read(_issue: int) -> dict[str, Any]:
             raise RuntimeError("GitHub read unavailable")
 
         monkeypatch.setattr(github, "gh_issue_json", failed_read)
-    elif fault == "bad-shape":
-        monkeypatch.setattr(github, "gh_issue_json", lambda _issue: [])
     else:
-        snapshot["authoritySanitized"] = True
+        monkeypatch.setattr(github, "gh_issue_json", lambda _issue: [])
     with pytest.raises(CommentJournalReadError):
         _scope(consumer, github)
 

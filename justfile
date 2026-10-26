@@ -45,10 +45,6 @@ test-integration:
 test-contract:
     uv run pytest tests/integration/contract --run-contract-tests --override-ini="addopts=" -v --strict-markers
 
-# Run BATS shell tests (recursive under tests/shell)
-test-shell:
-    bats --recursive tests/shell
-
 # Re-run unit tests on file change (uses pytest-watcher). Cancel with Ctrl-C.
 watch:
     uv run ptw {{ unit_test_dir }} -- --no-cov -q

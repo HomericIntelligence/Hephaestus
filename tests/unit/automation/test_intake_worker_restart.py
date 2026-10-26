@@ -78,21 +78,6 @@ def test_intake_fixture_does_not_use_the_hook_index(
 
 
 @pytest.mark.precommit
-def test_intake_remediation_store_preserves_clean_source(tmp_path: Path) -> None:
-    """Host remediation records must not change the intake source tree."""
-    from hephaestus.automation.remediation_prepublication import prepublication_private_git_dir
-
-    caller, remote = _make_repository(tmp_path)
-    intake = _manager(caller, remote).prepare()
-    store = prepublication_private_git_dir(repo_root=intake.path, pr_number=603, create=True)
-
-    assert store.is_relative_to(intake.state_root)
-    assert not store.is_relative_to(intake.path)
-    assert _run_git(intake.path, "status", "--porcelain").stdout == ""
-    assert _manager(caller, remote).prepare().path == intake.path
-
-
-@pytest.mark.precommit
 @pytest.mark.parametrize(
     "case",
     [
@@ -159,29 +144,3 @@ def test_intake_worker_host_path_requires_its_receipt(tmp_path: Path) -> None:
         repository_worker_path_is_valid(
             intake.path, intake.path / "nested", repository="acme/repo", item_number=602
         )
-
-
-@pytest.mark.precommit
-def test_intake_remediation_migrates_the_intake_store(tmp_path: Path) -> None:
-    """An intake store is copied to the host root, and its source is preserved."""
-    from hephaestus.automation.models import DEFAULT_STATE_DIR
-    from hephaestus.automation.remediation_prepublication import prepublication_private_git_dir
-
-    caller, remote = _make_repository(tmp_path)
-    intake = _manager(caller, remote).prepare()
-    legacy = intake.path / DEFAULT_STATE_DIR
-    legacy.mkdir(parents=True)
-    record = legacy / "preserve.json"
-    record.write_text("legacy evidence\n", encoding="utf-8")
-
-    private_git_dir = prepublication_private_git_dir(
-        repo_root=intake.path, pr_number=603, create=True
-    )
-
-    assert private_git_dir == (
-        intake.state_root / DEFAULT_STATE_DIR / "remediation-prepublication" / "pr-603.git"
-    )
-    assert (intake.state_root / DEFAULT_STATE_DIR / "preserve.json").read_text(
-        encoding="utf-8"
-    ) == "legacy evidence\n"
-    assert record.read_text(encoding="utf-8") == "legacy evidence\n"

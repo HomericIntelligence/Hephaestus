@@ -687,34 +687,6 @@ class TestCommitOperation:
         assert "fixed.py" in prompt
         assert message.startswith("fix: keep worker local\n\nRepair boundary.")
         assert "Closes #3009" in message
-        assert "Implemented-By: Codex" in message
-
-    @pytest.mark.parametrize(
-        ("model", "expected"),
-        (
-            (None, "Claude Code"),
-            ("claude-explicit-5", "claude-explicit-5"),
-        ),
-    )
-    def test_claude_implemented_by_uses_the_resolved_model(
-        self, model: str | None, expected: str
-    ) -> None:
-        """Claude keeps model provenance separate from its human co-author name."""
-        with patch.object(
-            pr_manager,
-            "_agentic_commit_email",
-            return_value="operator@example.invalid",
-        ):
-            message = pr_manager._format_commit_message(
-                metadata=CommitIssueMetadata(3009, "Repair publication", ""),
-                agent="claude",
-                subject="fix: repair publication",
-                body="",
-                model=model,
-            )
-
-        assert f"Implemented-By: {expected}" in message
-        assert "Co-Authored-By: Claude Code <operator@example.invalid>" in message
 
     def test_recovery_commit_disables_hooks_for_one_command(self) -> None:
         """A validated recovery commit bypasses repository hooks only once."""

@@ -10,7 +10,6 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import WorkspaceBinding
-from hephaestus.automation import claude_invoke
 from hephaestus.automation.pipeline import athena_skill_jobs, worker_pool
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest
 from hephaestus.automation.source_worktree import SourceWorkspacePreparationError
@@ -97,53 +96,5 @@ def test_host_skill_does_not_execute_after_cancellation(tmp_path: Path) -> None:
         with pytest.raises(InterruptedError):
             pool._run_athena_skill(job)
         executor.execute.assert_not_called()
-    finally:
-        pool.shutdown(mark_interrupted=False)
-
-
-def test_pretest_rejection_runs_under_the_current_source_lease(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A stale invalidation stops dispatch while the source lease is held."""
-    from collections.abc import Iterator
-    from contextlib import contextmanager
-
-    from hephaestus.automation.pipeline.jobs import AgentJob
-
-    active = [False]
-
-    @contextmanager
-    def lease(*args: object, **kwargs: object) -> Iterator[Path]:
-        active[0] = True
-        try:
-            yield tmp_path
-        finally:
-            active[0] = False
-
-    def reserve(*args: object, **kwargs: object) -> None:
-        assert active[0], "pretest authority was checked before its lease"
-        raise ValueError("remediation pretest predecessor is unavailable")
-
-    monkeypatch.setattr(worker_pool, "_agent_workspace_lease", lease)
-    monkeypatch.setattr(worker_pool, "resolve_agent", lambda *args, **kwargs: "claude")
-    provider = Mock()
-    monkeypatch.setattr(claude_invoke, "invoke_claude_with_session", provider)
-    pool = worker_pool.WorkerPool(size=1, shutdown=threading.Event(), completion_q=queue.Queue())
-    monkeypatch.setattr(pool, "_reserve_pretest_success", reserve)
-    job = AgentJob(
-        "repo",
-        1,
-        "claude",
-        "default",
-        lambda: "prompt",
-        tmp_path,
-        30,
-        workspace=WorkspaceBinding.external(tmp_path),
-    )
-    try:
-        result = pool._run(job)
-        assert result.error == "ValueError: remediation pretest predecessor is unavailable"
-        provider.assert_not_called()
-        assert not active[0]
     finally:
         pool.shutdown(mark_interrupted=False)

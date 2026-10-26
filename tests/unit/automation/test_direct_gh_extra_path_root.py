@@ -221,7 +221,6 @@ def test_direct_cli_rejects_untrusted_gh_root_during_parsing(
     tmp_path: Path,
 ) -> None:
     """Direct wrappers reject the same root classes as the full loop."""
-    with pytest.raises(SystemExit) as excinfo:
-        module.main(["--issues", "17", "--gh-extra-path-root", invalid_root(tmp_path)])
+    exit_code = module.main(["--issues", "17", "--gh-extra-path-root", invalid_root(tmp_path)])
 
-    assert excinfo.value.code == 2
+    assert exit_code == 2

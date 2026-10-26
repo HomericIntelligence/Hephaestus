@@ -293,15 +293,9 @@ def test_review_values_work_without_loading_github_transport() -> None:
     probe = (
         "import json, sys\n"
         "import hephaestus.automation.review_audit\n"
-        "import hephaestus.automation.implementation_go_audit_receipt\n"
-        "from hephaestus.automation.review_anchors import validate_comments_to_diff\n"
-        "result = validate_comments_to_diff([{'path': 'a.py', 'line': 1, 'body': 'fix'}], '')\n"
-        "from hephaestus.automation.review_finding_history import "
-        "normalize_review_finding_collection\n"
-        "records, compacted = normalize_review_finding_collection([])\n"
-        "assert records == () and compacted['identities'] == []\n"
-        "assert len(result.corrections) == 1\n"
-        "assert result.corrections[0].reason == 'reviewed_diff_unavailable'\n"
+        "from hephaestus.automation.review_anchors import place_findings\n"
+        "inline, body_only = place_findings([{'path': 'a.py', 'line': 1, 'body': 'fix'}], '')\n"
+        "assert inline == [] and len(body_only) == 1\n"
         "print(json.dumps([name for name in sys.modules if "
         "name.startswith(('hephaestus.automation.github_api', 'hephaestus.github'))]))\n"
     )

@@ -7,9 +7,7 @@ import subprocess
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -18,18 +16,10 @@ import pytest
 from hephaestus.automation import git_runtime, git_utils
 from hephaestus.automation.pipeline import repository_lock
 from hephaestus.automation.pipeline.git_jobs import GitJob
-from hephaestus.automation.pipeline.github_jobs import (
-    AppendReplyJournalRequest,
-    DeliverReplyHandoffRequest,
-    FrozenJson,
-    GitHubJob,
-    RecoverRemediationReplyJournalRequest,
-)
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.repository_lock import RepositoryOperationLock
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github import PipelineGitHub
-from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 
@@ -60,41 +50,6 @@ def test_git_runtime_forwards_cancellation(monkeypatch: pytest.MonkeyPatch, tmp_
     assert child.call_args.kwargs["shutdown"] is shutdown
 
 
-@pytest.mark.parametrize("cancelled", [False, True], ids=["expired", "cancelled-and-expired"])
-def test_git_job_deadline_includes_repository_lock_admission(
-    tmp_path: Path, cancelled: bool
-) -> None:
-    """An expired Git job must not dispatch after repository lock admission."""
-    shutdown = threading.Event()
-    if cancelled:
-        shutdown.set()
-    pool = WorkerPool(
-        size=1,
-        shutdown=shutdown,
-        completion_q=queue.Queue(),
-        lock_dir=tmp_path / "locks",
-    )
-    dispatch = Mock()
-    pool._dispatch_git_op = dispatch  # type: ignore[method-assign]
-    try:
-        result = pool._run_git(
-            GitJob(
-                "repo",
-                "prepare_remediation_recovery",
-                120,
-                deadline_s=1.0,
-            )
-        )
-    finally:
-        pool.shutdown(mark_interrupted=False)
-
-    assert not result.ok
-    assert result.error == ("interrupted" if cancelled else "timeout")
-    assert result.interrupted is cancelled
-    dispatch.assert_not_called()
-    assert not (tmp_path / "locks").exists()
-
-
 def test_checkout_timeout_after_admission_is_not_lock_contention(tmp_path: Path) -> None:
     """A Git timeout after both repository locks stays an operation timeout."""
     pool = WorkerPool(
@@ -120,79 +75,6 @@ def test_checkout_timeout_after_admission_is_not_lock_contention(tmp_path: Path)
 
     assert result.error == "timeout"
     assert result.value is None
-
-
-@pytest.mark.parametrize("job_kind", ["git", "github", "github_default"])
-@pytest.mark.parametrize("expire_at", ["reservation", "thread_acquisition", "thread_contention"])
-def test_operation_deadline_expiry_during_lock_admission(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    job_kind: str,
-    expire_at: str,
-) -> None:
-    """An expired admission must not publish a holder or dispatch work."""
-    now = [1.0]
-    monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.time.monotonic", lambda: now[0])
-    runner = Mock(gh_timeout=9 if job_kind == "github_default" else 120)
-    pool = WorkerPool(
-        size=1,
-        shutdown=threading.Event(),
-        completion_q=queue.Queue(),
-        lock_dir=tmp_path / "locks",
-        github_job_runner=runner,
-    )
-    entry = RepositoryOperationLock("repo", lock_dir=tmp_path / "locks", monotonic=lambda: now[0])
-    pool._repo_locks["repo"] = entry
-    publish = Mock(wraps=entry._write_owner_record)
-    monkeypatch.setattr(entry, "_write_owner_record", publish)
-    dispatch = Mock(return_value=JobResult(ok=True))
-    monkeypatch.setattr(pool, "_dispatch_locked_git", dispatch)
-    if expire_at == "reservation":
-        reserve = entry.reserve
-
-        def expire_on_reservation() -> None:
-            reserve()
-            now[0] = 11.0
-
-        monkeypatch.setattr(entry, "reserve", expire_on_reservation)
-    else:
-        thread_lock = entry.lock
-        proxy = Mock(wraps=thread_lock)
-
-        def expire_on_acquisition(*, blocking: bool) -> bool:
-            acquired = False
-            if expire_at != "thread_contention":
-                acquired = thread_lock.acquire(blocking=blocking)
-            now[0] = 11.0
-            return acquired
-
-        proxy.acquire.side_effect = expire_on_acquisition
-        monkeypatch.setattr(entry, "lock", proxy)
-    try:
-        if job_kind == "git":
-            result = pool._run_git(GitJob("repo", "clone", 120, deadline_s=10.0))
-        elif job_kind == "github_default":
-            marker = (
-                f"<!-- hephaestus-implementation-reply-handoff:pr=1:head={'a' * 40}"
-                f":batch={'b' * 32} -->"
-            )
-            request = AppendReplyJournalRequest(1, marker, f"{marker}\n<!-- payload -->")
-            result = pool._run_github(GitHubJob("repo", tmp_path, request, "append"))
-        else:
-            result = pool._run_github(
-                GitHubJob("repo", tmp_path.resolve(), _recovery_request(10.0), "recover")
-            )
-    finally:
-        pool.shutdown(mark_interrupted=False)
-
-    assert result.error == ("timeout" if job_kind == "git" else "github_timeout")
-    assert not result.ok
-    publish.assert_not_called()
-    dispatch.assert_not_called()
-    runner.run.assert_not_called()
-    assert not (tmp_path / "locks").exists()
-    assert entry.users == 0
-    assert not entry.lock.locked()
 
 
 @pytest.mark.parametrize("layer", ["primary", "owner"])
@@ -376,33 +258,6 @@ def test_repository_lock_wait_ends_on_shutdown(tmp_path: Path) -> None:
     assert not pool._repo_locks
 
 
-def test_github_dispatch_stops_when_shutdown_is_already_set(tmp_path: Path) -> None:
-    """A stopped worker must not start a GitHub operation."""
-    shutdown = threading.Event()
-    shutdown.set()
-    runner = Mock(gh_timeout=120)
-    pool = WorkerPool(
-        size=1,
-        shutdown=shutdown,
-        completion_q=queue.Queue(),
-        lock_dir=tmp_path,
-        github_job_runner=runner,
-    )
-    try:
-        marker = (
-            f"<!-- hephaestus-implementation-reply-handoff:pr=1:head={'a' * 40}"
-            f":batch={'b' * 32} -->"
-        )
-        request = AppendReplyJournalRequest(1, marker, f"{marker}\n<!-- payload -->")
-        result = pool._run_github(GitHubJob("repo", tmp_path, request, descr="append journal"))
-    finally:
-        pool.shutdown(mark_interrupted=False)
-
-    assert result.interrupted
-    assert not result.ok
-    runner.run.assert_not_called()
-
-
 def test_publication_starts_neither_push_nor_probe_after_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -454,139 +309,6 @@ def test_failed_push_does_not_probe_after_the_operation_deadline(
     assert child.call_count == 1
 
 
-def test_remediation_requests_reject_invalid_absolute_deadlines() -> None:
-    """Closed remediation requests accept only finite positive deadlines."""
-    marker = (
-        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
-    )
-    body = f'{marker}\n<!-- {{"format":1}} -->'
-
-    with pytest.raises(ValueError, match="deadline_s"):
-        AppendReplyJournalRequest(7, marker, body, deadline_s=float("inf"))
-    with pytest.raises(ValueError, match="deadline_s"):
-        DeliverReplyHandoffRequest(
-            3,
-            7,
-            FrozenJson.snapshot({}),
-            0,
-            deadline_s=0.0,
-        )
-    with pytest.raises(ValueError, match="deadline_s"):
-        GitJob("repo", "prepare_remediation_recovery", 120, deadline_s=float("nan"))
-
-
-@pytest.mark.parametrize(
-    ("expire_before", "expected_phases", "expected_children"),
-    [
-        ("pre", ["pre"], 0),
-        ("write", ["pre"], 1),
-        ("post", ["pre", "write", "post"], 2),
-    ],
-    ids=("pre-read", "write", "post-read"),
-)
-def test_append_checks_deadline_before_pre_read_write_and_post_read(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    expire_before: str,
-    expected_phases: list[str],
-    expected_children: int,
-) -> None:
-    """The append operation applies one deadline to all three phases."""
-    module = __import__(
-        "hephaestus.automation.pipeline_github_jobs",
-        fromlist=["PipelineGitHubJobRunner"],
-    )
-    marker = (
-        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
-    )
-    request = AppendReplyJournalRequest(
-        7,
-        marker,
-        f'{marker}\n<!-- {{"format":1}} -->',
-        deadline_s=10.0,
-    )
-    queries = __import__("hephaestus.automation.pipeline_github_queries", fromlist=["github_api"])
-    phases: list[str] = []
-    now = [1.0]
-
-    def fetch_comments(
-        _issue_number: int,
-        *,
-        owner: str,
-        name: str,
-        call: object,
-    ) -> list[dict[str, object]]:
-        del owner, name
-        phase = "pre" if not phases else "post"
-        phases.append(phase)
-        if phase == expire_before:
-            now[0] = 11.0
-        call(["api", "comments"])  # type: ignore[operator]
-        return []
-
-    def gh_call(_argv: list[str], **_kwargs: object) -> SimpleNamespace:
-        if _argv[:3] == ["issue", "comment", "7"]:
-            phases.append("write")
-        elif expire_before == "write":
-            now[0] = 11.0
-        return SimpleNamespace(stdout="[]", stderr="", returncode=0)
-
-    child = Mock(side_effect=gh_call)
-    monkeypatch.setattr(module, "PipelineGitHub", partial(PipelineGitHub, command_runner=child))
-    monkeypatch.setattr(queries.github_api, "_fetch_issue_comments_paginated", fetch_comments)
-    monkeypatch.setattr("hephaestus.automation.operation_deadlines.time.monotonic", lambda: now[0])
-
-    with pytest.raises(subprocess.TimeoutExpired):
-        module.PipelineGitHubJobRunner("org", False).run(
-            GitHubJob("repo", tmp_path.resolve(), request, "append")
-        )
-
-    assert phases == expected_phases
-    assert child.call_count == expected_children
-
-
-def test_delivery_checks_deadline_before_each_thread_operation(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Reply delivery cannot start a later thread operation after expiry."""
-    module = __import__(
-        "hephaestus.automation.pipeline_github_jobs",
-        fromlist=["PipelineGitHubJobRunner"],
-    )
-    request = DeliverReplyHandoffRequest(
-        3,
-        7,
-        FrozenJson.snapshot({"format": 1}),
-        0,
-        deadline_s=10.0,
-    )
-
-    calls: list[str] = []
-    now = [1.0]
-
-    def fake_attempt(_request: object, github: object) -> object:
-        for thread_id in ("T1", "T2", "T3"):
-            calls.append(thread_id)
-            if thread_id == "T3":
-                now[0] = 11.0
-            github._gh(["api", thread_id])  # type: ignore[attr-defined]
-        return SimpleNamespace()
-
-    child = Mock(return_value=SimpleNamespace(stdout="", stderr="", returncode=0))
-    monkeypatch.setattr(module, "attempt_reply_handoff", fake_attempt)
-    monkeypatch.setattr(module, "PipelineGitHub", partial(PipelineGitHub, command_runner=child))
-    monkeypatch.setattr("hephaestus.automation.operation_deadlines.time.monotonic", lambda: now[0])
-
-    with pytest.raises(subprocess.TimeoutExpired):
-        module.PipelineGitHubJobRunner("org", False).run(
-            GitHubJob("repo", tmp_path.resolve(), request, "deliver")
-        )
-
-    assert calls == ["T1", "T2", "T3"]
-    assert child.call_count == 2
-
-
 def test_delivery_file_lock_wait_stops_at_operation_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -611,80 +333,3 @@ def test_delivery_file_lock_wait_stops_at_operation_deadline(
     ):
         with adapter._operation_file_lock(tmp_path / "reply.lock", require_exclusive=True):
             raise AssertionError("the held lock must not be acquired")
-
-
-def _recovery_request(deadline_s: float) -> RecoverRemediationReplyJournalRequest:
-    """Build one closed format-3 recovery read request."""
-    return RecoverRemediationReplyJournalRequest(
-        issue_number=3,
-        pr_number=7,
-        repository="org/repo",
-        branch="fix/recovery",
-        current_remote_head="a" * 40,
-        threads=FrozenJson.snapshot([]),
-        deadline_s=deadline_s,
-    )
-
-
-@pytest.mark.parametrize("cancelled", [False, True], ids=["expired", "cancelled-and-expired"])
-def test_recovery_deadline_includes_repository_lock_admission(
-    tmp_path: Path, cancelled: bool
-) -> None:
-    """An expired recovery read must not dispatch after its repository lock."""
-    runner = Mock(gh_timeout=120)
-    shutdown = threading.Event()
-    if cancelled:
-        shutdown.set()
-    pool = WorkerPool(
-        size=1,
-        shutdown=shutdown,
-        completion_q=queue.Queue(),
-        lock_dir=tmp_path / "locks",
-        github_job_runner=runner,
-    )
-    try:
-        result = pool._run_github(
-            GitHubJob("repo", tmp_path.resolve(), _recovery_request(1.0), "recover")
-        )
-    finally:
-        pool.shutdown(mark_interrupted=False)
-
-    assert not result.ok
-    assert result.error == ("interrupted" if cancelled else "github_timeout")
-    assert result.interrupted is cancelled
-    runner.run.assert_not_called()
-    assert not (tmp_path / "locks").exists()
-
-
-def test_recovery_pagination_stops_when_aggregate_deadline_expires(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A later recovery page cannot receive a new GitHub timeout budget."""
-    module = __import__(
-        "hephaestus.automation.pipeline_github_jobs",
-        fromlist=["PipelineGitHubJobRunner"],
-    )
-    queries = __import__("hephaestus.automation.pipeline_github_queries", fromlist=["github_api"])
-    child = Mock(return_value=SimpleNamespace(stdout="[]", stderr="", returncode=0))
-
-    def fetch_comments(
-        _issue_number: int, *, owner: str, name: str, call: object
-    ) -> list[dict[str, object]]:
-        del owner, name
-        call(["api", "page-1"])  # type: ignore[operator]
-        now[0] = 11.0
-        call(["api", "page-2"])  # type: ignore[operator]
-        return []
-
-    monkeypatch.setattr(module, "PipelineGitHub", partial(PipelineGitHub, command_runner=child))
-    monkeypatch.setattr(queries.github_api, "_fetch_issue_comments_paginated", fetch_comments)
-    now = [1.0]
-    monkeypatch.setattr("hephaestus.automation.operation_deadlines.time.monotonic", lambda: now[0])
-
-    with pytest.raises(CommentJournalReadError, match="deadline"):
-        module.PipelineGitHubJobRunner("org", False).run(
-            GitHubJob("repo", tmp_path.resolve(), _recovery_request(10.0), "recover")
-        )
-
-    assert child.call_count == 1

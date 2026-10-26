@@ -492,8 +492,6 @@ def test_linux_preflight_requires_existing_runtime_image_and_retained_quota_owne
     )
     receipt = PyxisQuotaBackend(
         image=tmp_path / "image.sqsh",
-        image_sha256="a" * 64,
-        authority=tmp_path / "authority.json",
         quota_root=quota_root,
         runtime_available=runtime,
         execution_boundary_id="test-boundary",
@@ -504,11 +502,7 @@ def test_linux_preflight_requires_existing_runtime_image_and_retained_quota_owne
         image.assert_not_called()
         quota.assert_not_called()
     else:
-        image.assert_called_once_with(
-            tmp_path / "image.sqsh",
-            expected_sha256="a" * 64,
-            provenance=tmp_path / "authority.json",
-        )
+        image.assert_called_once_with(tmp_path / "image.sqsh")
         if fault == "image":
             quota.assert_not_called()
         else:

@@ -5,21 +5,15 @@ Test issue classification, repository GitHub snapshots, and queue source entries
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation import state_labels
-from hephaestus.automation.implementation_go_audit_receipt import (
-    PendingImplementationGoAudit,
-    PendingReviewFindingJournal,
-)
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
@@ -33,15 +27,11 @@ from hephaestus.automation.pipeline.seeding import (
     seed_issue_from_github,
 )
 from hephaestus.automation.pipeline_github import PipelineGitHub
-from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import (
-    ATHENA_FINALIZED_PLAN_LABEL,
     STATE_BLOCKED,
-    STATE_IMPLEMENTATION_BLOCKED,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
-    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
@@ -51,13 +41,11 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
 def _finalized_body() -> str:
-    placeholder = (
+    return (
         "## Why\n\nUse the reviewed implementation plan.\n\n"
         f"<!-- athena:finalize-plan R={'a' * 64} P=123456789:{'b' * 64} "
-        f"V=987654321:{'c' * 64} F=<F> -->"
+        f"V=987654321:{'c' * 64} F={'d' * 64} -->"
     )
-    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
-    return placeholder.replace("F=<F>", f"F={digest}")
 
 
 def _facts(
@@ -140,104 +128,27 @@ class TestClassifyIssue:
         assert stage is StageName.PLANNING
         assert "requirements recovery" in reason
 
-    def test_finalized_plan_without_evidence_routes_to_authentication(self) -> None:
+    def test_finalized_plan_routes_to_planning(self) -> None:
         stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=_finalized_body()))
 
         assert stage is StageName.PLANNING
-        assert "authentication" in reason
+        assert "finalized plan" in reason
 
-    def test_indented_invalid_finalization_cannot_use_stale_plan_go(self) -> None:
-        body = _finalized_body().replace(
-            "<!-- athena:finalize-plan ",
-            "  <!-- athena:finalize-plan ",
-        )
-
-        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
-
-        assert stage is StageName.PLANNING
-        assert "requirements recovery" in reason
-
-    def test_invalid_backtick_fence_cannot_hide_claim_from_stale_plan_go(self) -> None:
-        marker = _finalized_body().splitlines()[-1]
-        body = f"```bad`info\n  {marker}\n```"
-
-        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
-
-        assert stage is StageName.PLANNING
-        assert "requirements recovery" in reason
-
-    def test_list_fence_cannot_hide_dedented_claim_from_stale_plan_go(self) -> None:
-        marker = _finalized_body().splitlines()[-1]
-        body = f"- example\n\n  ```text\n  fenced text\n{marker}"
-
-        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
-
-        assert stage is StageName.PLANNING
-        assert "requirements recovery" in reason
-
-    def test_unicode_separator_cannot_hide_claim_from_stale_plan_go(self) -> None:
-        marker = _finalized_body().splitlines()[-1]
-        body = f"prefix\u2028same CommonMark line\n{marker}"
-
-        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
-
-        assert stage is StageName.PLANNING
-        assert "requirements recovery" in reason
-
-    def test_nested_raw_html_marker_invalidates_finalized_epoch_evidence(self) -> None:
-        placeholder = (
-            "<!--\n"
-            f"<!-- athena:finalize-plan R={'a' * 64} P=123456789:{'b' * 64} "
-            f"V=987654321:{'c' * 64} F=<F> -->\n"
-            "-->"
-        )
-        digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
-        body = placeholder.replace("F=<F>", f"F={digest}")
-
+    def test_finalized_plan_with_plan_go_routes_to_planning(self) -> None:
         stage, reason = classify_issue(
             _facts(
-                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
-                body=body,
-            )
-        )
-
-        assert stage is StageName.PLANNING
-        assert "finalized planning epoch changed" in reason
-
-    def test_shared_plan_review_comment_invalidates_finalized_epoch_evidence(self) -> None:
-        placeholder = (
-            "## Why\n\nPreserve independently reviewed authority.\n\n"
-            f"<!-- athena:finalize-plan R={'a' * 64} P=123456789:{'b' * 64} "
-            f"V=123456789:{'c' * 64} F=<F> -->"
-        )
-        digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
-        body = placeholder.replace("F=<F>", f"F={digest}")
-
-        stage, reason = classify_issue(
-            _facts(
-                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
-                body=body,
-            )
-        )
-
-        assert stage is StageName.PLANNING
-        assert "finalized planning epoch changed" in reason
-
-    def test_finalized_plan_with_evidence_routes_to_no_model_authentication(self) -> None:
-        stage, reason = classify_issue(
-            _facts(
-                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                labels={STATE_PLAN_GO},
                 body=_finalized_body(),
             )
         )
 
         assert stage is StageName.PLANNING
-        assert "authentication" in reason
+        assert "finalized plan" in reason
 
-    def test_finalized_plan_with_open_pr_still_routes_to_authentication(self) -> None:
+    def test_finalized_plan_with_open_pr_still_routes_to_planning(self) -> None:
         stage, reason = classify_issue(
             _facts(
-                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                labels={STATE_PLAN_GO},
                 body=_finalized_body(),
                 pr_number=88,
                 pr_is_open=True,
@@ -246,48 +157,18 @@ class TestClassifyIssue:
         )
 
         assert stage is StageName.PLANNING
-        assert "authentication" in reason
+        assert "finalized plan" in reason
 
-    def test_finalized_plan_supersedes_blocked_only_after_planning_authentication(self) -> None:
-        stage, reason = classify_issue(_facts(labels={STATE_PLAN_BLOCKED}, body=_finalized_body()))
-
-        assert stage is StageName.PLANNING
-        assert "authentication" in reason
-
-    def test_finalized_plan_with_stale_sibling_labels_routes_to_authentication(self) -> None:
+    def test_finalized_plan_with_stale_sibling_labels_routes_to_planning(self) -> None:
         stage, reason = classify_issue(
             _facts(
-                labels={STATE_NEEDS_PLAN, STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                labels={STATE_NEEDS_PLAN, STATE_PLAN_GO},
                 body=_finalized_body(),
             )
         )
 
         assert stage is StageName.PLANNING
-        assert "authentication" in reason
-
-    def test_removed_finalized_marker_invalidates_stale_plan_go(self) -> None:
-        stage, reason = classify_issue(
-            _facts(
-                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
-                body="## Revised requirements\n\nThe behavior materially changed.",
-            )
-        )
-
-        assert stage is StageName.PLANNING
-        assert "finalized planning epoch changed" in reason
-
-    def test_drifted_finalized_marker_with_open_pr_still_routes_to_recovery(self) -> None:
-        stage, reason = classify_issue(
-            _facts(
-                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
-                body=f"{_finalized_body()}\nchanged",
-                pr_number=88,
-                pr_is_open=True,
-            )
-        )
-
-        assert stage is StageName.PLANNING
-        assert "finalized planning epoch changed" in reason
+        assert "finalized plan" in reason
 
     @pytest.mark.parametrize(
         ("pr_number", "pr_is_open", "pr_has_implementation_go"),
@@ -329,26 +210,6 @@ class TestClassifyIssue:
         stage, reason = classify_issue(_facts(labels={STATE_SKIP, STATE_PLAN_GO}))
         assert stage is None
         assert STATE_SKIP in reason
-
-    def test_plan_blocked_is_excluded_until_external_input_arrives(self) -> None:
-        stage, reason = classify_issue(_facts(labels={state_labels.STATE_PLAN_BLOCKED}))
-
-        assert stage is None
-        assert state_labels.STATE_PLAN_BLOCKED in reason
-
-    def test_plan_blocked_cannot_be_revived_by_comment_text(self) -> None:
-        stage, reason = classify_issue(_facts(labels={state_labels.STATE_PLAN_BLOCKED}))
-
-        assert stage is None
-        assert "external intervention" in reason
-
-    def test_implementation_blocked_is_a_restart_latch(self) -> None:
-        """A blocked implementation is excluded without plan-state loss."""
-        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO, STATE_IMPLEMENTATION_BLOCKED}))
-
-        assert stage is None
-        assert STATE_IMPLEMENTATION_BLOCKED in reason
-        assert STATE_PLAN_GO not in reason
 
     def test_pr_merged_finished(self) -> None:
         """Merged PR is genuinely finished (pass, idempotent) — NOT an exclusion."""
@@ -520,7 +381,7 @@ _STATE_LABEL_SETS: tuple[frozenset[str], ...] = (
     frozenset({STATE_IMPLEMENTATION_GO}),
     frozenset({STATE_SKIP}),
     frozenset({STATE_SKIP, STATE_PLAN_GO}),
-    frozenset({STATE_IMPLEMENTATION_BLOCKED, STATE_PLAN_GO}),
+    frozenset({STATE_BLOCKED, STATE_PLAN_GO}),
     frozenset({STATE_NEEDS_PLAN, STATE_IMPLEMENTATION_GO}),  # contradictory
 )
 _PR_STATES: tuple[dict[str, Any], ...] = (
@@ -554,7 +415,7 @@ class TestClassificationIsStageNameSSOT:
                     for label in labels
                     if label in {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}
                 }
-                if STATE_SKIP in labels or STATE_IMPLEMENTATION_BLOCKED in labels or len(known) > 1:
+                if STATE_SKIP in labels or STATE_BLOCKED in labels or len(known) > 1:
                     assert stage is None
                 else:
                     assert stage is not None
@@ -637,9 +498,6 @@ class TestSeedIssueFetchLayer:
                     STATE_IMPLEMENTATION_NO_GO in implementation_labels,
                 ),
             ),
-            patch.object(github, "pending_implementation_go_audit", return_value=None),
-            patch.object(github, "pending_review_finding_journal", return_value=None),
-            patch.object(github, "read_review_rebase_record", return_value=None),
         ):
             return seed_issue_from_github(issue, github)
 
@@ -745,158 +603,6 @@ class TestSeedIssueFetchLayer:
         facts = self._seed(101, [STATE_NEEDS_PLAN], [], authority_sanitized=True)
 
         assert facts.authority_sanitized is True
-
-    def test_blocked_comment_without_blocked_label_cannot_control_restart(self) -> None:
-        """Seeding never infers BLOCKED from review prose after a label-write failure."""
-        github = MagicMock()
-        github.gh_issue_json.return_value = {
-            "number": 102,
-            "title": "A task",
-            "body": "",
-            "state": "OPEN",
-            "labels": [{"name": STATE_NEEDS_PLAN}],
-            "authoritySanitized": True,
-        }
-        github.issue_comments.side_effect = AssertionError("comments are not state authority")
-        github.find_pr_for_issue.return_value = None
-        github.find_merged_pr_for_issue.return_value = None
-
-        facts = seed_issue_from_github(102, github)
-        stage, _ = classify_issue(facts)
-
-        assert stage is StageName.PLANNING
-        assert STATE_PLAN_BLOCKED not in facts.labels
-        assert facts.authority_sanitized is True
-        github.issue_comments.assert_not_called()
-
-    def test_pending_go_audit_receipt_routes_restart_back_to_pr_review(self) -> None:
-        """A durable receipt outranks the GO label until publication completes."""
-
-        class RestartGitHub:
-            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
-                return {
-                    "number": issue_number,
-                    "title": "A task",
-                    "body": "",
-                    "state": "OPEN",
-                    "labels": [{"name": STATE_PLAN_GO}],
-                }
-
-            def find_pr_for_issue(self, issue_number: int) -> int:
-                del issue_number
-                return 44
-
-            def find_merged_pr_for_issue(self, issue_number: int) -> None:
-                del issue_number
-                return None
-
-            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
-                del pr_number
-                return True, False
-
-            def pending_implementation_go_audit(
-                self, pr_number: int
-            ) -> PendingImplementationGoAudit:
-                return PendingImplementationGoAudit(
-                    pr_number=pr_number,
-                    head_sha="a" * 40,
-                    audit=ReviewAudit("A", "clean", (), "", valid=True, verdict="GO"),
-                )
-
-            def read_review_rebase_record(self, pr_number: int) -> None:
-                """Return an explicit absence of retained rebase evidence."""
-                assert pr_number == 44
-                return None
-
-        facts = seed_issue_from_github(102, RestartGitHub())
-        entry = seed_entry_from_facts(facts)
-
-        assert entry.stage is StageName.PR_REVIEW
-        assert entry.pending_implementation_go_audit is not None
-        assert entry.pending_implementation_go_label_confirmed is True
-
-    def test_invalid_go_audit_receipt_routes_stale_go_label_back_to_pr_review(self) -> None:
-        """An invalid audit cannot let a retained GO label reach merge wait."""
-
-        class RestartGitHub:
-            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
-                return {
-                    "number": issue_number,
-                    "title": "A task",
-                    "body": "",
-                    "state": "OPEN",
-                    "labels": [{"name": STATE_PLAN_GO}],
-                }
-
-            def find_pr_for_issue(self, issue_number: int) -> int:
-                del issue_number
-                return 44
-
-            def find_merged_pr_for_issue(self, issue_number: int) -> None:
-                del issue_number
-                return None
-
-            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
-                del pr_number
-                return True, False
-
-            def pending_implementation_go_audit(
-                self, pr_number: int
-            ) -> PendingImplementationGoAudit:
-                return PendingImplementationGoAudit(
-                    pr_number=pr_number,
-                    head_sha="a" * 40,
-                    audit=ReviewAudit(
-                        grade=None,
-                        summary="Invalid audit requires a fresh review.",
-                        findings=(),
-                        raw_feedback="",
-                        valid=False,
-                        verdict=None,
-                    ),
-                )
-
-            def read_review_rebase_record(self, pr_number: int) -> None:
-                """Return an explicit absence of retained rebase evidence."""
-                assert pr_number == 44
-                return None
-
-        facts = seed_issue_from_github(102, RestartGitHub())
-        entry = seed_entry_from_facts(facts)
-
-        assert entry.stage is StageName.PR_REVIEW
-        assert entry.pending_implementation_go_audit is not None
-        assert entry.pending_implementation_go_audit.audit.valid is False
-
-    def test_finding_journal_is_recovered_for_the_next_review(self) -> None:
-        """Restart seeding keeps exact finding outcomes for the next audit."""
-        record: dict[str, object] = {
-            "finding_id": "f" * 64,
-            "source_head": "a" * 40,
-            "severity": "minor",
-            "body": "Keep this advisory.",
-            "original_anchor": {"path": "a.py", "line": 1, "side": "RIGHT"},
-            "final_anchor": None,
-            "status": "published",
-            "surface": "audit",
-            "reason": None,
-        }
-        github = FakeStageGitHub(
-            labels=[STATE_PLAN_GO],
-            open_pr=44,
-            pr_impl_state=(False, True),
-        )
-        github.pending_finding_journals[44] = PendingReviewFindingJournal(
-            pr_number=44,
-            head_sha="a" * 40,
-            finding_records=(record,),
-        )
-
-        entry = seed_entry_from_facts(seed_issue_from_github(102, github))
-
-        assert entry.stage is StageName.PR_REVIEW
-        assert entry.pending_review_finding_journal is not None
-        assert entry.pending_review_finding_journal.finding_records == (record,)
 
 
 class TestSeedIssueEpicDetection:

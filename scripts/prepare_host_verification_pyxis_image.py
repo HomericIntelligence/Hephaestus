@@ -18,7 +18,6 @@ from pathlib import Path
 
 from hephaestus.automation.pipeline.host_verification_pyxis import (
     DEFAULT_HOST_VERIFICATION_PYXIS_IMAGE,
-    PYXIS_AUTHORITY_SCHEMA,
     image_sha256,
     validate_pyxis_image,
 )
@@ -157,30 +156,6 @@ def _extract_committed_context(
         raise HostVerificationImagePreparationError("committed build context is invalid") from exc
 
 
-def _authority_path(target: Path) -> Path:
-    """Return the separate host authority path for one squashfs."""
-    return target.with_suffix(".authority.json")
-
-
-def _write_private_json(path: Path, value: dict[str, str]) -> Path:
-    """Write one owner-read-only JSON file and return its temporary path."""
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(name)
-    try:
-        os.fchmod(descriptor, 0o400)
-        payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
-        view = memoryview(payload)
-        while view:
-            view = view[os.write(descriptor, view) :]
-        os.fsync(descriptor)
-    except OSError:
-        temporary.unlink(missing_ok=True)
-        raise
-    finally:
-        os.close(descriptor)
-    return temporary
-
-
 def _publish_private_image(source: Path, target: Path, expected_sha256: str) -> None:
     """Copy verified image bytes to same-parent staging and publish them."""
     parent_descriptor = -1
@@ -239,26 +214,6 @@ def _publish_private_image(source: Path, target: Path, expected_sha256: str) -> 
             Path(temporary_name).unlink(missing_ok=True)
 
 
-def _authority(
-    *,
-    image_id: str,
-    image_reference: str,
-    containerfile_sha256: str,
-    source_revision: str,
-    squashfs_sha256: str,
-) -> dict[str, str]:
-    """Return the exact independently consumed image authority."""
-    return {
-        "schema": PYXIS_AUTHORITY_SCHEMA,
-        "containerfile": str(_CONTAINERFILE),
-        "containerfile_sha256": containerfile_sha256,
-        "container_image_id": image_id,
-        "container_image_reference": image_reference,
-        "source_revision": source_revision,
-        "squashfs_sha256": squashfs_sha256,
-    }
-
-
 def prepare_image(
     *,
     repo_root: Path,
@@ -271,36 +226,13 @@ def prepare_image(
     """Build, export, and authorize one content-addressed local CI image."""
     root = repo_root.expanduser().resolve()
     target = _safe_output_path(root, output)
-    authority_path = _safe_output_path(root, _authority_path(target))
 
     if target.exists() and not rebuild:
-        if authority_path.is_symlink() or not authority_path.is_file():
-            raise HostVerificationImagePreparationError("existing image authority is unavailable")
         try:
-            value = json.loads(authority_path.read_text(encoding="utf-8"))
-            expected_sha256 = value["squashfs_sha256"]
-        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise HostVerificationImagePreparationError(
-                "existing image authority is invalid"
-            ) from exc
-        try:
-            metadata = validate_pyxis_image(
-                target, expected_sha256=expected_sha256, provenance=authority_path
-            )
+            metadata = validate_pyxis_image(target)
         except (OSError, ValueError) as exc:
-            raise HostVerificationImagePreparationError("existing image is not authorized") from exc
-        return {
-            "image": str(metadata.path),
-            "sha256": metadata.sha256,
-            "image_id": metadata.container_image_id,
-            "image_reference": metadata.container_image_reference,
-            "authority": str(authority_path),
-            "engine": "podman"
-            if metadata.container_image_reference.startswith("podman://")
-            else "docker",
-            "source_revision": metadata.source_revision,
-            "reused": True,
-        }
+            raise HostVerificationImagePreparationError("existing image is unusable") from exc
+        return {"image": str(metadata.path), "sha256": metadata.sha256, "reused": True}
 
     _regular_path(root, _CONTAINERFILE)
     if (root / "ci").is_symlink():
@@ -351,35 +283,20 @@ def prepare_image(
             if stream.read(4) != b"hsqs":
                 raise HostVerificationImagePreparationError("Enroot image is not squashfs")
         digest = image_sha256(temporary_image)
-        authority = _authority(
-            image_id=image_id,
-            image_reference=source_uri,
-            containerfile_sha256=containerfile_sha256,
-            source_revision=revision,
-            squashfs_sha256=digest,
+        _publish_private_image(temporary_image, target, digest)
+        parent_descriptor = os.open(
+            target.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
         )
-        temporary_authority = _write_private_json(authority_path, authority)
         try:
-            _publish_private_image(temporary_image, target, digest)
-            os.replace(temporary_authority, authority_path)
-            parent_descriptor = os.open(
-                target.parent,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-            )
-            try:
-                os.fsync(parent_descriptor)
-            finally:
-                os.close(parent_descriptor)
+            os.fsync(parent_descriptor)
         finally:
-            temporary_authority.unlink(missing_ok=True)
+            os.close(parent_descriptor)
 
-    metadata = validate_pyxis_image(target, expected_sha256=digest, provenance=authority_path)
+    metadata = validate_pyxis_image(target)
     return {
         "image": str(metadata.path),
         "sha256": metadata.sha256,
-        "image_id": metadata.container_image_id,
-        "image_reference": metadata.container_image_reference,
-        "authority": str(authority_path),
         "engine": selected_engine,
         "source_revision": revision,
         "reused": False,

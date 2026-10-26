@@ -117,8 +117,6 @@ def test_writer_creation_stops_while_its_handoff_lock_is_held(
             yield
 
     monkeypatch.setattr(implementation_writer, "file_lock", observed_lock)
-    monkeypatch.setattr(pool, "_recover_pretest_candidate", lambda *args: None)
-    monkeypatch.setattr(pool, "_recover_prepared_remediation_worktree", lambda *args: None)
     inner = Mock(return_value=JobResult(ok=False, error="unexpected writer execution"))
     monkeypatch.setattr(pool, "_git_create_worktree_with_handoff", inner)
     results: list[JobResult] = []

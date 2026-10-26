@@ -21,10 +21,6 @@ from hephaestus.automation.pipeline.host_verification_pyxis import (
     validate_pyxis_image,
     validate_pyxis_quota_root,
 )
-from hephaestus.automation.pipeline.stages.pr_review_receipts import (
-    _host_verification_receipt_matches,
-)
-from hephaestus.automation.pipeline.stages.pr_review_verification import _HostVerificationSpec
 from hephaestus.automation.pyxis_artifact_io import (
     CrossNodePathBinding,
     bind_cross_node_root,
@@ -43,105 +39,21 @@ def _image(tmp_path: Path, *, sidecar: bool = True) -> tuple[Path, str]:
     return image, digest
 
 
-def _authority(image: Path, digest: str, **updates: str) -> Path:
-    """Create one private host authority for an image fixture."""
+def _authority(image: Path, digest: str) -> None:
+    """Make the image fixture owner-only."""
     image.chmod(0o400)
-    payload = {
-        "schema": "hephaestus-host-verification-pyxis-v2",
-        "containerfile": "ci/Containerfile",
-        "containerfile_sha256": "c" * 64,
-        "container_image_id": "sha256:" + ("d" * 64),
-        "container_image_reference": "podman://sha256:" + ("d" * 64),
-        "source_revision": "e" * 40,
-        "squashfs_sha256": digest,
-    }
-    payload.update(updates)
-    authority = image.with_suffix(".authority.json")
-    authority.write_text(json.dumps(payload), encoding="utf-8")
-    authority.chmod(0o400)
-    return authority
 
 
-def test_validate_pyxis_image_binds_local_squashfs_to_sidecar(tmp_path: Path) -> None:
+def test_validate_pyxis_image_loads_local_squashfs(tmp_path: Path) -> None:
     """A valid local image returns its host-authorized digest and provenance."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
+    _authority(image, digest)
 
-    metadata = validate_pyxis_image(
-        image,
-        expected_sha256=digest,
-        provenance=authority,
-    )
+    metadata = validate_pyxis_image(image)
 
     assert metadata.path == image.resolve()
     assert metadata.sha256 == digest
     assert metadata.container_runtime == "pyxis"
-    assert metadata.container_image_id == "sha256:" + ("d" * 64)
-    assert metadata.source_revision == "e" * 40
-
-
-def test_validate_pyxis_image_rejects_self_attested_sidecar(tmp_path: Path) -> None:
-    """An image and adjacent digest file are not independent authority."""
-    image, _ = _image(tmp_path)
-
-    with pytest.raises(PyxisImageValidationError, match="authority"):
-        validate_pyxis_image(image)
-
-
-def test_validate_pyxis_image_rejects_forged_image_and_sidecar_pair(tmp_path: Path) -> None:
-    """A forged pair cannot replace the separately configured expected digest."""
-    image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
-
-    with pytest.raises(PyxisImageValidationError, match="expected digest"):
-        validate_pyxis_image(
-            image,
-            expected_sha256="f" * 64,
-            provenance=authority,
-        )
-
-
-def test_validate_pyxis_image_rejects_writable_authority(tmp_path: Path) -> None:
-    """A group-writable authority cannot grant execution permission."""
-    image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
-    authority.chmod(0o620)
-
-    with pytest.raises(PyxisImageValidationError, match="permissions"):
-        validate_pyxis_image(
-            image,
-            expected_sha256=digest,
-            provenance=authority,
-        )
-
-
-def test_validate_pyxis_image_rejects_wrong_authority_owner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Authority must belong to the effective host user."""
-    image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
-    real_fstat = os.fstat
-    authority_inode = authority.stat().st_ino
-
-    def wrong_owner(descriptor: int) -> os.stat_result:
-        result = real_fstat(descriptor)
-        if result.st_ino != authority_inode:
-            return result
-        values = list(result)
-        values[4] = result.st_uid + 1
-        return os.stat_result(values)
-
-    monkeypatch.setattr(
-        "hephaestus.automation.pyxis_artifact_io.os.fstat",
-        wrong_owner,
-    )
-    with pytest.raises(PyxisImageValidationError, match="owner"):
-        validate_pyxis_image(
-            image,
-            expected_sha256=digest,
-            provenance=authority,
-        )
 
 
 def test_stage_verified_pyxis_image_uses_content_addressed_read_only_bytes(
@@ -149,14 +61,10 @@ def test_stage_verified_pyxis_image_uses_content_addressed_read_only_bytes(
 ) -> None:
     """The dispatched image is a private copy with the authorized digest."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
+    _authority(image, digest)
     stage_root = tmp_path / "stage"
     stage_root.mkdir(mode=0o700)
-    metadata = validate_pyxis_image(
-        image,
-        expected_sha256=digest,
-        provenance=authority,
-    )
+    metadata = validate_pyxis_image(image)
 
     staged = stage_verified_pyxis_image(metadata, stage_root)
     try:
@@ -171,14 +79,10 @@ def test_stage_verified_pyxis_image_uses_content_addressed_read_only_bytes(
 def test_stage_verified_pyxis_image_reuses_verified_digest_target(tmp_path: Path) -> None:
     """A retry reuses an unchanged private digest target."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
+    _authority(image, digest)
     stage_root = tmp_path / "stage"
     stage_root.mkdir(mode=0o700)
-    metadata = validate_pyxis_image(
-        image,
-        expected_sha256=digest,
-        provenance=authority,
-    )
+    metadata = validate_pyxis_image(image)
 
     first = stage_verified_pyxis_image(metadata, stage_root)
     second = stage_verified_pyxis_image(metadata, stage_root)
@@ -197,17 +101,13 @@ def test_stage_verified_pyxis_image_preserves_conflicting_digest_target(
 ) -> None:
     """A conflicting existing target fails closed and stays intact."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
+    _authority(image, digest)
     stage_root = tmp_path / "stage"
     stage_root.mkdir(mode=0o700)
     target = stage_root / f"sha256-{digest}.sqsh"
     target.write_bytes(b"conflict")
     target.chmod(0o400)
-    metadata = validate_pyxis_image(
-        image,
-        expected_sha256=digest,
-        provenance=authority,
-    )
+    metadata = validate_pyxis_image(image)
 
     with pytest.raises(PyxisImageValidationError, match="staging"):
         stage_verified_pyxis_image(metadata, stage_root)
@@ -220,15 +120,11 @@ def test_stage_verified_pyxis_image_rejects_root_substitution(
 ) -> None:
     """A replaced staging root cannot redirect a content-addressed write."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
+    _authority(image, digest)
     stage_root = tmp_path / "stage"
     moved_root = tmp_path / "moved-stage"
     stage_root.mkdir(mode=0o700)
-    metadata = validate_pyxis_image(
-        image,
-        expected_sha256=digest,
-        provenance=authority,
-    )
+    metadata = validate_pyxis_image(image)
     real_open = os.open
     substituted = False
 
@@ -265,12 +161,8 @@ def test_stage_verified_pyxis_image_rejects_substitution_after_validation(
 ) -> None:
     """Changed source bytes fail before the content-addressed image dispatch."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
-    metadata = validate_pyxis_image(
-        image,
-        expected_sha256=digest,
-        provenance=authority,
-    )
+    _authority(image, digest)
+    metadata = validate_pyxis_image(image)
     image.chmod(0o600)
     image.write_bytes(b"hsqs" + b"substitute")
     image.chmod(0o400)
@@ -287,11 +179,11 @@ def test_staged_image_binding_rejects_post_staging_replacement(
 ) -> None:
     """The retained binding rejects a leaf or root swap before launch."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
+    _authority(image, digest)
     stage_root = tmp_path / "stage"
     stage_root.mkdir(mode=0o700)
     staged = stage_verified_pyxis_image(
-        validate_pyxis_image(image, expected_sha256=digest, provenance=authority),
+        validate_pyxis_image(image),
         stage_root,
     )
     binding = staged.launch_binding
@@ -313,14 +205,6 @@ def test_staged_image_binding_rejects_post_staging_replacement(
         binding.close()
 
 
-def test_validate_pyxis_image_rejects_missing_sidecar(tmp_path: Path) -> None:
-    """An image without its host provenance fails closed."""
-    image, _ = _image(tmp_path, sidecar=False)
-
-    with pytest.raises(PyxisImageValidationError, match="authority"):
-        validate_pyxis_image(image)
-
-
 def test_validate_pyxis_image_rejects_mutable_symlink(tmp_path: Path) -> None:
     """A symlink cannot select a mutable image after validation."""
     image, _ = _image(tmp_path)
@@ -328,11 +212,7 @@ def test_validate_pyxis_image_rejects_mutable_symlink(tmp_path: Path) -> None:
     link.symlink_to(image)
 
     with pytest.raises(PyxisImageValidationError, match="regular"):
-        validate_pyxis_image(
-            link,
-            expected_sha256="f" * 64,
-            provenance=tmp_path / "authority.json",
-        )
+        validate_pyxis_image(link)
 
 
 def test_validate_pyxis_image_rejects_path_substitution_after_open(
@@ -340,7 +220,7 @@ def test_validate_pyxis_image_rejects_path_substitution_after_open(
 ) -> None:
     """A replacement after the image opens cannot change the verified path."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
+    _authority(image, digest)
     replacement = tmp_path / "replacement.sqsh"
     replacement.write_bytes(image.read_bytes())
     replacement.chmod(0o400)
@@ -367,38 +247,13 @@ def test_validate_pyxis_image_rejects_path_substitution_after_open(
     )
 
     with pytest.raises(PyxisImageValidationError, match="changed"):
-        validate_pyxis_image(
-            image,
-            expected_sha256=digest,
-            provenance=authority,
-        )
+        validate_pyxis_image(image)
 
 
 def test_validate_pyxis_image_rejects_registry_uri(tmp_path: Path) -> None:
     """The worker accepts only a local filesystem image path."""
     with pytest.raises(PyxisImageValidationError, match="local"):
-        validate_pyxis_image(
-            Path("docker://registry.example/image:latest"),
-            expected_sha256="f" * 64,
-            provenance=tmp_path / "authority.json",
-        )
-
-
-def test_validate_pyxis_image_rejects_digest_mismatch(tmp_path: Path) -> None:
-    """A changed image cannot reuse an old digest sidecar."""
-    image, _ = _image(tmp_path)
-    digest = hashlib.sha256(image.read_bytes()).hexdigest()
-    authority = _authority(image, digest)
-    image.chmod(0o600)
-    image.write_bytes(b"hsqs" + b"changed")
-    image.chmod(0o400)
-
-    with pytest.raises(PyxisImageValidationError, match="digest"):
-        validate_pyxis_image(
-            image,
-            expected_sha256=digest,
-            provenance=authority,
-        )
+        validate_pyxis_image(Path("docker://registry.example/image:latest"))
 
 
 def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
@@ -406,7 +261,7 @@ def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
 ) -> None:
     """Pyxis receives fixed isolation flags and explicit mount modes."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
+    _authority(image, digest)
     source = tmp_path / "source"
     metadata = tmp_path / "metadata.git"
     scratch = tmp_path / "scratch"
@@ -415,11 +270,7 @@ def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
         path.mkdir(parents=True)
 
     command = build_pyxis_srun_command(
-        image=validate_pyxis_image(
-            image,
-            expected_sha256=digest,
-            provenance=authority,
-        ),
+        image=validate_pyxis_image(image),
         source=source,
         git_metadata=metadata,
         scratch=scratch,
@@ -475,14 +326,7 @@ def test_build_pyxis_srun_command_uses_read_only_source_and_no_network(
     assert f"{logs.resolve()}:{(source / 'pi-smoke-logs').resolve()}:rw" in mounts
     assert command[command.index("/usr/bin/env") + 1] == "-i"
     assert "/usr/local/bin/uv" in command
-    assert (
-        digest
-        in validate_pyxis_image(
-            image,
-            expected_sha256=digest,
-            provenance=authority,
-        ).sha256
-    )
+    assert digest in validate_pyxis_image(image).sha256
 
 
 def test_validate_pyxis_quota_root_requires_finite_private_filesystem(
@@ -650,41 +494,6 @@ def test_build_pyxis_environment_prepares_writable_runtime_paths(tmp_path: Path)
     assert environment["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
 
 
-def test_linux_pyxis_receipt_requires_exact_image_digest(tmp_path: Path) -> None:
-    """Only a passed Linux receipt with local image evidence can match."""
-    spec = _HostVerificationSpec(
-        changed_path=None,
-        argv=("uv", "run", "pytest", "tests/unit"),
-        descr="review_python_tests",
-    )
-    receipt = {
-        "argv": list(spec.argv),
-        "head_sha": "a" * 40,
-        "immutable_source": True,
-        "ok": True,
-        "platform": "linux",
-        "status": "passed",
-        "container_runtime": "pyxis",
-        "container_image": str((tmp_path / f"sha256-{'b' * 64}.sqsh").resolve()),
-        "container_image_sha256": "b" * 64,
-        "container_image_id": "sha256:" + ("c" * 64),
-        "container_image_reference": "podman://sha256:" + ("c" * 64),
-        "containerfile_sha256": "d" * 64,
-        "container_source_revision": "e" * 40,
-        "stdout_tail": "",
-        "stderr_tail": "",
-    }
-
-    assert _host_verification_receipt_matches(receipt, spec, "a" * 40)
-    assert not _host_verification_receipt_matches(
-        {**receipt, "container_image_sha256": ""}, spec, "a" * 40
-    )
-    assert not _host_verification_receipt_matches(
-        {**receipt, "container_image": "docker://image"}, spec, "a" * 40
-    )
-    assert not _host_verification_receipt_matches({**receipt, "status": "skipped"}, spec, "a" * 40)
-
-
 @pytest.mark.parametrize(
     "missing",
     [
@@ -767,9 +576,8 @@ def test_pyxis_placement_adds_only_explicit_scheduler_pair(tmp_path: Path, node:
     with pytest.raises(FrozenInstanceError):
         placement.node = "other"  # type: ignore[misc]
     image, digest = _image(tmp_path)
-    metadata = validate_pyxis_image(
-        image, expected_sha256=digest, provenance=_authority(image, digest)
-    )
+    _authority(image, digest)
+    metadata = validate_pyxis_image(image)
     build_command = partial(
         build_pyxis_srun_command,
         image=metadata,
@@ -795,9 +603,9 @@ def test_pyxis_placement_adds_only_explicit_scheduler_pair(tmp_path: Path, node:
 def test_execution_node_resource_limits(tmp_path: Path, low_hard_limit: bool) -> None:
     """The child receives hard ceilings, or does not start if setup fails."""
     image, digest = _image(tmp_path)
-    authority = _authority(image, digest)
+    _authority(image, digest)
     command = build_pyxis_srun_command(
-        image=validate_pyxis_image(image, expected_sha256=digest, provenance=authority),
+        image=validate_pyxis_image(image),
         source=tmp_path,
         git_metadata=tmp_path,
         scratch=tmp_path,

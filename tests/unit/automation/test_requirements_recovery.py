@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-from collections.abc import Callable
 
 import pytest
 
@@ -16,22 +14,18 @@ from hephaestus.automation.protocol import (
 from hephaestus.automation.requirements_recovery import (
     ATHENA_FINALIZED_PLAN_PREFIX,
     HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
-    RecoveryCommentIdentityError,
+    RECOVERED_REQUIREMENTS_MARKER,
     RecoveryDisposition,
     RecoveryVerdict,
-    build_recovery_prompt,
-    build_recovery_review_prompt,
-    evidence_digest,
     has_contaminated_issue_body,
+    has_finalized_plan_candidate,
     is_semantic_disposition_candidate,
     parse_recovered_requirements,
-    parse_recovery_provenance,
     parse_recovery_review,
-    recovered_requirements_for_context,
+    recovered_requirements,
     recovered_requirements_json,
     render_recovered_requirements,
     select_recovery_comment,
-    verified_finalized_plan,
 )
 from hephaestus.automation.review_journal import HISTORY_MARKER
 
@@ -41,12 +35,9 @@ def _finalized_body(
     *,
     prefix: str = HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
 ) -> str:
-    """Return a body carrying a correctly self-bound finalized-plan marker."""
-    placeholder = (
-        f"{content}\n\n{prefix}R={'a' * 64} P=123456789:{'b' * 64} V=987654321:{'c' * 64} F=<F> -->"
-    )
-    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
-    return placeholder.replace("F=<F>", f"F={digest}")
+    """Return a body carrying a finalized-plan marker line."""
+    seal = f"R={'a' * 64} P=123456789:{'b' * 64} V=987654321:{'c' * 64} F=x -->"
+    return f"{content}\n\n{prefix}{seal}"
 
 
 @pytest.mark.parametrize(
@@ -75,224 +66,30 @@ def test_noncanonical_or_nonleading_markers_are_not_contamination(body: str) -> 
     assert has_contaminated_issue_body(body) is False
 
 
-def test_verified_shared_finalized_body_is_not_recovered_as_generated_requirements() -> None:
-    body = _finalized_body()
-
-    identity = verified_finalized_plan(body)
-
-    assert identity is not None
-    assert identity.requirements_identity == "a" * 64
-    assert identity.plan_identity == f"123456789:{'b' * 64}"
-    assert identity.review_identity == f"987654321:{'c' * 64}"
-    assert (
-        identity.final_body_digest
-        == hashlib.sha256(
-            body.replace(f"F={identity.final_body_digest}", "F=<F>").encode("utf-8")
-        ).hexdigest()
-    )
-    assert has_contaminated_issue_body(body) is False
-
-
-def test_shared_homeric_intelligence_finalized_body_is_recognized() -> None:
-    """Finalized output from the shared planning contract remains sealed evidence."""
-    assert HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX == "<!-- HomericIntelligence:finalize-plan "
-    body = _finalized_body()
-
-    assert verified_finalized_plan(body) is not None
-    assert has_contaminated_issue_body(body) is False
-
-
-def test_legacy_athena_finalized_body_remains_recognized() -> None:
-    """Existing sealed Athena bodies remain valid through the one-write migration."""
-    body = _finalized_body(prefix=ATHENA_FINALIZED_PLAN_PREFIX)
-
-    assert verified_finalized_plan(body) is not None
-    assert has_contaminated_issue_body(body) is False
-
-
-def test_self_checksummed_role_names_are_not_comment_identities() -> None:
-    """Artifact roles cannot stand in for exact GitHub issue-comment IDs."""
-    placeholder = (
-        "## Why\n\nPreserve the approved behavior.\n\n"
-        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} "
-        f"P=plan-comment:{'b' * 64} V=review-comment:{'c' * 64} F=<F> -->"
-    )
-    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
-    body = placeholder.replace("F=<F>", f"F={digest}")
-
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is True
-
-
-@pytest.mark.parametrize("indent", [" ", "  ", "   "])
-def test_indented_finalized_claim_fails_closed(indent: str) -> None:
-    """Top-level Markdown indentation cannot hide an invalid finalization claim."""
-    body = _finalized_body().replace(
-        HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
-        indent + HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
-    )
-
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is True
-
-
-def test_four_space_indented_finalized_example_is_not_top_level_authority() -> None:
-    body = _finalized_body().replace(
-        HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
-        "    " + HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
-    )
-
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is False
-
-
-def test_invalid_backtick_fence_info_cannot_hide_finalized_claim() -> None:
-    marker = _finalized_body().splitlines()[-1]
-    body = f"```bad`info\n  {marker}\n```"
-
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is True
-
-
-def test_list_child_fence_cannot_hide_dedented_finalized_claim() -> None:
-    marker = _finalized_body().splitlines()[-1]
-    body = f"- example\n\n  ```text\n  fenced text\n{marker}"
-
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is True
-
-
-def test_finalized_marker_inside_list_is_not_top_level_authority() -> None:
-    marker = _finalized_body().splitlines()[-1]
-    body = f"- example\n\n  {marker}"
-
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is False
-
-
 @pytest.mark.parametrize(
-    "unicode_separator",
-    ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
+    "prefix", [HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX, ATHENA_FINALIZED_PLAN_PREFIX]
 )
-def test_unicode_separator_cannot_desynchronize_commonmark_line_mapping(
-    unicode_separator: str,
-) -> None:
-    marker = _finalized_body().splitlines()[-1]
-    body = f"prefix{unicode_separator}same CommonMark line\n{marker}"
+def test_finalized_body_is_recognized_and_not_contaminated(prefix: str) -> None:
+    body = _finalized_body(prefix=prefix)
 
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is True
-
-
-@pytest.mark.parametrize(
-    ("prefix", "suffix"),
-    [("<!--\n", "\n-->"), ("<script>\n", "\n</script>"), ("<div>\n", "\n</div>")],
-)
-def test_nested_raw_html_marker_is_not_standalone_authority(prefix: str, suffix: str) -> None:
-    placeholder = (
-        f"{prefix}{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} "
-        f"P=123456789:{'b' * 64} V=987654321:{'c' * 64} F=<F> -->{suffix}"
-    )
-    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
-    body = placeholder.replace("F=<F>", f"F={digest}")
-
-    assert verified_finalized_plan(body) is None
+    assert has_finalized_plan_candidate(body) is True
     assert has_contaminated_issue_body(body) is False
 
 
-def test_plan_and_review_must_reference_distinct_comments() -> None:
-    placeholder = (
-        "## Why\n\nPreserve independently reviewed authority.\n\n"
-        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} "
-        f"P=123456789:{'b' * 64} V=123456789:{'c' * 64} F=<F> -->"
-    )
-    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
-    body = placeholder.replace("F=<F>", f"F={digest}")
-
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is True
-
-
-def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> None:
-    source = "Original requirements"
-    revision = "d" * 40
-    binding = evidence_digest("repo", 17, revision, "Original title", source)
-    rendered = render_recovered_requirements(
-        source,
-        "Recovered requirements",
-        binding,
-        issue_title="Original title",
-        repository_revision=revision,
-    )
-
-    assert (
-        recovered_requirements_for_context(
-            rendered,
-            repository="repo",
-            issue_number=17,
-            issue_title="Original title",
-            source_body=source,
-            repository_revision=revision,
-        )
-        == "Recovered requirements"
-    )
-    assert (
-        recovered_requirements_for_context(
-            rendered,
-            repository="repo",
-            issue_number=17,
-            issue_title="Edited title",
-            source_body=source,
-            repository_revision=revision,
-        )
-        is None
-    )
-    assert (
-        recovered_requirements_for_context(
-            rendered,
-            repository="repo",
-            issue_number=17,
-            issue_title="Original title",
-            source_body=source,
-            repository_revision="e" * 40,
-        )
-        is None
-    )
-
-
 @pytest.mark.parametrize(
-    "mutate",
+    "wrap",
     [
-        lambda body: body + "\nLater material edit.",
-        lambda body: body.replace("R=" + "a" * 64, "R=malformed identity"),
-        lambda body: body.replace("P=123456789:" + "b" * 64, "P=<P>"),
-        lambda body: body.replace("P=123456789:" + "b" * 64, "P=" + "b" * 64),
-        lambda body: body.replace("P=123456789:", "P=plan-comment:"),
-        lambda body: body.replace("P=123456789:" + "b" * 64, "P=123456789:x"),
-        lambda body: body + "\n" + body.splitlines()[-1],
-        lambda body: body.replace("F=", "F=0", 1),
+        lambda marker: f"    {marker}",
+        lambda marker: f"- example\n\n  {marker}",
+        lambda marker: f"```text\n{marker}\n```",
+        lambda marker: f"<div>\n{marker}\n</div>",
+        lambda marker: f"Document {marker} in the guide.",
     ],
 )
-def test_invalid_or_drifted_athena_finalization_requires_recovery(
-    mutate: Callable[[str], str],
-) -> None:
-    body = mutate(_finalized_body())
+def test_marker_examples_are_not_top_level_finalization(wrap) -> None:  # type: ignore[no-untyped-def]
+    marker = _finalized_body().splitlines()[-1]
 
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is True
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        "Document <!-- athena:finalize-plan R=... P=... V=... F=... --> in the guide.",
-        "```text\n<!-- athena:finalize-plan R=x P=y V=z F=0 -->\n```",
-    ],
-)
-def test_nonsemantic_finalized_marker_example_is_ordinary_requirement_text(body: str) -> None:
-
-    assert verified_finalized_plan(body) is None
-    assert has_contaminated_issue_body(body) is False
+    assert has_finalized_plan_candidate(wrap(marker)) is False
 
 
 def test_recovery_parser_is_strict_and_typed() -> None:
@@ -553,155 +350,45 @@ def test_recovered_requirements_json_round_trips_through_the_parser() -> None:
     assert reparsed == proposal
 
 
-def test_provenance_round_trip_binds_all_three_digests() -> None:
-    source = f"{PLAN_CANONICAL_MARKER}\nOld plan"
+def test_recovered_requirements_round_trip_through_the_plain_marker() -> None:
     requirements = "## Required behavior\n\n- Keep the API stable."
-    binding = evidence_digest("repo", 17, "a" * 40, "title", source)
 
-    body = render_recovered_requirements(source, requirements, binding)
-    provenance = parse_recovery_provenance(body)
+    body = render_recovered_requirements(requirements)
 
-    assert provenance is not None
-    assert provenance.source_digest == hashlib.sha256(source.encode()).hexdigest()
-    assert provenance.requirements_digest == hashlib.sha256(requirements.encode()).hexdigest()
-    assert provenance.evidence_digest == binding
+    assert body.startswith(RECOVERED_REQUIREMENTS_MARKER)
+    assert recovered_requirements(body) == requirements
     assert has_contaminated_issue_body(body) is False
 
 
-def _recovery_body(version: int = 3) -> str:
-    """Return a correct recovery body for selector tests."""
-    body = render_recovered_requirements(
-        "source requirements",
-        "recovered requirements",
-        "b" * 64,
-        issue_title="Issue title",
-        repository_revision="c" * 40,
-    )
-    if version < 3:
-        body = render_recovered_requirements(
-            "source requirements",
-            "recovered requirements",
-            "b" * 64,
-        )
-        if version == 1:
-            body = body.replace(":v=2:", ":v=1:", 1)
-    return body
+def test_recovered_requirements_ignore_a_body_without_the_marker() -> None:
+    assert recovered_requirements("plain issue text") is None
+    assert recovered_requirements(RECOVERED_REQUIREMENTS_MARKER) is None
 
 
-def _recovery_comment(body: str, *, owned: bool = True, comment_id: int = 1) -> dict[str, object]:
-    """Return metadata shaped like a bounded issue-comment journal entry."""
-    return {"body": body, "databaseId": comment_id, "owned": owned}
-
-
-@pytest.mark.parametrize("version", [1, 2, 3])
-def test_recovery_selector_accepts_each_supported_version(version: int) -> None:
-    body = _recovery_body(version)
-    comment = _recovery_comment(body)
+def test_recovery_selector_returns_the_newest_owned_recovery_comment() -> None:
+    older = {"body": render_recovered_requirements("old"), "owned": True}
+    foreign = {"body": render_recovered_requirements("foreign"), "owned": False}
+    newest = {"body": render_recovered_requirements("new"), "owned": True}
+    unrelated = {"body": "ordinary comment", "owned": True}
 
     selected = select_recovery_comment(
-        [comment],
+        [older, newest, foreign, unrelated],
         body_of=lambda value: str(value["body"]),
         owned_of=lambda value: bool(value["owned"]),
     )
 
-    assert selected is not None
-    assert selected.comment is comment
-    assert selected.provenance.version == version
+    assert selected is newest
 
 
-def test_recovery_selector_rejects_leading_whitespace_before_marker() -> None:
-    body = "  " + _recovery_body()
-
-    with pytest.raises(RecoveryCommentIdentityError, match="byte zero"):
+def test_recovery_selector_returns_none_without_an_owned_recovery_comment() -> None:
+    assert (
         select_recovery_comment(
-            [_recovery_comment(body)],
+            [{"body": render_recovered_requirements("x"), "owned": False}],
             body_of=lambda value: str(value["body"]),
             owned_of=lambda value: bool(value["owned"]),
         )
-
-
-def test_recovery_selector_rejects_foreign_marker() -> None:
-    with pytest.raises(RecoveryCommentIdentityError, match="foreign"):
-        select_recovery_comment(
-            [_recovery_comment(_recovery_body(), owned=False)],
-            body_of=lambda value: str(value["body"]),
-            owned_of=lambda value: bool(value["owned"]),
-        )
-
-
-def test_recovery_selector_rejects_malformed_marker() -> None:
-    malformed = _recovery_body().replace(":v=3:", ":v=9:", 1)
-
-    with pytest.raises(RecoveryCommentIdentityError, match="malformed"):
-        select_recovery_comment(
-            [_recovery_comment(malformed)],
-            body_of=lambda value: str(value["body"]),
-            owned_of=lambda value: bool(value["owned"]),
-        )
-
-
-def test_recovery_selector_rejects_repeated_claims_in_one_comment() -> None:
-    first = _recovery_body()
-    second = _recovery_body().split("\n", 1)[0]
-    repeated = f"{first}\n\n{second}\n\nrepeated"
-
-    with pytest.raises(RecoveryCommentIdentityError, match="repeated"):
-        select_recovery_comment(
-            [_recovery_comment(repeated)],
-            body_of=lambda value: str(value["body"]),
-            owned_of=lambda value: bool(value["owned"]),
-        )
-
-
-def test_recovery_selector_rejects_duplicate_actor_owned_comments() -> None:
-    comments = [
-        _recovery_comment(_recovery_body(), comment_id=1),
-        _recovery_comment(_recovery_body(), comment_id=2),
-    ]
-
-    with pytest.raises(RecoveryCommentIdentityError, match="duplicate"):
-        select_recovery_comment(
-            comments,
-            body_of=lambda value: str(value["body"]),
-            owned_of=lambda value: bool(value["owned"]),
-        )
-
-
-def test_tampered_recovered_body_does_not_validate_provenance() -> None:
-    body = render_recovered_requirements("source", "requirements", "b" * 64)
-    assert parse_recovery_provenance(body.replace("requirements", "changed")) is None
-
-
-def test_prompts_bind_evidence_and_minimize_repeated_code() -> None:
-    recovery = build_recovery_prompt(
-        issue_number=17,
-        issue_title="Broken retry",
-        issue_body="Derived plan",
-        repository="acme/repo",
-        repository_revision="a" * 40,
-        evidence_binding="b" * 64,
+        is None
     )
-    review = build_recovery_review_prompt(
-        issue_number=17,
-        issue_title="Broken retry",
-        issue_body="Derived plan",
-        source_body_digest="c" * 64,
-        evidence_binding="b" * 64,
-        proposal_json=(
-            '{"disposition":"REQUIREMENTS","requirements":"Keep retry bounded.",'
-            '"reason":"Repository evidence","evidence":"Tests"}'
-        ),
-        repository="acme/repo",
-        repository_revision="a" * 40,
-    )
-
-    assert "Broken retry" in recovery
-    assert "Do not include diffs" in recovery
-    assert "minimal" in recovery.lower()
-    assert "independent" in review.lower()
-    assert "acme/repo" in review
-    assert "GO or NOGO" in review
-    assert "BLOCKED" not in review
 
 
 @pytest.mark.parametrize(

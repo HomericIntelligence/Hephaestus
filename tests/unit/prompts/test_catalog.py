@@ -38,12 +38,8 @@ def test_packaged_plan_template_renders_the_issue_number() -> None:
     """The packaged planning template interpolates its declared context."""
     rendered = PromptCatalog().render("planning/plan.j2", issue_number=99)
 
-    assert "Create an implementation plan for GitHub issue #99." in rendered
+    assert "#99" in rendered
     assert "{{ issue_number }}" not in rendered
-
-    # The worked examples remain fenced so their commands are unambiguous.
-    assert "```bash" in rendered
-    assert rendered.count("```") % 2 == 0
 
 
 def test_complete_agent_prompt_carries_the_writing_standard() -> None:
@@ -52,9 +48,7 @@ def test_complete_agent_prompt_carries_the_writing_standard() -> None:
 
     assert WRITING_STANDARD_SENTINEL in rendered
     assert rendered.startswith("## Writing standard\n\n")
-    assert rendered.index(WRITING_STANDARD_SENTINEL) < rendered.index(
-        "Create an implementation plan"
-    )
+    assert rendered.index(WRITING_STANDARD_SENTINEL) < rendered.index("plan-issue")
 
 
 def test_harness_template_replaces_only_the_matching_default(tmp_path: Path) -> None:
@@ -78,7 +72,7 @@ def test_harness_template_replaces_only_the_matching_default(tmp_path: Path) -> 
         repo_slug="owner/repo",
         worktree_path="/repo/.git/worktrees/tidy-2-fix",
     )
-    assert "You are a Myrmidon rebase-fix agent" in default_rendered
+    assert "$athena:tidy" in default_rendered
 
 
 def test_harness_can_override_a_shared_prompt_fragment(tmp_path: Path) -> None:
@@ -107,7 +101,7 @@ def test_default_catalog_has_no_implicit_override() -> None:
     rendered = PromptCatalog.current().render("planning/plan.j2", issue_number=12)
 
     assert rendered.startswith("## Writing standard\n\n")
-    assert "\nCreate an implementation plan" in rendered
+    assert "\nRun `$athena:plan-issue`" in rendered
 
 
 def test_environment_does_not_select_a_prompt_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,7 +112,7 @@ def test_environment_does_not_select_a_prompt_override(monkeypatch: pytest.Monke
     rendered = PromptCatalog.current().render("planning/plan.j2", issue_number=12)
 
     assert rendered.startswith("## Writing standard\n\n")
-    assert "\nCreate an implementation plan" in rendered
+    assert "\nRun `$athena:plan-issue`" in rendered
 
 
 def test_prompt_dir_cli_flag_selects_the_optional_override(tmp_path: Path) -> None:
@@ -154,7 +148,7 @@ def test_later_cli_parse_without_prompt_dir_resets_prior_override(tmp_path: Path
 
     rendered = PromptCatalog.current().render("planning/plan.j2", issue_number=42)
     assert rendered.startswith("## Writing standard\n\n")
-    assert "\nCreate an implementation plan" in rendered
+    assert "\nRun `$athena:plan-issue`" in rendered
 
 
 def test_from_cli_builds_a_catalog_with_the_requested_override(tmp_path: Path) -> None:
@@ -169,7 +163,7 @@ def test_from_cli_builds_a_catalog_with_the_requested_override(tmp_path: Path) -
     assert catalog.render("planning/plan.j2", issue_number=7).endswith("FACTORY 7\n")
     # The factory result must not become the ambient selection.
     ambient = PromptCatalog.current().render("planning/plan.j2", issue_number=7)
-    assert "Create an implementation plan for GitHub issue #7." in ambient
+    assert "$athena:plan-issue" in ambient
 
 
 def test_apply_writing_standard_composes_the_directive() -> None:

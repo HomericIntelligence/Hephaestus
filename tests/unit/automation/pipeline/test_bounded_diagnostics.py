@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-import json
 from collections import deque
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hephaestus.automation.github_api.diff import normalize_review_finding_records
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.stages.base import Stage
-from hephaestus.automation.pipeline.stages.pr_review_audit import PrReviewAudit
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from tests.unit.automation.pipeline.conftest import (
     FakeWorkerPool,
@@ -74,213 +71,6 @@ def _finding_record(issue: int) -> dict[str, object]:
         "surface": "inline",
         "reason": None,
     }
-
-
-def test_terminal_finding_events_stream_before_item_detail_eviction(tmp_path: Path) -> None:
-    """JSONL keeps bounded finding identities after terminal details roll over."""
-    coordinator = _coordinator(tmp_path)
-    event_log_path = tmp_path / "events.jsonl"
-
-    for issue in range(1, 5):
-        item = _finished_item(issue, passed=True)
-        item.payload["review_finding_records"] = [_finding_record(issue)]
-        coordinator.items.append(item)
-        coordinator._record_terminal_result(item)
-
-    assert [item.issue for item in coordinator.items] == [3, 4]
-    records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
-    finding_events = [record for record in records if record["event"] == "review_finding_outcome"]
-    assert [event["fields"][0]["finding_id"] for event in finding_events] == [
-        f"{issue:064x}" for issue in range(1, 5)
-    ]
-    assert [event["fields"][0]["original_anchor"]["path"] for event in finding_events] == [
-        f"file-{issue}.py" for issue in range(1, 5)
-    ]
-    assert all("body" not in event["fields"][0] for event in finding_events)
-    assert all("evidence" not in event["fields"][0] for event in finding_events)
-
-
-def test_terminal_finding_events_include_compacted_identities(tmp_path: Path) -> None:
-    """JSONL keeps the bounded identity and outcome after full-record compaction."""
-    coordinator = _coordinator(tmp_path)
-    event_log_path = tmp_path / "events.jsonl"
-    item = _finished_item(1, passed=True)
-    item.pr = 1001
-    item.payload["review_finding_records"] = []
-    item.payload["review_finding_compacted_outcomes"] = {
-        "counts": {"corrected": 0, "not_publishable": 1, "published": 0},
-        "identities": [["f" * 64, "9" * 40, "n", "b"]],
-    }
-
-    coordinator._record_terminal_result(item)
-
-    records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
-    compacted = [
-        record for record in records if record["event"] == "review_finding_compacted_outcome"
-    ]
-    assert len(compacted) == 1
-    assert compacted[0]["fields"] == [
-        {
-            "blocking": True,
-            "finding_id": "f" * 64,
-            "issue": 1,
-            "outcome": "not_publishable",
-            "pr": 1001,
-            "repo": "repo-a",
-            "source_head": "9" * 40,
-        }
-    ]
-
-
-def test_restarted_go_history_reaches_terminal_summary_and_diagnostics(tmp_path: Path) -> None:
-    """Restored pending GO history supplies terminal counters and bounded events."""
-    coordinator = _coordinator(tmp_path)
-    item = _finished_item(1, passed=True)
-    item.pr = 1001
-    item.payload["pending_implementation_go_audit_findings"] = [_finding_record(1)]
-    item.payload["pending_implementation_go_audit_compacted_outcomes"] = {
-        "counts": {"corrected": 1, "not_publishable": 0, "published": 0},
-        "identities": [["f" * 64, "9" * 40, "c", "a"]],
-    }
-
-    PrReviewAudit._restore_pending_go_finding_history(item)
-    coordinator._record_terminal_result(item)
-
-    assert coordinator._terminal_summary.review_finding_outcomes == {
-        "corrected": 1,
-        "published": 1,
-    }
-    records = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-    assert any(record["event"] == "review_finding_compacted_outcome" for record in records)
-
-
-def test_legacy_boundary_terminal_history_emits_compacted_diagnostic(tmp_path: Path) -> None:
-    """A valid old list emits an exact terminal identity after bounded conversion."""
-    low = 1
-    high = 16_384
-    legacy_record: dict[str, object] | None = None
-    while low <= high:
-        size = (low + high) // 2
-        candidate: dict[str, object] = {
-            **_finding_record(1),
-            "body": "<" * size,
-            "evidence": "e" * 1_000,
-        }
-        try:
-            normalize_review_finding_records([candidate])
-        except ValueError:
-            high = size - 1
-        else:
-            legacy_record = candidate
-            low = size + 1
-    assert legacy_record is not None
-    coordinator = _coordinator(tmp_path)
-    item = _finished_item(1, passed=True)
-    item.pr = 1001
-    item.payload["review_finding_records"] = [legacy_record]
-    item.payload["review_finding_compacted_outcomes"] = {
-        "counts": {"corrected": 0, "not_publishable": 0, "published": 0},
-        "identities": [],
-    }
-
-    coordinator._record_terminal_result(item)
-
-    records = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-    compacted = [
-        record for record in records if record["event"] == "review_finding_compacted_outcome"
-    ]
-    assert compacted[0]["fields"][0]["finding_id"] == legacy_record["finding_id"]
-
-
-def test_legacy_boundary_pending_history_emits_full_pending_diagnostic(tmp_path: Path) -> None:
-    """A maximal old pending list emits its identity without a terminal claim."""
-    low = 1
-    high = 16_384
-    legacy_record: dict[str, object] | None = None
-    while low <= high:
-        size = (low + high) // 2
-        candidate: dict[str, object] = {
-            **_finding_record(1),
-            "body": "<" * size,
-            "evidence": "e" * 1_000,
-            "final_anchor": {"path": "file-1.py", "line": 1, "side": "RIGHT"},
-            "status": "pending",
-            "surface": "inline",
-            "reason": None,
-        }
-        try:
-            normalize_review_finding_records([candidate])
-        except ValueError:
-            high = size - 1
-        else:
-            legacy_record = candidate
-            low = size + 1
-    assert legacy_record is not None
-    coordinator = _coordinator(tmp_path)
-    item = _finished_item(1, passed=False)
-    item.pr = 1001
-    item.payload["review_finding_records"] = [legacy_record]
-    item.payload["review_finding_compacted_outcomes"] = {
-        "counts": {"corrected": 0, "not_publishable": 0, "published": 0},
-        "identities": [],
-    }
-
-    coordinator._record_terminal_result(item)
-
-    records = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-    pending = [record for record in records if record["event"] == "review_finding_outcome"]
-    compacted = [
-        record for record in records if record["event"] == "review_finding_compacted_outcome"
-    ]
-    assert pending[0]["fields"][0]["finding_id"] == legacy_record["finding_id"]
-    assert pending[0]["fields"][0]["status"] == "pending"
-    assert compacted == []
-
-
-def test_coordinator_bounds_diagnostics_and_keeps_full_terminal_aggregates(
-    tmp_path: Path,
-) -> None:
-    """Metric ticks, repo contexts, and old terminal detail cannot grow with an org."""
-    coordinator = _coordinator(tmp_path)
-
-    for _ in range(5):
-        coordinator._emit_observability_tick()
-    assert len(coordinator.event_log) == 3
-    assert all(event[0] == "metrics_snapshot" for event in coordinator.event_log)
-
-    for repo in ("repo-a", "repo-b", "repo-c"):
-        coordinator._ctx_for_repo(repo)
-    assert list(coordinator._ctx_cache) == ["repo-c"]
-
-    for issue in range(1, 5):
-        item = _finished_item(issue, passed=issue != 2)
-        record = _finding_record(issue)
-        if issue == 4:
-            record.update(
-                {
-                    "final_anchor": None,
-                    "status": "not_publishable",
-                    "surface": "not_publishable",
-                    "reason": "line_not_in_diff",
-                }
-            )
-        item.payload["review_finding_records"] = [record]
-        assert coordinator._push_item(item, StageName.FINISHED, enter=True)
-        coordinator._drain_queues()
-
-    # The diagnostic rings retain only recent data, including generated metric
-    # events, while the terminal aggregate still reflects all four outcomes.
-    assert len(coordinator.event_log) == 3
-    assert len(coordinator._ctx_cache) == 1
-    assert [item.issue for item in coordinator.items] == [3, 4]
-    assert [result.reason for result in coordinator.ledger] == ["ok", "ok"]
-    assert coordinator._terminal_summary.total == 4
-    assert coordinator._terminal_summary.dispositions == {"fail": 1, "pass": 3}
-    assert coordinator._terminal_summary.review_finding_outcomes == {
-        "not_publishable": 1,
-        "published": 3,
-    }
-    assert coordinator._exit_code() == 1
 
 
 def test_coordinator_metric_policy_rejects_unknown_stage(tmp_path: Path) -> None:

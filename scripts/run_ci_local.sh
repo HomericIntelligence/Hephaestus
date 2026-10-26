@@ -22,7 +22,6 @@
 #   ./scripts/run_ci_local.sh symlinks     # repository symlink validation
 #   ./scripts/run_ci_local.sh justfile     # justfile evaluation and recipe listing
 #   ./scripts/run_ci_local.sh shellcheck   # shell static analysis
-#   ./scripts/run_ci_local.sh shell-tests  # Bats shell tests (nightly)
 #   ./scripts/run_ci_local.sh secrets      # Gitleaks repository scan
 #
 # Container engine: auto-detected (podman first, docker fallback).
@@ -689,11 +688,6 @@ run_shellcheck() {
     run_in_container shellcheck --severity=error "${files[@]}"
 }
 
-run_shell_tests() {
-    log_step "Bats shell tests"
-    run_in_container bats --recursive tests/shell
-}
-
 run_secrets() {
     log_step "Gitleaks repository scan"
     local history_args=(detect --source=. --verbose --exit-code=1)
@@ -821,9 +815,6 @@ case "${SUBSET}" in
     shellcheck)
         run_step "shellcheck" run_shellcheck
         ;;
-    shell-tests)
-        run_step "shell-tests" run_shell_tests
-        ;;
     secrets)
         run_step "secrets" run_secrets
         ;;
@@ -842,7 +833,7 @@ case "${SUBSET}" in
         ;;
     *)
         log_error "Unknown subset: ${SUBSET}"
-        log_error "Valid values: all, lint, unit, integration, cli, build, audit, sast, workflow-scan, schema, version, license, symlinks, justfile, shellcheck, shell-tests, secrets"
+        log_error "Valid values: all, lint, unit, integration, cli, build, audit, sast, workflow-scan, schema, version, license, symlinks, justfile, shellcheck, secrets"
         exit 1
         ;;
 esac

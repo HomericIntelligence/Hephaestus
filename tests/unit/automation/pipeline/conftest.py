@@ -117,7 +117,6 @@ class FakeWorkerPool:
         *,
         claim_key: str = "",
         claim_stage: str = "",
-        remediation_owner_id: int | None = None,
     ) -> JobHandle:
         """Execute *job* inline and put its completion on the queue.
 
@@ -283,9 +282,6 @@ class FakeWorkerPool:
         """Set the bounded channel's control signals."""
         self._wakeup = wakeup
         self._saturation = saturation
-
-    def discard_remediation_pretest_successes(self, claim_key: str, *, owner_id: int) -> None:
-        """Release the test lane's item authority."""
 
     def run_cleanup_git(self, job: GitJob) -> JobResult:
         """Complete one test cleanup job."""
@@ -472,19 +468,6 @@ class FakeGitHub:
         """Mirror github_api.gh_pr_update_review_comment."""
         del body  # state not modelled; the log entry is the observable
         self._log("gh_pr_update_review_comment", comment_node_id)
-
-    def post_scope_expansion_blocking_review(
-        self,
-        pr_number: int,
-        *,
-        body: str,
-        marker: str,
-    ) -> str:
-        """Record one idempotent scope-expansion blocking review."""
-        if not body.startswith(marker):
-            raise ValueError(f"blocking review body must start with marker {marker!r}")
-        self._log("post_scope_expansion_blocking_review", pr_number, marker)
-        return f"review-{pr_number}-{len(self.reviews.get(pr_number, [])) + 1}"
 
 
 @pytest.fixture

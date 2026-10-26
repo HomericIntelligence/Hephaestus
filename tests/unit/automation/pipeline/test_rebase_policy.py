@@ -49,10 +49,7 @@ def real_policy_case(
     from hephaestus.automation import git_utils
     from hephaestus.automation.pipeline.github_jobs import (
         InspectRebaseConflictRequest,
-        InspectRebaseReviewRequest,
         RebaseConflictInspected,
-        RebaseReviewInspected,
-        RebaseReviewPublished,
     )
 
     with _abort_worker_case(
@@ -98,10 +95,7 @@ def real_policy_case(
                 assert request.reviewed_head_sha == case.original
                 assert request.base_sha == case.base
                 return RebaseConflictInspected(request, True, "Controlled live admission.")
-            if isinstance(request, InspectRebaseReviewRequest):
-                return RebaseReviewInspected(request, True)
-            case.events.append("record")
-            return RebaseReviewPublished(request, case.publication_ok)
+            raise AssertionError(f"unexpected GitHub request {request!r}")
 
         def push(branch: str, expected: str, cwd: Path, **kwargs: Any) -> None:
             assert branch == "1-repair" and expected == case.original
@@ -370,73 +364,3 @@ def _assert_supported_tree_comparison(case: Any) -> None:
     """Require real tree execution before interpreting the review result."""
     assert case.merge_tree_results, "The worker did not run the tree comparison."
     assert all(result[1] == 0 for result in case.merge_tree_results), case.merge_tree_results
-
-
-@pytest.mark.parametrize("failure", [None, "tree_changed", "remote_changed", "audit_missing"])
-def test_published_rebase_returns_separate_review_proof(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure: str | None,
-) -> None:
-    """Keep the reviewed head separate and reject each specified proof failure."""
-    with real_policy_case(
-        tmp_path,
-        monkeypatch,
-        publish=True,
-        reason="review_conflict",
-    ) as case:
-        case.job = _reviewed_policy_job(case, failure)
-        case.remote_drift = failure == "remote_changed"
-        result = case.pool._run_git(case.job)
-        assert case.starts == [True]
-        if failure != "audit_missing":
-            _assert_supported_tree_comparison(case)
-        else:
-            assert case.merge_tree_results == []
-        record = _store(case.manager.common_dir).read(1, case.job.capability_target.request_id)
-        assert record.resulting_workspace is not None
-        rewritten = record.resulting_workspace.revision
-        assert rewritten != case.original
-        expected_errors = {
-            "tree_changed": "rebase tree changed; source decision required",
-            "remote_changed": "rebase publication is unverified",
-            "audit_missing": "initial rebase review audit is invalid",
-        }
-        if failure is not None:
-            assert not result.ok, result
-            assert result.error == expected_errors[failure]
-            assert "retained_rebase_review_proof" not in result.value
-            assert case.events == (["record", "push"] if failure == "remote_changed" else [])
-            return
-        assert result.ok, result
-        proof = result.value["retained_rebase_review_proof"]
-        assert proof.reviewed_head_sha == case.original
-        assert proof.resulting_head_sha == rewritten
-        assert proof.resulting_tree_sha == _git(case.binding.cwd, "rev-parse", "HEAD^{tree}")
-        assert proof.target_base_sha == case.base
-        assert case.events == ["record", "push"]
-
-
-@pytest.mark.parametrize("publication_ok", [True, False])
-def test_review_record_is_visible_before_the_rebase_push(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    publication_ok: bool,
-) -> None:
-    """A rejected record publication must stop the exact-source branch push."""
-    with real_policy_case(
-        tmp_path,
-        monkeypatch,
-        publish=True,
-        reason="review_conflict",
-    ) as case:
-        case.job = _reviewed_policy_job(case)
-        case.publication_ok = publication_ok
-        result = case.pool._run_git(case.job)
-        assert case.starts == [True]
-        _assert_supported_tree_comparison(case)
-        assert result.ok is publication_ok, result
-        assert case.events == (["record", "push"] if publication_ok else ["record"])
-        if not publication_ok:
-            assert result.error == "rebase record publication failed"
-            assert case.remote_head == case.original
