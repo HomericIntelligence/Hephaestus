@@ -86,7 +86,7 @@ def test_finalized_body_is_recognized_and_not_contaminated(prefix: str) -> None:
         lambda marker: f"Document {marker} in the guide.",
     ],
 )
-def test_marker_examples_are_not_top_level_finalization(wrap) -> None:  # type: ignore[no-untyped-def]
+def test_marker_examples_are_not_top_level_finalization(wrap) -> None:
     marker = _finalized_body().splitlines()[-1]
 
     assert has_finalized_plan_candidate(wrap(marker)) is False

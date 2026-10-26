@@ -14,10 +14,10 @@ def test_new_side_lines_in_a_hunk_are_valid() -> None:
 
 def test_findings_split_into_inline_and_body_only() -> None:
     """Findings split into inline and body only."""
-    on_diff = {"path": "a.py", "line": 2, "body": "a"}
-    off_diff = {"path": "a.py", "line": 9, "body": "b"}
-    no_line = {"path": "a.py", "body": "c"}
-    other_file = {"path": "b.py", "line": 1, "body": "d"}
+    on_diff: dict[str, object] = {"path": "a.py", "line": 2, "body": "a"}
+    off_diff: dict[str, object] = {"path": "a.py", "line": 9, "body": "b"}
+    no_line: dict[str, object] = {"path": "a.py", "body": "c"}
+    other_file: dict[str, object] = {"path": "b.py", "line": 1, "body": "d"}
 
     inline, body_only = place_findings([on_diff, off_diff, no_line, other_file], _DIFF)
 

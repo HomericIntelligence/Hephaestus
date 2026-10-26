@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import queue
 import shlex
@@ -6224,59 +6222,6 @@ class TestWriterPublicationRefresh:
             Disposition.FINISH_FAIL, "commit_push_refresh_invalid"
         )
         assert ctx.github.mutation_log == []
-
-
-def _pretest_stage_item(tmp_path: Path, make_work_item: Any) -> Any:
-    """Bind stage routing to one immutable successful-job input."""
-    from hephaestus.automation.remediation_prepublication import (
-        RemediationPretestCandidate,
-        canonical_source_receipt_json,
-    )
-
-    from hephaestus.automation.pipeline.jobs import RemediationPretestInput
-    from tests.unit.automation.test_remediation_recovery import _pretest_payload
-
-    candidate = RemediationPretestCandidate.from_dict(_pretest_payload(tmp_path))
-    inputs = RemediationPretestInput(
-        candidate.repository,
-        candidate.issue_number,
-        candidate.pr_number,
-        candidate.branch,
-        candidate.expected_remote_sha,
-        canonical_source_receipt_json(candidate.source_receipt),
-        candidate.source_receipt_sha256,
-        candidate.thread_snapshot_json,
-        candidate.batch_nonce,
-        ("a.py",),
-        hashlib.sha256(_WRITER_PLAN.encode()).hexdigest(),
-        1,
-        None,
-    )
-    item = make_work_item(repo="project", issue=9, pr=10, state="IMPLEMENT_WAIT")
-    item.branch = candidate.branch
-    item.worktree = candidate.worktree_path
-    source = candidate.source_receipt
-    binding = WorkspaceBinding.source(
-        cwd=source.path,
-        reusable_root=tmp_path,
-        repository=source.repository,
-        ownership_key=source.ownership_key,
-        item_number=source.item_number,
-        lane=source.lane,
-        revision=source.revision,
-        generation=source.generation,
-        detached=source.detached,
-    )
-    item.payload.update(
-        implementation_remediation=True,
-        remediation_thread_snapshots=json.loads(candidate.thread_snapshot_json),
-        _impl_source_revision=candidate.expected_remote_sha,
-        _impl_source_workspace=binding.to_dict(),
-        _impl_source_receipt=source,
-        remediation_pretest_input=inputs,
-        remediation_pretest_nonce="f" * 32,
-    )
-    return item
 
 
 @pytest.mark.parametrize("operation", ["inspect", "rebase-conflict", "test-fix"])

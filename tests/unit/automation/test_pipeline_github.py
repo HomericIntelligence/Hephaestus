@@ -53,8 +53,6 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.github.client import GitHubRateLimitError
 
-_BATCH_NONCE = "b" * 32
-
 
 def _assert_bounded_command_kwargs(kwargs: Mapping[str, Any], started_at: float) -> None:
     """Check the deadline and retry bounds for one command."""
@@ -70,100 +68,8 @@ def _viewer_login_command(argv: list[str], **_kwargs: object) -> subprocess.Comp
     return subprocess.CompletedProcess(argv, 0, stdout="bot\n", stderr="")
 
 
-class _RulesetBypassGitHub:
-    """Expose one stable effective policy at the merge-wait boundary."""
-
-    def __init__(
-        self,
-        *,
-        bypassable_ruleset_ids: tuple[int, ...],
-        conversation_resolution_enforced: bool,
-        merge_queue_method: str | None = None,
-        strict_update_enforced: bool = True,
-    ) -> None:
-        self.events: list[str] = []
-        self._bypassable_ruleset_ids = bypassable_ruleset_ids
-        self._conversation_resolution_enforced = conversation_resolution_enforced
-        self._merge_queue_method = merge_queue_method
-        self._strict_update_enforced = strict_update_enforced
-        self._merged = False
-
-    def gh_pr_state(self, _pr: int) -> dict[str, object]:
-        self.events.append("state")
-        if self._merged:
-            return {"state": "MERGED", "mergedAt": "2026-09-05T00:00:00Z"}
-        return {
-            "id": "PR_node",
-            "state": "OPEN",
-            "autoMergeRequest": None,
-            "baseRefName": "main",
-            "baseRefOid": "b" * 40,
-            "headRefOid": "a" * 40,
-        }
-
-    def pr_has_implementation_state_label(self, _pr: int) -> tuple[bool, bool]:
-        self.events.append("label")
-        return True, False
-
-    def list_unresolved_review_threads(self, _pr: int) -> list[object]:
-        self.events.append("threads")
-        return []
-
-    def gh_pr_merge_readiness(self, _pr: int) -> dict[str, object]:
-        self.events.append("readiness")
-        return {
-            "headRefOid": "a" * 40,
-            "mergeStateStatus": "CLEAN",
-            "mergeable": "MERGEABLE",
-        }
-
-
-def _run_ruleset_bypass_cycle(github: _RulesetBypassGitHub) -> Any:
-    """Run one exact-head merge cycle with a selected effective policy."""
-    from hephaestus.automation.pipeline.github_jobs import RunMergeWaitCycleRequest
-    from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
-
-    return PipelineGitHubJobRunner._run_merge_wait_cycle(
-        RunMergeWaitCycleRequest(
-            pr_number=7,
-            reviewed_head_sha="a" * 40,
-            deadline_s=time.monotonic() + 30.0,
-            cancellation=threading.Event(),
-        ),
-        github,
-    )
-
-
-def _assert_ruleset_bypass_stops_before_mutable_merge_reads(
-    *, conversation_resolution_enforced: bool
-) -> None:
-    """Assert that a bypassable policy stops before readiness and merge reads."""
-    github = _RulesetBypassGitHub(
-        bypassable_ruleset_ids=(15556494,),
-        conversation_resolution_enforced=conversation_resolution_enforced,
-    )
-
-    receipt = _run_ruleset_bypass_cycle(github)
-
-    assert receipt.outcome == "merge_policy_bypassable"
-    assert receipt.attempted is False
-    assert github.events == ["state", "label", "repository", "policy"]
-
-
 class PipelineGitHubForTest(PipelineGitHub):
     """Production adapter with an explicit test-only operation nonce default."""
-
-    def _implementation_thread_reply_body(
-        self,
-        pr_number: int,
-        head_sha: str,
-        thread_id: str,
-        reply: str,
-        batch_nonce: str = _BATCH_NONCE,
-    ) -> str:
-        return super()._implementation_thread_reply_body(
-            pr_number, head_sha, thread_id, reply, batch_nonce
-        )
 
 
 @pytest.fixture
@@ -193,36 +99,6 @@ def test_adapter_satisfies_stage_github_protocol(adapter: PipelineGitHub) -> Non
     assert isinstance(adapter, StageGitHub)
 
 
-def _external_reviewer_thread(thread_id: str = "reviewer-thread") -> dict[str, Any]:
-    """Return an arbitrary reviewer-owned thread eligible for the new protocol."""
-    return {
-        "id": thread_id,
-        "path": "a.py",
-        "line": 7,
-        "side": "RIGHT",
-        "body": "Please fix this.",
-        "author": "maintainer",
-        "authors": ["maintainer"],
-        "comments": [
-            {"id": f"comment-{thread_id}", "author": "maintainer", "body": "Please fix this."}
-        ],
-    }
-
-
-def _open_thread_snapshot(thread: dict[str, Any], *, resolved: bool = False) -> dict[str, Any]:
-    """Add the direct-read PR proof required by thread-action tests."""
-    return {
-        **thread,
-        "isResolved": resolved,
-        "pr_node_id": "pull-request",
-        "pr_state": {
-            "state": "OPEN",
-            "headRefOid": "a" * 40,
-            "autoMergeRequest": None,
-        },
-    }
-
-
 def _open_pr_identity(*, head_sha: str = "a" * 40) -> dict[str, Any]:
     """Return the complete PR identity required by stable thread reads."""
     return {
@@ -232,39 +108,6 @@ def _open_pr_identity(*, head_sha: str = "a" * 40) -> dict[str, Any]:
         "baseRefOid": "b" * 40,
         "baseRefName": "main",
         "autoMergeRequest": None,
-    }
-
-
-def _submitted_implementation_receipt(
-    adapter: PipelineGitHub,
-    thread: dict[str, Any],
-    reply: str,
-    *,
-    head_sha: str = "a" * 40,
-    review_id: str = "implementation-review",
-    review_state: str = "COMMENTED",
-) -> dict[str, Any]:
-    """Return a complete host snapshot for one source-attached reply."""
-    reply_body = adapter._implementation_thread_reply_body(
-        7, head_sha, thread["id"], reply, _BATCH_NONCE
-    )
-    return {
-        **thread,
-        "comments": [
-            *thread["comments"],
-            {
-                "id": "implementation-comment",
-                "author": "hephaestus[bot]",
-                "body": reply_body,
-                "viewer_did_author": True,
-                "review_id": review_id,
-                "review_state": review_state,
-                "review_commit_sha": head_sha,
-            },
-        ],
-        "implementation_reply_id": "implementation-comment",
-        "implementation_reply_body": reply_body,
-        "implementation_head_sha": head_sha,
     }
 
 
@@ -948,26 +791,6 @@ def test_dry_run_state_transitions_do_not_reach_transport(
     dry_adapter.mark_pr_implementation_go(7)
 
     call_mock.assert_not_called()
-
-
-def _no_review_threads_payload() -> dict[str, object]:
-    """Return a GraphQL review-receipt response that holds no review thread."""
-    return {
-        "data": {
-            "repository": {
-                "owner": {"login": "org"},
-                "name": "repo-a",
-                "pullRequest": {
-                    "id": "PR_7",
-                    "number": 7,
-                    "reviewThreads": {
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        "nodes": [],
-                    },
-                },
-            }
-        }
-    }
 
 
 class TestRepoScoping:
