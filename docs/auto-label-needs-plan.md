@@ -8,7 +8,6 @@ source of truth for an issue's plan-review status:
 | `state:needs-plan` | Issue is new; planner should run on the next loop. |
 | `state:plan-no-go` | Confirmed plan-review label; re-plan next loop. Review prose is audit context, not routing authority. |
 | `state:plan-go` | Plan approved; implementer may proceed. |
-| `state:plan-blocked` | Planning requires named external feedback or a dependency. |
 
 Hephaestus self-tags its own newly-opened issues via
 [`.github/workflows/auto-label-needs-plan.yml`](../.github/workflows/auto-label-needs-plan.yml).

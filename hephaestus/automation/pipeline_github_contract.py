@@ -3,7 +3,6 @@
 from typing import TYPE_CHECKING
 
 from .github_api.graphql import GraphQLSpec
-from .pipeline.merge_wait_admission import RequiredChecksDeferred as RequiredChecksDeferred
 
 if TYPE_CHECKING:
     import subprocess
@@ -84,20 +83,6 @@ if TYPE_CHECKING:
             pass
 
         def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-            pass
-
-        def verified_repository_default_branch(self) -> Any:
-            pass
-
-        def required_checks_pass_for_head(
-            self,
-            head_sha: str,
-            policy: Any,
-            *,
-            deadline_s: float,
-            cancellation: Any,
-        ) -> bool | RequiredChecksDeferred:
-            """Only literal True permits merge admission."""
             pass
 
         def pull_request_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:

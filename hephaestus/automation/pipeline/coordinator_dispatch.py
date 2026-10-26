@@ -271,9 +271,7 @@ class ImplementationDispatcher(_CoordinatorHost):
         """Claim *item* at its current position, preserving FIFO retry order."""
         for index, queued in enumerate(self.queues[ct.StageName.IMPLEMENTATION].snapshot()):
             if queued is item:
-                claimed = self._claim_item(ct.StageName.IMPLEMENTATION, index=index)
-                if claimed is not item:  # pragma: no cover - coordinator-thread invariant
-                    raise RuntimeError("implementation queue selected a different item")
+                self._claim_item(ct.StageName.IMPLEMENTATION, index=index)
                 return True
         return False
 

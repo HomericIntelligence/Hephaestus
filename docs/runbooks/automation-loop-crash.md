@@ -155,11 +155,8 @@ when the file is malformed or the repository checkout was restored.
 
 `state:skip` takes an issue out of the loop as an explicit skip decision. It is
 operator-applied or applied after independent planner/reviewer agreement that
-an issue is a non-code tracker or obsolete request. A successful implementation
-run with no commit uses `state:implementation-blocked` instead; see the
-[implementation-blocked recovery runbook](implementation-blocked-recovery.md).
-A crash alone does **not** apply either label; re-running the loop is the
-correct first response to a crash.
+an issue is a non-code tracker or obsolete request. A crash alone does **not**
+apply it; re-running the loop is the correct first response to a crash.
 Apply `state:skip` yourself only when an issue remains blocked after repeated
 attempts. For a PR that cannot merge after its required checks pass, see the
 [queue merge stall runbook](ci-driver-stall.md).

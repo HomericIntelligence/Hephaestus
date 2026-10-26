@@ -36,7 +36,7 @@ DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT = 1200
 COMMIT_ISSUE_TITLE_MAX_BYTES = 1024
 COMMIT_ISSUE_BODY_MAX_BYTES = 256 * 1024
 _RESERVED_MESSAGE_LINE = re.compile(
-    r"^\s*(?:Closes\s+#\d+|Implemented-By:|Co-Authored-By:)",
+    r"^\s*(?:Closes\s+#\d+|Co-Authored-By:)",
     re.IGNORECASE,
 )
 _AGENT_COMMIT_NAMES = {
@@ -45,13 +45,6 @@ _AGENT_COMMIT_NAMES = {
     "pi": "Pi",
     "opencode": "OpenCode-AI",
     "opencode2": "OpenCode-AI",
-}
-_AGENT_PROVENANCE = {
-    "claude": "Claude Code",
-    "codex": "Codex",
-    "pi": "Pi",
-    "opencode": "OpenCode",
-    "opencode2": "OpenCode 2",
 }
 _FALLBACK_AGENT_COMMIT_EMAIL = "noreply@hephaestus.invalid"
 
@@ -239,22 +232,15 @@ def _format_commit_message(
     agent: str,
     subject: str,
     body: str,
-    model: str | None = None,
 ) -> str:
     """Render a commit message with host-owned policy trailers."""
     coauthor_name = _AGENT_COMMIT_NAMES.get(agent, _AGENT_COMMIT_NAMES["claude"])
-    provenance = (
-        model or _AGENT_PROVENANCE["claude"]
-        if agent == "claude"
-        else _AGENT_PROVENANCE.get(agent, agent)
-    )
     clean_body = _strip_reserved_lines(body)
     body_block = f"\n\n{clean_body}" if clean_body else ""
     return f"""{subject}{body_block}
 
 Closes #{metadata.number}
 
-Implemented-By: {provenance}
 Co-Authored-By: {coauthor_name} <{_agentic_commit_email()}>
 """
 
@@ -310,7 +296,6 @@ def _generate_commit_message(
             agent=agent,
             subject=subject,
             body=_message_text(data.get("body")),
-            model=agent_model,
         )
     except Exception as exc:
         logger.warning(
@@ -323,7 +308,6 @@ def _generate_commit_message(
             agent=agent,
             subject=f"feat: Implement #{metadata.number}",
             body=metadata.title,
-            model=agent_model,
         )
 
 

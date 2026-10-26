@@ -21,14 +21,9 @@ from typing import Any, Literal, TypeGuard, cast
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import SeedEntry
-from hephaestus.automation.requirements_recovery import (
-    evidence_digest as recovery_evidence_digest,
-)
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
-    ATHENA_FINALIZED_PLAN_LABEL,
-    STATE_IMPLEMENTATION_BLOCKED,
     STATE_SKIP,
 )
 from hephaestus.io.utils import write_secure
@@ -146,7 +141,6 @@ class WaveMergeReceipt:
 
     issue_number: int
     pr_number: int
-    reviewed_head_sha: str
     merge_sha: str
 
     def __post_init__(self) -> None:
@@ -155,8 +149,6 @@ class WaveMergeReceipt:
             raise IssueWaveValidationError("merge receipt issue_number must be positive")
         if isinstance(self.pr_number, bool) or self.pr_number <= 0:
             raise IssueWaveValidationError("merge receipt pr_number must be positive")
-        if not is_full_commit_sha(self.reviewed_head_sha):
-            raise IssueWaveValidationError("merge receipt reviewed_head_sha is invalid")
         if not is_full_commit_sha(self.merge_sha):
             raise IssueWaveValidationError("merge receipt merge_sha is invalid")
 
@@ -197,7 +189,6 @@ class WaveNonCodeIntent:
 
     issue_number: int
     reason: str
-    evidence_digest: str
     repository_revision: str
     extra_labels: tuple[str, ...] = ()
     explanation: str = ""
@@ -209,12 +200,6 @@ class WaveNonCodeIntent:
             raise IssueWaveValidationError("non-code intent issue_number must be positive")
         if not isinstance(self.reason, str) or not self.reason:
             raise IssueWaveValidationError("non-code intent reason must be non-empty")
-        if not (
-            isinstance(self.evidence_digest, str)
-            and len(self.evidence_digest) == 64
-            and all(character in "0123456789abcdef" for character in self.evidence_digest)
-        ):
-            raise IssueWaveValidationError("non-code intent evidence_digest is invalid")
         if not is_full_commit_sha(self.repository_revision):
             raise IssueWaveValidationError("non-code intent repository_revision is invalid")
         if not isinstance(self.extra_labels, tuple) or any(
@@ -230,40 +215,15 @@ class WaveNonCodeIntent:
             raise IssueWaveValidationError("non-code intent retired must be boolean")
 
 
-def _non_code_intent_matches_facts(
-    intent: WaveNonCodeIntent,
-    facts: Any,
-    repository: str,
-) -> bool:
-    """Return whether fresh issue text matches the independently reviewed evidence."""
-    if intent.retired or facts is None or getattr(facts, "authority_sanitized", False) is True:
-        return False
-    title = getattr(facts, "title", None)
-    body = getattr(facts, "body", None)
-    if not isinstance(title, str) or not isinstance(body, str):
-        return False
-    return intent.evidence_digest == recovery_evidence_digest(
-        repository,
-        intent.issue_number,
-        intent.repository_revision,
-        title,
-        body,
-    )
-
-
 def _require_reviewed_non_code_skip(
     outcome: WaveIssueOutcome,
     facts: Any,
     *,
     drift: str,
     intent: WaveNonCodeIntent | None = None,
-    repository: str,
 ) -> None:
     """Require the durable skip label that proves a reviewed non-code outcome."""
-    if intent is None or not (
-        _non_code_intent_matches_facts(intent, facts, repository)
-        and _non_code_intent_is_applied(intent, facts)
-    ):
+    if intent is None or not _non_code_intent_is_applied(intent, facts):
         raise IssueWaveBlockedError(f"issue #{outcome.issue_number} {drift}")
 
 
@@ -278,14 +238,14 @@ def non_code_intent_skip_is_applied(
         and set(intent.extra_labels).issubset(label_set)
         and not label_set.intersection(ALL_STATE_LABELS)
         and not label_set.intersection(ALL_IMPLEMENTATION_STATE_LABELS)
-        and STATE_IMPLEMENTATION_BLOCKED not in label_set
-        and ATHENA_FINALIZED_PLAN_LABEL not in label_set
     )
 
 
 def _non_code_intent_is_applied(intent: WaveNonCodeIntent, facts: Any) -> bool:
     """Return whether fresh facts exactly confirm an active non-code transition."""
-    labels = set(getattr(facts, "labels", set())) if facts is not None else set()
+    if facts is None or getattr(facts, "authority_sanitized", False) is True:
+        return False
+    labels = set(getattr(facts, "labels", set()))
     return not intent.retired and non_code_intent_skip_is_applied(intent, labels)
 
 
@@ -311,7 +271,6 @@ def _validate_verified_outcome_facts(
                 facts,
                 drift="lost its reviewed non-code skip",
                 intent=intent,
-                repository=repository,
             )
             continue
         receipt = next(
@@ -474,7 +433,6 @@ def _receipt_to_json(receipt: WaveMergeReceipt) -> dict[str, Any]:
     return {
         "issue_number": receipt.issue_number,
         "pr_number": receipt.pr_number,
-        "reviewed_head_sha": receipt.reviewed_head_sha,
         "merge_sha": receipt.merge_sha,
     }
 
@@ -483,7 +441,6 @@ def _non_code_intent_to_json(intent: WaveNonCodeIntent) -> dict[str, Any]:
     return {
         "issue_number": intent.issue_number,
         "reason": intent.reason,
-        "evidence_digest": intent.evidence_digest,
         "repository_revision": intent.repository_revision,
         "extra_labels": list(intent.extra_labels),
         "explanation": intent.explanation,
@@ -552,7 +509,6 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
             WaveMergeReceipt(
                 issue_number=cast(int, item.get("issue_number")),
                 pr_number=cast(int, item.get("pr_number")),
-                reviewed_head_sha=cast(str, item.get("reviewed_head_sha")),
                 merge_sha=cast(str, item.get("merge_sha")),
             )
             for item in receipts_raw
@@ -571,7 +527,6 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
             WaveNonCodeIntent(
                 issue_number=cast(int, item.get("issue_number")),
                 reason=cast(str, item.get("reason")),
-                evidence_digest=cast(str, item.get("evidence_digest")),
                 repository_revision=cast(str, item.get("repository_revision")),
                 extra_labels=tuple(item.get("extra_labels", [])),
                 explanation=cast(str, item.get("explanation", "")),
@@ -994,7 +949,6 @@ class IssueWaveStore:
         *,
         issue_number: int,
         reason: str,
-        evidence_digest: str,
         repository_revision: str,
         extra_labels: tuple[str, ...] = (),
         explanation: str = "",
@@ -1003,7 +957,6 @@ class IssueWaveStore:
         intent = WaveNonCodeIntent(
             issue_number=issue_number,
             reason=reason,
-            evidence_digest=evidence_digest,
             repository_revision=repository_revision,
             extra_labels=extra_labels,
             explanation=explanation,
@@ -1144,11 +1097,10 @@ class IssueWaveStore:
         *,
         issue_number: int,
         pr_number: int,
-        reviewed_head_sha: str,
         merge_sha: str,
     ) -> WaveLease:
-        """Persist one successful conditional normal-merge receipt."""
-        receipt = WaveMergeReceipt(issue_number, pr_number, reviewed_head_sha, merge_sha)
+        """Persist one successful normal-merge receipt."""
+        receipt = WaveMergeReceipt(issue_number, pr_number, merge_sha)
         with self._locked():
             checkpoint = self._read_unlocked()
             if checkpoint is None:
@@ -1244,12 +1196,7 @@ class IssueWaveStore:
                     f"issue #{receipt.issue_number} lacks fresh merge facts"
                 )
             labels = set(getattr(facts, "labels", set()))
-            if (
-                bool(getattr(facts, "is_epic", False))
-                or "state:skip" in labels
-                or "state:plan-blocked" in labels
-                or STATE_IMPLEMENTATION_BLOCKED in labels
-            ):
+            if bool(getattr(facts, "is_epic", False)) or "state:skip" in labels:
                 raise IssueWaveBlockedError(
                     f"issue #{receipt.issue_number} has an external skip/block override"
                 )
@@ -1304,7 +1251,6 @@ class IssueWaveStore:
                         facts,
                         drift="no longer has its reviewed non-code skip",
                         intent=intent,
-                        repository=self.repo,
                     )
                     continue
                 receipt = next(
@@ -1435,10 +1381,7 @@ def wave_entry_from_facts(
     outcome = store.outcome_for(lease, facts.number)
     if outcome is not None and outcome.non_code:
         intent = store.non_code_intent_for(lease, facts.number)
-        exact_skip = intent is not None and (
-            _non_code_intent_matches_facts(intent, facts, repo)
-            and _non_code_intent_is_applied(intent, facts)
-        )
+        exact_skip = intent is not None and _non_code_intent_is_applied(intent, facts)
         if exact_skip:
             return replace(
                 entry,
@@ -1463,13 +1406,11 @@ def wave_entry_from_facts(
                 passed=True,
                 non_code=True,
                 non_code_labels=intent.extra_labels,
-                non_code_evidence_digest=intent.evidence_digest,
                 non_code_repository_revision=intent.repository_revision,
                 non_code_explanation=intent.explanation,
                 non_code_retired=True,
             )
-        evidence_matches = _non_code_intent_matches_facts(intent, facts, repo)
-        if evidence_matches and _non_code_intent_is_applied(intent, facts):
+        if _non_code_intent_is_applied(intent, facts):
             return replace(
                 entry,
                 stage=StageName.FINISHED,
@@ -1477,7 +1418,6 @@ def wave_entry_from_facts(
                 passed=True,
                 non_code=True,
                 non_code_labels=intent.extra_labels,
-                non_code_evidence_digest=intent.evidence_digest,
                 non_code_repository_revision=intent.repository_revision,
                 non_code_explanation=intent.explanation,
             )
@@ -1488,7 +1428,6 @@ def wave_entry_from_facts(
             passed=True,
             non_code=True,
             non_code_labels=intent.extra_labels,
-            non_code_evidence_digest=intent.evidence_digest,
             non_code_repository_revision=intent.repository_revision,
             non_code_explanation=intent.explanation,
         )

@@ -233,22 +233,6 @@ class CodexAdapterAdmission:
     deployment_lock_sha256: str
     factory: object
 
-    def validate_adapter_identity(
-        self,
-        *,
-        distribution: str,
-        version: str,
-        installed_tree_sha256: str,
-    ) -> None:
-        """Reject adapter self-attestation that differs from the host lock."""
-        expected = (
-            self.lock.adapter_distribution,
-            self.lock.adapter_version,
-            self.lock.installed_tree_sha256,
-        )
-        if (distribution, version, installed_tree_sha256) != expected:
-            raise CodexAdapterAdmissionError("adapter identity does not match deployment lock")
-
 
 @dataclass(frozen=True, slots=True)
 class _VerifiedInstalledTree:

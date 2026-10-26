@@ -142,10 +142,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         """Append an event to memory and, when configured, to JSONL on disk."""
         _observability.record_event(self, event, *fields, now_fn=self._wall_time, logger=logger)
 
-    def _record_review_finding_events(self, item: ct.WorkItem) -> None:
-        """Stream bounded finding identities without review text."""
-        _observability.record_review_finding_events(self, item, logger=logger)
-
     def _observability_snapshot(self) -> dict[str, ct.Any]:
         """Read the coordinator lifecycle values that observability exposes."""
         return _observability.observability_snapshot(self, logger=logger)
@@ -456,7 +452,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if item.result is None or item.payload.get("_summary_recorded", False):
             return
         item.payload["_summary_recorded"] = True
-        self._record_review_finding_events(item)
         self._terminal_summary.record(item)
         self._seen_item_ids.discard(id(item))
 
@@ -496,9 +491,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return None
         item = lease.item
         item_id = id(item)
-        if item_id in self._leases:  # pragma: no cover - internal invariant
-            lease.restore()
-            raise RuntimeError(f"duplicate active lease for {self._item_key(item)}")
         self._leases[item_id] = lease
         return item
 
@@ -836,13 +828,6 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             "outcome": value.outcome,
             "attempted": value.attempted,
         }
-        evidence = value.required_checks_evidence
-        if evidence is not None:
-            fields["merge_admission"]["required_checks"] = {
-                "boundary": evidence.boundary,
-                "detail": evidence.detail,
-                "contexts": list(evidence.contexts),
-            }
 
     @staticmethod
     def _job_result_error_class(result: JobResult) -> str | None:

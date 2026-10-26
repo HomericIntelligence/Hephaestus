@@ -11,8 +11,9 @@ comment that can change pipeline state stays all-or-nothing.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
-from collections.abc import Mapping, MutableSequence, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -35,7 +36,6 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKERS,
     PLAN_REVIEW_PREFIX,
 )
-from hephaestus.automation.review_warnings import ReviewWarning, record_review_warning
 
 HISTORY_MARKER: Final[str] = "<!-- hephaestus-plan-history:revision={revision}:kind={kind} -->"
 HISTORY_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-history:"
@@ -55,9 +55,7 @@ RAW_PATCH_RE: Final[re.Pattern[str]] = re.compile(
     r"(?m)^\s*```diff\s*$|^\s*diff --git\s+|^\s*@@\s+-\d+(?:,\d+)?\s+\+\d+"
 )
 MAX_PRIOR_PLAN_FINGERPRINTS: Final[int] = 16
-PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
-    {"state:plan-go", "state:plan-no-go", "state:plan-blocked"}
-)
+PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset({"state:plan-go", "state:plan-no-go"})
 
 #: Planning/review prompts receive the current plan and/or latest review in
 #: dedicated fields. Keep the restart-only current-revision context bounded
@@ -72,9 +70,11 @@ _TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 _STATE_BEARING_COMMENT_MARKERS: Final[tuple[str, ...]] = (
     HOMERIC_INTELLIGENCE_COMMENT_PREFIX,
     HISTORY_MARKER_PREFIX,
-    "<!-- hephaestus-recovered-requirements:",
+    "<!-- hephaestus-recovered-requirements",
     "<!-- hephaestus-obsolete-explanation:",
 )
+logger = logging.getLogger(__name__)
+
 _QUARANTINE_RECOVERY = (
     "Delete or repair the malformed issue comment, then re-run the round so the "
     "host reads the complete journal again."
@@ -159,7 +159,6 @@ class JournalSnapshot:
     current_review_revision: int | None
     prior_plan_fingerprints: tuple[str, ...] = ()
     forced_planning_epoch: bool = False
-    recovery_source_digest: str | None = None
 
 
 def is_plan_comment(body: str) -> bool:
@@ -267,7 +266,6 @@ def normalize_issue_comments(
     comments: Sequence[object],
     *,
     viewer_login: str,
-    warnings: MutableSequence[ReviewWarning] | None = None,
 ) -> list[IssueComment]:
     """Validate REST comments and derive ownership from authenticated identity.
 
@@ -290,7 +288,6 @@ def normalize_issue_comments(
     Args:
         comments: Raw REST comment payloads in chronological order.
         viewer_login: Login returned by the authenticated GitHub session.
-        warnings: Collector that the caller reads, or None to log.
 
     Returns:
         Structured comments with derived ownership metadata.
@@ -314,11 +311,8 @@ def normalize_issue_comments(
             continue
         if _comment_can_change_pipeline_state(raw):
             raise CommentJournalReadError(f"comment {index} {reason}")
-        record_review_warning(
-            warnings,
-            "journal_comment_quarantined",
-            message=f"Issue comment {index} {reason}. The host skipped it.",
-            recovery=_QUARANTINE_RECOVERY,
+        logger.warning(
+            "Issue comment %s %s. The host skipped it. %s", index, reason, _QUARANTINE_RECOVERY
         )
     return normalized
 
@@ -384,12 +378,12 @@ def _without_fingerprint_line(text: str) -> str:
     return stripped
 
 
-def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool, str | None]:
+def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool]:
     """Parse host metadata only from the canonical plan-comment header."""
     stripped = body.lstrip()
     canonical_marker = _top_level_marker(body, PLAN_CANONICAL_MARKERS)
     if canonical_marker is None and not stripped.startswith(PLAN_COMMENT_MARKER):
-        return stripped.strip(), (), False, None
+        return stripped.strip(), (), False
 
     text = (
         _without_top_level_marker_line(body, canonical_marker)
@@ -409,17 +403,15 @@ def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool, str | No
         text = _without_fingerprint_line(text)
 
     forced = False
-    recovery_source: str | None = None
     first = text.lstrip().partition("\n")[0].strip()
     if first == FORCED_PLANNING_EPOCH_MARKER:
         forced = True
         text = _without_leading_line(text, FORCED_PLANNING_EPOCH_MARKER)
     first = text.lstrip().partition("\n")[0].strip()
-    recovery_match = RECOVERY_SOURCE_EPOCH_RE.fullmatch(first)
-    if recovery_match is not None:
-        recovery_source = recovery_match.group("source")
+    # Older plan comments carry a recovery-source line. Drop it from the text.
+    if RECOVERY_SOURCE_EPOCH_RE.fullmatch(first) is not None:
         text = _without_leading_line(text, first)
-    return text.strip(), fingerprints, forced, recovery_source
+    return text.strip(), fingerprints, forced
 
 
 def extract_current_plan(body: str) -> str:
@@ -441,7 +433,6 @@ def render_current_plan(
     revision: int = 1,
     prior_fingerprints: Sequence[str] = (),
     forced_planning_epoch: bool = False,
-    recovery_source_digest: str | None = None,
 ) -> str:
     """Render the editable current plan with an opaque canonical marker."""
     payload = extract_current_plan(plan)
@@ -451,10 +442,6 @@ def render_current_plan(
         metadata = f"\n<!-- prior-plan-fingerprints: {','.join(fingerprints)} -->"
     if forced_planning_epoch:
         metadata += f"\n{FORCED_PLANNING_EPOCH_MARKER}"
-    if recovery_source_digest is not None:
-        if re.fullmatch(r"[0-9a-f]{64}", recovery_source_digest) is None:
-            raise ValueError("recovery source digest must be a lowercase SHA-256 digest")
-        metadata += f"\n<!-- hephaestus-recovery-source-epoch: {recovery_source_digest} -->"
     return (
         f"{PLAN_CANONICAL_MARKER}\n{PLAN_COMMENT_MARKER}\n"
         f"<!-- revision: {revision} -->{metadata}\n\n{payload}"
@@ -478,32 +465,6 @@ def render_pending_review(*, revision: int) -> str:
     )
 
 
-def blocked_audit_recovery_body(
-    comments: Sequence[IssueComment],
-) -> str | None:
-    """Return an actionable repair body when BLOCKED lacks a current explanation.
-
-    The plan-state label remains the sole plan-review state authority. This
-    helper only repairs the
-    audit half of an interrupted label-first BLOCKED transaction and never
-    infers eligibility or removes the latch.
-    """
-    snapshot = journal_snapshot(comments)
-    if (
-        snapshot.current_review_revision == snapshot.revision
-        and parse_plan_review_state(snapshot.current_review) == "state:plan-blocked"
-    ):
-        return None
-    return render_current_review(
-        "Automation confirmed `state:plan-blocked`, but an interrupted audit write "
-        "left the original detailed explanation unavailable. An external operator "
-        "must inspect the issue or automation logs, document and resolve the missing "
-        "decision or dependency, then replace the blocked label with exactly one next "
-        "plan-state label.\n\nstate:plan-blocked",
-        revision=snapshot.revision,
-    )
-
-
 def is_pending_review(review: str, *, revision: int) -> bool:
     """Return whether canonical review content is the exact pending sentinel."""
     return extract_current_review(review) == (
@@ -516,22 +477,12 @@ def parse_plan_review_state(review: str) -> str | None:
 
     This parser intentionally does not recognize the historical ``Verdict:``
     vocabulary. Reviewer output selects a GitHub label only when exactly one
-    supported state token is present as the final non-empty line. BLOCKED also
-    requires explanatory prose so the canonical comment tells maintainers what
-    input or dependency is missing.
+    supported state token is present as the final non-empty line.
     """
     lines = [line.strip() for line in review.splitlines() if line.strip()]
     matches = [line for line in lines if line in PLAN_REVIEW_STATES]
     if len(matches) != 1 or not lines or lines[-1] != matches[0]:
         return None
-    if matches[0] == "state:plan-blocked":
-        explanation = [
-            line
-            for line in lines[:-1]
-            if not line.startswith(("#", "<!--")) and line not in PLAN_REVIEW_STATES
-        ]
-        if not explanation:
-            return None
     return matches[0]
 
 
@@ -581,9 +532,7 @@ def journal_snapshot(comments: Sequence[IssueComment]) -> JournalSnapshot:
             current_review_body = comment.body
     revision = comment_revision(current_plan_body) if current_plan_body else None
     review_revision = comment_revision(current_review_body) if current_review_body else None
-    current_plan, prior_fingerprints, forced_epoch, recovery_source = _current_plan_parts(
-        current_plan_body
-    )
+    current_plan, prior_fingerprints, forced_epoch = _current_plan_parts(current_plan_body)
     return JournalSnapshot(
         revision=revision or 1,
         current_plan=current_plan if current_plan_body else "",
@@ -593,7 +542,6 @@ def journal_snapshot(comments: Sequence[IssueComment]) -> JournalSnapshot:
         current_review_revision=review_revision,
         prior_plan_fingerprints=prior_fingerprints,
         forced_planning_epoch=forced_epoch,
-        recovery_source_digest=recovery_source,
     )
 
 
@@ -632,7 +580,6 @@ def current_plan_context(
         snapshot.current_plan,
         revision=snapshot.revision,
         forced_planning_epoch=snapshot.forced_planning_epoch,
-        recovery_source_digest=snapshot.recovery_source_digest,
     )
     return _bounded_excerpt(plan, max_chars)
 
@@ -657,7 +604,6 @@ def current_revision_context(
             snapshot.current_plan,
             revision=snapshot.revision,
             forced_planning_epoch=snapshot.forced_planning_epoch,
-            recovery_source_digest=snapshot.recovery_source_digest,
         )
         if snapshot.current_plan
         else ""

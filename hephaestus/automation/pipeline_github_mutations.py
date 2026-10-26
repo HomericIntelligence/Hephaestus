@@ -200,6 +200,8 @@ class PipelineGitHubMutations(PipelineGitHubMergeMutations):
         has_go, has_no_go = self.pr_has_implementation_state_label(pr_number)
         if has_go or not has_no_go:
             raise RuntimeError(f"PR #{pr_number} implementation-no-go label read-back failed")
+        # A withdrawn approval must not merge: turn native auto-merge off.
+        self.disable_auto_merge(pr_number)
 
     def ensure_state_labels(self) -> None:
         """Ensure the ``state:*`` label vocabulary exists on the repo.

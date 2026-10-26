@@ -20,9 +20,6 @@ from dataclasses import dataclass
 from typing import Any, TypeVar, cast, overload
 
 from hephaestus.automation.dependency_parser import MAX_DEPENDENCY_FACTS
-from hephaestus.automation.pipeline.merge_wait_admission import (
-    VerifiedRepositoryDefaultBranch,
-)
 from hephaestus.github.client import (
     ClaudeUsageCapError,
     GitHubRateLimitError,
@@ -89,10 +86,6 @@ class GraphQLMutationOutcomeUnknownError(GraphQLResponseError):
         """Store the sanitized intent that must not be replayed."""
         super().__init__(message)
         self.intent = intent
-
-
-class MergeQueueAlreadyEnqueuedError(GraphQLMutationOutcomeUnknownError):
-    """The exact queue rejection that permits read-only reconciliation."""
 
 
 class ReviewCommentNotEditableError(GraphQLMutationOutcomeUnknownError):
@@ -279,46 +272,6 @@ def _require_prepared[T](
     return prepared
 
 
-def _already_enqueued_error[T](
-    spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
-    prepared: _PreparedGraphQLMutation[T] | None,
-    errors: object,
-) -> MergeQueueAlreadyEnqueuedError | None:
-    """Return the typed exact queue rejection, or None for a lookalike."""
-    if (
-        not isinstance(spec, GraphQLMutationSpec)
-        or spec.operation != "enqueuePullRequest"
-        or prepared is None
-        or prepared.intent.operation != "enqueuePullRequest"
-        or not isinstance(errors, list)
-        or len(errors) != 1
-    ):
-        return None
-    error = errors[0]
-    if (
-        not isinstance(error, dict)
-        or error.get("type") != "UNPROCESSABLE"
-        or error.get("message") != "Pull request is already in the queue"
-    ):
-        return None
-    return MergeQueueAlreadyEnqueuedError(error["message"], intent=prepared.intent)
-
-
-def _already_enqueued_error_from_stdout[T](
-    spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
-    prepared: _PreparedGraphQLMutation[T] | None,
-    stdout: str,
-) -> MergeQueueAlreadyEnqueuedError | None:
-    """Inspect only structured GraphQL output for the exact queue rejection."""
-    try:
-        envelope = json.loads(stdout)
-    except (TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(envelope, dict):
-        return None
-    return _already_enqueued_error(spec, prepared, envelope.get("errors"))
-
-
 def _classify_transport_error[T](  # noqa: C901
     spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
     prepared: _PreparedGraphQLMutation[T] | None,
@@ -392,9 +345,6 @@ def _classify_status[T](
     result: subprocess.CompletedProcess[str],
 ) -> None:
     """Raise the appropriate typed error for a nonzero process result."""
-    already_enqueued = _already_enqueued_error_from_stdout(spec, prepared, result.stdout or "")
-    if already_enqueued is not None:
-        raise already_enqueued
     text = "\n".join(value for value in (result.stdout, result.stderr) if isinstance(value, str))
     reset = _rate_limit_evidence(text)
     if reset is not None:
@@ -458,9 +408,6 @@ def _parse_envelope[T](  # noqa: C901
             if prepared is None:
                 raise GraphQLDeterministicError(message)
             raise _mutation_unknown(message, prepared)
-        already_enqueued = _already_enqueued_error(spec, prepared, errors)
-        if already_enqueued is not None:
-            raise already_enqueued
         messages = [str(error["message"]) for error in errors]
         all_rate_limited = all(
             str(error.get("type", "")).upper() == "RATE_LIMITED"
@@ -633,35 +580,6 @@ def reviewed_pr_state_query(pull_request_id: str) -> GraphQLQuerySpec[dict[str, 
     )
 
 
-def repository_default_branch_query(
-    owner: str, name: str
-) -> GraphQLQuerySpec[VerifiedRepositoryDefaultBranch]:
-    """Build a validated repository identity and default-branch query."""
-    document = (
-        "query RepositoryDefaultBranch($owner:String!,$name:String!){"
-        "repository(owner:$owner,name:$name){owner{login} name nameWithOwner "
-        "defaultBranchRef{name}}}"
-    )
-
-    def validate(data: dict[str, Any]) -> VerifiedRepositoryDefaultBranch:
-        repository = _repo_identity(data, owner, name)
-        name_with_owner = repository.get("nameWithOwner")
-        default_branch_ref = repository.get("defaultBranchRef")
-        default_branch = (
-            default_branch_ref.get("name") if isinstance(default_branch_ref, dict) else None
-        )
-        if not isinstance(name_with_owner, str) or not isinstance(default_branch, str):
-            raise ValueError("repository default-branch fields were malformed")
-        return VerifiedRepositoryDefaultBranch(
-            owner=owner,
-            name=name,
-            name_with_owner=name_with_owner,
-            default_branch=default_branch,
-        )
-
-    return _query("RepositoryDefaultBranch", document, validate)
-
-
 def issue_comment_ids_query(
     owner: str, name: str, issue_number: int
 ) -> GraphQLQuerySpec[list[dict[str, Any]]]:
@@ -726,38 +644,6 @@ def scope_expansion_issue_owner_query(
         }
 
     return _query("ScopeExpansionIssueOwner", document, validate)
-
-
-def issue_body_editor_query(owner: str, name: str, issue_number: int) -> GraphQLQuerySpec[bool]:
-    """Build the validated viewer-vs-latest-editor identity query."""
-    document = (
-        "query IssueBodyEditor($owner:String!,$name:String!,$number:Int!){"
-        "repository(owner:$owner,name:$name){owner{login} name "
-        "issue(number:$number){number editor{login}}} "
-        "viewer{login}}"
-    )
-
-    def validate(data: dict[str, Any]) -> bool:
-        repository = _repo_identity(data, owner, name)
-        issue = repository.get("issue")
-        if not isinstance(issue, dict) or issue.get("number") != issue_number:
-            raise ValueError("issue identity was malformed")
-        viewer = data.get("viewer")
-        viewer_login = viewer.get("login") if isinstance(viewer, dict) else None
-        if not isinstance(viewer_login, str) or not viewer_login:
-            raise ValueError("viewer login was malformed")
-        editor = issue.get("editor")
-        # An absent editor means nobody edited the body after creation.
-        if editor is None:
-            return False
-        if not isinstance(editor, dict):
-            raise ValueError("issue body editor login was malformed")
-        editor_login = editor.get("login")
-        if not isinstance(editor_login, str):
-            raise ValueError("issue body editor login was malformed")
-        return editor_login.lower() == viewer_login.lower()
-
-    return _query("IssueBodyEditor", document, validate)
 
 
 def inline_review_threads_page_query(
@@ -1605,113 +1491,6 @@ def resolve_thread_mutation(thread_id: str) -> GraphQLMutationSpec[dict[str, Any
     )
 
 
-def enqueue_pull_request_mutation(
-    pull_request_id: str, expected_head_oid: str
-) -> GraphQLMutationSpec[dict[str, Any]]:
-    """Build an exact-head merge-queue admission mutation."""
-    document = (
-        "mutation EnqueuePullRequest($pullRequestId:ID!,$expectedHeadOid:GitObjectID!,"
-        "$clientMutationId:String!){enqueuePullRequest(input:{pullRequestId:$pullRequestId,"
-        "expectedHeadOid:$expectedHeadOid,clientMutationId:$clientMutationId}){clientMutationId "
-        "mergeQueueEntry{id state}}}"
-    )
-
-    def required(
-        payload: dict[str, Any], intent: GraphQLMutationIntent, _: dict[str, Any]
-    ) -> dict[str, Any]:
-        entry = payload.get("mergeQueueEntry")
-        if (
-            not isinstance(entry, dict)
-            or not isinstance(entry.get("id"), str)
-            or not entry["id"]
-            or entry.get("state") not in _MERGE_QUEUE_ENTRY_STATES
-        ):
-            raise ValueError("merge-queue admission receipt was incomplete")
-        return {"clientMutationId": intent.client_mutation_id, **entry}
-
-    return _receipt_mutation(
-        "enqueuePullRequest",
-        document,
-        {"pullRequestId": pull_request_id, "expectedHeadOid": expected_head_oid},
-        ("pullRequestId", "expectedHeadOid"),
-        (),
-        "enqueuePullRequest",
-        required,
-    )
-
-
-def pull_request_queue_entry_query(
-    owner: str, name: str, pr_number: int
-) -> GraphQLQuerySpec[dict[str, Any]]:
-    """Build an exact pull-request queue-entry readback query."""
-    document = (
-        "query PullRequestQueueEntry($owner:String!,$name:String!,$number:Int!){"
-        "repository(owner:$owner,name:$name){owner{login} name pullRequest(number:$number){"
-        "id number state headRefOid mergeQueueEntry{id state}}}}"
-    )
-
-    def validate(data: dict[str, Any]) -> dict[str, Any]:
-        repository = _repo_identity(data, owner, name)
-        pull_request = repository.get("pullRequest")
-        if (
-            not isinstance(pull_request, dict)
-            or pull_request.get("number") != pr_number
-            or not isinstance(pull_request.get("id"), str)
-            or pull_request.get("state") != "OPEN"
-            or not isinstance(pull_request.get("headRefOid"), str)
-        ):
-            raise ValueError("pull-request queue identity was malformed")
-        entry = pull_request.get("mergeQueueEntry")
-        if (
-            not isinstance(entry, dict)
-            or not isinstance(entry.get("id"), str)
-            or not entry["id"]
-            or entry.get("state") not in _MERGE_QUEUE_ENTRY_STATES
-        ):
-            raise ValueError("pull-request queue entry was malformed")
-        return pull_request
-
-    return _query("pullRequestQueueEntry", document, validate)
-
-
-def pull_request_merge_queue_reconciliation_query(
-    owner: str, name: str, pr_number: int
-) -> GraphQLQuerySpec[dict[str, Any]]:
-    """Build a queue query that accepts a validated entry or explicit removal."""
-    document = (
-        "query PullRequestMergeQueueReconciliation($owner:String!,$name:String!,$number:Int!){"
-        "repository(owner:$owner,name:$name){owner{login} name pullRequest(number:$number){"
-        "id number state headRefOid mergeQueueEntry{id state}}}}"
-    )
-
-    def validate(data: dict[str, Any]) -> dict[str, Any]:
-        repository = _repo_identity(data, owner, name)
-        pull_request = repository.get("pullRequest")
-        pull_request_id = pull_request.get("id") if isinstance(pull_request, dict) else None
-        head_sha = pull_request.get("headRefOid") if isinstance(pull_request, dict) else None
-        if (
-            not isinstance(pull_request, dict)
-            or pull_request.get("number") != pr_number
-            or not isinstance(pull_request_id, str)
-            or not pull_request_id
-            or pull_request.get("state") != "OPEN"
-            or not isinstance(head_sha, str)
-            or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", head_sha) is None
-        ):
-            raise ValueError("pull-request queue identity was malformed")
-        entry = pull_request.get("mergeQueueEntry")
-        if entry is not None and (
-            not isinstance(entry, dict)
-            or not isinstance(entry.get("id"), str)
-            or not entry["id"]
-            or entry.get("state") not in _MERGE_QUEUE_ENTRY_STATES
-        ):
-            raise ValueError("pull-request queue entry was malformed")
-        return pull_request
-
-    return _query("pullRequestMergeQueueReconciliation", document, validate)
-
-
 def github_schema_contract_query() -> GraphQLQuerySpec[dict[str, Any]]:
     """Build a read-only introspection query for the live schema contract lane."""
     document = (
@@ -1733,7 +1512,6 @@ __all__ = [
     "GraphQLResponseError",
     "GraphQLRetryableError",
     "GraphQLSpec",
-    "MergeQueueAlreadyEnqueuedError",
     "ReviewCommentNotEditableError",
     "add_implementation_thread_reply_mutation",
     "add_reviewer_feedback_reply_mutation",
@@ -1744,7 +1522,6 @@ __all__ = [
     "batch_issue_states_query",
     "batch_issue_titles_query",
     "create_pending_review_mutation",
-    "enqueue_pull_request_mutation",
     "gh_call",
     "gh_cli_timeout",
     "github_schema_contract_query",
@@ -1753,9 +1530,6 @@ __all__ = [
     "issue_comments_query",
     "pipeline_thread_snapshot_page_query",
     "pipeline_unresolved_threads_page_query",
-    "pull_request_merge_queue_reconciliation_query",
-    "pull_request_queue_entry_query",
-    "repository_default_branch_query",
     "resolve_thread_mutation",
     "review_receipts_page_query",
     "review_thread_snapshot_page_query",

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 def main(argv: list[str] | None = None) -> int:
     """Delegate the command to the shared queue boundary."""
+    from hephaestus.errors import boundary_main
+
     from .pipeline_cli import main as run_queue
 
-    return run_queue(argv, profile="review")
+    return boundary_main(run_queue, argv, profile="review")
 
 
 if __name__ == "__main__":

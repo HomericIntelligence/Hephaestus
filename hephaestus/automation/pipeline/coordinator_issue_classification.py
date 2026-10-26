@@ -9,7 +9,6 @@ import hephaestus.automation.issue_waves as issue_waves_mod
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
 from hephaestus.automation.comment_identity import CommentAliasConflictError
-from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED
 
 from .coordinator_contract import _CoordinatorHost
 from .diagnostics import redact_diagnostic_text
@@ -37,8 +36,6 @@ class IssueClassificationCoordinator(_CoordinatorHost):
         """Classify one row, or record its safe terminal failure."""
         try:
             facts = _seeding.seed_issue_from_github(number, github)
-            if source.wave_lease is None and STATE_PLAN_BLOCKED in facts.labels:
-                github.ensure_blocked_audit(number)
             entry = _seeding.seed_entry_from_facts(facts)
             if source.wave_lease is not None:
                 entry = issue_waves_mod.wave_entry_from_facts(

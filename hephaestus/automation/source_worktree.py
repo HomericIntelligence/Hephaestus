@@ -11,6 +11,7 @@ import stat
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
@@ -1585,6 +1586,113 @@ class SourceWorkspaceManager:
         if self._read_receipt(item_number, lane) != successor:
             raise SourceWorkspaceError("dirty direct claim write is unconfirmed")
         return self._binding(successor)
+
+    def _discard_absent_impl_lane_locked(self, item_number: int) -> bool:
+        """Remove a lane whose recorded checkout is gone, keeping its branch.
+
+        A lane can outlive its worktree: the checkout is removed but the receipt
+        remains, so the lane describes nothing. The recorded branch is copied to
+        a ``preserved/`` ref when it holds commits, and the receipt is removed so
+        the item may prepare a fresh writer.
+
+        Args:
+            item_number: The item whose implementation lane is held by the caller.
+
+        Returns:
+            True when a stale receipt was removed.
+
+        """
+        lane = SourceLane.IMPLEMENTATION
+        receipt = self._read_receipt(item_number, lane)
+        if receipt is None:
+            return False
+        self._reject_foreign_owner(receipt, item_number, lane)
+        if (
+            receipt.path.exists()
+            or receipt.path.is_symlink()
+            or self._path_is_registered_to_repository(receipt.path)
+        ):
+            return False
+        if receipt.branch is not None:
+            ahead = _git(
+                self.repo_root,
+                "rev-list",
+                "--count",
+                f"{receipt.revision}..refs/heads/{receipt.branch}",
+                check=False,
+            )
+            if ahead.returncode != 0 or ahead.stdout.strip() not in {"", "0"}:
+                self._preserve_unmerged_branch(item_number, receipt.branch)
+        for name in (f"{item_number}-impl.json", f"{item_number}-impl-transition.json"):
+            target = self.state_dir / name
+            if target.exists():
+                target.unlink()
+        self._fsync_state_dir()
+        return self._read_receipt(item_number, lane) is None
+
+    def _preserve_unmerged_branch(self, item_number: int, branch: str) -> str:
+        """Keep the work of a lane that can no longer own its worktree."""
+        name = f"preserved/{item_number}-unmerged-impl"
+        if (
+            _git(
+                self.repo_root,
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{name}",
+                check=False,
+            ).returncode
+            == 0
+        ):
+            name = f"{name}-{uuid.uuid4().hex[:8]}"
+        created = _git(self.repo_root, "branch", name, branch, check=False)
+        if created.returncode != 0:
+            raise SourceWorkspaceError(f"cannot preserve unmerged lane branch: {branch}")
+        return name
+
+    def _release_unadvanced_dirty_claim_locked(self, item_number: int) -> bool:
+        """Restore a plain receipt when a consumed claim published nothing.
+
+        A continuation that ends without advancing the branch leaves a consumed
+        claim whose head still equals its reservation base. Nothing reached the
+        remote, so the item may prepare a writer lane again. The dirty files in
+        the checkout stay untouched.
+
+        Args:
+            item_number: The item whose implementation lane is held by the caller.
+
+        Returns:
+            True when the receipt was rewritten as a plain v1 receipt.
+
+        """
+        lane = SourceLane.IMPLEMENTATION
+        receipt = self._require_receipt(item_number, lane)
+        self._reject_foreign_owner(receipt, item_number, lane)
+        claim = receipt.dirty_claim
+        if (
+            receipt.schema_version != 2
+            or claim is None
+            or claim.state != "consumed"
+            or receipt.revision != claim.reservation_base_sha
+            or receipt.branch is None
+            or receipt.path.is_symlink()
+            or not receipt.path.exists()
+            or not self._path_is_registered_to_repository(receipt.path)
+            or self._head_branch(receipt.path) != f"refs/heads/{receipt.branch}"
+            or self._head_revision(receipt.path) != receipt.revision
+        ):
+            return False
+        successor = replace(
+            receipt,
+            schema_version=1,
+            dirty_claim=None,
+            generation=receipt.generation + 1,
+            obligations=tuple(
+                value for value in receipt.obligations if value != "dirty-direct-continuation"
+            ),
+        )
+        self._write_receipt(successor)
+        return self._read_receipt(item_number, lane) == successor
 
     @contextmanager
     def dirty_direct_publication(

@@ -1,26 +1,19 @@
-"""Shared contracts for detached PR review and thread validation.
+"""Shared names for the PR-review stage.
 
-The review stage owns review checkouts, structural audits, and thread
-validation. The implementation queue owns all source changes and reply
-publication. A clean audit can grant GO only for its current-process reviewed
-head after complete live thread and label checks. Merge wait verifies the
-same head and the required server policy before each merge request.
-
-Only valid structural audits use the review budget. Host check failures,
-malformed audits, and scope dependencies use their bounded queue paths.
+The review stage reads a review, posts its comments, and reads the unresolved
+threads back from GitHub. Any unresolved thread sends the pull request to the
+implementation agent, which answers and resolves each one. No unresolved thread
+means the pull request is approved. The host keeps no record of its own.
 """
 
 # This module intentionally re-exports the stage's shared imported namespace.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
-import secrets
 import typing as _typing
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -31,28 +24,17 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.issue_waves import is_full_commit_sha
 from hephaestus.automation.prompts.pr_review import (
-    BLOCKING_SEVERITIES,
-    VALID_SEVERITIES,
     get_pr_review_analysis_prompt,
     get_review_validation_prompt,
 )
-from hephaestus.automation.review_audit import (
-    ReviewAudit,
-    has_reserved_finding_control,
-    parse_review_audit,
-)
+from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.state_labels import STATE_SKIP
 
-from ..scope_retraction import (
-    SCOPE_RETRACTION_MARKER_PREFIX,
-    normalize_scope_retraction_paths,
-    scope_retraction_paths_for_threads,
-)
+from ..scope_retraction import scope_retraction_paths_for_threads
 from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
-    BuildTestJob,
     CompactJob,
     Continue,
     Disposition,
@@ -64,54 +46,15 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
-    _is_confirmed_open_unarmed,
     _worktree_path,
     agent_provider,
     stage_model,
     stage_timeout,
     write_skip_label,
 )
-from .pr_review_receipts import (
-    UNSUPPORTED_HOST_VERIFICATION_ERROR,
-    _host_verification_failure_kind,
-    _host_verification_receipt_matches,
-    _host_verification_result_status,
-)
-from .pr_review_repository import (
-    _payload_host_verification_specs,
-    _prepare_host_checks,
-)
 from .pr_review_round_state import _ROUND_PAYLOAD_KEYS, _clear_round_review_state
-from .pr_review_verification import (
-    HOST_VERIFICATION_DIAGNOSTIC_MAX,
-    HOST_VERIFICATION_TIMEOUT_S,
-    _host_verification_specs,
-    _HostVerificationSpec,
-)
 
 logger = logging.getLogger(__name__)
-
-
-def _host_verification_receipts_match(
-    receipts: object,
-    specs: tuple[_HostVerificationSpec, ...],
-    reviewed_head: str,
-) -> bool:
-    """Return whether every required fixed check has a successful exact-head receipt."""
-    return bool(
-        isinstance(receipts, list)
-        and len(receipts) == len(specs)
-        and all(
-            _host_verification_receipt_matches(receipt, spec, reviewed_head)
-            for receipt, spec in zip(receipts, specs, strict=True)
-        )
-    )
-
-
-_JSON_RESPONSE_BLOCK_RE = re.compile(
-    r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*$",
-    re.DOTALL | re.MULTILINE,
-)
 
 
 def _scope_retraction_paths(threads: list[dict[str, Any]]) -> tuple[str, ...] | None:
@@ -121,75 +64,45 @@ def _scope_retraction_paths(threads: list[dict[str, Any]]) -> tuple[str, ...] | 
 
 @dataclass(frozen=True)
 class _ParsedReviewResponse:
-    """Structural reviewer audit parsed inside the worker."""
+    """The review, read inside the worker."""
 
     audit: ReviewAudit
 
 
 def _parse_review_response(response: str) -> _ParsedReviewResponse:
-    """Parse the review's strict structural audit without reading prose decisions."""
+    """Read the review the reviewer returned."""
     return _ParsedReviewResponse(parse_review_audit(response))
 
 
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
-SCOPE_DEPENDENCY_WAIT = "SCOPE_DEPENDENCY_WAIT"
 ADOPT_WORKTREE_WAIT = "ADOPT_WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
 REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
-HOST_VERIFICATION_WAIT = "HOST_VERIFICATION_WAIT"
-HOST_CAPABILITY_WAIT = "HOST_CAPABILITY_WAIT"
-REPOSITORY_VALIDATION_CI_WAIT = "REPOSITORY_VALIDATION_CI_WAIT"
-REPOSITORY_VALIDATION_SOURCE_WAIT = "REPOSITORY_VALIDATION_SOURCE_WAIT"
-REPOSITORY_VALIDATION_RUNTIME_WAIT = "REPOSITORY_VALIDATION_RUNTIME_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
 POST = "POST"
-SCOPE_EXPANSION_PREPARE_SUBMIT = "SCOPE_EXPANSION_PREPARE_SUBMIT"
 POST_APPLY = "POST_APPLY"
 EVAL = "EVAL"
-GO_AUDIT_RECEIPT = "GO_AUDIT_RECEIPT"
-GO_AUDIT_PUBLISH = "GO_AUDIT_PUBLISH"
 COMPACT_REVIEWER_WAIT = "COMPACT_REVIEWER_WAIT"
 CLEANUP_REVIEW_WORKTREE_WAIT = "CLEANUP_REVIEW_WORKTREE_WAIT"
 
-#: Legacy state of the removed anchor-correction review round (issue #3389).
-#: A durable item can still hold it after a restart. The stage routes it to a
-#: fresh review step instead of failing closed as an unknown state.
-LEGACY_ANCHOR_CORRECTION_WAIT = "ANCHOR_CORRECTION_WAIT"
-
-# Public audit publication is a receipt-backed external reconciliation, not a
-# review round. Three delayed attempts (1s, 2s, 4s) bound one coordinator run;
-# the durable receipt lets a later run resume without another reviewer call.
-IMPLEMENTATION_GO_AUDIT_RETRY_CAP = 3
-
 _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
-    SCOPE_DEPENDENCY_WAIT: "_scope_dependency_wait",
     ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
     REVIEW_WAIT: "_review_wait",
     REVIEW_CHECKOUT_WAIT: "_review_checkout_wait",
-    HOST_VERIFICATION_WAIT: "_host_verification_wait",
-    HOST_CAPABILITY_WAIT: "_host_capability_wait",
-    REPOSITORY_VALIDATION_CI_WAIT: "_repository_validation_ci_wait",
-    REPOSITORY_VALIDATION_SOURCE_WAIT: "_repository_validation_source_wait",
-    REPOSITORY_VALIDATION_RUNTIME_WAIT: "_repository_validation_runtime_wait",
     VALIDATE_WAIT: "_validate_wait",
     POST: "_post",
-    SCOPE_EXPANSION_PREPARE_SUBMIT: "_scope_expansion_prepare_submit",
     POST_APPLY: "_post_apply",
     EVAL: "_eval",
-    GO_AUDIT_RECEIPT: "_go_audit_receipt",
-    GO_AUDIT_PUBLISH: "_go_audit_publish",
     COMPACT_REVIEWER_WAIT: "_compact_reviewer_wait",
     CLEANUP_REVIEW_WORKTREE_WAIT: "_cleanup_review_worktree_wait",
 }
 
 
 def _issue_number(item: WorkItem) -> int:
-    """Return the issue number after the stage-level guard has run."""
-    if item.issue is None:
-        raise RuntimeError("pr_review stage reached without an issue number")
-    return item.issue
+    """Return the issue number; the stage entry point has already checked it."""
+    return cast(int, item.issue)
 
 
 def _review_context_kind(item: WorkItem) -> str:
@@ -197,46 +110,29 @@ def _review_context_kind(item: WorkItem) -> str:
     return "PR" if item.payload.get("review_context_kind") == "PR" else "issue"
 
 
-#: Max CONSECUTIVE reviewer-infrastructure failures (malformed audits or
-#: failed/valueless review jobs) tolerated before failing back
-#: ``agent_error``. Bounds the in-stage ERROR retry loop without burning
-#: ``pr_review_iter`` or stamping labels (#911/#1554; mirrors
-#: plan_review.REVIEW_ERROR_RETRY_CAP). Reset whenever a valid audit arrives.
+#: Max consecutive reviewer failures (an unreadable response or a failed review
+#: job) before the item fails back ``agent_error``. A failure never burns a
+#: review round or changes a label.
 REVIEW_ERROR_RETRY_CAP = 2
 REVIEW_CHECKOUT_RETRY_CAP = 2
 
-_HOST_VERIFICATION_PENDING = "host_verification_pending"
 _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
-#: Consecutive failures of the pre-review thread read. A transient transport or
-#: API failure is not a review result; the counter bounds its retries and is
-#: cleared as soon as one read succeeds.
-_THREAD_RECEIPT_RETRIES = "review_thread_receipt_retries"
+_THREAD_READ_RETRIES = "review_thread_read_retries"
+_REPLY_PREFIX = "[Response] "
 
 
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
-    """Parse the validator job's output into its verdict dict, tolerantly.
+    """Read the validator's ``{"resolved": [...], "unaddressed": [...]}`` answer.
 
-    The validation prompt asks for a single fenced JSON block at the END of
-    the response (``{"resolved": [...], "unaddressed": [...]}``). When a
-    response contains fenced blocks, only its complete final block can be a
-    verdict; an earlier valid block must never authorize a malformed later
-    answer. An unfenced response must be exactly one JSON object. Returns None
-    when the final verdict does not parse — callers fail closed.
-
-    Return the parsed verdict dict, or None if parsing fails.
+    The answer is the last fenced JSON block, or the whole response when it is
+    one JSON object. Returns None when no object can be read.
     """
     if isinstance(raw, dict):
         return raw
     if not isinstance(raw, str) or not raw.strip():
         return None
     blocks = list(re.finditer(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL))
-    if blocks:
-        final = blocks[-1]
-        if raw[final.end() :].strip():
-            return None
-        candidate = final.group(1)
-    else:
-        candidate = raw
+    candidate = blocks[-1].group(1) if blocks else raw
     try:
         parsed = json.loads(candidate.strip())
     except (json.JSONDecodeError, ValueError):
@@ -244,387 +140,93 @@ def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _thread_ids(entries: Any) -> set[str]:
-    """Collect the ``thread_id``/``id`` strings from a validator bucket."""
-    ids: set[str] = set()
-    if not isinstance(entries, list):
-        return ids
-    for entry in entries:
+def _validation_decisions(raw: Any) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Return the thread ids the reviewer accepted and the explanation for each other one."""
+    parsed = _parse_validation_result(raw)
+    if parsed is None:
+        return (), {}
+    resolved = parsed.get("resolved")
+    unaddressed = parsed.get("unaddressed")
+    resolved_ids = tuple(
+        sorted({str(value).strip() for value in resolved or [] if str(value).strip()})
+        if isinstance(resolved, list)
+        else ()
+    )
+    feedback: dict[str, str] = {}
+    for entry in unaddressed if isinstance(unaddressed, list) else []:
         if not isinstance(entry, dict):
             continue
-        thread_id = entry.get("thread_id") or entry.get("id")
-        if thread_id:
-            ids.add(str(thread_id))
-    return ids
-
-
-def _is_postable_finding(thread: dict[str, Any]) -> bool:
-    """Return whether a structured finding has a durable inline-thread shape."""
-    return (
-        isinstance(thread.get("path"), str)
-        and bool(thread["path"].strip())
-        and isinstance(thread.get("line"), int)
-        and not isinstance(thread.get("line"), bool)
-        and thread["line"] > 0
-        and thread.get("side") == "RIGHT"
-        and str(thread.get("severity", "")).lower() in VALID_SEVERITIES
-        and isinstance(thread.get("body"), str)
-        and bool(thread["body"].strip())
-        and not has_reserved_finding_control(thread["body"])
-    )
+        thread_id = str(entry.get("thread_id") or entry.get("id") or "").strip()
+        detail = str(entry.get("detail") or "").strip()
+        if thread_id and detail and thread_id not in resolved_ids:
+            feedback[thread_id] = detail
+    return resolved_ids, feedback
 
 
 def _durable_thread_id(thread: dict[str, Any]) -> str | None:
-    """Return one non-empty durable GraphQL thread id, if present."""
+    """Return one non-empty GraphQL thread id, if present."""
     value = thread.get("id") or thread.get("thread_id")
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    return value or None
+    return value.strip() or None if isinstance(value, str) else None
 
 
-def _finding_content_key(thread: dict[str, Any]) -> tuple[str, int, str, str] | None:
-    """Build a stable content key without durable publication markers."""
-    path = thread.get("path")
-    line = thread.get("line")
-    side = thread.get("side")
-    body = thread.get("body")
-    if (
-        not isinstance(path, str)
-        or not isinstance(line, int)
-        or isinstance(line, bool)
-        or line <= 0
-        or not isinstance(side, str)
-        or not isinstance(body, str)
-    ):
-        return None
-    body = "\n".join(
-        line_text
-        for line_text in body.splitlines()
-        if not line_text.strip().startswith("<!-- hephaestus-severity:")
-        and not line_text.strip().startswith(SCOPE_RETRACTION_MARKER_PREFIX)
-    )
-    # The visible role marker distinguishes the original reviewer in GitHub's
-    # conversation but must not make an otherwise identical finding look new.
-    body = re.sub(r"^\[Review\]\s*", "", body)
-    body = re.sub(r"^Reopened \(prior round, still unaddressed\):\s*", "", body).strip()
-    return (path.strip(), line, side.strip().upper(), re.sub(r"\s+", " ", body).casefold())
+def _thread_snapshots(live_threads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark each open thread by whether the implementation agent already answered it.
 
-
-def _finding_scope_paths(thread: dict[str, Any]) -> tuple[str, ...] | None:
-    """Return one canonical scope manifest from a finding or live marker."""
-    declared_value = thread.get("scope_retraction_paths")
-    declared = () if declared_value is None else normalize_scope_retraction_paths(declared_value)
-    if declared is None:
-        return None
-    body = thread.get("body")
-    if not isinstance(body, str):
-        return None
-    marker_lines = [
-        line.strip()
-        for line in body.splitlines()
-        if line.strip().startswith(SCOPE_RETRACTION_MARKER_PREFIX)
-    ]
-    if not marker_lines:
-        return declared
-    if len(marker_lines) != 1 or not marker_lines[0].endswith("-->"):
-        return None
-    payload = marker_lines[0][len(SCOPE_RETRACTION_MARKER_PREFIX) : -3].strip()
-    try:
-        marked = normalize_scope_retraction_paths(json.loads(payload))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if marked is None or (declared_value is not None and declared != marked):
-        return None
-    return marked
-
-
-def _finding_key(
-    thread: dict[str, Any],
-) -> tuple[str, int, str, str, tuple[str, ...]] | None:
-    """Build a stable finding key with its canonical publication scope."""
-    content = _finding_content_key(thread)
-    scope_paths = _finding_scope_paths(thread)
-    if content is None or scope_paths is None:
-        return None
-    return (*content, scope_paths)
-
-
-def _without_duplicate_live_findings(
-    findings: list[dict[str, Any]], live_threads: dict[str, dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Keep new findings and reject a conflicting live publication identity."""
-    findings_by_content: dict[
-        tuple[str, int, str, str],
-        set[tuple[str, int, str, str, tuple[str, ...]]],
-    ] = {}
-    finding_keys: list[tuple[str, int, str, str, tuple[str, ...]]] = []
-    for finding in findings:
-        content = _finding_content_key(finding)
-        key = _finding_key(finding)
-        if content is None or key is None:
-            raise ValueError("review finding identity is invalid")
-        findings_by_content.setdefault(content, set()).add(key)
-        finding_keys.append(key)
-    existing: set[tuple[str, int, str, str, tuple[str, ...]]] = set()
-    for thread in live_threads.values():
-        content = _finding_content_key(thread)
-        if content is None or content not in findings_by_content:
-            continue
-        key = _finding_key(thread)
-        if key is None or key not in findings_by_content[content]:
-            raise ValueError("live review finding identity conflicts with publication")
-        existing.add(key)
-    retained: list[dict[str, Any]] = []
-    for finding, key in zip(findings, finding_keys, strict=True):
-        prior_thread_id = finding.get("prior_thread_id")
-        if isinstance(prior_thread_id, str) and prior_thread_id in live_threads:
-            continue
-        if key in existing:
-            continue
-        retained.append(finding)
-        existing.add(key)
-    return retained
+    A thread is answered when its last comment starts with ``[Response]``.
+    """
+    snapshots: list[dict[str, Any]] = []
+    for thread in live_threads:
+        snapshot = dict(thread)
+        comments = thread.get("comments")
+        last = comments[-1] if isinstance(comments, list) and comments else None
+        body = str(last.get("body") or "") if isinstance(last, dict) else ""
+        answered = len(comments or []) > 1 and body.startswith(_REPLY_PREFIX)
+        snapshot["implementation_reply_body"] = body if answered else None
+        snapshot["implementation_reply_submitted"] = answered
+        snapshots.append(snapshot)
+    return snapshots
 
 
 def _normalize_remediation_threads(
     threads: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Normalize every live review thread for implementation remediation.
+    """Describe every open thread for the implementation agent.
 
-    The reviewer audit contains proposed findings, not durable GitHub thread
-    identities. Address jobs must instead consume the live post/read-back
-    snapshot so every open thread—regardless of author—is investigated.  The
-    implementation agent replies against the verified current head; the
-    reviewer later performs a fresh review and resolves or returns the exact
-    thread. No-commit replies are explicitly marked for thorough analysis.
+    A follow-up on a thread keeps the whole conversation, so the agent acts on
+    what is still wrong instead of repeating the first fix.
     """
     normalized: list[dict[str, Any]] = []
     for thread in threads:
-        thread_id = str(thread.get("id") or thread.get("thread_id") or "").strip()
-        if not thread_id:
+        thread_id = _durable_thread_id(thread)
+        if thread_id is None:
             continue
         line = thread.get("line")
         body = str(thread.get("body") or "")
         comments = thread.get("comments")
-        # The first thread body is already supplied above.  Once a reviewer
-        # leaves a follow-up, retain the entire conversation in the next
-        # implementer prompt so the agent can act on the precise remaining
-        # defect rather than trying the original fix again.
         if isinstance(comments, list) and len(comments) > 1:
-            rendered_comments: list[str] = []
-            for comment in comments[1:]:
-                if not isinstance(comment, dict):
-                    continue
-                author = str(comment.get("author") or "unknown reviewer").strip()
-                comment_body = str(comment.get("body") or "").strip()
-                if comment_body:
-                    rendered_comments.append(f"{author}: {comment_body}")
-            if rendered_comments:
-                body = f"{body}\n\nThread conversation:\n" + "\n\n".join(rendered_comments)
+            follow_ups = [
+                f"{str(comment.get('author') or 'unknown reviewer').strip()}: "
+                f"{str(comment.get('body') or '').strip()}"
+                for comment in comments[1:]
+                if isinstance(comment, dict) and str(comment.get("body") or "").strip()
+            ]
+            if follow_ups:
+                body = f"{body}\n\nThread conversation:\n" + "\n\n".join(follow_ups)
         normalized.append(
             {
                 "thread_id": thread_id,
                 "path": str(thread.get("path") or ""),
-                "line": (
-                    line
-                    if isinstance(line, int) and not isinstance(line, bool) and line > 0
-                    else None
-                ),
+                "line": line if isinstance(line, int) and not isinstance(line, bool) else None,
                 "body": body,
             }
         )
     return normalized
 
 
-def _validation_thread_snapshots(
-    live_threads: list[dict[str, Any]], receipts: list[dict[str, Any]]
-) -> list[dict[str, Any]] | None:
-    """Decorate every open thread for reviewer validation.
-
-    The reviewer always receives the full open-thread snapshot.  Only the
-    subset with a host-verified implementation reply on the reviewed head is
-    eligible for a resolve or reviewer-feedback mutation in this pass; the
-    remainder stays open for the implementation agent.  Receipts come from a
-    fresh GitHub read, rather than this process's former work-item payload.
-    """
-    receipt_by_id: dict[str, dict[str, Any]] = {}
-    for receipt in receipts:
-        thread_id = _durable_thread_id(receipt)
-        if thread_id is None or thread_id in receipt_by_id:
-            return None
-        receipt_by_id[thread_id] = receipt
-
-    snapshots: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for thread in live_threads:
-        if not isinstance(thread, dict):
-            return None
-        thread_id = _durable_thread_id(thread)
-        if thread_id is None or thread_id in seen:
-            return None
-        seen.add(thread_id)
-        snapshot = dict(thread)
-        matched_receipt = receipt_by_id.get(thread_id)
-        if matched_receipt is not None:
-            snapshot["implementation_reply_body"] = matched_receipt["implementation_reply_body"]
-            snapshot["implementation_reply_submitted"] = True
-        else:
-            snapshot["implementation_reply_body"] = None
-            snapshot["implementation_reply_submitted"] = False
-        snapshots.append(snapshot)
-
-    if not set(receipt_by_id).issubset(seen):
-        return None
-    return snapshots
-
-
-def _validation_receipt_fingerprints(
-    receipts: list[dict[str, Any]],
-) -> dict[str, str] | None:
-    """Bind a validator decision to the exact host-read reply receipt.
-
-    A thread ID alone is not an immutable decision target: another reply can
-    be appended on the same thread and head while the validation job is
-    running.  Store a canonical digest of the complete comment receipt that
-    the reviewer was shown, then require an identical fresh receipt before
-    consuming its decision in ``POST``.
-    """
-    fingerprints: dict[str, str] = {}
-    for receipt in receipts:
-        thread_id = _durable_thread_id(receipt)
-        comments = receipt.get("comments") if isinstance(receipt, dict) else None
-        reply_id = receipt.get("implementation_reply_id") if isinstance(receipt, dict) else None
-        reply_body = receipt.get("implementation_reply_body") if isinstance(receipt, dict) else None
-        head_sha = receipt.get("implementation_head_sha") if isinstance(receipt, dict) else None
-        if (
-            thread_id is None
-            or thread_id in fingerprints
-            or not isinstance(comments, list)
-            or not isinstance(reply_id, str)
-            or not isinstance(reply_body, str)
-            or not is_full_commit_sha(head_sha)
-        ):
-            return None
-        snapshot: list[tuple[str, str]] = []
-        seen_comment_ids: set[str] = set()
-        for comment in comments:
-            if not isinstance(comment, dict):
-                return None
-            comment_id = comment.get("id")
-            body = comment.get("body")
-            if (
-                not isinstance(comment_id, str)
-                or not comment_id
-                or comment_id in seen_comment_ids
-                or not isinstance(body, str)
-            ):
-                return None
-            seen_comment_ids.add(comment_id)
-            snapshot.append((comment_id, body))
-        if not snapshot or snapshot[-1] != (reply_id, reply_body):
-            return None
-        canonical = json.dumps(
-            {
-                "comments": snapshot,
-                "head_sha": head_sha,
-                "implementation_reply_body": reply_body,
-                "implementation_reply_id": reply_id,
-                "thread_id": thread_id,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        fingerprints[thread_id] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return fingerprints
-
-
-def _validation_pr_metadata_fingerprint(
-    pr_context: dict[str, str] | None, reviewed_head: str
-) -> str | None:
-    """Bind a validator decision to the exact live title/body it reviewed."""
-    if (
-        pr_context is None
-        or pr_context.get("pr_head_sha") != reviewed_head
-        or not isinstance(pr_context.get("pr_title"), str)
-        or not isinstance(pr_context.get("pr_description"), str)
-    ):
-        return None
-    canonical = json.dumps(
-        {
-            "head_sha": reviewed_head,
-            "pr_description": pr_context["pr_description"],
-            "pr_title": pr_context["pr_title"],
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _reviewer_thread_decisions(  # noqa: C901
-    receipts: list[dict[str, Any]], validation_result: Any
-) -> tuple[set[str], dict[str, str]] | None:
-    """Return reviewer-approved IDs and rejection explanations, fail closed."""
-    parsed = _parse_validation_result(validation_result)
-    if parsed is None:
-        return None
-    # Resolution is authority-bearing.  Require the reviewer to make an
-    # explicit, exhaustive two-way decision for every host-read receipt;
-    # omission and a historical ``wont_fix`` bucket must never silently close
-    # a discussion.
-    if set(parsed) != {"resolved", "unaddressed"}:
-        return None
-    resolved = parsed.get("resolved")
-    unaddressed = parsed.get("unaddressed")
-    if not isinstance(resolved, list) or not isinstance(unaddressed, list):
-        return None
-    known_ids: set[str] = set()
-    for receipt in receipts:
-        thread_id = _durable_thread_id(receipt)
-        if thread_id is None:
-            return None
-        known_ids.add(thread_id)
-    if len(known_ids) != len(receipts):
-        return None
-    resolved_ids: set[str] = set()
-    for thread_id in resolved:
-        if not isinstance(thread_id, str) or not thread_id.strip():
-            return None
-        normalized_id = thread_id.strip()
-        if normalized_id in resolved_ids:
-            return None
-        resolved_ids.add(normalized_id)
-    feedback: dict[str, str] = {}
-    for entry in unaddressed:
-        if not isinstance(entry, dict):
-            return None
-        thread_id = str(entry.get("thread_id") or entry.get("id") or "").strip()
-        detail = str(entry.get("detail") or "").strip()
-        if not thread_id or not detail or thread_id in feedback:
-            return None
-        feedback[thread_id] = detail
-    feedback_ids = set(feedback)
-    if (
-        not resolved_ids.issubset(known_ids)
-        or not feedback_ids.issubset(known_ids)
-        or resolved_ids & feedback_ids
-        or resolved_ids | feedback_ids != known_ids
-    ):
-        return None
-    return (resolved_ids, feedback)
-
-
 if _typing.TYPE_CHECKING:
 
     class _PrReviewHost(_typing.Protocol):
         """Cross-collaborator methods supplied by the review-stage façade."""
-
-        @staticmethod
-        def _require_confirmed_unarmed(pr_number: int, ctx: StageContext) -> StageOutcome | None:
-            raise NotImplementedError
 
         @staticmethod
         def _write_no_go(item: WorkItem, ctx: StageContext) -> StepResult | None:
@@ -635,18 +237,16 @@ if _typing.TYPE_CHECKING:
         ) -> StepResult:
             raise NotImplementedError
 
-        def _route_threads_before_broad_review(
-            self, item: WorkItem, ctx: StageContext
-        ) -> StepResult:
-            raise NotImplementedError
-
         def _handoff_implementation(self, item: WorkItem, ctx: StageContext) -> StepResult:
             raise NotImplementedError
 
+        def _route_existing_threads(
+            self, item: WorkItem, ctx: StageContext, *, after_checkout: bool
+        ) -> StepResult | None:
+            raise NotImplementedError
+
         @staticmethod
-        def _submit_host_verification(
-            item: WorkItem, ctx: StageContext, verification: _HostVerificationSpec
-        ) -> JobRequest:
+        def _on_reconciliation_done(item: WorkItem, result: JobResult) -> None:
             raise NotImplementedError
 
 
@@ -660,44 +260,25 @@ else:
 __all__ = [
     "ADOPT_WORKTREE_WAIT",
     "AGENT_PR_REVIEWER",
-    "BLOCKING_SEVERITIES",
     "CLEANUP_REVIEW_WORKTREE_WAIT",
     "COMPACT_REVIEWER_WAIT",
     "ENTER",
     "EVAL",
     "GIT_JOB_TIMEOUT_S",
-    "GO_AUDIT_PUBLISH",
-    "GO_AUDIT_RECEIPT",
-    "HOST_CAPABILITY_WAIT",
-    "HOST_VERIFICATION_DIAGNOSTIC_MAX",
-    "HOST_VERIFICATION_TIMEOUT_S",
-    "HOST_VERIFICATION_WAIT",
-    "IMPLEMENTATION_GO_AUDIT_RETRY_CAP",
-    "LEGACY_ANCHOR_CORRECTION_WAIT",
     "POST",
-    "REPOSITORY_VALIDATION_CI_WAIT",
-    "REPOSITORY_VALIDATION_RUNTIME_WAIT",
-    "REPOSITORY_VALIDATION_SOURCE_WAIT",
+    "POST_APPLY",
     "REVIEW_CHECKOUT_RETRY_CAP",
     "REVIEW_CHECKOUT_WAIT",
     "REVIEW_ERROR_RETRY_CAP",
     "REVIEW_WAIT",
-    "SCOPE_DEPENDENCY_WAIT",
-    "SCOPE_EXPANSION_PREPARE_SUBMIT",
     "STATE_SKIP",
-    "UNSUPPORTED_HOST_VERIFICATION_ERROR",
     "VALIDATE_WAIT",
-    "VALID_SEVERITIES",
     "_COMMENT_VALIDATION_ONLY",
-    "_HOST_VERIFICATION_PENDING",
-    "_JSON_RESPONSE_BLOCK_RE",
     "_ROUND_PAYLOAD_KEYS",
     "_STEP_HANDLER_NAMES",
-    "_THREAD_RECEIPT_RETRIES",
+    "_THREAD_READ_RETRIES",
     "AgentJob",
     "Any",
-    "BuildTestJob",
-    "Callable",
     "CompactJob",
     "Continue",
     "Disposition",
@@ -711,53 +292,31 @@ __all__ = [
     "StageOutcome",
     "StepResult",
     "WorkItem",
-    "_HostVerificationSpec",
     "_ParsedReviewResponse",
     "_PrReviewHost",
     "_clear_round_review_state",
     "_durable_thread_id",
-    "_finding_content_key",
-    "_finding_key",
-    "_host_verification_failure_kind",
-    "_host_verification_receipt_matches",
-    "_host_verification_receipts_match",
-    "_host_verification_result_status",
-    "_host_verification_specs",
-    "_is_confirmed_open_unarmed",
-    "_is_postable_finding",
     "_issue_number",
     "_normalize_remediation_threads",
     "_parse_review_response",
     "_parse_validation_result",
-    "_payload_host_verification_specs",
-    "_prepare_host_checks",
     "_review_context_kind",
-    "_reviewer_thread_decisions",
     "_scope_retraction_paths",
-    "_thread_ids",
-    "_validation_pr_metadata_fingerprint",
-    "_validation_receipt_fingerprints",
-    "_validation_thread_snapshots",
-    "_without_duplicate_live_findings",
+    "_thread_snapshots",
+    "_validation_decisions",
     "_worktree_path",
     "agent_provider",
     "annotations",
     "cast",
-    "dataclass",
     "get_pr_review_analysis_prompt",
     "get_review_validation_prompt",
-    "has_reserved_finding_control",
-    "hashlib",
     "is_full_commit_sha",
     "json",
     "logger",
     "logging",
-    "parse_review_audit",
     "pr_reviewer_claude_timeout",
     "re",
     "reviewer_model",
-    "scope_retraction_paths_for_threads",
-    "secrets",
     "stage_model",
     "stage_timeout",
     "write_skip_label",

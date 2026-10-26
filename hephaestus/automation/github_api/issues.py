@@ -27,17 +27,8 @@ from ..comment_identity import (
 from ..dependency_parser import parse_issue_dependencies as parse_issue_dependencies
 from ..models import IssueInfo, IssueState
 from ..protocol import comment_marker_aliases
-from ..requirements_recovery import (
-    RECOVERY_PROVENANCE_PREFIX,
-    RecoveryCommentIdentityError,
-    RecoveryCommentSelection,
-    select_recovery_comment,
-)
 from ..review_journal import (
-    CommentJournalReadError,
-    IssueComment,
     has_exact_leading_marker,
-    normalize_issue_comments,
 )
 
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
@@ -164,29 +155,6 @@ def gh_issue_json(
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError, TypeError, ValueError) as e:
         raise issue_read_error(issue_number, e) from e
     return data
-
-
-def gh_issue_body_edited_by_viewer(
-    issue_number: int,
-    repo: tuple[str, str] | None = None,
-) -> bool:
-    """Return whether the authenticated actor made the latest issue-body edit.
-
-    The GraphQL read goes through the one validated response contract in
-    ``github_api.graphql``; transport and decoding failures keep the
-    historical bounded ``RuntimeError`` surface for standalone finalization
-    checks.
-    """
-    try:
-        owner, name = repo if repo is not None else _api.get_repo_info()
-        return _api.run_graphql(
-            _api.issue_body_editor_query(owner, name, issue_number),
-            {"owner": owner, "name": name, "number": issue_number},
-        )
-    except (subprocess.SubprocessError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"Failed to authenticate issue body editor for #{issue_number}: {exc}"
-        ) from exc
 
 
 def _repo_args(repo: tuple[str, str] | None) -> list[str]:
@@ -410,8 +378,6 @@ def gh_issue_upsert_comment(
         RuntimeError: A comment mutation error occurs.
 
     """
-    if marker_prefix == RECOVERY_PROVENANCE_PREFIX:
-        return _gh_issue_upsert_recovery_comment(issue_number, body, repo=repo)
     if not has_exact_leading_marker(body, marker_prefix):
         raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
     if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
@@ -484,109 +450,6 @@ def gh_issue_upsert_comment(
         ):
             raise RuntimeError(
                 f"updated canonical comment {target_id} on #{issue_number} was not confirmed"
-            )
-    return target_id
-
-
-def _select_recovery_metadata_comment(
-    comments: list[dict[str, Any]],
-    viewer_login: str,
-) -> RecoveryCommentSelection[IssueComment] | None:
-    """Select one recovery comment from full metadata."""
-    try:
-        normalized = normalize_issue_comments(comments, viewer_login=viewer_login)
-    except CommentJournalReadError as exc:
-        raise RecoveryCommentIdentityError(
-            f"recovery comment journal is not correct: {exc}"
-        ) from exc
-    return select_recovery_comment(
-        normalized,
-        body_of=lambda comment: comment.body,
-        owned_of=lambda comment: comment.viewer_did_author,
-    )
-
-
-def _patch_recovery_comment(
-    issue_number: int,
-    comment_id: int,
-    body: str,
-    *,
-    repo: tuple[str, str] | None,
-) -> None:
-    """Update one recovery comment body."""
-    owner, name = repo if repo is not None else _api.get_repo_info()
-    try:
-        with _body_file(body) as path:
-            _api._gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{comment_id}",
-                    "-F",
-                    f"body=@{path}",
-                ]
-            )
-    except subprocess.CalledProcessError as error:
-        raise RuntimeError(
-            f"GitHub did not update recovery comment {comment_id} on #{issue_number}: {error}"
-        ) from error
-
-
-def _gh_issue_upsert_recovery_comment(
-    issue_number: int,
-    body: str,
-    *,
-    repo: tuple[str, str] | None,
-) -> int:
-    """Upsert a versioned recovery comment with full-journal readback checks."""
-    validate_planning_body_for_write(RECOVERY_PROVENANCE_PREFIX, body)
-    outgoing = select_recovery_comment(
-        [{"body": body}],
-        body_of=lambda comment: str(comment["body"]),
-        owned_of=lambda _comment: True,
-    )
-    if outgoing is None:
-        raise RuntimeError("recovery comment body did not contain a correct provenance marker")
-    viewer_login = (_api.gh_current_login() or "").strip().lower()
-    if not viewer_login:
-        raise RuntimeError("GitHub viewer login is not available")
-
-    comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-    target = _select_recovery_metadata_comment(comments, viewer_login)
-    if target is None:
-        _api.gh_issue_comment(issue_number, body, repo=repo)
-        target = _select_recovery_metadata_comment(
-            _api.fetch_issue_comments_metadata(issue_number, repo),
-            viewer_login,
-        )
-        if target is None:
-            raise RuntimeError(
-                f"GitHub did not show the new recovery comment on #{issue_number} as actor-owned"
-            )
-        if target.comment.body != body:
-            raise RuntimeError(
-                f"The recovery comment readback for #{issue_number} did not show the specified body"
-            )
-
-    target_id = target.comment.database_id
-    if target_id is None:
-        raise RuntimeError(f"recovery comment on #{issue_number} has no database id")
-    if target.comment.body != body:
-        _patch_recovery_comment(issue_number, target_id, body, repo=repo)
-
-        confirmed = _select_recovery_metadata_comment(
-            _api.fetch_issue_comments_metadata(issue_number, repo),
-            viewer_login,
-        )
-        if (
-            confirmed is None
-            or confirmed.comment.database_id != target_id
-            or confirmed.comment.body != body
-        ):
-            raise RuntimeError(
-                f"The recovery comment readback did not show the update "
-                f"for comment {target_id} on #{issue_number}"
             )
     return target_id
 

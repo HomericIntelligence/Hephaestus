@@ -139,8 +139,6 @@ ROUTES: dict[StageName, Route] = {
             # terminal abandonment. Other merge-wait failures are terminal;
             # the stage never reconciles a state owned by another run.
             "not_implementation_go": StageName.PR_REVIEW,
-            "reviewed_head_missing": StageName.PR_REVIEW,
-            "reviewed_head_drift": StageName.PR_REVIEW,
             "merge_conflicting": StageName.IMPLEMENTATION,
             "*": StageName.FINISHED,
         },

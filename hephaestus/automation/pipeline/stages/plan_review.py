@@ -18,7 +18,7 @@ re-pointed at the pipeline (#1820):
   ``get_plan_loop_review_prompt`` always sees a 0-based iteration in
   ``0..plan_review_iter-1``; ``plan_cycles`` bounds the number of cycles.
 - Both counters advance in EVAL and ONLY for real verdicts
-  (GO/NOGO/BLOCKED). ERROR, unsupported, and missing verdicts never burn an iteration
+  (GO/NOGO). ERROR, unsupported, and missing verdicts never burn an iteration
   (the shared ``review_types.ReviewVerdict`` doctrine: "the reviewer never ran" must
   not be mistaken for a judgement, #911/#1554/#1794); they RETRY with
   labels untouched, bounded in-stage by
@@ -29,8 +29,8 @@ re-pointed at the pipeline (#1820):
   failure is not fixed by replanning, so failing back to planning would
   only spend ``plan_cycles`` on more doomed reviews; labels stay untouched
   on the whole ERROR path.
-- Owned labels: ``state:plan-go`` (GO), ``state:plan-no-go`` (NOGO),
-  and ``state:plan-blocked`` (external input required) [durable]. GO/NOGO are
+- Owned labels: ``state:plan-go`` (GO) and ``state:plan-no-go`` (NOGO)
+  [durable]. GO/NOGO are
   computed by the shared pure ``state_labels.apply_plan_verdict`` and applied
   through one fail-closed, mutually-exclusive label transition.
 - Verdict parsed IN-WORKER by :func:`parse_plan_review_verdict` from one exact
@@ -78,7 +78,6 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.comment_identity import (
     CommentAliasConflictError,
-    validate_planning_body_for_write,
 )
 from hephaestus.automation.plan_review_session import PlanReviewSessionLostError
 from hephaestus.automation.prompts._shared import fence_content
@@ -102,7 +101,6 @@ from hephaestus.automation.review_journal import (
 from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
-    STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     apply_plan_verdict,
@@ -131,7 +129,7 @@ from .base import (
     stage_model,
     stage_timeout,
 )
-from .planning import _publish_plan_blocked, build_plan_prompt
+from .planning import build_plan_prompt
 
 _MODEL_SELECTION_FORMAT = 1
 
@@ -178,7 +176,6 @@ AMEND_WAIT = "AMEND_WAIT"
 REVIEW_ERROR_RETRY_CAP = 2
 
 _PLAN_SCOPE_INVALID = "plan_scope_invalid"
-_EXTERNAL_PLAN_BLOCK_REASON = "plan was blocked externally while review was in flight"
 _REVIEWED_PLAN_COMMENT_BODY = "reviewed_plan_comment_body"
 
 
@@ -191,16 +188,16 @@ def _plan_scope_admission_failure(plan_text: str, ctx: StageContext) -> str | No
     return _PLAN_SCOPE_INVALID
 
 
-def _plan_scope_blocked_verdict() -> ReviewVerdict:
-    """Build the host audit record for a rejected implementation admission."""
+def _plan_scope_nogo_verdict() -> ReviewVerdict:
+    """Build the host review record for a plan with no valid implementation scope."""
     body = (
         "Host validation rejected implementation admission because the canonical plan has no "
         "valid implementation file scope. Diagnostic: plan_scope_invalid. Use a `## Files to "
         "Modify`, `## Files to Create`, or `## File Changes` section. Start each file "
-        "declaration with a backticked repository-relative path. Correct the canonical plan, "
-        "obtain review, and replace the blocked state before the loop can continue."
+        "declaration with a backticked repository-relative path. Correct the canonical plan "
+        "and resubmit it for review."
     )
-    return ReviewVerdict(grade=None, verdict="BLOCKED", raw=f"{body}\n\n{STATE_PLAN_BLOCKED}")
+    return ReviewVerdict(grade=None, verdict="NOGO", raw=f"{body}\n\n{STATE_PLAN_NO_GO}")
 
 
 @dataclass(frozen=True)
@@ -213,9 +210,6 @@ class _AcceptedPlanReview:
     charged_round: int | None = None
     comment_published: bool = False
     label_proposed: bool = False
-    blocked_audit_body: str | None = None
-    blocked_prior_review_body: str | None = None
-    scope_rejection_reason: str | None = None
 
 
 def _reviewer_failure(item: WorkItem, reason: str) -> StageOutcome:
@@ -266,7 +260,6 @@ def _missing_plan_admission_outcome(
 _PLAN_REVIEW_LABELS = {
     STATE_PLAN_GO: "GO",
     STATE_PLAN_NO_GO: "NOGO",
-    STATE_PLAN_BLOCKED: "BLOCKED",
 }
 
 
@@ -334,20 +327,10 @@ def _confirm_pending_amendment_transition(
     # Validate both shared roles before it changes that durable state.
     journal_snapshot(ctx.github.issue_comments(item.issue))
     labels = _require_issue_labels(item, ctx)
-    if STATE_PLAN_BLOCKED in labels:
-        return StageOutcome(
-            Disposition.BLOCKED,
-            "plan was blocked externally while amendment was in flight",
-        )
     if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
         add, remove = enter_planning_transition()
         ctx.github.edit_labels(item.issue, add=add, remove=remove)
         labels = _require_issue_labels(item, ctx)
-        if STATE_PLAN_BLOCKED in labels:
-            return StageOutcome(
-                Disposition.BLOCKED,
-                "plan was blocked externally while amendment was in flight",
-            )
         if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
             return StageOutcome(
                 Disposition.RETRY,
@@ -438,10 +421,8 @@ def _restore_review_conversation(
         )
     except PlanReviewSessionLostError as exc:
         logger.error("plan_review:%d: review-session-lost: %s", item.issue, exc)
-        raw_review = f"Reviewer conversation recovery required.\n\n{STATE_PLAN_BLOCKED}"
-        _publish_plan_blocked(item.issue, ctx, raw_review=raw_review, revision=revision)
         item.payload["review_session_error"] = "review-session-lost"
-        return StageOutcome(Disposition.BLOCKED, "review-session-lost")
+        return _reviewer_failure(item, "review-session-lost")
     return None
 
 
@@ -449,8 +430,6 @@ def _restart_review_conversation(item: WorkItem, ctx: StageContext) -> StageOutc
     """Replace a lost session within the current review failure budget."""
     if item.issue is None:
         return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
-    if STATE_PLAN_BLOCKED in _require_issue_labels(item, ctx):
-        return StageOutcome(Disposition.BLOCKED, "plan is blocked pending external intervention")
     failure = _reviewer_failure(item, "review-session-lost")
     if failure.disposition is Disposition.FINISH_FAIL:
         return failure
@@ -587,35 +566,17 @@ def _record_amendment_value(item: WorkItem, plan_text: str, ctx: StageContext) -
             plan_fingerprint=plan_fingerprint(publication.plan),
         )
     if publication.is_stuck:
-        item.payload["no_progress_reason"] = publication.no_progress_reason
-        raw_review = (
-            "Planning is stuck and needs external feedback. "
-            f"{publication.no_progress_reason}\n\n{STATE_PLAN_BLOCKED}"
-        )
-        _publish_plan_blocked(
+        logger.warning(
+            "plan_review:%s: planning made no progress: %s",
             item.issue,
-            ctx,
-            raw_review=raw_review,
-            revision=publication.revision,
+            publication.no_progress_reason,
         )
+        item.payload["no_progress_reason"] = publication.no_progress_reason
         return
     add, remove = enter_planning_transition()
     ctx.github.edit_labels(item.issue, add=add, remove=remove)
     item.payload["needs_plan_transition_pending"] = True
     item.payload.pop("no_progress_reason", None)
-
-
-def _operator_blocked_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-    """Stop non-EVAL work when the operator latch appears between steps."""
-    if item.state in {"ENTER", "EVAL"} or item.issue is None:
-        return None
-    live_labels = _require_issue_labels(item, ctx)
-    if STATE_PLAN_BLOCKED not in live_labels:
-        return None
-    return StageOutcome(
-        Disposition.BLOCKED,
-        "plan is blocked pending external intervention",
-    )
 
 
 def build_amend_prompt(
@@ -672,14 +633,12 @@ class PlanReviewStage(Stage):
     - REVIEW_WAIT: clear any stale verdict, then submit the reviewer job;
       the verdict is parsed in-worker by ``parse_plan_review_verdict`` and lands
       in ``item.payload["review_verdict"]``.
-    - EVAL [M]: real verdicts (GO/NOGO/BLOCKED) advance both iteration
+    - EVAL [M]: real verdicts (GO/NOGO) advance both iteration
       counters; ERROR/missing verdicts never do. GO -> durably apply
       ``state:plan-go`` (write BEFORE the advancing outcome), emit an immutable
       learning intent, then ADVANCE; NOGO within the cycle-relative iteration budget ->
       durably apply ``state:plan-no-go`` and enter AMEND_WAIT within budget,
       or FAIL_BACK("nogo") while plan cycles remain;
-      BLOCKED applies and confirms ``state:plan-blocked`` first, publishes its
-      explanation as audit data, and stops
       or FAIL_BACK("plan_cycles_exhausted") once exhausted; ERROR/missing
       verdict -> labels untouched, RETRY (bounded by
       ``REVIEW_ERROR_RETRY_CAP`` consecutive failures, then FINISH_FAIL).
@@ -723,21 +682,6 @@ class PlanReviewStage(Stage):
         """
         if item.issue is not None:
             labels = _require_issue_labels(item, ctx)
-            if STATE_PLAN_BLOCKED in labels:
-                logger.info("plan_review:%d: already plan-blocked; stopping", item.issue)
-                try:
-                    ctx.github.ensure_blocked_audit(item.issue)
-                except CommentJournalReadError as exc:
-                    logger.warning(
-                        "plan_review:%d: plan journal blocked-audit read failed: %s",
-                        item.issue,
-                        exc,
-                    )
-                    return StageOutcome(
-                        Disposition.RETRY,
-                        f"plan journal read failed: {exc}",
-                    )
-                return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
             try:
                 comments = reconcile_plan_journal(item.issue, ctx.github)
             except CommentJournalReadError as exc:
@@ -755,16 +699,15 @@ class PlanReviewStage(Stage):
                 return _missing_plan_admission_outcome(item, labels)
 
             if is_exclusive_plan_state(labels, STATE_PLAN_GO):
-                if reason := _plan_scope_admission_failure(snapshot.current_plan_body, ctx):
+                if _plan_scope_admission_failure(snapshot.current_plan_body, ctx):
                     expected_review = _AcceptedPlanReview(
-                        verdict=_plan_scope_blocked_verdict(),
+                        verdict=_plan_scope_nogo_verdict(),
                         revision=snapshot.revision,
                         plan_comment_body=snapshot.current_plan_body,
                         # The existing GO label is the restart authority.
                         # Retract it if the plan identity changes before the
                         # blocking write.
                         label_proposed=True,
-                        scope_rejection_reason=reason,
                     )
                     item.payload["plan_text"] = snapshot.current_plan
                     item.payload["plan_revision"] = snapshot.revision
@@ -812,7 +755,7 @@ class PlanReviewStage(Stage):
             item.payload.pop("review_error_retries", None)
         return None
 
-    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
+    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Execute the next plan-review action for the item's current state.
 
         Args:
@@ -832,13 +775,6 @@ class PlanReviewStage(Stage):
                 return recovery_outcome
             return Continue(next_state="REVIEW_WAIT")
 
-        # on_enter is not a durable lock. Re-check the operator latch before
-        # every agent request and before the delayed post-learn transition.
-        # EVAL performs its own read immediately before any verdict write.
-        blocked_outcome = _operator_blocked_outcome(item, ctx)
-        if blocked_outcome is not None:
-            return blocked_outcome
-
         if item.state == "ENTER":
             return Continue(next_state="REVIEW_WAIT")
 
@@ -849,22 +785,9 @@ class PlanReviewStage(Stage):
 
             no_progress_reason = str(item.payload.get("no_progress_reason") or "")
             if no_progress_reason:
-                raw_review = (
-                    "Planning is stuck and needs external feedback. "
-                    f"{no_progress_reason}\n\n{STATE_PLAN_BLOCKED}"
-                )
-                revision = int(item.payload.get("plan_revision") or 1)
-                confirmed = _publish_plan_blocked(
-                    item.issue,
-                    ctx,
-                    raw_review=raw_review,
-                    revision=revision,
-                )
-                if not confirmed:
-                    return StageOutcome(Disposition.RETRY, "blocked label was not confirmed")
                 return StageOutcome(
-                    Disposition.BLOCKED,
-                    "planning made no progress; external feedback required",
+                    Disposition.FINISH_FAIL,
+                    "planning made no progress; the plan did not change",
                 )
 
             # Counters advance in EVAL, and only for real verdicts — a
@@ -1072,7 +995,6 @@ class PlanReviewStage(Stage):
             if not isinstance(verdict, ReviewVerdict) or verdict.verdict not in {
                 "GO",
                 "NOGO",
-                "BLOCKED",
             }:
                 item.payload.pop("accepted_plan_review", None)
                 return _reviewer_failure(item, "reviewer error")
@@ -1095,27 +1017,16 @@ class PlanReviewStage(Stage):
             return _reviewer_failure(item, "no verdict found")
         verdict = review.verdict
 
-        # An operator may apply BLOCKED while the reviewer agent is running.
-        # Re-read immediately before any audit or label write; automation must
-        # neither overwrite the blocked explanation nor clear the latch.
-        live_labels = _require_issue_labels(item, ctx)
-        if STATE_PLAN_BLOCKED in live_labels and review.blocked_audit_body is None:
-            return StageOutcome(
-                Disposition.BLOCKED,
-                _EXTERNAL_PLAN_BLOCK_REASON,
-            )
-
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
-        if review.scope_rejection_reason is not None:
-            return self._complete_scope_blocked(
-                item,
-                ctx,
-                review.scope_rejection_reason,
-                review,
-            )
-        if verdict.is_go and (scope_outcome := self._scope_admission_outcome(item, ctx, review)):
-            return scope_outcome
+        if verdict.is_go:
+            scoped = self._scope_admission_review(item, ctx, review)
+            if isinstance(scoped, StageOutcome):
+                return scoped
+            if scoped is not None:
+                review = scoped
+                verdict = review.verdict
+                item.payload["accepted_plan_review"] = review
         if review.charged_round is None:
             round_done = int(item.payload.get("review_round", 0)) + 1
             review = replace(review, charged_round=round_done)
@@ -1123,12 +1034,6 @@ class PlanReviewStage(Stage):
             item.payload["review_round"] = round_done
             item.attempts["plan_review_iter"] = item.attempts.get("plan_review_iter", 0) + 1
             item.payload["review_error_retries"] = 0
-        if verdict.verdict == "BLOCKED":
-            # BLOCKED is the safety latch. Make it durable first so an audit
-            # write failure cannot resume autonomous work; the retry still
-            # attempts to persist the required explanation idempotently.
-            return self._complete_blocked_with_audit(item, ctx, review, verdict)
-
         # GO/NOGO audit text is durable before its proposed label. Regardless
         # of prose, only the confirmed exclusive label below can route.
         if not review.comment_published:
@@ -1222,29 +1127,20 @@ class PlanReviewStage(Stage):
             and snapshot.current_plan_body == review.plan_comment_body
         ):
             return None
-        labels = _require_issue_labels(item, ctx)
-        if STATE_PLAN_BLOCKED in labels:
-            return StageOutcome(
-                Disposition.BLOCKED, "plan is blocked pending external intervention"
-            )
         if review.label_proposed:
             add, remove = enter_planning_transition()
             ctx.github.edit_labels(item.issue, add=add, remove=remove)
             labels = _require_issue_labels(item, ctx)
-            if STATE_PLAN_BLOCKED in labels:
-                return StageOutcome(
-                    Disposition.BLOCKED, "plan is blocked pending external intervention"
-                )
             if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
                 return StageOutcome(Disposition.RETRY, "changed plan state was not confirmed")
         return StageOutcome(
             Disposition.FAIL_BACK, "plan_changed" if snapshot.current_plan else "plan_missing"
         )
 
-    def _scope_admission_outcome(
+    def _scope_admission_review(
         self, item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview
-    ) -> StageOutcome | None:
-        """Reject a Codex GO when its current reviewed plan has no scope."""
+    ) -> StageOutcome | _AcceptedPlanReview | None:
+        """Turn a Codex GO into a NOGO when its reviewed plan has no scope."""
         assert item.issue is not None  # noqa: S101 - EVAL validates the issue
         if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
             return None
@@ -1261,129 +1157,13 @@ class PlanReviewStage(Stage):
                 snapshot=snapshot,
             )
         if reason := _plan_scope_admission_failure(snapshot.current_plan_body, ctx):
-            return self._complete_scope_blocked(item, ctx, reason, review)
-        return None
-
-    def _complete_scope_blocked(
-        self,
-        item: WorkItem,
-        ctx: StageContext,
-        reason: str,
-        review: _AcceptedPlanReview,
-    ) -> StageOutcome:
-        """Block implementation admission and publish one host validation audit."""
-        logger.warning(
-            "plan_review:%s: implementation admission rejected: %s",
-            item.issue,
-            reason,
-        )
-        outcome = self._complete_blocked_with_audit(
-            item,
-            ctx,
-            review,
-            _plan_scope_blocked_verdict(),
-        )
-        if outcome.disposition is Disposition.BLOCKED and outcome != StageOutcome(
-            Disposition.BLOCKED, _EXTERNAL_PLAN_BLOCK_REASON
-        ):
-            return StageOutcome(Disposition.BLOCKED, "plan scope is invalid")
-        return outcome
-
-    def _complete_blocked(self, item: WorkItem, ctx: StageContext) -> StageOutcome:
-        """Apply and confirm BLOCKED before returning its routing outcome."""
-        assert item.issue is not None  # noqa: S101 - _eval narrows the issue
-        ctx.github.edit_labels(
-            item.issue,
-            add=[STATE_PLAN_BLOCKED],
-            remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
-        )
-        if not is_exclusive_plan_state(
-            _require_issue_labels(item, ctx),
-            STATE_PLAN_BLOCKED,
-        ):
-            return StageOutcome(Disposition.RETRY, "blocked label was not confirmed")
-        return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
-
-    def _complete_blocked_with_audit(
-        self,
-        item: WorkItem,
-        ctx: StageContext,
-        review: _AcceptedPlanReview,
-        verdict: ReviewVerdict,
-    ) -> StageOutcome:
-        """Latch BLOCKED, then retry its exact audit until it is durable."""
-        assert item.issue is not None  # noqa: S101 - _eval narrows the issue
-        snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
-        identity_outcome = self._review_identity_outcome(
-            item,
-            ctx,
-            review,
-            snapshot=snapshot,
-        )
-        if identity_outcome is not None:
-            return identity_outcome
-
-        comment_body = review.blocked_audit_body or _normalize_review_comment(
-            verdict.raw,
-            revision=review.revision,
-        )
-        validate_planning_body_for_write(PLAN_REVIEW_CANONICAL_MARKER, comment_body)
-
-        labels = _require_issue_labels(item, ctx)
-        if review.blocked_audit_body is None:
-            # A BLOCKED label that existed before this transaction belongs to
-            # an external actor. Keep its explanation unchanged.
-            if STATE_PLAN_BLOCKED in labels:
-                return StageOutcome(Disposition.BLOCKED, _EXTERNAL_PLAN_BLOCK_REASON)
-            review = replace(
-                review,
-                label_proposed=True,
-                blocked_audit_body=comment_body,
-                blocked_prior_review_body=snapshot.current_review_body,
-            )
-            item.payload["accepted_plan_review"] = review
-
-        if not is_exclusive_plan_state(labels, STATE_PLAN_BLOCKED):
-            outcome = self._complete_blocked(item, ctx)
-            if outcome.disposition == Disposition.RETRY:
-                return outcome
-        else:
-            outcome = StageOutcome(
-                Disposition.BLOCKED,
-                "plan requires external intervention",
-            )
-
-        snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
-        if identity_outcome := self._review_identity_outcome(
-            item,
-            ctx,
-            review,
-            snapshot=snapshot,
-        ):
-            return identity_outcome
-        if snapshot.current_review_body not in {
-            review.blocked_prior_review_body,
-            comment_body,
-        }:
-            return StageOutcome(Disposition.BLOCKED, _EXTERNAL_PLAN_BLOCK_REASON)
-        if snapshot.current_review_body != comment_body:
-            ctx.github.upsert_issue_comment(
+            logger.warning(
+                "plan_review:%s: implementation admission rejected: %s",
                 item.issue,
-                PLAN_REVIEW_CANONICAL_MARKER,
-                comment_body,
+                reason,
             )
-
-        snapshot = journal_snapshot(ctx.github.issue_comments(item.issue))
-        if identity_outcome := self._review_identity_outcome(
-            item,
-            ctx,
-            review,
-            snapshot=snapshot,
-        ):
-            return identity_outcome
-        if snapshot.current_review_body != comment_body:
-            return StageOutcome(Disposition.BLOCKED, _EXTERNAL_PLAN_BLOCK_REASON)
-        return outcome
+            return replace(review, verdict=_plan_scope_nogo_verdict())
+        return None
 
     def _complete_go(
         self, item: WorkItem, ctx: StageContext, review: _AcceptedPlanReview
@@ -1406,10 +1186,10 @@ class PlanReviewStage(Stage):
 
     @staticmethod
     def _write_verdict_labels(issue_number: int, ctx: StageContext, *, is_go: bool) -> None:
-        """Write a verdict label without ever clearing an operator BLOCKED latch.
+        """Write a verdict label.
 
         The caller must re-read and confirm an exclusive state before using
-        this write to route the item. A concurrent BLOCKED application wins.
+        this write to route the item.
 
         Args:
             issue_number: GitHub issue number.

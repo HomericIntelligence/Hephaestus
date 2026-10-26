@@ -47,6 +47,7 @@ from hephaestus.utils.terminal import terminal_guard
 
 from ._review_utils import build_automation_parser
 from .label_taxonomy import REQUIRED_REPOSITORY_LABEL_SPECS
+from .state_labels import REMOVED_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,42 @@ def ensure_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
     return issued
 
 
+def delete_removed_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
+    """Delete the labels automation no longer uses from ``repo``.
+
+    ``gh label delete`` removes the label from every issue and pull request
+    that carries it. A label that is already absent is not an error.
+
+    Args:
+        repo: ``OWNER/NAME`` slug.
+        dry_run: When True, log what would happen and delete nothing.
+
+    Returns:
+        Number of labels actually deleted (0 in dry-run mode).
+
+    """
+    deleted = 0
+    for label in REMOVED_LABELS:
+        if dry_run:
+            logger.info("[dry-run] %s ← gh label delete %r", repo, label)
+            continue
+        try:
+            gh_call(["label", "delete", label, "--repo", repo, "--yes"])
+        except subprocess.CalledProcessError as exc:
+            # A missing label is the wanted end state.
+            logger.warning(
+                "%s: could not delete label %r (rc=%s): %s",
+                repo,
+                label,
+                exc.returncode,
+                (exc.stderr or "").strip(),
+            )
+            continue
+        logger.info("%s: deleted label %r", repo, label)
+        deleted += 1
+    return deleted
+
+
 def _detect_current_repo_slug() -> str:
     """Derive ``owner/name`` from the current git checkout's ``origin`` remote."""
     try:
@@ -217,6 +254,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--org",
         metavar="ORG",
         help=text("Apply to every non-archived, non-fork repo in the org."),
+    )
+    parser.add_argument(
+        "--delete-removed",
+        action="store_true",
+        help=text("Delete the labels automation no longer uses instead of ensuring labels."),
     )
     return parser
 
@@ -271,7 +313,10 @@ def _run(args: argparse.Namespace) -> int:
                 if shutdown.is_set():
                     logger.warning("Interrupted; stopping before remaining repos.")
                     break
-                total_issued += ensure_labels_on_repo(slug, dry_run=args.dry_run)
+                if args.delete_removed:
+                    total_issued += delete_removed_labels_on_repo(slug, dry_run=args.dry_run)
+                else:
+                    total_issued += ensure_labels_on_repo(slug, dry_run=args.dry_run)
             if args.dry_run:
                 logger.info(
                     "[dry-run] Would ensure %d labels across %d repo(s).",

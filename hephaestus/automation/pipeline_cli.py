@@ -875,8 +875,6 @@ def build_config(
         "rebase",
         "update_plan",
         "issue_limit",
-        "host_verification_pyxis_sha256",
-        "host_verification_pyxis_authority",
         "host_verification_pyxis_quota_root",
         "podman_machine",
         "podman_machine_preflight_failed",

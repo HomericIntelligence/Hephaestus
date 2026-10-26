@@ -12,20 +12,11 @@ from hephaestus.automation.comment_identity import (
     validate_planning_comment_identities,
 )
 from hephaestus.automation.protocol import comment_marker_aliases
-from hephaestus.automation.requirements_recovery import (
-    RECOVERY_PROVENANCE_PREFIX,
-    RecoveryCommentIdentityError,
-    RecoveryCommentSelection,
-    select_recovery_comment,
-)
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 from .review_journal import (
-    CommentJournalReadError,
-    IssueComment,
     has_exact_leading_marker,
-    normalize_issue_comments,
 )
 
 
@@ -78,8 +69,6 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
                 body,
                 legacy_marker=legacy_marker,
             )
-        except RecoveryCommentIdentityError:
-            raise
         except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
             raise RuntimeError(
                 f"failed to upsert issue #{issue_number} comment {marker!r}: {exc}"
@@ -94,9 +83,6 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         legacy_marker: str | None = None,
     ) -> None:
         """Execute canonical comment upsert after the public error boundary."""
-        if marker == RECOVERY_PROVENANCE_PREFIX:
-            self._upsert_recovery_comment(issue_number, body)
-            return
         planning_marker = is_planning_marker(marker)
         if planning_marker and not is_current_planning_marker(marker):
             raise ValueError("new planning comments must use a shared HomericIntelligence marker")
@@ -180,71 +166,6 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             or str(target.get("body", "")) != body
         ):
             raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
-
-    def _upsert_recovery_comment(self, issue_number: int, body: str) -> None:
-        """Upsert one versioned recovery comment with full-journal readback."""
-        validate_planning_body_for_write(RECOVERY_PROVENANCE_PREFIX, body)
-
-        def select(
-            comments: list[dict[str, Any]],
-        ) -> RecoveryCommentSelection[IssueComment] | None:
-            try:
-                normalized = normalize_issue_comments(
-                    comments,
-                    viewer_login=self._viewer_login(),
-                )
-            except CommentJournalReadError as exc:
-                raise RecoveryCommentIdentityError(
-                    f"recovery comment journal is not correct: {exc}"
-                ) from exc
-            return select_recovery_comment(
-                normalized,
-                body_of=lambda comment: comment.body,
-                owned_of=lambda comment: comment.viewer_did_author,
-            )
-
-        outgoing = select_recovery_comment(
-            [{"body": body}],
-            body_of=lambda comment: str(comment["body"]),
-            owned_of=lambda _comment: True,
-        )
-        if outgoing is None:
-            raise RecoveryCommentIdentityError(
-                "recovery comment body did not contain a correct provenance marker"
-            )
-        if self._skip(f"upsert {RECOVERY_PROVENANCE_PREFIX!r} comment on #{issue_number}"):
-            return
-
-        target = select(self._repo_issue_comments(issue_number))
-        if target is None:
-            self._post_issue_comment(issue_number, body)
-            target = select(self._repo_issue_comments(issue_number))
-            if target is None or target.comment.body != body:
-                raise RecoveryCommentIdentityError(
-                    f"The recovery comment readback for #{issue_number} "
-                    "did not show the specified body"
-                )
-
-        target_id = target.comment.database_id
-        if target_id is None:
-            raise RecoveryCommentIdentityError(
-                f"recovery comment on #{issue_number} has no database id"
-            )
-        if target.comment.body != body:
-            owner, name = (
-                self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
-            )
-            self._patch_issue_comment(target_id, body, repo=(owner, name))
-            confirmed = select(self._repo_issue_comments(issue_number))
-            if (
-                confirmed is None
-                or confirmed.comment.database_id != target_id
-                or confirmed.comment.body != body
-            ):
-                raise RecoveryCommentIdentityError(
-                    f"The recovery comment readback did not show the update "
-                    f"for comment {target_id} on #{issue_number}"
-                )
 
     def _post_issue_comment(self, issue_number: int, body: str) -> None:
         """Post one issue comment in the adapter's configured repository."""

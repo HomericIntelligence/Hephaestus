@@ -64,7 +64,6 @@ from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation.pipeline.merge_wait_admission import RequiredChecksDeferred
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
 from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.automation.state_labels import STATE_SKIP
@@ -73,13 +72,10 @@ from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillR
 from ..events import StageEvent
 from ..github_jobs import (
     GitHubJob,
-    ImplementationReplyProgress,
-    MergeQueueReconciliation,
     ReadRepositoryValidationCIRequest,
     RepositoryValidationCIRead,
 )
 from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
-from ..merge_wait_admission import VerifiedRepositoryDefaultBranch
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..stage_results import Continue, JobRequest
 from ..work_item import ItemKind, WorkItem
@@ -88,7 +84,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from hephaestus.automation.dependency_parser import DependencyFact
-    from hephaestus.automation.rebase_review_receipt import RebaseReviewRecord
 
     from ..coordinator_types import PipelineConfig
 
@@ -101,18 +96,14 @@ __all__ = [
     "AthenaSkillResult",
     "BuildTestJob",
     "CompactJob",
-    "ConditionalMergeResult",
     "Continue",
     "Disposition",
     "GitHubJob",
     "GitJob",
-    "ImplementationReplyProgress",
-    "ImplementationThreadReplyResult",
     "ItemKind",
     "JobHandle",
     "JobRequest",
     "JobResult",
-    "ReviewerThreadReconciliationResult",
     "Stage",
     "StageContext",
     "StageEvent",
@@ -166,24 +157,6 @@ SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S = 45.0
 
 
 @dataclass(frozen=True)
-class ConditionalMergeResult:
-    """Outcome of one SHA-conditional normal GitHub merge request.
-
-    ``status`` and ``body`` preserve the server's response for merge-wait to
-    classify. ``transport_error`` means the server outcome is unknown, while
-    ``malformed`` means the response was received but could not be safely
-    interpreted. The adapter never retries this mutation itself.
-    """
-
-    status: int | None
-    body: dict[str, Any] | None
-    transport_error: bool = False
-    malformed: bool = False
-    dry_run: bool = False
-    queued: bool = False
-
-
-@dataclass(frozen=True)
 class AutoMergeEnableResult:
     """Outcome of one request to enable GitHub native auto-merge.
 
@@ -199,42 +172,6 @@ class AutoMergeEnableResult:
     transport_error: bool = False
     malformed: bool = False
     dry_run: bool = False
-
-
-@dataclass(frozen=True)
-class ImplementationThreadReplyResult:
-    """Outcome of posting head-gated implementation replies to review threads.
-
-    ``receipts`` are complete, host-read thread snapshots after the implementation
-    reply is visible.  They are the only input a later reviewer-validation
-    mutation may consume; model output never directly identifies a mutable
-    GitHub object. ``retryable_thread_ids`` identifies only replies whose host
-    outcome is transport/read-ambiguous. An ordinary ``blocked_thread_ids``
-    result means the saved snapshot is stale and must return through a fresh
-    reviewer pass rather than replay. ``visibility_lag`` distinguishes a
-    second GitHub thread read that has not yet observed the just-pushed head;
-    the caller consumes its separate bounded backoff rather than transport
-    retries. Implementation replies are submitted through one review-level
-    envelope so every response from a pass remains batched.
-    """
-
-    replied_thread_ids: tuple[str, ...] = ()
-    blocked_thread_ids: tuple[str, ...] = ()
-    receipts: tuple[dict[str, Any], ...] = ()
-    retryable_thread_ids: tuple[str, ...] = ()
-    progress: ImplementationReplyProgress | None = None
-    retryable: bool = False
-    visibility_lag: bool = False
-    outcome_unknown: bool = False
-
-
-@dataclass(frozen=True)
-class ReviewerThreadReconciliationResult:
-    """Outcome of a reviewer performing fresh thread reconciliation."""
-
-    resolved_thread_ids: tuple[str, ...] = ()
-    feedback_thread_ids: tuple[str, ...] = ()
-    blocked_thread_ids: tuple[str, ...] = ()
 
 
 @runtime_checkable
@@ -288,10 +225,6 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
-        """Return whether the authenticated actor owns the latest body edit."""
-        raise NotImplementedError
-
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue, if any (``_review_utils``)."""
         ...
@@ -318,10 +251,6 @@ class StageGitHub(Protocol):
 
     def issue_comments(self, issue_number: int) -> list[IssueComment]:
         """Return issue comments with ownership metadata in creation order."""
-        pass
-
-    def ensure_blocked_audit(self, issue_number: int) -> None:
-        """Repair a missing canonical BLOCKED explanation without changing labels."""
         pass
 
     def add_labels(self, issue_number: int, labels: list[str]) -> None:
@@ -397,72 +326,6 @@ class StageGitHub(Protocol):
         """Return complete fresh snapshots of every unresolved review thread."""
         pass
 
-    def post_implementation_thread_replies(
-        self,
-        pr_number: int,
-        *,
-        expected_head_sha: str,
-        threads: list[dict[str, Any]],
-        replies: dict[str, str],
-        batch_nonce: str,
-        progress: ImplementationReplyProgress | None = None,
-        recover_pending_review: bool = False,
-    ) -> ImplementationThreadReplyResult:
-        """Post host-validated implementation replies after a successful push.
-
-        The implementation agent supplies only prose keyed by IDs from the
-        host-provided snapshot.  This accessor verifies the PR head and exact
-        live thread state before and after every reply, but never resolves a
-        thread.
-        """
-        ...
-
-    def reconcile_implementation_thread_replies(
-        self,
-        pr_number: int,
-        *,
-        expected_head_sha: str,
-        threads: list[dict[str, Any]],
-        replies: dict[str, str],
-        batch_nonce: str,
-    ) -> ImplementationThreadReplyResult:
-        """Reconcile an armed handoff using reads only; never dispatch mutation."""
-        ...
-
-    def reviewer_validation_receipts(
-        self,
-        pr_number: int,
-        *,
-        reviewed_head_sha: str,
-        threads: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Return current, host-verifiable implementation reply receipts.
-
-        Receipts are derived afresh from the complete live-thread snapshot and
-        are bound to ``reviewed_head_sha``.  They are deliberately not backed
-        by process-local work-item state, so a restarted loop can validate an
-        implementation reply created by an earlier work item.
-        """
-        ...
-
-    def reconcile_reviewer_validated_threads(
-        self,
-        pr_number: int,
-        *,
-        reviewed_head_sha: str,
-        receipts: list[dict[str, Any]],
-        resolved_thread_ids: set[str],
-        feedback: dict[str, str],
-    ) -> ReviewerThreadReconciliationResult:
-        """Resolve reviewer-validated threads or reply with remaining defects.
-
-        A fresh read-only reviewer supplies the disposition.  The adapter
-        revalidates the complete implementation-reply receipt immediately
-        before mutation, resolves only accepted IDs, and leaves feedback IDs
-        open after posting the reviewer's explanation.
-        """
-        ...
-
     def open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
         """Return every open branch PR, or fail when the read is incomplete."""
         ...
@@ -497,24 +360,27 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def post_review_threads(
+    def post_review(
         self,
         pr_number: int,
-        threads: list[dict[str, Any]],
-        *,
-        expected_head_sha: str,
-        review_diff: str,
-    ) -> list[dict[str, Any]]:
-        """Post one source-anchored batch for the immutable reviewed snapshot.
+        inline: list[dict[str, Any]],
+        body_only: list[dict[str, Any]],
+        summary: str = "",
+    ) -> None:
+        """Post one review: inline comments on the diff, the rest in the review body.
 
-        ``expected_head_sha`` identifies the exact detached checkout the
-        reviewer inspected.  A later PR push does not invalidate that review:
-        GitHub accepts a review bound to the older commit and marks affected
-        comments outdated when appropriate.  Eligibility for the GO label is
-        checked separately against the current head.
-        The production result is list-compatible and carries typed anchor
-        corrections for findings that the reviewed diff cannot publish.
+        ``summary`` is the informational verdict and grade line for the body.
         """
+        ...
+
+    def apply_review_thread_decisions(
+        self,
+        pr_number: int,
+        *,
+        resolved_thread_ids: tuple[str, ...],
+        feedback: dict[str, str],
+    ) -> None:
+        """Resolve the threads the reviewer accepted and answer the others."""
         ...
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
@@ -527,58 +393,6 @@ class StageGitHub(Protocol):
         artifacts are informational rather than label authority.
         """
         ...
-
-    def persist_review_finding_journal(
-        self, pr_number: int, head_sha: str, finding_records: object
-    ) -> None:
-        """Persist the exact-head finding journal before review publication."""
-        pass
-
-    def pending_review_finding_journal(self, pr_number: int) -> Any:
-        """Return the actor-owned finding journal, if one exists."""
-        pass
-
-    def clear_review_finding_journal(self, pr_number: int, head_sha: str) -> None:
-        """Remove an exact-head journal after public audit readback."""
-        pass
-
-    def publish_implementation_go_audit(
-        self,
-        pr_number: int,
-        head_sha: str,
-        audit: Any,
-        *,
-        finding_records: object = (),
-    ) -> None:
-        """Publish the public audit, then remove exact-head reply journals."""
-        pass
-
-    def persist_pending_implementation_go_audit(
-        self,
-        pr_number: int,
-        head_sha: str,
-        audit: Any,
-        *,
-        finding_records: object = (),
-    ) -> None:
-        """Persist and read back the exact-head audit recovery receipt."""
-        pass
-
-    def pending_implementation_go_audit(self, pr_number: int) -> Any:
-        """Return the actor-owned pending audit receipt, if one exists."""
-        pass
-
-    def publish_review_rebase_record(self, record: RebaseReviewRecord) -> None:
-        """Store rebase facts for fresh host verification after a restart."""
-        pass
-
-    def read_review_rebase_record(self, pr_number: int) -> RebaseReviewRecord | None:
-        """Read authenticated rebase facts without restoring merge authority."""
-        pass
-
-    def clear_pending_implementation_go_audit(self, pr_number: int, head_sha: str) -> None:
-        """Remove the exact-head receipt after public audit readback."""
-        pass
 
     # -- merge_wait surface (#1816) ------------------------------------------
 
@@ -601,57 +415,6 @@ class StageGitHub(Protocol):
 
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
         """Read operational normal-merge readiness without granting authorization."""
-        pass
-
-    def verified_repository_default_branch(self) -> VerifiedRepositoryDefaultBranch:
-        """Read validated repository identity and its exact default branch."""
-        pass
-
-    def effective_merge_policy(
-        self,
-        pr_number: int,
-        base_branch: str,
-        *,
-        deadline_s: float,
-        cancellation: threading.Event,
-    ) -> Any:
-        """Return one stable classic-and-ruleset merge-policy snapshot."""
-        pass
-
-    def required_checks_pass_for_head(
-        self,
-        head_sha: str,
-        policy: Any,
-        *,
-        deadline_s: float,
-        cancellation: threading.Event,
-    ) -> bool | RequiredChecksDeferred:
-        """Only literal True permits merge admission for ``head_sha``."""
-        pass
-
-    def merge_pr_if_head(
-        self,
-        pr_number: int,
-        reviewed_sha: str,
-        *,
-        policy: Any,
-        pull_request_id: str | None = None,
-        deadline_s: float | None = None,
-        cancellation: threading.Event | None = None,
-    ) -> ConditionalMergeResult:
-        """Request one server-enforced merge route for the reviewed head."""
-        pass
-
-    def reconcile_merge_queue_entry(
-        self,
-        pr_number: int,
-        pull_request_id: str,
-        reviewed_sha: str,
-        *,
-        deadline_s: float,
-        cancellation: threading.Event,
-    ) -> MergeQueueReconciliation:
-        """Read the exact-head live merge-queue entry state."""
         pass
 
     # -- repo-stage surface (#1817) -----------------------------------------
@@ -907,46 +670,6 @@ def _worktree_path(item: WorkItem, ctx: StageContext) -> Path:
     if item.worktree:
         return Path(item.worktree)
     return Path(str(ctx.paths.worktree))
-
-
-def _require_item_worktree(item: WorkItem, stage_name: str, action: str) -> StageOutcome | None:
-    """Return a fail-back outcome when a mutating action lacks a worktree."""
-    if item.worktree:
-        return None
-    logger.warning(
-        "%s:%s: %s requires an item worktree; failing back to implementation",
-        stage_name,
-        item.issue if item.issue is not None else item.pr,
-        action,
-    )
-    return StageOutcome(Disposition.FAIL_BACK, "missing_worktree")
-
-
-def _reviewed_terminal_pr_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
-    """Finish only from a terminal record for the exact dispatched review."""
-    node_id = item.payload.get("reviewed_pr_node_id")
-    head = item.payload.get("reviewed_pr_head_sha")
-    if not isinstance(node_id, str) or not node_id or not isinstance(head, str):
-        return None
-    if len(head) != 40 or any(char not in "0123456789abcdef" for char in head):
-        return None
-    if item.pr is None:
-        return None
-    try:
-        state = ctx.github.reviewed_pr_state(node_id)
-    except Exception:
-        return None
-    if not isinstance(state, dict) or state.get("id") != node_id or state.get("headRefOid") != head:
-        return None
-    if (
-        state.get("state") == "MERGED"
-        and isinstance(state.get("mergedAt"), str)
-        and state["mergedAt"]
-    ):
-        return StageOutcome(Disposition.FINISH_PASS, "merged")
-    if state.get("state") == "CLOSED" and "mergedAt" in state and state["mergedAt"] is None:
-        return StageOutcome(Disposition.FINISH_FAIL, "closed")
-    return None
 
 
 def _terminal_pr_outcome(pr_state: dict[str, Any] | None, pr_number: int) -> StageOutcome | None:

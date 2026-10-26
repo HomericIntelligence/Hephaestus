@@ -775,8 +775,6 @@ class PyxisQuotaBackend(_QuotaBackend):
         self,
         *,
         image: Path,
-        image_sha256: str,
-        authority: Path,
         quota_root: Path,
         runtime_available: Callable[[], bool],
         execution_boundary_id: str,
@@ -784,8 +782,6 @@ class PyxisQuotaBackend(_QuotaBackend):
         """Keep host configuration separate from source-owned request data."""
         super().__init__(execution_boundary_id)
         self._image = image
-        self._image_sha256 = image_sha256
-        self._authority = authority
         self._quota_root = quota_root
         self._runtime_available = runtime_available
 
@@ -799,9 +795,7 @@ class PyxisQuotaBackend(_QuotaBackend):
             if not self._runtime_available():
                 raise ValueError("The configured Pyxis runtime is unavailable.")
             deadline.remaining()
-            host_verification_pyxis.validate_pyxis_image(
-                self._image, expected_sha256=self._image_sha256, provenance=self._authority
-            )
+            host_verification_pyxis.validate_pyxis_image(self._image)
             deadline.remaining()
             binding = host_verification_pyxis.validate_pyxis_quota_root(
                 self._quota_root, retain_binding=True
@@ -831,8 +825,6 @@ class PyxisQuotaBackend(_QuotaBackend):
 def select_quota_backend(
     *,
     image: Path,
-    image_sha256: str | None,
-    authority: Path | None,
     quota_root: Path | None,
     runtime_available: Callable[[], bool],
     execution_boundary_id: str,
@@ -840,16 +832,9 @@ def select_quota_backend(
     """Select only a supported backend with explicit host configuration."""
     if sys.platform == "darwin":
         return HdiutilQuotaBackend(execution_boundary_id=execution_boundary_id)
-    if (
-        sys.platform == "linux"
-        and image_sha256
-        and authority is not None
-        and quota_root is not None
-    ):
+    if sys.platform == "linux" and quota_root is not None:
         return PyxisQuotaBackend(
             image=image,
-            image_sha256=image_sha256,
-            authority=authority,
             quota_root=quota_root,
             runtime_available=runtime_available,
             execution_boundary_id=execution_boundary_id,

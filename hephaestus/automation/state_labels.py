@@ -1,6 +1,6 @@
 """GitHub issue/PR state-label vocabulary for the automation pipeline.
 
-The automation pipeline uses four mutually-exclusive ``state:*`` labels as the
+The automation pipeline uses three mutually-exclusive ``state:*`` labels as the
 single source of truth for an issue's plan-review status. This module is the
 authoritative definition of those labels, the PR-scoped implementation-review
 labels, the independent implementation-intervention latch, and the small
@@ -16,10 +16,6 @@ State machine
         │
         ▼
     state:needs-plan ──(planner+reviewer run)──▶ state:plan-no-go ──┐
-            │                         └────────▶ state:plan-blocked │
-            │                                   (automation hold; │
-            │                                    external actor   │
-            │                                    must replace it) │
             │                                                      │
             └──────────────────────────────────────────────────────▼
                                                             state:plan-go
@@ -27,17 +23,8 @@ State machine
                                                              this exclusively; never
                                                              re-plans or re-reviews)
 
-At most one of the four labels should be present on an issue at any time.
-Automation removes ordinary siblings while changing state, but ordinary
-transitions never remove ``state:plan-blocked``. If that operator-owned latch
-appears during a concurrent transition, exclusive-state confirmation fails and
-automation stops until an external actor resolves the block. An authenticated
-Athena finalized-plan body is that external resolution: planning may atomically
-replace the stale latch with exclusive ``state:plan-go``.
-
-``state:implementation-blocked`` is a separate human-intervention latch. It
-can coexist with ``state:plan-go`` and prevents implementation until a human
-deliberately changes the issue state.
+At most one of the three labels should be present on an issue at any time.
+Automation removes ordinary siblings while changing state.
 """
 
 from __future__ import annotations
@@ -46,33 +33,32 @@ import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-# Single source of truth for the four plan-state labels. All label-aware code
+# Single source of truth for the three plan-state labels. All label-aware code
 # in the pipeline imports these constants; do not hard-code the names.
 STATE_NEEDS_PLAN = "state:needs-plan"
 STATE_PLAN_NO_GO = "state:plan-no-go"
 STATE_PLAN_GO = "state:plan-go"
-STATE_PLAN_BLOCKED = "state:plan-blocked"
 
 #: Operator-owned execution hold. This is distinct from a plan-review verdict:
 #: an approved issue can become externally blocked after planning, and no
 #: implementation or remediation agent may run until the hold is removed.
 STATE_BLOCKED = "state:blocked"
 
-#: Human-intervention latch for an implementation run that produced no commit.
-#: This is independent of the plan state so an approved ``state:plan-go``
-#: decision remains visible during recovery.
-STATE_IMPLEMENTATION_BLOCKED = "state:implementation-blocked"
+#: Labels that automation no longer reads or writes. The one-off cleanup in
+#: ``hephaestus-ensure-state-labels --delete-removed`` deletes them from a repo.
+REMOVED_LABELS = (
+    "state:plan-blocked",
+    "state:implementation-blocked",
+    "athena:finalized-plan",
+    "state:finalized-plan",
+    "state:plan-approved",
+    "state:implementation-approved",
+    "state:in-progress",
+)
 
-# Durable evidence that Hephaestus has observed and verified the exact Athena
-# finalization marker in the current issue body. This is metadata, not a plan
-# state: ``state:plan-go`` remains the sole implementation admission gate. The
-# evidence lets restart seeding detect a later body rewrite that removed or
-# invalidated the marker instead of trusting a stale plan-go label.
-ATHENA_FINALIZED_PLAN_LABEL = "athena:finalized-plan"
-
-#: All four state labels in one tuple — useful for "ensure none of these are
+#: All plan state labels in one tuple — useful for "ensure none of these are
 #: present" / "remove all of these" operations.
-ALL_STATE_LABELS = (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO, STATE_PLAN_BLOCKED)
+ALL_STATE_LABELS = (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)
 
 # PR-scoped implementation-review state labels. These deliberately live outside
 # ALL_STATE_LABELS so issue-level plan state remains independent from PR review
@@ -146,20 +132,9 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
         "color": "0e8a16",  # green — approved
         "description": "Plan approved by reviewer; implementer may proceed.",
     },
-    STATE_PLAN_BLOCKED: {
-        "color": "5319e7",
-        "description": (
-            "Automation is stopped; an external actor must resolve the block "
-            "and replace this label."
-        ),
-    },
     STATE_BLOCKED: {
         "color": "000000",  # black — external progress hold
         "description": "Automation is stopped pending an external dependency or operator action.",
-    },
-    STATE_IMPLEMENTATION_BLOCKED: {
-        "color": "5319e7",
-        "description": "No implementation commit; human direction is required before recovery.",
     },
     STATE_IMPLEMENTATION_NO_GO: {
         "color": "d93f0b",  # red — blocked
@@ -177,10 +152,6 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_SKIP: {
         "color": "ededed",  # grey — intentionally inert
         "description": "Automation normally skips this issue/PR in every phase.",
-    },
-    ATHENA_FINALIZED_PLAN_LABEL: {
-        "color": "5319e7",
-        "description": "Verified Athena finalized-plan marker for the current issue body.",
     },
 }
 
@@ -323,13 +294,13 @@ def needs_plan(labels: Iterable[str]) -> bool:
     workflow tags freshly-opened issues with ``state:needs-plan``, and the
     absence of any state label is functionally equivalent (planner runs).
 
-    Terminal states win: if GO, NO-GO, or BLOCKED is also
+    Terminal states win: if GO or NO-GO is also
     present (e.g. mid label-churn during the reviewer's apply/remove sequence),
     the issue is NOT in the needs-plan state regardless of whether
     ``state:needs-plan`` was already removed.
     """
     label_set = set(labels)
-    return not label_set.intersection({STATE_PLAN_GO, STATE_PLAN_NO_GO, STATE_PLAN_BLOCKED})
+    return not label_set.intersection({STATE_PLAN_GO, STATE_PLAN_NO_GO})
 
 
 def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
@@ -340,7 +311,6 @@ def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
     seeding compute the transition identically.
 
     GO and NOGO add their verdict label and remove ordinary sibling states.
-    They deliberately never remove BLOCKED, which is an external-actor latch.
 
     Args:
         is_go: ``True`` when the reviewer's verdict is GO; ``False`` for NOGO.
@@ -355,11 +325,10 @@ def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
 
 
 def apply_plan_state(state_label: str) -> tuple[str, list[str]]:
-    """Compute a plan-state write that never clears an existing BLOCKED latch."""
+    """Compute the label removals that accompany one plan-state write."""
     removals = {
         STATE_PLAN_GO: [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN],
         STATE_PLAN_NO_GO: [STATE_PLAN_GO, STATE_NEEDS_PLAN],
-        STATE_PLAN_BLOCKED: [STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
     }
     try:
         return state_label, removals[state_label]
@@ -381,9 +350,7 @@ def enter_planning_transition() -> tuple[list[str], list[str]]:
 
     Restores the documented state-machine edge
     ``state:plan-no-go ──re-plan──▶ needs-plan`` (module docstring lifecycle
-    diagram): add ``state:needs-plan`` and remove NO-GO and GO. BLOCKED is
-    never removed by automation; if it appears in flight, exclusive label
-    confirmation fails until an external actor replaces it.
+    diagram): add ``state:needs-plan`` and remove NO-GO and GO.
 
     Returns:
         A tuple (labels_to_add, labels_to_remove): ``[STATE_NEEDS_PLAN]`` and

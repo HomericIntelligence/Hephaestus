@@ -2,19 +2,14 @@
 
 from .pipeline.github_jobs import ReadRepositoryValidationCIRequest, RepositoryValidationCIRead
 from .pipeline.repository_validation_profiles import require_repository_validation_profile
-from .pipeline_github_audit import PipelineGitHubAuditReceipts
-from .pipeline_github_check_policy import PipelineGitHubCheckPolicy
 from .pipeline_github_mutations import PipelineGitHubMutations
 from .pipeline_github_queries import PipelineGitHubQueries
-from .pipeline_github_repository import PipelineGitHubRepositoryMetadata
-from .pipeline_github_required_checks import PipelineGitHubRequiredChecks
 from .pipeline_github_review_queries import PipelineGitHubReviewQueries
 from .pipeline_github_review_validation import (
     ValidationCIReader,
     collect_repository_validation_ci,
 )
 from .pipeline_github_reviews import PipelineGitHubReviews
-from .pipeline_github_scope_expansion import PipelineGitHubScopeExpansion
 from .pipeline_github_transport import PipelineGitHubTransport
 from .state_labels import STATE_IMPLEMENTATION_GO, STATE_IMPLEMENTATION_NO_GO
 
@@ -22,14 +17,9 @@ from .state_labels import STATE_IMPLEMENTATION_GO, STATE_IMPLEMENTATION_NO_GO
 class PipelineGitHub(
     PipelineGitHubTransport,
     PipelineGitHubQueries,
-    PipelineGitHubRepositoryMetadata,
-    PipelineGitHubCheckPolicy,
-    PipelineGitHubRequiredChecks,
     PipelineGitHubReviewQueries,
     PipelineGitHubReviews,
-    PipelineGitHubAuditReceipts,
     PipelineGitHubMutations,
-    PipelineGitHubScopeExpansion,
 ):
     """Stable GitHub façade with explicit single-owner semantics.
 

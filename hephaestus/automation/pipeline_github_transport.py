@@ -34,13 +34,6 @@ from hephaestus.automation.pipeline.scope_retraction import (
 )
 from hephaestus.automation.pipeline.stages.base import (
     AutoMergeEnableResult,
-    ConditionalMergeResult,
-    ImplementationThreadReplyResult,
-    ReviewerThreadReconciliationResult,
-)
-from hephaestus.automation.prompts.pr_review import (
-    SEVERITY_MARKER_PREFIX,
-    VALID_SEVERITIES,
 )
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
@@ -50,7 +43,6 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.review_journal import (
     IssueComment,
-    blocked_audit_recovery_body,
 )
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
@@ -120,33 +112,6 @@ def rate_limit_remaining(*, call: GitHubCommandRunner) -> tuple[int, int] | None
         return remaining, reset
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
         return None
-
-
-def _with_severity_marker(comment: dict[str, Any]) -> str:
-    """Publish a visible reviewer prefix and durable severity marker (#1856).
-
-    An absent/unknown severity is written as ``major`` (blocking) so an
-    unclassifiable thread never silently unblocks a GO, and so the pre-#1856
-    all-blocking behavior is reproduced until the reviewer's severity is seeded.
-    """
-    sev = str(comment.get("severity") or "").strip().lower()
-    if sev not in VALID_SEVERITIES:
-        sev = "major"
-    body = str(comment.get("body") or "")
-    body = "\n".join(
-        line
-        for line in body.splitlines()
-        if not line.strip().startswith(SEVERITY_MARKER_PREFIX)
-        and not line.strip().startswith(SCOPE_RETRACTION_MARKER_PREFIX)
-        and not _STANDALONE_VERDICT_LINE_RE.match(line)
-    )
-    if body.startswith("[Review] "):
-        body = body.removeprefix("[Review] ")
-    paths = normalize_scope_retraction_paths(comment.get("scope_retraction_paths"))
-    markers = [f"{SEVERITY_MARKER_PREFIX} {sev} -->"]
-    if paths:
-        markers.append(scope_retraction_marker(paths))
-    return "\n".join([f"[Review] {body}", *markers])
 
 
 class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
@@ -341,16 +306,15 @@ class PipelineGitHubTransport(PipelineGitHubDeadlineMixin, _PipelineGitHubHost):
 __all__ = [
     'ALL_IMPLEMENTATION_STATE_LABELS', 'ALL_STATE_LABELS', 'PLAN_CANONICAL_MARKER',
     'PLAN_COMMENT_MARKER', 'PLAN_REVIEW_CANONICAL_MARKER', 'PLAN_REVIEW_PREFIX',
-    'SCOPE_RETRACTION_MARKER_PREFIX', 'SEVERITY_MARKER_PREFIX', 'SKIP_REASON_MARKER',
+    'SCOPE_RETRACTION_MARKER_PREFIX', 'SKIP_REASON_MARKER',
     'STATE_IMPLEMENTATION_GO', 'STATE_IMPLEMENTATION_NO_GO', 'STATE_LABEL_SPECS', 'STATE_SKIP',
-    'VALID_SEVERITIES', '_CLOSES_ISSUE_LINE_RE', '_FULL_COMMIT_SHA_RE', '_HTTP_STATUS_RE',
+    '_CLOSES_ISSUE_LINE_RE', '_FULL_COMMIT_SHA_RE', '_HTTP_STATUS_RE',
     '_IMPLEMENTATION_REPLY_BODY_RE', '_STANDALONE_VERDICT_LINE_RE', 'Any',
-    'AutoMergeEnableResult', 'ConditionalMergeResult', 'ImplementationThreadReplyResult',
+    'AutoMergeEnableResult',
     'IssueComment',
     'LockUnavailableError', 'Path', 'PipelineGitHubTransport',
-    'ReviewerThreadReconciliationResult',
-    '_parse_included_http_response', '_with_severity_marker',
-    'annotations', 'blocked_audit_recovery_body',
+    '_parse_included_http_response',
+    'annotations',
     'close_issue_as_covered', 'ensure_state_dir', 'file_lock', 'find_merged_closing_pr',
     'find_merged_pr_for_issue', 'format_skip_reason_comment', 'get_pr_head_branch', 'gh_call',
     'github_api', 'has_exact_closing_line', 'has_label', 'hashlib', 'is_implementation_go',
