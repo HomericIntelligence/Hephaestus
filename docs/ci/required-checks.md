@@ -346,6 +346,26 @@ more. Enumerating each one individually in branch protection is brittle: renamin
 a job, adding a job, or splitting one silently changes what's required, and nobody
 notices until something slips through.
 
+## Hosted cache behavior
+
+The required-checks workflow no longer caches the rootless Podman storage
+directory (`~/.local/share/containers/storage`). Rootless layer permissions and
+namespace-mapped ownership prevent the GitHub Actions cache action from reading
+all selected paths, which caused cache save failures after successful validation
+steps. The affected cache steps have been removed from both
+`_required.yml` and `security.yml`.
+
+The following caches remain active and are known to work correctly:
+
+- **Pre-commit environments** (`~/.cache/pre-commit`) — cached in the `lint` job.
+- **Mypy incremental cache** (`.mypy_cache`) — cached in the `lint` job.
+
+Each CI job builds the `hephaestus-ci:local` image from `ci/Containerfile` on
+every run. The image build is fast on GitHub-hosted runners because the base
+image layers are pre-pulled by the runner environment. A dedicated image or
+archive cache may be proposed separately if measured restore/rebuild benefit
+justifies its storage and identity controls.
+
 ## Live audit
 
 ```bash
