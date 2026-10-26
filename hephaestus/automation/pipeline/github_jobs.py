@@ -263,13 +263,15 @@ class InspectDirtyDirectPrStateRequest:
             or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository) is None
         ):
             raise ValueError("repository must be OWNER/REPOSITORY")
-        expected_prefix = f"{self.issue_number}-auto-impl-direct-"
+        # The branch is read from this writer's own lane, so this only bounds
+        # the character set. The arm validator owns the direct-writer identity:
+        # a renamed lane is rejected there with a clean failure instead of an
+        # escaping error, and the version 1 receipt stays retryable (#3466).
         if (
             not isinstance(self.branch, str)
             or not self.branch
             or self.branch != self.branch.strip()
-            or not self.branch.startswith(expected_prefix)
-            or re.fullmatch(r"[1-9][0-9]*-auto-impl-direct-[0-9a-f]{32}", self.branch) is None
+            or re.fullmatch(r"[A-Za-z0-9._/-]+", self.branch) is None
         ):
             raise ValueError("branch must name the direct issue writer")
 
