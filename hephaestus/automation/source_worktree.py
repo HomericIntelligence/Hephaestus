@@ -1318,11 +1318,18 @@ class SourceWorkspaceManager:
                 # The worktree was removed and its registration pruned. The
                 # receipt is stale state from an earlier run, so the lane has
                 # no predecessor and a new transition may start.
-                logger.warning(
-                    "source workspace receipt %s names a removed worktree; "
-                    "ignoring the stale receipt",
-                    expected_path,
-                )
+                if self._discard_absent_impl_lane_locked(item_number):
+                    logger.warning(
+                        "source workspace receipt %s names a removed worktree; "
+                        "discarded the stale lane",
+                        expected_path,
+                    )
+                else:
+                    logger.warning(
+                        "source workspace receipt %s names a removed worktree that "
+                        "the host could not discard; preparing a fresh writer anyway",
+                        expected_path,
+                    )
                 return False
             raise SourceWorkspaceError(
                 f"source workspace receipt path is missing: {expected_path}",
@@ -1623,16 +1630,33 @@ class SourceWorkspaceManager:
         ):
             return False
         if receipt.branch is not None:
-            ahead = _git(
-                self.repo_root,
-                "rev-list",
-                "--count",
-                f"{receipt.revision}..refs/heads/{receipt.branch}",
-                check=False,
+            branch_ref = f"refs/heads/{receipt.branch}"
+            exists = (
+                _git(
+                    self.repo_root,
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    branch_ref,
+                    check=False,
+                ).returncode
+                == 0
             )
-            if ahead.returncode != 0 or ahead.stdout.strip() not in {"", "0"}:
-                self._preserve_unmerged_branch(item_number, receipt.branch)
-        for name in (f"{item_number}-impl.json", f"{item_number}-impl-transition.json"):
+            if exists:
+                ahead = _git(
+                    self.repo_root,
+                    "rev-list",
+                    "--count",
+                    f"{receipt.revision}..{branch_ref}",
+                    check=False,
+                )
+                if ahead.returncode != 0 or ahead.stdout.strip() not in {"", "0"}:
+                    self._preserve_unmerged_branch(item_number, receipt.branch)
+        for name in (
+            f"{item_number}-impl.json",
+            f"{item_number}-impl-transition.json",
+            f"{item_number}-impl-terminal.json",
+        ):
             target = self.state_dir / name
             if target.exists():
                 target.unlink()
