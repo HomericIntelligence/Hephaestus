@@ -92,6 +92,33 @@ class TestSessionName:
             session_name("R", 1, "wizard")
 
     @pytest.mark.parametrize(
+        "agent",
+        [
+            "requirements-recovery:2758:e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79",
+            "requirements-recovery-review:2758:e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79",
+        ],
+    )
+    def test_requirements_recovery_keys_are_session_agents(self, agent: str) -> None:
+        """The planning recovery keys build a ``claude --name``-safe name (#3469 / PR F-001)."""
+        name = session_name("R", 2758, agent)
+        assert name.startswith("R_2758_")
+        assert ":" not in name
+
+    @pytest.mark.parametrize(
+        "agent",
+        [
+            "requirements-recovery:issue:deadbeef",
+            "requirements-recovery:2758:",
+            "requirements-recovery:2758:A" + "0" * 63,
+            "requirements-evil:2758:e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79",
+        ],
+    )
+    def test_requirements_recovery_shape_rejects_near_misses(self, agent: str) -> None:
+        """Only the exact recovery-key form is accepted (PR F-001)."""
+        with pytest.raises(ValueError, match="unknown agent"):
+            session_name("R", 5, agent)
+
+    @pytest.mark.parametrize(
         ("repo", "issue"),
         [("", 1), ("R", "")],
     )
@@ -150,6 +177,27 @@ class TestSessionUUID:
         a = session_uuid("R", 1, AGENT_PLANNER, "claude-sonnet-4-6")
         b = session_uuid("R", 1, AGENT_PLANNER, "claude-opus-4-8")
         assert a != b
+
+    def test_recovery_key_identity_keeps_the_raw_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR F-001: display-name normalization must not alter the session identity.
+
+        The uuid5 input keeps the RAW recovery key, so the session id for the
+        same issue and binding is unchanged by the name-safe display form.
+        """
+        agent = (
+            "requirements-recovery:2758:"
+            "e17008d36888029c191703d4285805b8b5f8567805ed625ede5fc882f039ad79"
+        )
+        monkeypatch.setattr(
+            agent_config,
+            "_checkout_identity",
+            lambda cwd, *, remaining_timeout=None: "CHECKOUT",
+        )
+        sid = session_uuid("R", 2758, agent, "model", cwd=tmp_path)
+        raw_identity = f"R_2758_{agent}_model@CHECKOUT"
+        assert sid == str(uuid.uuid5(uuid.NAMESPACE_DNS, raw_identity))
 
     def test_registered_worktree_family_gets_same_checkout_uuid(self, tmp_path: Path) -> None:
         """Repo-root and linked-worktree callers share their common-dir identity."""
@@ -475,3 +523,108 @@ def test_distinct_literal_models_have_distinct_session_keys() -> None:
     assert session_name("Repo", 1, AGENT_IMPLEMENTER, "provider/model") != session_name(
         "Repo", 1, AGENT_IMPLEMENTER, "provider-model"
     )
+
+
+class TestTranscriptWorktreeLifecycle:
+    """Worktree family transcript lifecycle across removal, recreation, and sibling callers."""
+
+    def test_root_transcript_allows_removed_worktree_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A root-held transcript survives replacement of its recorded worktree."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner" / "Repo"
+        removed_worktree = repo_root / "build" / ".worktrees" / "issue-2284-a"
+        replacement_worktree = repo_root / "build" / ".worktrees" / "issue-2284-c"
+        removed_worktree.mkdir(parents=True)
+        replacement_worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, repo_root)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(
+            f'{{"cwd": "{repo_root.resolve()}"}}\n{{"cwd": "{removed_worktree.resolve()}"}}\n',
+            encoding="utf-8",
+        )
+        removed_worktree.rmdir()
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(repo_root.resolve(), replacement_worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, replacement_worktree) == transcript
+
+    def test_removed_managed_predecessor_resumes_from_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transcript created at the repo root resolves from a replacement worktree."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner" / "Repo"
+        replacement = tmp_path / "separate-root" / "issue-2284-b"
+        repo_root.mkdir(parents=True)
+        replacement.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, repo_root)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(repo_root.resolve(), replacement.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, replacement) == transcript
+
+    def test_recreated_worktree_resumes_removed_worktree_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recreated worktree at a colliding encoded path resumes its own transcript."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner" / "Repo"
+        worktree = repo_root / "build" / ".worktrees" / "issue-2284-a"
+        worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, worktree)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{worktree.resolve()}"}}\n', encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(repo_root.resolve(), worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, worktree) == transcript
+
+    def test_sibling_worktree_resumes_main_checkout_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transcript created from one sibling worktree resolves from the other sibling."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "main" / "Repo"
+        sibling_worktree = tmp_path / "separate-root" / "issue-2284"
+        repo_root.mkdir(parents=True)
+        sibling_worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        transcript = session_jsonl_path(sid, repo_root)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{repo_root.resolve()}"}}\n', encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(repo_root.resolve(), sibling_worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, sibling_worktree) == transcript
+
+    def test_exact_cwd_transcript_does_not_require_git_discovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When Git discovery fails, resolver falls back to exact-cwd transcript."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        cwd = tmp_path / "checkout"
+        cwd.mkdir()
+        transcript = session_jsonl_path("session-id", cwd)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(f'{{"cwd": "{cwd.resolve()}"}}\n', encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config.subprocess.run",
+            side_effect=subprocess.CalledProcessError(128, ["git"]),
+        ):
+            assert resolve_session_jsonl_path("session-id", cwd) == transcript

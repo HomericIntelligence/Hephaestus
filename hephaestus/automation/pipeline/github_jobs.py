@@ -265,10 +265,11 @@ class InspectDirtyDirectPrStateRequest:
             raise ValueError("repository must be OWNER/REPOSITORY")
         if (
             not isinstance(self.branch, str)
-            or re.fullmatch(rf"{self.issue_number}-auto-impl-direct-[0-9a-f]{{32}}", self.branch)
-            is None
+            or not self.branch
+            or self.branch != self.branch.strip()
+            or re.fullmatch(r"[A-Za-z0-9._/-]+", self.branch) is None
         ):
-            raise ValueError("branch must name the exact direct issue writer")
+            raise ValueError("branch must name the direct issue writer")
 
 
 @dataclass(frozen=True)

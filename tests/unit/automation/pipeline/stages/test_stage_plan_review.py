@@ -921,6 +921,20 @@ class TestPlanReviewStageStep:
         assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.job.timeout_s == plan_reviewer_claude_timeout()
 
+    def test_review_wait_uses_reviewer_timeout_override(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A configured reviewer timeout replaces the shared reviewer default."""
+        stage = PlanReviewStage()
+        ctx = make_ctx(config_overrides={"reviewer_timeout": 321})
+        item = make_work_item(issue=7, state="REVIEW_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
+        assert result.job.timeout_s == 321
+
     def test_review_wait_clears_stale_verdict(self, make_ctx: Any, make_work_item: Any) -> None:
         """Submission clears any stale verdict (M3).
 

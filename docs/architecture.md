@@ -2378,6 +2378,11 @@ defaults remain independent.
  readiness, diff-collection, and pre-PR-test budgets into one configuration.
  Advice and learning are host-owned Mnemosyne operations. The queue does not
  expose model or agent timeout options for them.
+- `AGENT_REVIEW_TIMEOUT` (3600 seconds) in
+ [`constants.py`](../hephaestus/constants.py) is the single default for
+ `--reviewer-timeout`, `PipelineConfig.reviewer_timeout`, and both reviewer
+ stages. An explicit `--phase-timeout` still bounds each reviewer job below
+ this default.
 
 ---
 

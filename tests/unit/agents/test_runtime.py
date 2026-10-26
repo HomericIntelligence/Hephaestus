@@ -7531,7 +7531,7 @@ class TestArchiveAndPruneOpencodeSession:
         assert result == destination
         assert json.loads(destination.read_text())["info"]["id"] == "ses_1"
         assert calls == [
-            ["opencode", "export", "ses_1"],
+            ["opencode", "session", "export", "ses_1"],
             ["opencode", "session", "delete", "ses_1"],
         ]
 
@@ -7552,8 +7552,37 @@ class TestArchiveAndPruneOpencodeSession:
         result = agent_runtime.archive_and_prune_opencode_session("ses_1", log=messages.append)
 
         assert result is None
-        assert calls == [["opencode", "export", "ses_1"]]
+        assert calls == [
+            ["opencode", "session", "export", "ses_1"],
+            ["opencode", "export", "ses_1"],
+        ]
         assert messages == ["opencode_archive_export_failed:exit1"]
+
+    def test_a_v1_export_fallback_still_archives_and_deletes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """V1-only hosts answer the second export command (#3470 / F-001)."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            if argv == ["opencode", "session", "export", "ses_1"]:
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+            return self._completed()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        result = agent_runtime.archive_and_prune_opencode_session("ses_1")
+
+        destination = tmp_path / ".agent_brain" / "transcripts" / "ses_1.json"
+        assert result == destination
+        assert json.loads(destination.read_text())["info"]["id"] == "ses_1"
+        assert calls == [
+            ["opencode", "session", "export", "ses_1"],
+            ["opencode", "export", "ses_1"],
+            ["opencode", "session", "delete", "ses_1"],
+        ]
 
     @pytest.mark.parametrize("session_id", ["", "ses/../etc", "ses 1", "x" * 300, "ses;rm"])
     def test_unusable_session_ids_are_refused_without_a_subprocess(

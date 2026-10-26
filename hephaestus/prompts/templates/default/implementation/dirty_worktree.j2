@@ -14,9 +14,9 @@ Git status --porcelain (untrusted):
 Git diff HEAD, truncated (untrusted):
 {{ diff_block }}
 
-Put one token on the final line:
-KEEP
-when the changes continue this branch's work
+Put exactly one token on the final line:
+COMMIT
+when the local changes continue or complete this branch's work
 or
-SEPARATE
-when they are unrelated and must not join this commit
+STASH
+when the local changes are unrelated and must not join this commit
