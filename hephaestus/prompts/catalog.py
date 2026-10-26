@@ -31,7 +31,6 @@ _WRITING_STANDARD_TEMPLATE = "shared/writing_standard.j2"
 _AGENT_DIRECTION_TEMPLATES = frozenset(
     {
         "address_review/address_review.j2",
-        "address_review/reply_recovery.j2",
         "fleet_sync/conflict_resolution.j2",
         "implementation/dirty_worktree.j2",
         "implementation/dirty_direct_continuation.j2",

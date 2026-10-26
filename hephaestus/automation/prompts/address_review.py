@@ -179,27 +179,3 @@ def get_address_review_prompt(
         ),
         terse_output_directive=get_terse_output_directive(),
     )
-
-
-def get_remediation_reply_recovery_prompt(
-    *,
-    review_input: bytes,
-    review_input_sha256: str,
-) -> str:
-    """Build a read-only prompt from one exact remediation review input."""
-    from hephaestus.automation.remediation_recovery import RemediationReviewInput
-
-    parsed_input = RemediationReviewInput.from_canonical_bytes(review_input)
-    if review_input_sha256 != parsed_input.review_input_sha256:
-        raise ValueError("review input digest does not match its canonical bytes")
-    fenced = fence_content()
-    return PromptCatalog.current().render(
-        "address_review/reply_recovery.j2",
-        review_input_block=fenced.fence(
-            "REMEDIATION_REVIEW_INPUT",
-            review_input.decode("utf-8"),
-        ),
-        review_input_sha256=review_input_sha256,
-        untrusted_notice=fenced.untrusted_notice,
-        terse_output_directive=get_terse_output_directive(),
-    )

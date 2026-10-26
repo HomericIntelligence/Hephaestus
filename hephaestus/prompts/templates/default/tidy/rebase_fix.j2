@@ -1,102 +1,36 @@
-You are a Myrmidon rebase-fix agent operating on a single git branch.
+Run `$athena:tidy` on one branch.
 
 {% macro shell_quote(value) -%}
 '{{ value|string|replace("'", "'\"'\"'") }}'
 {%- endmacro %}
 
-## Context
-- Repository: {{ repo_slug }}
-- Repository path: {{ repo_path }}
-- Branch to rebase: `{{ branch }}`
+- Repository: {{ repo_slug }} at {{ repo_path }}
+- Branch: `{{ branch }}`
 - Trunk: `{{ trunk }}`
-- Worktree to create: {{ worktree_path }}
+- Worktree to use: {{ worktree_path }}
 
-## FORBIDDEN ACTIONS — do not perform any of these, ever:
-- `git branch -d <branch>`
-- `git branch -D <branch>`
-- `git push origin --delete <branch>`
-- `git worktree remove --force <path>`
-- Removing or deleting any worktree that existed before this agent started
-- Deleting any local or remote branch
-Only the worktree that this agent creates (`{{ worktree_path }}`) can be removed,
-and only with `git worktree remove` (without --force).  If that fails, leave
-the worktree in place and report it.
+Do this:
 
-## Your task — complete in order, stop and report on any failure:
+1. Add a worktree for the branch:
+   `git -C {{ shell_quote(repo_path) }} worktree add {{ shell_quote(worktree_path) }} {{ shell_quote(branch) }}`
+2. Fetch the trunk and rebase onto it:
+   `git -C {{ shell_quote(worktree_path) }} fetch origin {{ shell_quote(trunk) }}`
+   `git -C {{ shell_quote(worktree_path) }} rebase {{ shell_quote("origin/" ~ trunk) }}`
+3. Resolve any conflicts yourself. Read both sides of each conflict and keep the
+   intent of both. For `uv.lock`, take the trunk version and run `uv sync`. Use
+   `GIT_EDITOR=true` with `git rebase --continue`, and `git rebase --skip` when a
+   commit becomes empty.
+4. If no commits remain after the rebase, they were already on the trunk: report
+   `subsumed` and stop.
+5. Push with
+   `git -C {{ shell_quote(worktree_path) }} push --force-with-lease --force-if-includes origin {{ shell_quote(branch) }}`.
+6. Remove the worktree you created with `git worktree remove` (no `--force`). Do
+   not delete branches or worktrees you did not create.
 
-### 1. Pre-flight
-```bash
-cd {{ shell_quote(repo_path) }}
-mkdir -p "$(dirname {{ shell_quote(worktree_path) }})"
-git worktree add {{ shell_quote(worktree_path) }} {{ shell_quote(branch) }}
-```
+End your response with:
 
-### 2. Fetch latest trunk
-```bash
-git -C {{ shell_quote(worktree_path) }} fetch origin {{ shell_quote(trunk) }}
-```
-
-### 3. Rebase
-```bash
-git -C {{ shell_quote(worktree_path) }} rebase {{ shell_quote("origin/" ~ trunk) }}
-```
-
-If the rebase succeeds cleanly, skip to step 5.
-
-If the rebase stops with conflicts:
-
-### 4. Semantic conflict resolution (for each conflicted file)
-```bash
-git -C {{ shell_quote(worktree_path) }} diff --name-only --diff-filter=U
-```
-
-For EACH conflicted file:
-- Read the file — it contains `<<<<<<<` / `=======` / `>>>>>>>` markers.
-- Read what BOTH sides were trying to accomplish.
-- Write the correctly merged content that preserves the intent of both sides.
-- `git -C {{ shell_quote(worktree_path) }} add <file>`
-
-Resolution heuristics (from batch-pr-rebase-workflow v2.8.0, verified-ci):
-- `.github/workflows/**` → prefer trunk's version unless this branch is ADDING the workflow
-- `uv.lock` → `git -C {{ shell_quote(worktree_path) }} show {{ shell_quote("origin/" ~ trunk ~ ":uv.lock") }} > {{ shell_quote(worktree_path ~ "/uv.lock") }}`;
-  then run `uv sync` inside the worktree to regenerate
-- Feature code, tests → keep both sides' genuine additions; do NOT blindly take either side
-- Generated/binary files → take trunk's version
-
-After staging all resolved files:
-```bash
-GIT_EDITOR=true git -C {{ shell_quote(worktree_path) }} rebase --continue
-```
-If git says "nothing to commit", use `git -C {{ shell_quote(worktree_path) }} rebase --skip` instead.
-Repeat until the rebase completes.
-
-### 5. Verify the rebase didn't silently drop everything
-```bash
-git -C {{ shell_quote(worktree_path) }} log {{ shell_quote("origin/" ~ trunk ~ "..HEAD") }} --oneline
-```
-If the output is EMPTY: all commits were already on {{ trunk }}. Report "subsumed" and STOP —
-do NOT push, do NOT delete anything.
-
-### 6. Push
-```bash
-git -C {{ shell_quote(worktree_path) }} push --force-with-lease --force-if-includes origin {{ shell_quote(branch) }}
-```
-
-### 7. Clean up worktree (no --force)
-```bash
-git -C {{ shell_quote(repo_path) }} worktree remove {{ shell_quote(worktree_path) }}
-```
-If this fails (worktree has uncommitted files), leave it in place and report. Do NOT use --force.
-
-## Report format (end your response with this):
 ```
 STATUS: <rebased | subsumed | conflict-too-complex | failed>
 BRANCH: {{ branch }}
-NOTE: <one sentence summary>
+NOTE: <one sentence>
 ```
-
-## Safety Net workarounds (use these when Safety Net hook blocks a command):
-- Instead of `git checkout <ref> -- <file>`: use `(cd {{ shell_quote(worktree_path) }} && git show <ref>:<file> > <file>)`
-- Instead of `git checkout <branch>`: use `git -C {{ shell_quote(worktree_path) }} switch <branch>`
-- Instead of `git reset --hard`: use `git -C {{ shell_quote(worktree_path) }} reset --keep` (only if no uncommitted changes)
-- `GIT_EDITOR=true` before `git rebase --continue` to suppress editor prompts

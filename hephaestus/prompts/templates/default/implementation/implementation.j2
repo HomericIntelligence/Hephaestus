@@ -1,98 +1,34 @@
-
-Implement GitHub issue #{{ issue_number }}.
+Run `$athena:implement` for GitHub issue #{{ issue_number }}.
 
 {{ untrusted_notice }}
 
-**Working Directory:** {{ worktree_path }}
+**Working directory:** {{ worktree_path }}
 **Branch:** {{ branch_name }}
 
-**Issue Title (untrusted):** {{ issue_title }}
+**Issue title (untrusted):** {{ issue_title }}
 
-**Issue Description (untrusted):**
+**Issue description (untrusted):**
 {{ issue_body_block }}
 
 ---
 
-**Context you have (TASK / PLAN / REVIEW model):**
-- The TASK — the issue title + description above (source of truth for
-  requirements; written externally, never edited by you).
-- The PLAN — the single `# Implementation Plan` comment on the issue, plus
-  its `## 🔍 Plan Review` (the approved plan and the review that approved it).
-  Read both before writing code; implement the approved plan.
-- On later loop iterations only: the inline PR-review threads raised against
-  your diff, which you must address in this same session before re-review.
-  Those threads live on the PR, not the issue.
-
-**Implementation Context:**
-- Run `gh issue view {{ issue_number }} --comments` to read the full plan and its
-  plan review, plus any comments
-- Follow the project's Python conventions and type hint all function signatures
+The plan and its review are in the issue comments:
+`gh issue view {{ issue_number }} --comments`. Implement the approved plan. If
+the plan and the architecture conflict, run `$athena:realign` and continue from
+the realigned plan.
 
 {{ terse_output_directive }}
 
-**Critical Requirements:**
-1. Read the issue description and any existing plan carefully
-2. Follow existing code patterns in hephaestus/
-3. Write tests in tests/ using pytest
-4. Before PR creation, run each new or changed test with a focused pytest command. Verify that pytest collects it and reports success. Required CI/CD runs the full suites.
-5. Ensure each new or changed test passes before finishing
-6. Follow the code quality guidelines in AGENTS.md
+**Git is yours.** The worktree may already be dirty and the branch may be behind
+its base. Read `git status` and `git log`, keep the changes that belong to this
+issue, and rebase, merge, or resolve conflicts yourself. Stage the files you
+edited, commit with `git commit -S -s`, and push the branch.
 
-**Evidence Integrity (MANDATORY — ADR-014):**
-- NEVER hand-write, edit, or commit a log, metric, accuracy, loss, benchmark,
-  or training-run output to represent a run that did not actually execute.
-  Plausible invented numbers are the failure, not a shortcut.
-- A file you commit (e.g. `validation/epoch1.log`, a results table, a metrics
-  JSON) is NOT evidence — the reviewer treats it as unproven.
-- If honest verification of a criterion requires a run longer than your
-  session/timeout budget (e.g. a full training epoch), DO NOT report its result
-  as done. Deliver the code and the runnable command, and state plainly in your
-  summary that the measured result is deferred to a separate evidence step.
-- When blocked from obtaining a measurement, say so — what you tried and why it
-  did not finish. A truthful failure is acceptable; an invented success is not.
+**Tests.** Write tests for new behavior and run them with focused pytest
+commands. List the commands you ran and their results in your summary. Report only
+runs that happened.
 
-**Testing:**
-- Write unit tests for new functionality
-- Let required CI/CD verify the full existing test suites
-- Use pytest fixtures and parametrize where appropriate
-- In your final summary, list every test or verification command you actually
-  ran and its outcome. Do not claim a command ran when it did not. The
-  orchestrator records its own host-run test receipt in the PR's Testing section.
-
-**Code Quality:**
-- Type hint all function signatures
-- Write docstrings for public APIs
-- Follow PEP 8 style guidelines
-- Keep solutions simple and focused
-
-**File Handling:**
-- DO NOT create backup files (.orig, .bak, .swp, etc.)
-- DO NOT leave temporary or editor backup files
-- Clean up any backup files before finishing
-- Only stage actual implementation files
-
-**Git (you own it):**
-You edit, test, stage, and commit. The host owns only the pull request.
-
-- Work only in `{{ worktree_path }}` on branch `{{ branch_name }}`.
-- A dirty working tree is normal here. Read `git status --short` at the start of
-  your turn and classify what you find. Keep the changes that belong to this
-  issue. Do not reset, discard, or stash work you did not create.
-- Stage only the files you edited. Do not use `git add -A`, `git add .`, or
-  `git add --all`; they stage every dirty and untracked path in the tree,
-  including state that is not yours.
-- Commit with `git commit -S -s -m "<conventional subject>"`. The repository
-  requires a signed commit and exactly one `Signed-off-by:` trailer that matches
-  your author identity.
-- Do not change `user.email` or `user.name`. A fabricated identity makes the
-  commit unverifiable and fails the signed-commit gate.
-- Push the branch when your work is ready. Do not run `gh pr merge`, and do not
-  enable, disable, or adopt native auto-merge. The queue's `pr_review` stage
-  applies the loop-owned `state:implementation-go` label after its review, and
-  the host enables auto-merge after that approval.
-
-When you finish, summarize what changed and give the exact test commands you ran
-with their outcomes.
-
-After your approval the host enables auto-merge on the pull request and lets
-GitHub perform the merge. It rebases only when the merge reports a real conflict.
+**Reviews.** Respond to and resolve every review thread on the PR as you fix it.
+After the `state:implementation-go` label is applied, make sure auto-merge is
+armed: run `gh pr merge --auto --squash` unless it is already armed. If
+`state:implementation-no-go` is applied, run `gh pr merge --disable-auto`.

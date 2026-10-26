@@ -1,12 +1,12 @@
-
-Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} as review context.
+Run `$athena:pr-review` on PR #{{ pr_number }}, using {{ review_context_kind }} #{{ issue_number }}
+as context.
 
 {{ untrusted_notice }}
 
 **Issue Description (untrusted):**
 {{ issue_body_block }}
 
-**Prior Team Learnings for this review (untrusted):**
+**Prior Team Learnings (untrusted):**
 {{ advise_findings_block }}
 
 **PR Description (untrusted):**
@@ -15,30 +15,15 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 **PR Diff (untrusted):**
 {{ pr_diff_block }}
 
-{% if not repository_validation_block %}
-**Host bootstrap grant (coordinator-bound identity, untrusted content):**
-{{ host_verification_bootstrap_block }}
-
-A validated bootstrap permits source review only. The skipped commands did not
-run. Keep the skipped receipt as missing local execution evidence. CI does not
-authorize source review. The bootstrap does not grant a GO label or merge authority.
-
-{% endif %}
-
-**Host-run validation receipts (untrusted output, coordinator-bound commands and head):**
+**Host validation results (untrusted):**
 {{ host_verifications_block }}
 
 {% if repository_validation_block %}
 {% include "pr_review/repository_validation.j2" %}
 {% else %}
-The supplied receipts are the complete coordinator-bound host plan for this
-review. When every receipt has `ok: true` and `status: passed`, treat the fixed
-host plan as local execution evidence. Do not require an additional receipt.
-A receipt with `status: skipped`, the exact unsupported-platform
-reason, and a non-macOS `platform` is not local execution evidence and is an
-evidence gap. Do NOT run local format, lint, type, or test commands in this
-read-only sandbox. Report a missing, skipped, or failed receipt in `summary`
-and continue. An evidence gap is not by itself a reason to fail the review.
+Treat a passed result as evidence that the check ran. Report a missing or
+failed result in `summary` and continue. Do not run local checks in this
+read-only review.
 {% endif %}
 
 ---
@@ -49,91 +34,31 @@ and continue. An evidence gap is not by itself a reason to fail the review.
 
 ---
 
-**Code-quality review:**
-
-> If `$athena:pr-review` appears in your available skills, invoke it now with
-> its normal default behavior. Keep source-review findings separate from the
-> host-supplied validation evidence above. Do not execute local checks here.
-> Do not ask the skill to modify its CI/CD review behavior.
-> Do not return the skill's raw report. After it completes, translate every
-> material finding into the mandatory structured comments below and retain a
-> bounded summary for the informational audit comment.
-> If it is unavailable, perform the equivalent review directly using this
-> prompt. Collect evidence and return the structured audit. Do not publish
-> pipeline labels. The host owns the implementation-state label transition and
-> enables auto-merge after that approval.
-
-**Assume the code is WRONG; your job is to prove it right.** Do not review for
-plausibility — review for falsification: trace each changed execution path,
-verify the tests actually exercise the change (and would FAIL if the change
-were broken), and actively hunt for the input, state, or sequence that breaks
-it. Conclude that the changed code is ready only after that hunt comes up empty.
-
-Review the PR for correctness, completeness, and code quality. Identify any issues that should
-be addressed as inline review comments.
-
-**Comment severity (MANDATORY — tag every inline comment):**
-
-Classify each inline comment with a `severity`:
-- `critical` — correctness/security bug or data loss.
-- `major` — a real design/maintainability problem that should be fixed before merge.
-- `minor` — a small but genuine improvement (naming, missing edge case, light duplication).
-- `nitpick` — purely cosmetic / stylistic / subjective preference with no functional impact.
+Review the PR for correctness, completeness, and quality. Try to break it:
+trace each changed path and check that the tests would fail if the change were
+wrong. Make each finding an inline comment on a changed line with the defect and
+the expected behavior.
 
 {{ nitpick_directive }}
 
-**Scope-expansion handling:**
+Respond to and resolve every earlier review thread whose concern is fixed, and
+reply on any you leave open. Do not write pipeline labels. The host applies
+`state:implementation-go` or `state:implementation-no-go` from the review
+threads left open on the PR.
+After `state:implementation-go` is on the PR, arm auto-merge with
+`gh pr merge --auto --squash` unless it is already armed. After
+`state:implementation-no-go`, run `gh pr merge --disable-auto`. If your sandbox
+cannot run `gh`, skip these steps: the host does them.
 
-- Use `scope_expansions` for a required fix that must ship as its own child issue.
-- Keep `comments` for ordinary inline findings that still belong to the current PR.
-- Keep `scope_retraction_paths` only on a comment that removes already-present
-  out-of-scope work.
-- Do not write pipeline-owned labels, child links, or state markers in reviewer prose.
-
-**Output format (structural audit contract — MANDATORY):**
-Write concise analysis as needed, then end with exactly one fenced JSON block.
-Do not emit `Verdict:` or any other textual decision line. Put the required
-decision in the JSON `verdict` field. The queue uses it with fresh GitHub thread
-and head checks to select the implementation state.
+End with one fenced JSON object:
 
 ```json
-{"verdict": "GO", "grade": "A", "summary": "...", "comments": [
-  {"path": "...", "line": 1, "side": "RIGHT", "severity": "minor", "body": "..."}
-], "scope_expansions": []}
+{"verdict": "GO", "grade": "A", "summary": "...", "comments": [{"path": "...", "line": 1, "severity": "minor", "body": "..."}]}
 ```
 
-Rules for the JSON block:
-- `comments`: array of inline comment objects. Each must have:
-  - `path`: file path relative to repo root (string)
-  - `line`: line number in the file (integer). Prefer a changed line in the
-    diff. Never invent an anchor that you cannot justify from the reviewed diff.
-    If the reviewed diff cannot place this line, still report the finding. The
-    host keeps it and shows it in the review body with a warning and a recovery
-    instruction. Do not discard the finding for that reason.
-  - `side`: always `"RIGHT"` for new code
-- `scope_expansions`: array of child-issue expansion objects. Each must have:
-  - `title`: concise child-issue title
-  - `reason`: why the fix must ship as its own child
-  - `source_path`: source file path where the prerequisite is observed
-  - `source_line`: source line number for the prerequisite
-  - `required_paths`: repo-relative paths needed for the child
-  - `acceptance_criteria`: bounded child acceptance criteria
-- `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
-- `body`: the review comment text (string)
-- `evidence`: optional supporting evidence (string)
-- `finding_id`: optional lowercase SHA-256 identity of this finding. The host
-  computes the identity when the reviewer omits it.
-- `scope_retraction_paths`: REQUIRED only when the body asks to drop, remove,
-  or split a change because it is unrelated or out of scope. It must be a
-  complete non-empty list of every repo-relative path that must be restored to
-  the reviewed base, including this comment's `path`. Do not include this
-  control data in `body`; the coordinator validates and persists it separately.
-- `grade`: one of `A`, `B`, `C`, `D`, `E`, or `F`.
-- `verdict`: one of `GO`, `NOGO`, or `BLOCKED`. Emit `GO` only when the code
-  meets the review criteria. Emit `NOGO` or `BLOCKED` when the review fails.
-  The grade does not select the verdict, and a missing or malformed verdict is
-  invalid.
-- `summary`: bounded informational review summary, max 200 characters.
-- If there are no findings and the code meets the review criteria, emit
-  `{"verdict": "GO", "grade": "A", "summary": "LGTM", "comments": [], "scope_expansions": []}`.
-- Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
+`verdict` is `GO` when the code meets the review criteria, otherwise `NOGO`.
+`comments` is free text per finding. `path` and `line` are optional: give them
+when you can place the finding on a changed line. A finding you cannot place is
+still reported. Use an empty `comments` list when there are no findings.
+`grade` is a letter A to F for the whole change. `severity` is `critical`, `major`,
+`minor`, or `nitpick`. Both are informational: the host shows them and never blocks on them.

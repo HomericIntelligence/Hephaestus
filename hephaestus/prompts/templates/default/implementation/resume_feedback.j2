@@ -1,6 +1,6 @@
+Run `$athena:address-review` for issue #{{ issue_number }}.
 
-The independent reviewer for issue #{{ issue_number }} produced the following
-feedback on iteration {{ prev_iteration }}:
+The reviewer left this feedback on iteration {{ prev_iteration }}:
 
 ---
 
@@ -8,24 +8,9 @@ feedback on iteration {{ prev_iteration }}:
 
 ---
 
-Address every concrete finding above. Update the code (and tests, if needed)
-in this same working directory. Stage only the files you edited, then commit
-with `git commit -S -s` and push the branch. Do not run `gh pr merge` and do
-not manage native auto-merge.
-
-When done, summarize what you changed in 3-5 bullet points so the next
-review can verify the fixes were applied. Every supplied review thread is
-required: investigate and fix each one, then emit exactly one fenced JSON
-object containing every supplied thread ID and a concise reply for each. Do
-not omit, dismiss, or defer a thread; partial output is rejected:
-
-```json
-{"addressed": ["<thread_id>"], "replies": {"<thread_id>": "what was fixed"}}
-```
-
-Do not resolve GitHub threads. The coordinator posts an implementation reply
-only after the fix commit is pushed; the reviewer performs a fresh review and
-then resolves or returns each thread.
+Fix each finding in this working directory, with tests where needed, then commit
+with `git commit -S -s` and push. Reply to and resolve every review thread
+yourself once its fix is pushed. Summarize the fixes in a few bullets.
 
 {{ untrusted_notice }}
 

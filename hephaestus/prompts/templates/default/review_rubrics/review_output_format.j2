@@ -1,45 +1,12 @@
-
-**Required output format (structural audit — MANDATORY):**
-
-End with exactly one fenced JSON object and emit no textual decision line.
-Implementation authority is represented only by the live GitHub
-implementation-state label after the PR exists; this pre-PR compatibility
-review remains informational.
+End with one fenced JSON object:
 
 ```json
-{"verdict": "GO", "grade": "A", "summary": "...", "comments": [
-  {"path": "...", "line": 1, "side": "RIGHT", "severity": "major", "body": "..."}
-], "scope_expansions": []}
+{"verdict": "GO", "grade": "A", "summary": "...", "comments": [{"path": "...", "line": 1, "severity": "minor", "body": "..."}]}
 ```
 
-`verdict` is one of `GO`, `NOGO`, or `BLOCKED`. The field is required. `GO`
-states that the code meets the review criteria. A missing or malformed verdict
-is invalid. `grade` is informational and is one of `A`, `B`, `C`, `D`, `E`,
-or `F`; `summary` is a concise informational summary; `comments` is an array
-of concrete findings; and
-`scope_expansions` is an array of child-issue prerequisites that must not be
-routed to the current branch. Each comment must provide a repository-relative
-`path`, a positive integer `line`, `"RIGHT"` side, one of `critical`,
-`major`, `minor`, or `nitpick` severity, and actionable `body`. Prefer a
-changed line for `line`. Never invent an anchor that you cannot justify from the
-reviewed diff. A comment that the reviewed diff cannot place inline is still
-reported. The host keeps it and shows it in the review body with a warning and a
-recovery instruction, so do not discard the finding for that reason. Emit an
-empty `comments` array only when no findings remain. Emit an empty
-`scope_expansions` array when there is no required child issue. Do not emit
-`Verdict:` or any other textual decision line.
-
-**Severity scale:**
-
-- `critical` — the change breaks a documented contract, loses data, or opens a
-  security hole.
-- `major` — the change has a concrete failure mode. Name the input and the
-  wrong result.
-- `minor` — the change has a real defect with a bounded blast radius. Name the
-  wrong result.
-- `nitpick` — a preference, a style choice, or a "consider extracting" or
-  "consider renaming" suggestion with no failure mode. Do not report it as
-  `minor`. Omit it unless nitpick comments were requested.
-
-Report only a defect that a reader can act on. A suggestion that the reviewer
-does not ask for is not a defect.
+`verdict` is `GO` when the code meets the review criteria, otherwise `NOGO`.
+`comments` lists findings as free text. `path` and `line` are optional: give them
+when you can place the finding on a changed line. A finding without a line is
+still reported. Use an empty `comments` list when there are no findings.
+`grade` is a letter A to F for the whole change. `severity` is `critical`, `major`,
+`minor`, or `nitpick`. Both are informational: the host shows them and never blocks on them.
