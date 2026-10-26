@@ -1304,8 +1304,7 @@ reviewed isolation backend exists.
 Capability-dependent Hephaestus execution uses the boundary above. Ordinary
 source review does not execute these checks or require their image and quota
 filesystem. The completed PR #3006 bootstrap is retired. There is no
-target-specific grant, comment selector, or skip-to-pass path. Generic host receipts remain in
-[`pr_review_receipts.py`](../hephaestus/automation/pipeline/stages/pr_review_receipts.py).
+target-specific grant, comment selector, or skip-to-pass path.
 
 For a repository with an installed validation profile, the coordinator first
 binds the detached source workspace.
@@ -1350,10 +1349,6 @@ creates a terminal gap. A foreign callback cannot replace an active request.
 
 The pure contracts are in
 [`repository_validation_preparation.py`](../hephaestus/automation/pipeline/repository_validation_preparation.py).
-The stage owner is
-[`pr_review_repository_validation.py`](../hephaestus/automation/pipeline/stages/pr_review_repository_validation.py).
-Pure coverage and prompt summaries are in
-[`pr_review_repository_validation_state.py`](../hephaestus/automation/pipeline/stages/pr_review_repository_validation_state.py).
 The effectful runtime adapter is outside the pure pipeline, in
 [`repository_validation_runtime.py`](../hephaestus/automation/repository_validation_runtime.py).
 
@@ -2751,17 +2746,10 @@ diagnostic node data. `pr_review_verification_paths.py` imports these data
 through a one-way dependency. The data module has no runtime dependencies.
 Architecture tests enforce this boundary and its 150-line source cap.
 `github_api.diff` keeps its compatibility exports and emits transport diagnostics.
-The review stage uses the value modules directly. `pr_review_findings.py` builds
-finding records and applies ordinary review receipts. `pr_review_history.py`
-retains finding provenance and reserves space for the next review batch.
-`pr_review_recovery.py` reconciles pending publications and applies exact-request
-receipts before a new review. `coordinator_observability.py` records bounded
-finding outcome events without review text. These owners retain the existing
-identity, deadline, recovery, and source-size limits. The host now owns the
-worker-side review publication partition and the warning contract in
-[`review_warnings.py`](../hephaestus/automation/review_warnings.py). That module
-has no transport dependency and refuses a warning without a recovery
-instruction.
+The review stage reads the reviewer's text and optional JSON block through
+`review_audit.py` and places each comment on the diff with `review_anchors.py`.
+A comment that cannot be placed goes into the review body. GitHub review threads
+decide the outcome, and the grade and severity are informational.
 
 ## 12. Interrupt semantics and exit codes
 
