@@ -760,14 +760,18 @@ independently. Both default to `1`. `--no-learn` prevents new learning work and
 execution of learning intents.
 
 Four console scripts use one parser and configuration builder in
-`hephaestus.automation.pipeline_cli`:
+`hephaestus.automation.pipeline_cli`. Each console script enters through a
+base-importable shim in `hephaestus.cli.automation_entry`. The shim checks for
+the `[automation]` extra: on a base install it reports a configuration error
+with a recovery instruction instead of a raw `ModuleNotFoundError` traceback
+(issue #3528). With the extra, the shim delegates to the automation module.
 
 | Console script | Entry module | Main stage scope |
 |----------------|--------------|------------------|
-| `hephaestus-automation-loop` | `hephaestus.automation.loop_runner` | All six main stages |
-| `hephaestus-plan-issues` | `hephaestus.automation.planner` | `planning → plan_review` |
-| `hephaestus-implement-issues` | `hephaestus.automation.implementer` | `implementation → pr_review → merge_wait` |
-| `hephaestus-review-prs` | `hephaestus.automation.pr_reviewer` | `pr_review` |
+| `hephaestus-automation-loop` | `hephaestus.cli.automation_entry` → `hephaestus.automation.loop_runner` | All six main stages |
+| `hephaestus-plan-issues` | `hephaestus.cli.automation_entry` → `hephaestus.automation.planner` | `planning → plan_review` |
+| `hephaestus-implement-issues` | `hephaestus.cli.automation_entry` → `hephaestus.automation.implementer` | `implementation → pr_review → merge_wait` |
+| `hephaestus-review-prs` | `hephaestus.cli.automation_entry` → `hephaestus.automation.pr_reviewer` | `pr_review` |
 
 Learning and finished are implicit auxiliary stages for every scope. The full
 command accepts `--stages` with contiguous main stage names in queue order.

@@ -330,6 +330,15 @@ evidence and never falls back after failure. See
 [ADR-0043](docs/adr/0043-optional-codex-adapter-until-production-ready.md) and
 [the production adapter issue](https://github.com/HomericIntelligence/Hephaestus/issues/3062).
 
+The six queue commands in this table need the `[automation]` extra:
+
+```bash
+pip install 'HomericIntelligence-Hephaestus[automation]'
+```
+
+On a base install, each of the six queue commands stops with a configuration
+error that names this install step (issue #3528).
+
 | Command | Description |
 |---|---|
 | `hephaestus-automation-loop` | Run all six main queues and the auxiliary learning and cleanup queues |
