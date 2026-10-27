@@ -13,7 +13,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     ReadCurrentPlanScopeRequest,
 )
 from hephaestus.automation.pipeline.jobs import JobResult
-from hephaestus.automation.pipeline.stages import JobRequest, StageContext, StageOutcome
+from hephaestus.automation.pipeline.stages import JobRequest, StageContext
 from hephaestus.automation.pipeline.stages.implementation import (
     ImplementationStage,
     _capture_codex_publication_scope,
@@ -59,11 +59,11 @@ def _complete_publication_scope(item: WorkItem, ctx: StageContext, plan: str) ->
     assert _capture_codex_publication_scope(item, ctx) is None
 
 
-@pytest.mark.parametrize("invalid_path", ["../outside.py", "/absolute/file.py"])
-def test_invalid_plan_path_rejects_the_complete_publication_scope(
-    make_ctx: Callable[..., Any], make_work_item: Callable[..., Any], invalid_path: str
+@pytest.mark.parametrize("unusable_path", ["../outside.py", "/absolute/file.py"])
+def test_unusable_plan_path_keeps_the_usable_publication_scope(
+    make_ctx: Callable[..., Any], make_work_item: Callable[..., Any], unusable_path: str
 ) -> None:
-    """A valid path cannot hide an invalid path in the same manifest."""
+    """An unusable declaration cannot discard the usable path in the same manifest."""
     ctx = make_ctx(
         config_overrides={
             "agent": "codex",
@@ -73,18 +73,11 @@ def test_invalid_plan_path_rejects_the_complete_publication_scope(
         }
     )
     item = make_work_item()
-    plan = f"## Files to Modify\n- `hephaestus/example.py`\n- `{invalid_path}`\n"
-    request = _queue_scope_read(item, ctx)
-    with pytest.raises(ValueError, match="paths must contain sorted unique source paths") as error:
-        _read_scope_job(request, ctx, plan)
-    ImplementationStage().on_job_done(item, JobResult(ok=False, error=str(error.value)), ctx)
-    outcome = _capture_codex_publication_scope(item, ctx)
-    assert isinstance(outcome, StageOutcome)
-    assert outcome.note == "implementation_plan_scope_unavailable"
-    assert "_codex_publication_scope" not in item.payload
+    plan = f"## Files to Modify\n- `hephaestus/example.py`\n- `{unusable_path}`\n"
+    _complete_publication_scope(item, ctx, plan)
     publication = _codex_publication_kwargs(item, ctx, "b" * 40)
-    assert isinstance(publication, StageOutcome)
-    assert publication.note == "codex_publication_scope_claims_invalid"
+    assert isinstance(publication, dict)
+    assert publication["allowed_paths"] == ("hephaestus/example.py",)
 
 
 def test_publication_scope_preserves_hidden_and_extensionless_paths(

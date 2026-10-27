@@ -1728,10 +1728,10 @@ def test_adopted_writer_transition_refuses_to_discard_uncommitted_work(
     assert pending.read_text() == "preserve\n"
 
 
-def test_direct_writer_transition_ignores_a_receipt_for_a_removed_checkout(
+def test_direct_writer_transition_discards_a_receipt_for_a_removed_checkout(
     tmp_path: Path,
 ) -> None:
-    """A receipt whose checkout was removed is stale state, not a fault."""
+    """A stale lane is discarded, and its terminal evidence is kept."""
     repo, first, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")
     predecessor = manager.prepare(
@@ -1741,6 +1741,8 @@ def test_direct_writer_transition_ignores_a_receipt_for_a_removed_checkout(
         branch="old-writer-branch",
     )
     receipt_path = manager._receipt_path(9, SourceLane.IMPLEMENTATION)
+    terminal_path = manager._terminal_path(9)
+    terminal_path.write_text('{"cause": "kept"}\n', encoding="utf-8")
     _git(repo, "worktree", "remove", str(predecessor.cwd))
 
     with manager.implementation_writer_handoff(9) as handoff:
@@ -1752,8 +1754,9 @@ def test_direct_writer_transition_ignores_a_receipt_for_a_removed_checkout(
         )
 
     assert armed is False
-    assert receipt_path.exists()
+    assert not receipt_path.exists()
     assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
+    assert terminal_path.read_text(encoding="utf-8") == '{"cause": "kept"}\n'
 
 
 def test_direct_writer_transition_rejects_a_receipt_for_a_moved_checkout(

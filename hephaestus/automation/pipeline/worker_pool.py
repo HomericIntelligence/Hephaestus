@@ -4421,9 +4421,9 @@ def _codex_implementation_request(
     )
 
 
-def _is_remediation_job(job: GitJob) -> bool:
-    """Return whether one job publishes an address-review correction."""
-    return job.kwargs.get("implementation_remediation") is True
+def _is_direct_writer_branch(issue: int, branch: str) -> bool:
+    """Return whether one branch names the direct writer of an issue."""
+    return re.fullmatch(rf"{issue}-auto-impl-direct-[0-9a-f]{{32}}", branch) is not None
 
 
 def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
@@ -10835,6 +10835,11 @@ class WorkerPool:
                 if physical_branch is None or not physical_branch.startswith("refs/heads/"):
                     raise SourceWorkspaceError("dirty direct predecessor has no head branch")
                 physical_branch_name = physical_branch.removeprefix("refs/heads/")
+                if not _is_direct_writer_branch(issue, physical_branch_name):
+                    return JobResult(
+                        ok=False,
+                        error="dirty direct predecessor branch is not the direct issue writer",
+                    )
                 physical_head = manager._head_revision(original.path)
                 evidence = self._read_dirty_direct_state(
                     job, repo_root=repo_root, issue=issue, branch=physical_branch_name

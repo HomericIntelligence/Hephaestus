@@ -180,7 +180,6 @@ def _fetch_planned_files(
                 "the agent decides the files and the review judges the diff",
                 issue,
             )
-            return _parse_planned_files(discovered.plan_text)
         return paths
     return _parse_planned_files(discovered.plan_text)
 

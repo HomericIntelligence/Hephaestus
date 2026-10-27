@@ -21,6 +21,9 @@ from hephaestus.automation.pipeline.repository_validation import (
     RepositoryValidationPlan,
     RepositoryValidationReceipt,
 )
+from hephaestus.automation.pipeline.scope_retraction import (
+    is_safe_scope_retraction_path,
+)
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _JOURNAL_MARKER_RE = re.compile(
@@ -137,7 +140,9 @@ class CurrentPlanScopeRead:
             raise ValueError("request must be a current plan scope read")
         if (
             not isinstance(self.paths, tuple)
-            or not all(isinstance(path, str) for path in self.paths)
+            or not all(
+                isinstance(path, str) and is_safe_scope_retraction_path(path) for path in self.paths
+            )
             or tuple(sorted(set(self.paths))) != self.paths
         ):
             raise ValueError("paths must contain sorted unique source paths")
