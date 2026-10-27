@@ -29,6 +29,7 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import replace
+from pathlib import Path
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -132,6 +133,7 @@ from .base import (
     WorkItem,
     _repo_state_root,
     _require_issue_labels,
+    _worktree_path,
     agent_provider,
     athena_advise_failure_reason,
     planning_source_workspace_binding,
@@ -960,7 +962,7 @@ def _source_workspace_preparation_failure(
 def _prepare_planning_workspace(
     item: WorkItem,
     ctx: StageContext,
-) -> WorkspaceBinding | StageOutcome:
+) -> WorkspaceBinding | StageOutcome | None:
     """Prepare a planning source lane and classify bounded preparation failures."""
     try:
         return planning_source_workspace_binding(
@@ -972,6 +974,15 @@ def _prepare_planning_workspace(
         return _source_workspace_preparation_failure(item, ctx, exc)
 
 
+def _planning_job_cwd(
+    item: WorkItem,
+    ctx: StageContext,
+    workspace: WorkspaceBinding | None,
+) -> Path:
+    """Return the prepared lane, or the configured checkout for a preview."""
+    return workspace.cwd if workspace is not None else _worktree_path(item, ctx)
+
+
 def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult | None:
     """Build or apply one requirements-recovery substate action."""
     assert item.issue is not None  # noqa: S101 - PlanningStage.step validates this
@@ -979,22 +990,22 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
         workspace = _prepare_planning_workspace(item, ctx)
         if isinstance(workspace, StageOutcome):
             return workspace
-        revision = workspace.revision
-        assert revision is not None  # noqa: S101 - the captured source has a full revision
-        item.payload["requirements_repository_revision"] = revision
+        revision = workspace.revision if workspace is not None else None
+        if revision is not None:
+            item.payload["requirements_repository_revision"] = revision
         job = AgentJob(
             repo=item.repo,
             issue=item.issue,
             agent=agent_provider(ctx, "planner"),
             model=stage_model(ctx, "planner", planner_model),
             prompt_builder=build_recovery_prompt,
-            cwd=workspace.cwd,
+            cwd=_planning_job_cwd(item, ctx, workspace),
             timeout_s=planner_claude_timeout(),
             workspace=workspace,
             sandbox="read-only",
             allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_PLANNER,
-            session_key=f"requirements-recovery:{item.issue}:{revision}",
+            session_key=f"requirements-recovery:{item.issue}:{revision or 'preview'}",
             execution_request=ExecutionRequest(
                 AgentRole.PLANNER,
                 AgentOperation.PLAN,
@@ -1023,21 +1034,20 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
         workspace = _prepare_planning_workspace(item, ctx)
         if isinstance(workspace, StageOutcome):
             return workspace
-        revision = workspace.revision
-        assert revision is not None  # noqa: S101 - the captured source has a full revision
+        revision = workspace.revision if workspace is not None else None
         job = AgentJob(
             repo=item.repo,
             issue=item.issue,
             agent=agent_provider(ctx, "reviewer"),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=build_recovery_review_prompt,
-            cwd=workspace.cwd,
+            cwd=_planning_job_cwd(item, ctx, workspace),
             timeout_s=plan_reviewer_claude_timeout(),
             workspace=workspace,
             sandbox="read-only",
             allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_PLAN_REVIEWER,
-            session_key=f"requirements-recovery-review:{item.issue}:{revision}",
+            session_key=f"requirements-recovery-review:{item.issue}:{revision or 'preview'}",
             execution_request=ExecutionRequest(
                 AgentRole.PLAN_REVIEWER,
                 AgentOperation.PLAN_REVIEW,
@@ -1049,7 +1059,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
                 "issue_body": item.payload.get("issue_body", ""),
                 "proposal_json": recovered_requirements_json(proposal),
                 "repository": item.repo,
-                "repository_revision": revision,
+                "repository_revision": revision or "",
             },
             parse=parse_recovery_review,
             descr="review_recovered_requirements",
@@ -1767,7 +1777,7 @@ class PlanningStage(Stage):
                     issue=item.issue,
                     agent=agent_provider(ctx),
                     model=stage_model(ctx, "advise", advise_model),
-                    cwd=workspace.cwd,
+                    cwd=_planning_job_cwd(item, ctx, workspace),
                     timeout_s=stage_timeout(ctx, "advise", advise_claude_timeout),
                     workspace=workspace,
                     payload={
@@ -1796,7 +1806,7 @@ class PlanningStage(Stage):
                 agent=agent_provider(ctx, "planner"),
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_plan_prompt,
-                cwd=workspace.cwd,
+                cwd=_planning_job_cwd(item, ctx, workspace),
                 timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",

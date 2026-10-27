@@ -631,8 +631,17 @@ def planning_source_workspace_binding(
     ctx: StageContext,
     *,
     preparation_timeout_s: float | None = None,
-) -> WorkspaceBinding:
-    """Prepare the detached review lane for the captured planning source."""
+) -> WorkspaceBinding | None:
+    """Prepare the detached review lane for the captured planning source.
+
+    A dry run returns ``None`` and prepares nothing. The coordinator logs the
+    previewed job and does not submit it, so a dry run must not synchronize a
+    checkout, create a source worktree, or require revision evidence that only
+    a suppressed synchronization job can produce. A normal run still requires
+    the captured full revision.
+    """
+    if ctx.dry_run:
+        return None
     return source_workspace_binding(
         item,
         ctx,

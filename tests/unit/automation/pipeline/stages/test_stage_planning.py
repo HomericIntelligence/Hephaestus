@@ -2372,6 +2372,52 @@ class TestPlanningStageStep:
             "issue_history": "",
         }
 
+    @pytest.mark.parametrize(
+        ("state", "next_state"),
+        [("ADVISE_WAIT", "PLAN_WAIT"), ("PLAN_WAIT", "VERIFY")],
+    )
+    def test_dry_run_previews_a_source_reading_job_without_a_revision(
+        self,
+        state: str,
+        next_state: str,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A dry run previews the job without a lane or revision evidence (#2949)."""
+        resolved: list[bool] = []
+
+        def manager_factory() -> Any:
+            resolved.append(True)
+            raise AssertionError("dry run must not resolve the source manager")
+
+        stage = PlanningStage()
+        ctx = make_ctx(
+            dry_run=True,
+            paths=SimpleNamespace(
+                repo_root="/tmp/repo",
+                worktree="/tmp/repo/worktree",
+                source_workspaces=manager_factory,
+            ),
+        )
+        item = make_work_item(issue=4, state=state)
+        item.payload.clear()  # a suppressed synchronization supplies no revision
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert result.on_done_state == next_state
+        job = result.job
+        fallback = Path("/tmp/repo/worktree")
+        if isinstance(job, AthenaSkillJob):
+            assert job.request.workspace is None
+            assert job.request.cwd == fallback
+        else:
+            assert isinstance(job, AgentJob)
+            assert job.workspace is None
+            assert job.cwd == fallback
+        assert item.payload.get("source_workspace_failure") is None
+        assert resolved == []
+
     def test_plan_job_uses_selected_provider_and_planner_session_role(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

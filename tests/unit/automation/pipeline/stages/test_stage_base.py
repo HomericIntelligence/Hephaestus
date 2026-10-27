@@ -134,6 +134,45 @@ class TestAgentProvider:
 class TestPlanningSourceWorkspaceBinding:
     """Planning binds the detached captured source lane."""
 
+    def test_dry_run_prepares_no_source_workspace(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A preview returns no binding and never resolves the source manager."""
+        resolved: list[bool] = []
+
+        def manager_factory() -> Any:
+            resolved.append(True)
+            raise AssertionError("dry run must not resolve the source manager")
+
+        item = make_work_item(issue=12, state="ADVISE_WAIT", payload={})
+        item.payload.clear()  # a dry run synchronizes nothing, so no revision exists
+        ctx = make_ctx(
+            dry_run=True,
+            paths=SimpleNamespace(source_workspaces=manager_factory),
+        )
+
+        result = stage_base.planning_source_workspace_binding(item, ctx)
+
+        assert result is None
+        assert resolved == []
+
+    def test_normal_run_requires_captured_full_revision(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A real run still needs revision evidence before any source read."""
+        prepared: list[tuple[Any, ...]] = []
+
+        class Manager:
+            def prepare_bounded(self, *args: Any, **kwargs: Any) -> object:
+                prepared.append(args)
+                raise AssertionError("preparation must not start without a revision")
+
+        item = make_work_item(issue=12, state="ADVISE_WAIT", payload={})
+        item.payload.clear()  # an unsynchronized checkout supplies no revision
+        ctx = make_ctx(paths=SimpleNamespace(source_workspaces=Manager()))
+
+        with pytest.raises(RuntimeError, match="planning source requires a captured full revision"):
+            stage_base.planning_source_workspace_binding(item, ctx)
+        assert prepared == []
+
     @pytest.mark.parametrize(
         ("synced_revision", "expected_revision"),
         [
