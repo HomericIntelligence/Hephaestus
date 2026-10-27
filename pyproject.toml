@@ -118,13 +118,17 @@ default-groups = ["dev", "automation"]
 [project.scripts]
 hephaestus-fleet-build-artifacts = "hephaestus.automation.fleet_build_artifact_server:main"
 hephaestus-fleet-worker = "hephaestus.automation.fleet_worker_cli:main"
-hephaestus-automation-loop = "hephaestus.automation.loop_runner:main"
+# The six automation queue scripts go through the base-importable shims in
+# hephaestus.cli.automation_entry: on a base install (without the [automation]
+# extra) they report a ConfigurationError with a recovery instruction instead
+# of a raw ModuleNotFoundError (issue #3528).
+hephaestus-automation-loop = "hephaestus.cli.automation_entry:automation_loop_main"
 hephaestus-install-pi-plugins = "hephaestus.agents.pi_plugins:main"
-hephaestus-plan-issues = "hephaestus.automation.planner:main"
-hephaestus-implement-issues = "hephaestus.automation.implementer:main"
-hephaestus-review-prs = "hephaestus.automation.pr_reviewer:main"
-hephaestus-ensure-state-labels = "hephaestus.automation.ensure_state_labels:main"
-hephaestus-reconcile-implementation-labels = "hephaestus.automation.reconcile_implementation_labels:main"
+hephaestus-plan-issues = "hephaestus.cli.automation_entry:plan_issues_main"
+hephaestus-implement-issues = "hephaestus.cli.automation_entry:implement_issues_main"
+hephaestus-review-prs = "hephaestus.cli.automation_entry:review_prs_main"
+hephaestus-ensure-state-labels = "hephaestus.cli.automation_entry:ensure_state_labels_main"
+hephaestus-reconcile-implementation-labels = "hephaestus.cli.automation_entry:reconcile_implementation_labels_main"
 hephaestus-gh = "hephaestus.github.gh_cli:main"
 hephaestus-fleet-sync = "hephaestus.github.fleet_sync:main"
 hephaestus-tidy = "hephaestus.github.tidy:main"
