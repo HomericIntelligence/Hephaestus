@@ -76,6 +76,17 @@ def observability_snapshot(coordinator: Any, *, logger: logging.Logger) -> dict[
             snapshot_errors.append("circuit_breaker_snapshot_provider_failed")
 
     queue_depths = {name.value: len(queue) for name, queue in coordinator.queues.items()}
+    queue_capacities = {name.value: queue.capacity for name, queue in coordinator.queues.items()}
+    # Occupancy counts ready and leased items, so a queue that reserved its
+    # capacity for in-flight work is saturated even when ``queue_depths`` is
+    # small. The latched completion fault joins the same list.
+    saturated_queues = sorted(
+        name.value
+        for name, queue in coordinator.queues.items()
+        if queue.occupancy >= queue.capacity
+    )
+    if coordinator._completion_saturation.is_set():
+        saturated_queues = sorted({*saturated_queues, "completion"})
     lane_queue_depths = {
         "main": sum(queue_depths[stage.value] for stage in MAIN_PIPELINE_ORDER),
         "auxiliary": sum(queue_depths[stage.value] for stage in AUXILIARY_PIPELINE_ORDER),
@@ -86,6 +97,8 @@ def observability_snapshot(coordinator: Any, *, logger: logging.Logger) -> dict[
     }
     snapshot = {
         "queue_depths": queue_depths,
+        "queue_capacities": queue_capacities,
+        "saturated_queues": saturated_queues,
         "lane_queue_depths": lane_queue_depths,
         "inflight_per_repo": dict(coordinator.inflight_per_repo),
         "inflight_by_lane": inflight_by_lane,

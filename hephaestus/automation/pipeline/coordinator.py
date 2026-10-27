@@ -47,6 +47,12 @@ from .worker_protocol import AuxiliaryWorker, MainWorker, WorkerFactory
 logger = logging.getLogger(__name__)
 
 
+def _require_percentage_threshold(threshold: int) -> None:
+    """Reject an alert threshold outside the valid percentage range."""
+    if not 0 <= threshold <= 100:
+        raise ValueError("alert_queue_depth_threshold must be a percentage between 0 and 100")
+
+
 class Coordinator(
     CoordinatorRuntime,
     IssueClassificationCoordinator,
@@ -99,6 +105,7 @@ class Coordinator(
             raise ValueError("learning_workers must be positive")
         if config.learning_queue_capacity < 1:
             raise ValueError("learning_queue_capacity must be positive")
+        _require_percentage_threshold(config.alert_queue_depth_threshold)
         self._monotonic = monotonic or time.monotonic
         self._wall_time = wall_time or time.time
         self.shutdown = shutdown_event or threading.Event()

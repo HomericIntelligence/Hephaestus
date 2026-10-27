@@ -31,8 +31,9 @@ are constructed only when a metrics port is configured.
   counter in the catalog below. The server binds a literal loopback address
   only (`hephaestus/observability/server.py`); it rejects any non-loopback
   host, so the unauthenticated diagnostic endpoint is never exposed off-host.
-- **`/health`** is the coordinator readiness endpoint. A valid response always
-  has a top-level `status`: `ok` returns HTTP 200, while `degraded`,
+- **`/health`** is the coordinator readiness endpoint. Its snapshot also carries
+  `queue_depths`, `queue_capacities`, and `saturated_queues`. A valid response
+  always has a top-level `status`: `ok` returns HTTP 200, while `degraded`,
   `stopping`, and `error` return HTTP 503. Missing, non-string, or unknown
   provider statuses and provider failures are normalized to
   `{"status": "error"}` with HTTP 503. Valid provider snapshots retain their
@@ -78,7 +79,9 @@ are constructed only when a metrics port is configured.
   warnings and never change pipeline routing or exit status.
 
 The alert queue-depth threshold is configurable via
-`PipelineConfig.alert_queue_depth_threshold` (default `100`); the stall
+`PipelineConfig.alert_queue_depth_threshold` (default `100`). It is a percentage
+of each stage queue's bounded capacity, not an absolute count, so `100` alerts
+only at a full ready backlog and `0` alerts on any non-empty backlog. The stall
 threshold defaults to `3`, matching the coordinator's own
 `_STALL_TICKS_BEFORE_RETRY`.
 
@@ -111,7 +114,7 @@ points at the emission chokepoint in `coordinator_runtime.py`.
 | `hephaestus_pipeline_loops_total` | gauge | — | 1 | Reseed passes run by this coordinator process. |
 | `hephaestus_pipeline_stalled_ticks` | gauge | — | 1 | Consecutive drain ticks without pipeline progress. |
 | `hephaestus_circuit_breaker_state` | gauge | `name`: open breaker names; `state`: `closed`, `open`, `half_open` | 100 | Circuit-breaker lifecycle state (the active state has value `1`, others `0`). |
-| `hephaestus_pipeline_alert_active` | gauge | `name`: `circuit_breaker_open`, `queue_depth_exceeds`, `pipeline_stalled` | 3 | Whether a named alert condition is currently active (`1`) or resolved (`0`). |
+| `hephaestus_pipeline_alert_active` | gauge | `name`: `circuit_breaker_open`, `queue_depth_exceeds`, `queue_saturated`, `pipeline_stalled` | 4 | Whether a named alert condition is currently active (`1`) or resolved (`0`). |
 | `hephaestus_pipeline_jobs_total` | counter | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `learning`, `finished`; `outcome`: `ok`, `failed`, `interrupted` | 24 | Completed jobs by stage and outcome. |
 | `hephaestus_pipeline_agent_job_seconds_total` | counter | — | 1 | Cumulative agent-job wall-clock seconds (negative durations clamped to `0`). |
 | `hephaestus_pipeline_auxiliary_job_seconds_total` | counter | — | 1 | Cumulative host-learning and cleanup wall-clock seconds. |
@@ -139,7 +142,8 @@ persistent degradation never produces repeated event spam.
 | Alert | Severity | Condition | Owner | Runbook |
 | --- | --- | --- | --- | --- |
 | `circuit_breaker_open` | critical | Any circuit breaker in the snapshot reports `state == "open"`. | repository maintainer | [`docs/runbooks/automation-loop-crash.md`](runbooks/automation-loop-crash.md) |
-| `queue_depth_exceeds` | warning | Any stage queue's ready backlog exceeds `alert_queue_depth_threshold` (default `100`). Full queues are ordinary backpressure, not a completion fault. | repository maintainer | [`docs/runbooks/ci-driver-stall.md`](runbooks/ci-driver-stall.md) |
+| `queue_depth_exceeds` | warning | Any stage queue's ready backlog reaches `alert_queue_depth_threshold` percent of that queue's bounded capacity (default `100`). Full queues are ordinary backpressure, not a completion fault. | repository maintainer | [`docs/runbooks/queue-saturation.md`](runbooks/queue-saturation.md) |
+| `queue_saturated` | critical | Any stage queue holds its full occupancy, or the completion queue latch is set (`saturated_queues` contains `completion`). A completion latch is a fatal internal fault. | repository maintainer | [`docs/runbooks/queue-saturation.md`](runbooks/queue-saturation.md) |
 | `pipeline_stalled` | warning | `stalled_ticks` reaches the stall threshold (default `3`) — drain ticks with no progress. | repository maintainer | [`docs/runbooks/ci-driver-stall.md`](runbooks/ci-driver-stall.md) |
 
 ## SLOs
@@ -151,14 +155,14 @@ real exported data rather than intent. Targets are per automation run.
 | --- | --- | --- |
 | Pipeline readiness | `/health` returns HTTP 200 with `status: ok` for ≥ 99% of ticks during a run. | `/health` HTTP status and snapshot `status` field. |
 | Stall budget | `hephaestus_pipeline_stalled_ticks` < 3 for ≥ 99% of ticks. | `hephaestus_pipeline_stalled_ticks` gauge. |
-| Queue depth | `hephaestus_pipeline_queue_depth` ≤ the configured threshold for ≥ 99% of ticks. | `hephaestus_pipeline_queue_depth` gauge. |
+| Queue depth | `hephaestus_pipeline_queue_depth` stays below the configured percentage of each queue's capacity for ≥ 99% of ticks. | `hephaestus_pipeline_queue_depth` gauge. |
 | Agent job success rate | `hephaestus_pipeline_jobs_total{outcome="ok"}` / total completed jobs ≥ 90% per run. | `hephaestus_pipeline_jobs_total` counter. |
 | Breaker budget | `circuit_breaker_open` fires ≤ 1 time per run. | `hephaestus_pipeline_alert_active{name="circuit_breaker_open"}` gauge / `alert_fired` events. |
 
 These are **targets**, not committed measurements. Their ongoing measurement
 happens operationally against the scrape endpoint below; this document defines
-what "healthy" means, and the drift test keeps the definitions honest against
-the code.
+what "healthy" means, and source review keeps the definitions honest against the
+code.
 
 ## Ownership and escalation
 
@@ -167,8 +171,9 @@ repository maintainer (`mvillmow`); escalation is a GitHub issue.
 
 **Response expectation by severity:**
 
-- **critical** (`circuit_breaker_open`): investigate within the same working
-  session/day. A stuck-open breaker halts progress for the affected dependency.
+- **critical** (`circuit_breaker_open`, `queue_saturated`): investigate within
+  the same working session/day. A stuck-open breaker halts progress for the
+  affected dependency, and a completion-queue latch stops the run.
 - **warning** (`queue_depth_exceeds`, `pipeline_stalled`): review by the next
   automation run; these signal degraded throughput, not a hard stop.
 

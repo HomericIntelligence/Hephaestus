@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+
+def _validated_percentage(value: int, *, name: str) -> int:
+    """Return one validated 0-100 percentage threshold."""
+    if isinstance(value, bool) or not 0 <= value <= 100:
+        raise ValueError(f"{name} must be a percentage between 0 and 100")
+    return value
 
 
 @dataclass(frozen=True)
@@ -27,12 +34,16 @@ def evaluate_alerts(
     """Evaluate conditions that the coordinator's runtime snapshot really contains.
 
     The function deliberately contains no speculative rules: every rule reads
-    ``queue_depths``, ``circuit_breakers``, or ``stalled_ticks`` emitted by the
-    coordinator. Returned events describe active conditions;
-    :class:`AlertTracker` turns those into fire/resolve transitions.
+    ``queue_depths``, ``queue_capacities``, ``saturated_queues``,
+    ``circuit_breakers``, or ``stalled_ticks`` emitted by the coordinator.
+    Returned events describe active conditions; :class:`AlertTracker` turns
+    those into fire/resolve transitions.
+
+    ``queue_depth_threshold`` is a percentage of a stage queue's bounded
+    capacity. ``0`` fires on any non-empty ready backlog, and ``100`` fires
+    only when the ready backlog fills the queue.
     """
-    if queue_depth_threshold < 0:
-        raise ValueError("queue depth threshold must be non-negative")
+    _validated_percentage(queue_depth_threshold, name="queue depth threshold")
     if stalled_ticks_threshold < 0:
         raise ValueError("stalled ticks threshold must be non-negative")
     events: list[AlertEvent] = []
@@ -54,13 +65,19 @@ def evaluate_alerts(
             )
 
     raw_depths = snapshot.get("queue_depths", {})
-    if isinstance(raw_depths, Mapping):
+    raw_capacities = snapshot.get("queue_capacities", {})
+    if isinstance(raw_depths, Mapping) and isinstance(raw_capacities, Mapping):
         exceeded: list[str] = []
         for stage, depth in raw_depths.items():
+            capacity = raw_capacities.get(stage)
             if (
                 isinstance(depth, (int, float))
                 and not isinstance(depth, bool)
-                and depth > queue_depth_threshold
+                and isinstance(capacity, (int, float))
+                and not isinstance(capacity, bool)
+                and capacity > 0
+                and depth > 0
+                and depth * 100 >= capacity * queue_depth_threshold
             ):
                 exceeded.append(str(stage))
         if exceeded:
@@ -69,8 +86,21 @@ def evaluate_alerts(
                     name="queue_depth_exceeds",
                     severity="warning",
                     status="fired",
-                    message=f"queue depth exceeds {queue_depth_threshold}: "
+                    message=f"queue depth reaches {queue_depth_threshold}% of capacity: "
                     f"{', '.join(sorted(exceeded))}",
+                )
+            )
+
+    raw_saturated = snapshot.get("saturated_queues")
+    if isinstance(raw_saturated, Sequence) and not isinstance(raw_saturated, (str, bytes)):
+        saturated = sorted({str(name) for name in raw_saturated})
+        if saturated:
+            events.append(
+                AlertEvent(
+                    name="queue_saturated",
+                    severity="critical",
+                    status="fired",
+                    message=f"queues at capacity: {', '.join(saturated)}",
                 )
             )
 
@@ -98,8 +128,7 @@ class AlertTracker:
         self, *, queue_depth_threshold: int = 100, stalled_ticks_threshold: int = 3
     ) -> None:
         """Create a tracker with the coordinator's alert thresholds."""
-        if queue_depth_threshold < 0:
-            raise ValueError("queue depth threshold must be non-negative")
+        _validated_percentage(queue_depth_threshold, name="queue depth threshold")
         if stalled_ticks_threshold < 0:
             raise ValueError("stalled ticks threshold must be non-negative")
         self._queue_depth_threshold = queue_depth_threshold

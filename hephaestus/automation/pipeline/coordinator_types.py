@@ -308,7 +308,9 @@ class PipelineConfig:
     serialize_file_overlap: bool = True
     # Zero disables the optional local observability server.
     metrics_port: int = 0
-    # Alerts are emitted only from measured queue depths and breaker snapshots.
+    # Alerts are emitted only from measured queue data and breaker snapshots.
+    # This is a percentage of each stage queue's bounded capacity, valid 0-100.
+    # The default 100 alerts only at a full ready backlog.
     alert_queue_depth_threshold: int = 100
     # Product-layer breaker snapshot reader; keeps this module zero-I/O.
     circuit_breaker_snapshot_provider: Callable[[], dict[str, dict[str, Any]]] | None = None
