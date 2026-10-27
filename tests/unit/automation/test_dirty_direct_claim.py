@@ -1161,3 +1161,139 @@ def test_probe_claim_marks_unusable_owned_lane_not_applicable(
         assert stored.dirty_claim is None
     finally:
         pool._executor.shutdown()
+
+
+def test_probe_claim_classifies_a_foreign_registered_writer_path_not_applicable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_claim_creation_mask: None,
+) -> None:
+    """A writer path bound to another repository classifies and never claims.
+
+    Covers the ``_path_is_registered_to_repository`` arm of
+    ``WorkerPool._dirty_predecessor_is_gone`` (#3492).
+    ``test_probe_claim_marks_unusable_owned_lane_not_applicable`` covers the
+    path that lost registration entirely; this row keeps the path in this
+    repository's worktree listing and points its Git metadata at a second
+    repository, so only the common-directory comparison rejects it.
+
+    Does not duplicate the deterministic direct-scope stale state rows (#2905)
+    or the dirty unpublished writer rows in
+    ``tests/unit/automation/pipeline/test_dirty_publication_deadline.py``
+    (#3008): both keep receipt ownership inside this repository.
+    """
+    import queue
+    import threading
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline.jobs import GitJob
+    from hephaestus.automation.pipeline.worker_pool import WorkerPool
+    from hephaestus.automation.worktree_manager import WorktreeManager
+
+    (tmp_path / "foreign").mkdir()
+    foreign, _, _ = _repository(tmp_path / "foreign", origin_repository="other/project")
+    repo, _, head = _repository(tmp_path, origin_repository="example/project")
+    _registered_git_fixture(repo, monkeypatch)
+    _source_registration_fixture(repo, monkeypatch)
+    manager = SourceWorkspaceManager(repo, repository="project")
+    branch = _claim().branch
+    manager.prepare(12, SourceLane.IMPLEMENTATION, head, branch=branch)
+    original = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+    # A dirty lane is otherwise claimable, so only the ownership arm can
+    # classify this probe as not applicable.
+    (original.path / "tracked.txt").write_text("pending\n", encoding="utf-8")
+    (original.path / ".git").write_text(f"gitdir: {foreign / '.git'}\n", encoding="utf-8")
+
+    listed = {
+        Path(entry["path"]).resolve()
+        for entry in WorktreeManager(repo_root=repo, base_dir=manager.base_dir).list_worktrees()
+    }
+    assert original.path.resolve() in listed, "the path must stay registered to this repository"
+    assert manager._path_is_registered_to_repository(original.path) is False
+
+    runner = MagicMock()
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        github_job_runner=runner,
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
+    try:
+        probe = GitJob(
+            repo="project",
+            op="claim_dirty_direct_continuation",
+            timeout_s=30,
+            expected_repository="example/project",
+            kwargs={"repo_root": str(repo), "issue_number": 12, "probe": True},
+        )
+        result = pool._run_git(probe)
+        assert result.ok, result.error
+        assert result.value == {"dirty_direct_not_applicable": True}
+        assert runner.run.call_count == 0
+        stored = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
+        assert stored.dirty_claim is None
+    finally:
+        pool._executor.shutdown()
+
+
+@pytest.mark.parametrize("orphan_path", ["extant", "absent"])
+def test_probe_claim_classifies_a_missing_receipt_without_claiming(
+    tmp_path: Path,
+    orphan_path: str,
+    protected_claim_creation_mask: None,
+) -> None:
+    """A probe without a receipt classifies the lane and starts no claim.
+
+    Covers the ``original is None`` arms of
+    ``WorkerPool._dirty_direct_probe_result`` (#3492). An existing lane path
+    with no receipt fails the claim closed and records the path it preserves;
+    an absent path is ``dirty_direct_not_applicable`` so preparation can create
+    a fresh writer.
+
+    Does not duplicate ``test_probe_claim_marks_unusable_owned_lane_not_applicable``
+    (a receipt whose path is missing) or ``test_post_timeout_probe_claim_adopts_the_published_lane``
+    (a receipt with a real dirty writer).
+    """
+    import queue
+    import threading
+    from unittest.mock import MagicMock
+
+    from hephaestus.automation.pipeline.jobs import GitJob
+    from hephaestus.automation.pipeline.worker_pool import WorkerPool
+
+    repo, _, _ = _repository(tmp_path, origin_repository="example/project")
+    manager = SourceWorkspaceManager(repo, repository="project")
+    lane_path = manager.path_for(12, SourceLane.IMPLEMENTATION)
+    if orphan_path == "extant":
+        lane_path.mkdir()
+        (lane_path / "output.txt").write_text("orphaned\n", encoding="utf-8")
+    runner = MagicMock()
+    pool = WorkerPool(
+        1,
+        threading.Event(),
+        queue.Queue(),
+        github_job_runner=runner,
+        host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
+    )
+    try:
+        probe = GitJob(
+            repo="project",
+            op="claim_dirty_direct_continuation",
+            timeout_s=30,
+            expected_repository="example/project",
+            kwargs={"repo_root": str(repo), "issue_number": 12, "probe": True},
+        )
+        result = pool._run_git(probe)
+        assert result.ok is (orphan_path == "absent"), result.error
+        if orphan_path == "absent":
+            assert result.value == {"dirty_direct_not_applicable": True}
+        else:
+            assert result.error == "dirty_direct_claim_failed"
+            assert result.value == {"preserved_worktree": str(lane_path)}
+            assert lane_path.exists()
+            assert (lane_path / "output.txt").read_text() == "orphaned\n"
+        assert runner.run.call_count == 0
+        assert manager._read_receipt(12, SourceLane.IMPLEMENTATION) is None
+    finally:
+        pool._executor.shutdown()
