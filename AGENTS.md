@@ -170,9 +170,9 @@ whole `hephaestus/automation/*.py` module must stay measured.
 retained floors are `validation/schema.py`, `automation/models.py`,
 `automation/dependency_resolver.py`, and the line-coverage floors for
 `automation/implementer.py`, `automation/planner.py`,
-`automation/loop_runner.py`, `automation/loop_repo_manager.py`,
-`automation/address_review_core.py`, and `automation/pipeline_cli.py`. Remove a
-module floor only when its source is deleted. Keep all other module floors.
+`automation/loop_runner.py`, `automation/loop_repo_manager.py`, and
+`automation/pipeline_cli.py`. Remove a module floor only when its source is
+deleted. Keep all other module floors.
 
 `fail_under` in `[tool.coverage.report]` is 85. The gate measures the whole
 package. Hermetic unit tests inject the agent, GitHub, Git, subprocess, clock,
