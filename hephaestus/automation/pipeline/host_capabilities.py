@@ -12,9 +12,11 @@ from hephaestus.agents.workspace import SourceLane, WorkspaceBinding, WorkspaceK
 _DIAGNOSTIC_MAX = 4_000
 _FULL_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _REQUEST_ID = re.compile(r"[0-9a-f]{32}")
-QUOTA_AVAILABLE_TOKEN = "host_verification_quota_available"  # noqa: S105
-QUOTA_CREATE_FAILED_TOKEN = "host_verification_quota_create_failed"  # noqa: S105
-QUOTA_UNAVAILABLE_TOKEN = "host_verification_quota_unavailable"  # noqa: S105
+# These name host-verification quota outcomes, not credentials, so both the
+# ruff and Bandit hardcoded-password heuristics are suppressed here.
+QUOTA_AVAILABLE_TOKEN = "host_verification_quota_available"  # noqa: S105  # nosec B105
+QUOTA_CREATE_FAILED_TOKEN = "host_verification_quota_create_failed"  # noqa: S105  # nosec B105
+QUOTA_UNAVAILABLE_TOKEN = "host_verification_quota_unavailable"  # noqa: S105  # nosec B105
 
 
 def _absolute_path(value: object) -> bool:
