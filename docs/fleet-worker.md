@@ -9,6 +9,8 @@ session can execute through its matching supervisor-owned boundary at worker
 capacity one. Native macOS, Linux without that boundary, higher capacity, and
 cold resume remain unsupported. The deployment must separately validate the
 pinned provider's restricted startup and ordinary model/tool route.
+The design record [Contained Codex attachment](specs/2026-09-11-contained-attachment-design.md)
+preserves an unadopted routing proposal from pull request 3330.
 
 ## Start and attachment
 
