@@ -68,6 +68,7 @@ from hephaestus.agents.runtime import (
     requires_codex_implementation_isolation,
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
+from hephaestus.agents.workspace import WorkspaceBinding
 from hephaestus.automation.agent_config import (
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,
@@ -124,12 +125,23 @@ from .base import (
     StepResult,
     WorkItem,
     _require_issue_labels,
+    _worktree_path,
     agent_provider,
     planning_source_workspace_binding,
     stage_model,
     stage_timeout,
 )
 from .planning import build_plan_prompt
+
+
+def _review_job_cwd(
+    item: WorkItem,
+    ctx: StageContext,
+    workspace: WorkspaceBinding | None,
+) -> Path:
+    """Return the prepared lane, or the configured checkout for a preview."""
+    return workspace.cwd if workspace is not None else _worktree_path(item, ctx)
+
 
 _MODEL_SELECTION_FORMAT = 1
 
@@ -839,7 +851,7 @@ class PlanReviewStage(Stage):
                     else stage_model(ctx, "reviewer", reviewer_model)
                 ),
                 prompt_builder=get_plan_loop_review_prompt,
-                cwd=workspace.cwd,
+                cwd=_review_job_cwd(item, ctx, workspace),
                 timeout_s=stage_timeout(ctx, "reviewer", plan_reviewer_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",
@@ -923,7 +935,7 @@ class PlanReviewStage(Stage):
                 agent=agent_provider(ctx, "planner"),
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_amend_prompt,
-                cwd=workspace.cwd,
+                cwd=_review_job_cwd(item, ctx, workspace),
                 timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",

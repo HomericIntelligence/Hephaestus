@@ -253,6 +253,8 @@ class TestOnEnterAndCloneStates:
 
         assert isinstance(result, Continue)
         assert result.next_state == "WAVE_ADMIT"
+        # No suppressed synchronization stamps a revision for downstream jobs.
+        assert "_synced_default_branch_sha" not in repo_item.payload
 
     def test_existing_checkout_is_not_synchronized_in_dry_run(
         self,
@@ -272,6 +274,8 @@ class TestOnEnterAndCloneStates:
         assert isinstance(result, Continue)
         assert result.next_state == "WAVE_ADMIT"
         assert "[dry-run] would synchronize test-org/repo-a" in caplog.text
+        # No suppressed synchronization stamps a revision for downstream jobs.
+        assert "_synced_default_branch_sha" not in repo_item.payload
 
     def test_clone_failure_retries_within_budget(self, repo_item: WorkItem, repo_ctx: Any) -> None:
         """First failure (attempt 1 < budget 2) re-submits the clone."""
