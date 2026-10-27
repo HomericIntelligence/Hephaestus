@@ -48,7 +48,9 @@ _PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in ct.StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 _LANE_LABELS = frozenset({"main", "auxiliary"})
 _BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
-_ALERT_NAME_LABELS = frozenset({"circuit_breaker_open", "queue_depth_exceeds", "pipeline_stalled"})
+_ALERT_NAME_LABELS = frozenset(
+    {"circuit_breaker_open", "queue_depth_exceeds", "queue_saturated", "pipeline_stalled"}
+)
 
 
 class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):

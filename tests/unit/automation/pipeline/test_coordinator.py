@@ -3771,8 +3771,10 @@ class TestDurableEventLog:
         assert [(event[0], event[1]["name"]) for event in events] == [
             ("alert_fired", "circuit_breaker_open"),
             ("alert_fired", "queue_depth_exceeds"),
+            ("alert_fired", "queue_saturated"),
             ("alert_resolved", "circuit_breaker_open"),
             ("alert_resolved", "queue_depth_exceeds"),
+            ("alert_resolved", "queue_saturated"),
         ]
         snapshots = [entry[1] for entry in coordinator.event_log if entry[0] == "metrics_snapshot"]
         assert snapshots[0]["queue_depths"]["planning"] == 1
