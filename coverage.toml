@@ -15,5 +15,4 @@ minimum = 85
 "automation/planner.py" = { minimum = 70, metric = "line" }
 "automation/loop_runner.py" = { minimum = 70, metric = "line" }
 "automation/loop_repo_manager.py" = { minimum = 70, metric = "line" }
-"automation/address_review_core.py" = { minimum = 70, metric = "line" }
 "automation/pipeline_cli.py" = { minimum = 70, metric = "line" }
