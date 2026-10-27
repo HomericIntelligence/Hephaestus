@@ -34,6 +34,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     RunMergeWaitCycleRequest,
 )
 from hephaestus.automation.pipeline.repository_validation import RepositoryValidationGap
+from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_transport import rate_limit_remaining
@@ -194,9 +195,20 @@ class PipelineGitHubJobRunner:
             raise CommentJournalReadError(plan.error or "plan scope read failed")
         if plan.status is not PlanDiscoveryStatus.FOUND or plan.plan_text is None:
             raise ValueError("current plan scope is unavailable")
+        declared = sorted(parse_publication_scope_files(plan.plan_text))
+        usable = []
+        for path in declared:
+            if is_safe_scope_retraction_path(path):
+                usable.append(path)
+            else:
+                logger.warning(
+                    "plan scope for #%s declares an unusable path %r; ignoring it",
+                    request.issue_number,
+                    path,
+                )
         return CurrentPlanScopeRead(
             request=request,
-            paths=tuple(sorted(parse_publication_scope_files(plan.plan_text))),
+            paths=tuple(usable),
             plan_sha256=hashlib.sha256(plan.plan_text.encode("utf-8")).hexdigest(),
         )
 

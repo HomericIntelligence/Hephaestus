@@ -114,9 +114,21 @@ class TestPublicationScopeFiles:
     @pytest.mark.parametrize(
         "path", ["../outside", "/absolute", "./local", "a/../b", "bad\\path", "bad\x00path", ""]
     )
-    def test_invalid_declaration_rejects_complete_manifest(self, path: str) -> None:
+    def test_invalid_declaration_keeps_the_usable_manifest(
+        self, path: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """One unusable declaration cannot discard the other declared paths."""
         body = f"## Files to Modify\n- `src/main.py`\n- `{path}`\n"
+        assert parse_publication_scope_files(body) == {"src/main.py"}
+        assert "ignoring it" in caplog.text
+
+    def test_only_unusable_declarations_declare_nothing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A plan without a usable declaration declares no file."""
+        body = "## Files to Modify\n- `../outside`\n"
         assert parse_publication_scope_files(body) == set()
+        assert "ignoring it" in caplog.text
 
     def test_file_subheading_ignores_prose_and_other_sections(self) -> None:
         body = (

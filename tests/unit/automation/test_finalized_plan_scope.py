@@ -124,18 +124,22 @@ def test_finalized_scope_contains_complete_declared_paths(
 
 
 @pytest.mark.parametrize("consumer", ["overlap", "publication"])
-@pytest.mark.parametrize(
-    "content",
-    ["## Objective\nNo file scope.", "## Files to Modify\n- `src/service.py`\n- `../outside.py`"],
-    ids=["empty", "invalid-path"],
-)
-def test_finalized_scope_requires_nonempty_valid_paths(
-    consumer: str, content: str, monkeypatch: pytest.MonkeyPatch
+def test_empty_finalized_scope_declares_nothing(
+    consumer: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An invalid sealed scope cannot use an older comment plan."""
-    github, _snapshot = _github(monkeypatch, _finalized_body(content))
-    with pytest.raises((CommentJournalReadError, ValueError)):
-        _scope(consumer, github)
+    """A sealed plan without a file section declares no path, not an older plan."""
+    github, _snapshot = _github(monkeypatch, _finalized_body("## Objective\nNo file scope."))
+    assert _scope(consumer, github) == set()
+
+
+@pytest.mark.parametrize("consumer", ["overlap", "publication"])
+def test_partly_unusable_finalized_scope_keeps_its_usable_paths(
+    consumer: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unusable declaration is dropped, and the older comment plan stays unused."""
+    body = _finalized_body("## Files to Modify\n- `src/service.py`\n- `../outside.py`")
+    github, _snapshot = _github(monkeypatch, body)
+    assert _scope(consumer, github) == {"src/service.py"}
 
 
 @pytest.mark.parametrize("consumer", ["overlap", "publication"])

@@ -140,8 +140,9 @@ class CurrentPlanScopeRead:
             raise ValueError("request must be a current plan scope read")
         if (
             not isinstance(self.paths, tuple)
-            or not self.paths
-            or not all(is_safe_scope_retraction_path(path) for path in self.paths)
+            or not all(
+                isinstance(path, str) and is_safe_scope_retraction_path(path) for path in self.paths
+            )
             or tuple(sorted(set(self.paths))) != self.paths
         ):
             raise ValueError("paths must contain sorted unique source paths")

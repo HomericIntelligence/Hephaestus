@@ -862,10 +862,13 @@ def test_failed_commit_helper_cannot_advance_dirty_receipt(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    "outcome", ["success", "remote", "scope", "no_changes", "plan_race", "push_race"]
+    "outcome",
+    ["success", "remote", "outside_scope", "no_changes", "plan_race", "push_race"],
 )
-def test_dirty_publication_preserves_exact_scope_and_lease(tmp_path: Path, outcome: str) -> None:
-    """Publication verifies scope and current evidence before its exact lease push."""
+def test_dirty_publication_preserves_exact_scope_and_lease(
+    tmp_path: Path, outcome: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Publication warns about plan scope and verifies current evidence before its push."""
     import queue
     import threading
     from unittest.mock import patch
@@ -900,7 +903,7 @@ def test_dirty_publication_preserves_exact_scope_and_lease(tmp_path: Path, outco
         host_capabilities=WorkerCapabilities(None, "unit-worker", FakeSigningProvider()),
     )
     try:
-        if outcome == "scope":
+        if outcome == "outside_scope":
             (original.cwd / "foreign.txt").write_text("outside scope\n")
         elif outcome == "no_changes":
             _git(original.cwd, "restore", "tracked.txt")
@@ -950,11 +953,13 @@ def test_dirty_publication_preserves_exact_scope_and_lease(tmp_path: Path, outco
                     },
                 )
             )
-        assert result.ok is (outcome == "success")
+        assert result.ok is (outcome in {"success", "outside_scope"})
         receipt = manager._require_receipt(12, SourceLane.IMPLEMENTATION)
         assert receipt.dirty_claim is not None and receipt.dirty_claim.state == "consumed"
         assert "dirty-direct-continuation" in receipt.obligations
-        if outcome in {"remote", "scope", "no_changes"}:
+        if outcome == "outside_scope":
+            assert "implementation changed paths outside the plan scope: foreign.txt" in caplog.text
+        if outcome in {"remote", "no_changes"}:
             commit_call.assert_not_called()
             push.assert_not_called()
             assert receipt.revision == head

@@ -960,10 +960,15 @@ Architectural contract:
   reader. A finalized issue body must have a valid seal and an authenticated
   editor. A second issue read must confirm the
   same open issue, body, and digest after the editor check. A failed check
-  cannot use an older comment plan. Both consumers require complete, valid,
-  nonempty file scope for finalized bodies, including top-level files. Ordinary
-  issues keep the existing actor-owned comment lookup and path rules. The
-  reader writes no labels and grants no execution admission.
+  cannot use an older comment plan. Both consumers keep the declared paths of a
+  finalized body, including top-level files, and drop a declaration that names
+  an unusable path. A finalized body with no usable declaration supplies no
+  path; it does not fall back to the older comment plan. The plan scope guides
+  the work: an empty scope does not stop implementation, and an edit outside the
+  scope produces a warning. An isolated Codex writer is the only boundary that
+  needs a nonempty declared scope. Ordinary issues keep the existing
+  actor-owned comment lookup and path rules. The reader writes no labels and
+  grants no execution admission.
 
 ### 5.3 Plan review
 
