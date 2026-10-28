@@ -104,6 +104,10 @@ from hephaestus.automation.state_labels import (
     is_plan_go,
     is_skipped,
 )
+from hephaestus.automation.test_summary import (
+    last_pytest_summary_line,
+    summary_reports_no_executed_test,
+)
 from hephaestus.automation.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
@@ -541,6 +545,38 @@ def _pre_pr_runner_handoff_reason(result: JobResult) -> str | None:
     if terminal_record != f"{prefix}{reason}":
         return None
     return reason
+
+
+#: Bound on the quoted summary inside one receipt line. The test job keeps a
+#: 4000-character tail, so a summary can arrive with a long parameter list.
+_RECEIPT_SUMMARY_MAX = 200
+
+
+def _receipt_with_test_summary(receipt: str, result: JobResult) -> str:
+    """Append the last pytest summary line that the retained tails hold.
+
+    A green run reports what ran. When the tails hold no recognized summary,
+    the receipt keeps its command-only text and makes no claim.
+
+    Args:
+        receipt: The command and outcome text for the PR body.
+        result: The pre-PR test job result.
+
+    Returns:
+        The receipt, with the quoted summary and the no-execution marker when
+        the summary proves it.
+
+    """
+    summary = last_pytest_summary_line(result.stdout_tail, result.stderr_tail)
+    if summary is None:
+        return receipt
+    detail = summary
+    if len(detail) > _RECEIPT_SUMMARY_MAX:
+        detail = f"{detail[: _RECEIPT_SUMMARY_MAX - 1]}…"
+    text = f"{receipt}; last pytest summary: {detail}"
+    if summary_reports_no_executed_test(summary):
+        text += " (no test executed)"
+    return text
 
 
 def _native_pre_pr_fallback_is_authorized(item: WorkItem) -> bool:
@@ -3687,12 +3723,10 @@ class ImplementationStage(Stage):
                 command = submitted_command
             if isinstance(command, str) and command:
                 fallback_reason = item.payload.get("pre_pr_fallback_reason")
+                receipt = f"`{command}` — passed"
                 if runner_mode == "native" and fallback_reason in RUNNER_FALLBACK_REASONS:
-                    item.payload["test_receipt"] = (
-                        f"`{command}` — passed (native fallback after {fallback_reason})"
-                    )
-                else:
-                    item.payload["test_receipt"] = f"`{command}` — passed"
+                    receipt += f" (native fallback after {fallback_reason})"
+                item.payload["test_receipt"] = _receipt_with_test_summary(receipt, result)
             return
         output = "\n".join(
             part for part in (result.stdout_tail, result.stderr_tail, result.error) if part

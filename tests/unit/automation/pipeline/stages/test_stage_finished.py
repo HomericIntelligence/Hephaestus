@@ -891,6 +891,47 @@ def test_invalid_terminal_reference_preserves_reservation_and_records_failure(
     assert item.payload[DIRECT_SCOPE_RESERVATION_KEY] == reservation
 
 
+def test_ledger_reason_carries_the_named_uncommitted_work(
+    tmp_path: Path,
+    stage: FinishedStage,
+    ledger: list[ItemResult],
+    make_ctx: Any,
+) -> None:
+    """The recorded reason names the work the stranded lane holds."""
+    from hephaestus.automation.source_worktree import (
+        SourceWorkspaceTerminalView,
+        normalize_source_workspace_creation_failure,
+    )
+
+    action = (
+        "Preserve /state/42-impl and its records. Obtain valid ownership evidence. "
+        "It holds 1 uncommitted change: M kept-work.py."
+    )
+    item = _item(state="RECORD")
+    item.payload["source_workspace_preserve"] = True
+    item.payload["source_workspace_terminal"] = {
+        "identity": "42-impl-terminal.json",
+        "content_sha256": "b" * 64,
+    }
+    view = SourceWorkspaceTerminalView(
+        phase="unproven_legacy",
+        outcome="manual_recovery_required",
+        cause="source_workspace_recovery_receipt_invalid",
+        action=action,
+        path=tmp_path / "42-impl",
+        requested_branch=None,
+        requested_base_sha=None,
+        creation_failure=normalize_source_workspace_creation_failure(None),
+    )
+    with patch.object(finished_module, "SourceWorkspaceManager") as manager:
+        manager.return_value.read_terminal_failure.return_value = view
+        stage.step(item, make_ctx(org="acme", paths=SimpleNamespace(repo_root=tmp_path)))
+
+    assert ledger[0].reason == (
+        f"source_workspace_recovery_receipt_invalid: {action} creation_failure=unknown"
+    )
+
+
 @pytest.mark.parametrize("failure", ["none", "read", "constructor"])
 @pytest.mark.parametrize(
     "category",

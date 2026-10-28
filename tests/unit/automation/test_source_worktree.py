@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 import queue
 import shutil
@@ -3570,6 +3571,118 @@ def test_terminal_capture_classifies_invalid_source_evidence(
         manager.read_terminal_failure(9, reference).cause
         == "source_workspace_recovery_receipt_invalid"
     )
+
+
+def _terminal_receipt_invalid_view(
+    tmp_path: Path,
+) -> tuple[SourceWorkspaceManager, source_worktree.SourceWorkspaceTerminalView, Path]:
+    """Fail a writer transition with an invalid source receipt.
+
+    Returns:
+        The manager, the validated terminal view, and the lane path. The caller
+        decides what the lane holds before the failure.
+
+    """
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    with pytest.raises(source_worktree.SourceWorkspaceTerminalError) as raised:
+        with manager.implementation_writer_handoff(9) as handoff:
+            manager.authorize_direct_implementation_writer_transition(
+                9, branch="writer-branch", base_sha=second, handoff=handoff
+            )
+            manager._receipt_path(9, SourceLane.IMPLEMENTATION).write_text("invalid")
+            raise source_worktree.SourceWorkspaceTerminalError(
+                "terminal failure",
+                requested_branch="writer-branch",
+                requested_base_sha=second,
+            )
+    reference = raised.value.terminal_reference
+    assert reference is not None
+    return manager, manager.read_terminal_failure(9, reference), writer.cwd
+
+
+def test_terminal_strand_keeps_the_action_for_a_clean_lane(tmp_path: Path) -> None:
+    """A clean lane keeps the current recovery action byte for byte."""
+    manager, view, _ = _terminal_receipt_invalid_view(tmp_path)
+
+    assert view.cause == "source_workspace_recovery_receipt_invalid"
+    assert view.action == (
+        f"Preserve {manager.path_for(9, SourceLane.IMPLEMENTATION)} and its records. "
+        "Obtain valid ownership evidence."
+    )
+
+
+def test_terminal_strand_names_the_uncommitted_work(tmp_path: Path) -> None:
+    """A stranded lane names the work an operator must decide about."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    lane = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    with pytest.raises(source_worktree.SourceWorkspaceTerminalError) as raised:
+        with manager.implementation_writer_handoff(9) as handoff:
+            manager.authorize_direct_implementation_writer_transition(
+                9, branch="writer-branch", base_sha=second, handoff=handoff
+            )
+            manager._receipt_path(9, SourceLane.IMPLEMENTATION).write_text("invalid")
+            (writer.cwd / "kept-work.py").write_text("value = 1\n", encoding="utf-8")
+            (writer.cwd / "staged.py").write_text("value = 2\n", encoding="utf-8")
+            _git(writer.cwd, "add", "staged.py")
+            raise source_worktree.SourceWorkspaceTerminalError(
+                "terminal failure",
+                requested_branch="writer-branch",
+                requested_base_sha=second,
+            )
+    reference = raised.value.terminal_reference
+    assert reference is not None
+    view = manager.read_terminal_failure(9, reference)
+
+    assert view.cause == "source_workspace_recovery_receipt_invalid"
+    assert view.action.startswith(f"Preserve {lane} and its records. ")
+    assert "Obtain valid ownership evidence." in view.action
+    assert "It holds 2 uncommitted changes: " in view.action
+    assert "A staged.py" in view.action
+    assert "?? kept-work.py" in view.action
+
+
+def test_terminal_strand_keeps_the_action_when_the_status_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed Git read makes no claim and logs the recovery step."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.prepare(9, SourceLane.IMPLEMENTATION, first)
+    expected = (
+        f"Preserve {manager.path_for(9, SourceLane.IMPLEMENTATION)} and its records. "
+        "Obtain valid ownership evidence."
+    )
+    real_git = source_worktree._git
+
+    def failing_status(cwd: Path, *args: str, **kwargs: Any) -> Any:
+        if args[:1] == ("status",) and Path(cwd) == writer.cwd:
+            raise OSError("git status unavailable")
+        return real_git(cwd, *args, **kwargs)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(source_worktree.SourceWorkspaceTerminalError) as raised:
+            with manager.implementation_writer_handoff(9) as handoff:
+                manager.authorize_direct_implementation_writer_transition(
+                    9, branch="writer-branch", base_sha=second, handoff=handoff
+                )
+                manager._receipt_path(9, SourceLane.IMPLEMENTATION).write_text("invalid")
+                (writer.cwd / "kept-work.py").write_text("value = 1\n", encoding="utf-8")
+                monkeypatch.setattr(source_worktree, "_git", failing_status)
+                raise source_worktree.SourceWorkspaceTerminalError(
+                    "terminal failure",
+                    requested_branch="writer-branch",
+                    requested_base_sha=second,
+                )
+    reference = raised.value.terminal_reference
+    assert reference is not None
+    view = manager.read_terminal_failure(9, reference)
+
+    assert view.action == expected
+    assert any("could not read the uncommitted work" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize(
