@@ -2664,6 +2664,32 @@ class TestGitErrorRetryCap:
         assert outcome.note.startswith("scope_violation")
         assert "scope_correction_paths" not in item.payload
 
+    def test_remediation_scope_violation_keeps_the_terminal_note(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The address-review lane keeps today's terminal scope result."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        _prepared_writer(item)
+        item.payload["implementation_remediation"] = True
+        item.payload["remediation_threads"] = [{"thread_id": "t1", "body": "fix this"}]
+        item.attempts["implement"] = 1
+        result = JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+            value={"scope_violation_unexpected_paths": ["docs/adr/9999.md"]},
+        )
+
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note.startswith("scope_violation")
+        assert "scope_correction_paths" not in item.payload
+
     @pytest.mark.parametrize(
         "value",
         [

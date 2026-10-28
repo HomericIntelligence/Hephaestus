@@ -4160,7 +4160,14 @@ class ImplementationStage(Stage):
             unexpected = validated_scope_violation_paths(
                 item.payload.pop(SCOPE_VIOLATION_PATHS_KEY, None)
             )
-            if unexpected is not None and _scope_correction_is_valid(item, ctx):
+            # A remediation turn is driven by the review threads and answers
+            # them through the address-review prompt, which cannot carry this
+            # directive. That lane keeps today's terminal scope result.
+            if (
+                unexpected is not None
+                and not item.payload.get("implementation_remediation")
+                and _scope_correction_is_valid(item, ctx)
+            ):
                 item.payload[_SCOPE_CORRECTION_PATHS] = unexpected
                 logger.info(
                     "implementation:%s: routing one bounded scope correction",
