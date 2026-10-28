@@ -780,7 +780,7 @@ def _assert_publication_failure(
         assert not push_calls
         assert not absent_reads
         assert result.error == "implementation changed paths outside approved scope"
-        assert result.value is None
+        assert result.value == {"scope_violation_unexpected_paths": ["local.txt"]}
         assert not (manager.state_dir / "first-publications").exists()
         return
     if fault == "malformed":

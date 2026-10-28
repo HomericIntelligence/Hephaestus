@@ -8,6 +8,13 @@ from pathlib import PurePosixPath
 from typing import Any, TypeGuard
 
 SCOPE_RETRACTION_MARKER_PREFIX = "<!-- hephaestus-scope-retraction-paths:"
+
+#: Bounded unexpected-path evidence carried by a publication scope refusal.
+#: The key is deliberately distinct from every writer receipt key so a
+#: receipt reader never mistakes evidence for publication state.
+SCOPE_VIOLATION_PATHS_KEY = "scope_violation_unexpected_paths"
+SCOPE_VIOLATION_PATH_LIMIT = 50
+SCOPE_VIOLATION_PATH_MAX_CHARS = 500
 _SCOPE_ACTION_RE = re.compile(r"\b(?:drop|remove|split)\b", re.IGNORECASE)
 _SCOPE_BOUNDARY_RE = re.compile(r"\b(?:unrelated|out[\s-]*of[\s-]*scope)\b", re.IGNORECASE)
 
@@ -42,6 +49,31 @@ def normalize_scope_retraction_paths(value: object) -> tuple[str, ...] | None:
     if not isinstance(value, (list, tuple)) or not value:
         return None
     if not all(is_safe_scope_retraction_path(path) for path in value):
+        return None
+    return tuple(sorted(set(value)))
+
+
+def validated_scope_violation_paths(value: object) -> tuple[str, ...] | None:
+    """Validate one publication guard's bounded unexpected-path evidence.
+
+    A malformed, empty, or oversized list is a refusal, not a partial
+    correction: the caller falls back to the terminal scope result.
+
+    Args:
+        value: The evidence value from a scope-refused publication result.
+
+    Returns:
+        The sorted, de-duplicated paths, or ``None`` when the shape is bad.
+
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    if len(value) > SCOPE_VIOLATION_PATH_LIMIT:
+        return None
+    if not all(
+        is_safe_scope_retraction_path(path) and len(path) <= SCOPE_VIOLATION_PATH_MAX_CHARS
+        for path in value
+    ):
         return None
     return tuple(sorted(set(value)))
 

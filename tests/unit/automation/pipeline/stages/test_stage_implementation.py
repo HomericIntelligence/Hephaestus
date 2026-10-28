@@ -2541,6 +2541,218 @@ class TestGitErrorRetryCap:
         assert outcome.note == f"scope_violation: {_git_failure_fallback(result)}"
         assert len(outcome.note) <= len("scope_violation: ") + 500
 
+    def test_scope_violation_routes_one_bounded_correction(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A valid route sends the exact evidence to one correction turn."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        _prepared_writer(item)
+        item.attempts["implement"] = 1
+        result = JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+            value={"scope_violation_unexpected_paths": ["docs/adr/9999.md"]},
+        )
+
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, Continue)
+        assert outcome.next_state == "IMPLEMENT_WAIT"
+        # Routing reads the budget only: the refused turn already counted its
+        # attempt, so the correction's own completion counts the next one.
+        assert item.attempts["implement"] == 1
+        assert "git_error_retries" not in item.payload
+
+        item.state = outcome.next_state
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.on_done_state == "TEST_WAIT"
+        assert request.job.prompt_kwargs["scope_correction_paths"] == ("docs/adr/9999.md",)
+        assert "scope_correction_paths" not in item.payload
+        prompt = build_implementation_prompt(**request.job.prompt_kwargs)
+        assert "Publication Scope Correction" in prompt
+        assert "docs/adr/9999.md" in prompt
+
+        stage.on_job_done(item, JobResult(ok=True, value="corrected"), ctx)
+
+        assert item.attempts["implement"] == 2
+
+    def test_second_scope_violation_after_a_correction_is_terminal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The correction is bounded: a second refusal keeps the scope note."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        _prepared_writer(item)
+        item.attempts["implement"] = 1
+        result = JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+            value={"scope_violation_unexpected_paths": ["docs/adr/9999.md"]},
+        )
+
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        routed = stage.step(item, ctx)
+        assert isinstance(routed, Continue)
+        item.state = "IMPLEMENT_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value="corrected"), ctx)
+        assert item.attempts["implement"] == 2
+
+        item.state = "COMMIT_PUSH_WAIT"
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note.startswith("scope_violation")
+        assert "implement_exhausted" not in outcome.note
+
+    def test_scope_violation_without_budget_keeps_the_terminal_note(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An exhausted budget keeps today's exact scope result."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        _prepared_writer(item)
+        item.attempts["implement"] = ctx.budget("implement")
+        result = JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+            value={"scope_violation_unexpected_paths": ["docs/adr/9999.md"]},
+        )
+
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note.startswith("scope_violation")
+        assert "implement_exhausted" not in outcome.note
+        assert "scope_correction_paths" not in item.payload
+
+    def test_scope_violation_without_a_workspace_keeps_the_terminal_note(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A missing writer binding leaves nothing to correct."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.attempts["implement"] = 1
+        result = JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+            value={"scope_violation_unexpected_paths": ["docs/adr/9999.md"]},
+        )
+
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note.startswith("scope_violation")
+        assert "scope_correction_paths" not in item.payload
+
+    def test_remediation_scope_violation_keeps_the_terminal_note(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The address-review lane keeps today's terminal scope result."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        _prepared_writer(item)
+        item.payload["implementation_remediation"] = True
+        item.payload["remediation_threads"] = [{"thread_id": "t1", "body": "fix this"}]
+        item.attempts["implement"] = 1
+        result = JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+            value={"scope_violation_unexpected_paths": ["docs/adr/9999.md"]},
+        )
+
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note.startswith("scope_violation")
+        assert "scope_correction_paths" not in item.payload
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {},
+            {"scope_violation_unexpected_paths": []},
+            {"scope_violation_unexpected_paths": "docs/adr/9999.md"},
+            {"scope_violation_unexpected_paths": ["../escape.py"]},
+            {"scope_violation_unexpected_paths": ["/etc/passwd"]},
+            {"scope_violation_unexpected_paths": ["docs/adr/9999.md", 7]},
+            {"scope_violation_unexpected_paths": [f"src/file_{index}.py" for index in range(51)]},
+        ],
+    )
+    def test_scope_violation_without_valid_evidence_stays_terminal(
+        self, value: object, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Malformed or missing evidence never routes a correction."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        _prepared_writer(item)
+        item.attempts["implement"] = 1
+        result = JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+            value=value,
+        )
+
+        stage.on_job_done(item, result, ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note.startswith("scope_violation")
+        assert "scope_correction_paths" not in item.payload
+
+    def test_scope_violation_evidence_is_bounded_and_redacted(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The published evidence keeps a bounded, sorted, closed shape."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        _prepared_writer(item)
+        result = JobResult(
+            ok=False,
+            error="implementation changed paths outside approved scope",
+            value={
+                "scope_violation_unexpected_paths": [
+                    "src/b.py",
+                    "src/a.py",
+                    "src/a.py",
+                ]
+            },
+        )
+
+        stage.on_job_done(item, result, ctx)
+
+        assert item.payload["scope_violation_unexpected_paths"] == (
+            "src/a.py",
+            "src/b.py",
+        )
+
     @pytest.mark.parametrize("error", ["lock_timeout", "lock_metadata_error"])
     def test_push_lock_failure_finishes_without_git_retry(
         self,
