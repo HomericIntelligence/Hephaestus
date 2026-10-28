@@ -2,12 +2,24 @@
 
 import subprocess
 import threading
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation.agent_config import AGENT_PLAN_REVIEWER, session_uuid
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+from hephaestus.agents.pi_session import create_pi_binding
+from hephaestus.automation.agent_config import (
+    AGENT_PLAN_REVIEWER,
+    AGENT_PR_REVIEWER,
+    session_uuid,
+)
 from hephaestus.automation.learn import compact_agent_session, compact_session
 from hephaestus.utils import subprocess_registry
 
@@ -228,6 +240,82 @@ class TestCompactSession:
             assert result is True
 
 
+class TestCompactSessionDiscovery:
+    """Real session lookup stops at the checked Git discovery boundary.
+
+    These cases keep the real ``session_uuid`` and ``_checkout_identity``
+    execution and mock Git only at its single external ``git rev-parse``
+    command. The controlled clock or shutdown event changes inside the Git
+    seam, so the post-command operation check is the boundary under test.
+    """
+
+    def test_shutdown_inside_git_discovery_prevents_provider_launch(self, tmp_path: Path) -> None:
+        """A shutdown before the Git answer blocks the session lookup and launch."""
+        shutdown = threading.Event()
+        git_calls: list[list[str]] = []
+
+        def remaining_timeout() -> int:
+            if shutdown.is_set():
+                raise InterruptedError("compact operation cancelled")
+            return 60
+
+        def git_seam(
+            cmd: list[str], *_args: object, **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            git_calls.append(cmd)
+            shutdown.set()  # cancel before the "git rev-parse" answer returns
+            return subprocess.CompletedProcess(cmd, 0, stdout="/checkout/.git\n", stderr="")
+
+        with (
+            patch("hephaestus.automation.agent_config.subprocess.run", side_effect=git_seam),
+            patch("hephaestus.automation.learn.run_subprocess") as provider,
+        ):
+            result = compact_session(
+                "test-repo",
+                42,
+                AGENT_PR_REVIEWER,
+                tmp_path,
+                remaining_timeout=remaining_timeout,
+                shutdown=shutdown,
+            )
+
+        assert result is False
+        provider.assert_not_called()
+        assert len(git_calls) == 1
+
+    def test_deadline_inside_git_discovery_prevents_provider_launch(self, tmp_path: Path) -> None:
+        """An exhausted budget before the Git answer blocks the provider launch."""
+        clock = [100.0]
+        deadline_s = 130.0
+
+        def remaining_timeout() -> int:
+            remaining = deadline_s - clock[0]
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("compact operation deadline", 0)
+            return min(60, int(remaining))
+
+        def git_seam(
+            cmd: list[str], *_args: object, **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            clock[0] = 200.0  # consume the operation budget inside the Git boundary
+            return subprocess.CompletedProcess(cmd, 0, stdout="/checkout/.git\n", stderr="")
+
+        with (
+            patch("hephaestus.automation.agent_config.subprocess.run", side_effect=git_seam),
+            patch("hephaestus.automation.learn.run_subprocess") as provider,
+        ):
+            result = compact_session(
+                "test-repo",
+                42,
+                AGENT_PR_REVIEWER,
+                tmp_path,
+                remaining_timeout=remaining_timeout,
+            )
+
+        assert result is False
+        provider.assert_not_called()
+
+
 class TestCompactAgentSession:
     """Provider-neutral compaction preserves direct-runner context."""
 
@@ -348,3 +436,291 @@ class TestCompactAgentSession:
         assert resolve.call_args.kwargs["auth_status_timeout"] == 3
         assert resolve.call_args.kwargs["remaining_timeout"] is remaining_timeout
         assert resolve.call_args.kwargs["shutdown"] is shutdown
+
+    def test_opencode_compact_resumes_the_persisted_session(self, tmp_path: Path) -> None:
+        """OpenCode compaction resumes the stored session through the shared route."""
+        remaining_timeout = MagicMock(return_value=60)
+        with (
+            patch("hephaestus.automation.learn.resolve_agent", return_value="opencode"),
+            patch("hephaestus.automation.learn.resume_agent_session") as resume,
+        ):
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider="opencode",
+                session_agent="pr-reviewer",
+                session_id="opencode-session",
+                cwd=tmp_path,
+                timeout=60,
+                model="comet/kimi-k3",
+                sandbox="read-only",
+                remaining_timeout=remaining_timeout,
+            )
+
+        assert compacted is True
+        resume.assert_called_once_with(
+            agent="opencode",
+            session_id="opencode-session",
+            prompt="/compact",
+            cwd=tmp_path,
+            timeout=60,
+            model="comet/kimi-k3",
+            sandbox="read-only",
+            approval="never",
+            disable_pi_automation=False,
+            pi_dir=None,
+            process_tracker=subprocess_registry.track_process_group,
+            remaining_timeout=remaining_timeout,
+        )
+
+    @pytest.mark.parametrize("provider", ["codex", "opencode"])
+    @pytest.mark.parametrize(
+        "boundary",
+        [
+            InterruptedError("compact operation cancelled"),
+            subprocess.TimeoutExpired("compact operation deadline", 0),
+        ],
+        ids=("cancellation", "deadline"),
+    )
+    def test_compact_stops_before_provider_authentication(
+        self, tmp_path: Path, provider: str, boundary: BaseException
+    ) -> None:
+        """An exhausted bound prevents provider authentication and any launch."""
+        remaining_timeout = MagicMock(side_effect=boundary)
+        with (
+            patch("hephaestus.automation.learn.resolve_agent") as resolve,
+            patch("hephaestus.automation.learn.resume_agent_session") as resume,
+        ):
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider=provider,
+                session_agent="pr-reviewer",
+                session_id=f"{provider}-session",
+                cwd=tmp_path,
+                timeout=60,
+                remaining_timeout=remaining_timeout,
+            )
+
+        assert compacted is False
+        resolve.assert_not_called()
+        resume.assert_not_called()
+
+    @pytest.mark.parametrize("provider", ["codex", "opencode"])
+    @pytest.mark.parametrize(
+        "boundary",
+        [
+            InterruptedError("compact operation cancelled"),
+            subprocess.TimeoutExpired("compact operation deadline", 0),
+        ],
+        ids=("cancellation", "deadline"),
+    )
+    def test_compact_authentication_boundary_is_nonfatal(
+        self, tmp_path: Path, provider: str, boundary: BaseException
+    ) -> None:
+        """A cancelled or expired authentication keeps compaction best-effort."""
+        remaining_timeout = MagicMock(return_value=60)
+        with (
+            patch("hephaestus.automation.learn.resolve_agent", side_effect=boundary),
+            patch("hephaestus.automation.learn.resume_agent_session") as resume,
+        ):
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider=provider,
+                session_agent="pr-reviewer",
+                session_id=f"{provider}-session",
+                cwd=tmp_path,
+                timeout=60,
+                remaining_timeout=remaining_timeout,
+            )
+
+        assert compacted is False
+        resume.assert_not_called()
+
+    @pytest.mark.parametrize("provider", ["codex", "opencode"])
+    @pytest.mark.parametrize(
+        "boundary",
+        [
+            InterruptedError("compact operation cancelled"),
+            subprocess.TimeoutExpired("compact operation deadline", 0),
+        ],
+        ids=("cancellation", "deadline"),
+    )
+    def test_compact_stops_after_resume_preparation_before_launch(
+        self, tmp_path: Path, provider: str, boundary: BaseException
+    ) -> None:
+        """A bound check after resume preparation prevents provider process start."""
+        remaining_timeout = MagicMock(side_effect=[60, boundary])
+        with (
+            patch("hephaestus.automation.learn.resolve_agent", return_value=provider),
+            patch("hephaestus.automation.learn.resume_agent_session") as resume,
+        ):
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider=provider,
+                session_agent="pr-reviewer",
+                session_id=f"{provider}-session",
+                cwd=tmp_path,
+                timeout=60,
+                remaining_timeout=remaining_timeout,
+            )
+
+        assert compacted is False
+        resume.assert_not_called()
+
+    @pytest.mark.parametrize("provider", ["codex", "opencode"])
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            InterruptedError("compact operation cancelled"),
+            subprocess.TimeoutExpired(["provider"], 30),
+            subprocess.CalledProcessError(1, ["provider"], stderr="boom"),
+            OSError("provider binary vanished"),
+        ],
+        ids=("cancellation", "timeout", "nonzero-exit", "oserror"),
+    )
+    def test_compact_run_failure_is_nonfatal(
+        self, tmp_path: Path, provider: str, failure: BaseException
+    ) -> None:
+        """A failed provider run is an ordinary nonfatal compaction failure."""
+        remaining_timeout = MagicMock(return_value=60)
+        with (
+            patch("hephaestus.automation.learn.resolve_agent", return_value=provider),
+            patch("hephaestus.automation.learn.resume_agent_session", side_effect=failure),
+        ):
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider=provider,
+                session_agent="pr-reviewer",
+                session_id=f"{provider}-session",
+                cwd=tmp_path,
+                timeout=60,
+                remaining_timeout=remaining_timeout,
+            )
+
+        assert compacted is False
+
+    def test_pi_compact_uses_a_real_session_binding(self, tmp_path: Path) -> None:
+        """Pi compaction prepares resume arguments from a real session binding."""
+        request = ExecutionRequest(
+            AgentRole.PR_REVIEWER,
+            AgentOperation.COMPACT,
+            SessionLifecycle.RESUME_REQUIRED,
+        )
+        binding = create_pi_binding(
+            session_id="pi-session",
+            cwd=tmp_path,
+            role=request.role,
+            model="private/provider-model:high",
+        )
+        remaining_timeout = MagicMock(return_value=1200)
+        with (
+            patch("hephaestus.automation.learn.resolve_agent", return_value="pi"),
+            patch("hephaestus.automation.learn.resume_agent_session") as resume,
+        ):
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider="pi",
+                session_agent="pr-reviewer",
+                session_id="pi-session",
+                cwd=tmp_path,
+                timeout=60,
+                model="private/provider-model:high",
+                execution_request=request,
+                session_binding=binding,
+                remaining_timeout=remaining_timeout,
+            )
+
+        assert compacted is True
+        resume.assert_called_once_with(
+            agent="pi",
+            session_id="pi-session",
+            prompt="/compact",
+            cwd=tmp_path,
+            timeout=60,
+            model="private/provider-model:high",
+            sandbox="read-only",
+            approval="never",
+            disable_pi_automation=False,
+            pi_dir=None,
+            process_tracker=subprocess_registry.track_process_group,
+            remaining_timeout=remaining_timeout,
+            execution_request=request,
+            resume_binding=binding,
+        )
+
+
+class TestCompactTranscriptPreservation:
+    """Compaction must not rewrite the session transcript it compacts."""
+
+    @pytest.mark.parametrize("provider", ["claude", "codex", "opencode", "pi"])
+    def test_compaction_preserves_the_session_transcript_bytes(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+    ) -> None:
+        """Each provider route keeps its isolated transcript fixture byte-identical."""
+        monkeypatch.setattr(
+            "hephaestus.automation.agent_config._checkout_identity",
+            lambda _cwd, *, remaining_timeout=None: "test-checkout",
+        )
+        sentinel = b'{"type":"message","text":"original turn"}\n' + (b"x" * 4096)
+
+        request: ExecutionRequest | None = None
+        binding = None
+        session_id: str | None
+        if provider == "claude":
+            sid = session_uuid("test-repo", 42, AGENT_PR_REVIEWER, cwd=tmp_path)
+            session_id = None
+            transcript = tmp_path / f"{sid}.jsonl"
+        elif provider == "pi":
+            request = ExecutionRequest(
+                AgentRole.PR_REVIEWER,
+                AgentOperation.COMPACT,
+                SessionLifecycle.RESUME_REQUIRED,
+            )
+            binding = create_pi_binding(
+                session_id="pi-session",
+                cwd=tmp_path,
+                role=request.role,
+                model="",
+            )
+            session_id = "pi-session"
+            transcript = tmp_path / f"{binding.session_id}.jsonl"
+        else:
+            session_id = f"{provider}-session"
+            transcript = tmp_path / f"{session_id}.jsonl"
+        transcript.write_bytes(sentinel)
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "hephaestus.automation.learn.run_subprocess",
+                    return_value=subprocess.CompletedProcess([], 0, "", ""),
+                )
+            )
+            if provider != "claude":
+                stack.enter_context(
+                    patch("hephaestus.automation.learn.resolve_agent", return_value=provider)
+                )
+                stack.enter_context(patch("hephaestus.automation.learn.resume_agent_session"))
+            compacted = compact_agent_session(
+                repo="test-repo",
+                issue=42,
+                provider=provider,
+                session_agent=AGENT_PR_REVIEWER,
+                session_id=session_id,
+                cwd=tmp_path,
+                timeout=60,
+                execution_request=request,
+                session_binding=binding,
+                remaining_timeout=MagicMock(return_value=60),
+            )
+
+        assert compacted is True
+        assert transcript.read_bytes() == sentinel
