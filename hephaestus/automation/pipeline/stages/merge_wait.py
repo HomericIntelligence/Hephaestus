@@ -84,6 +84,10 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_wait_orphan")
         if not item.state:
             item.state = ENTER
+        # A fresh visit starts a fresh readiness window. A poll deadline kept
+        # from an earlier visit would expire at once and fail the item.
+        item.payload.pop("merge_poll_deadline_s", None)
+        item.payload.pop("merge_poll_count", None)
         return None
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -185,6 +189,21 @@ class MergeWaitStage(Stage):
             item.state = MERGE
             return self._poll(item, ctx)
         if outcome == "not_implementation_go":
+            item.payload.pop(_AUTO_MERGE_ARMED, None)
+            return StageOutcome(Disposition.FAIL_BACK, outcome)
+        if outcome == "merge_blocked_by_unresolved_threads":
+            # GitHub will not merge while a review thread is unresolved. Name the
+            # count and send the item back to review, so the implementation
+            # agent answers and resolves the threads instead of this stage
+            # waiting for a merge that cannot happen.
+            logger.warning(
+                "merge_wait:%s: PR #%s is blocked by %d unresolved review thread(s); "
+                "routing back to review",
+                item.issue,
+                item.pr,
+                receipt.unresolved_thread_count,
+            )
+            item.payload["merge_blocked_unresolved_threads"] = receipt.unresolved_thread_count
             item.payload.pop(_AUTO_MERGE_ARMED, None)
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome == "merge_conflicting":

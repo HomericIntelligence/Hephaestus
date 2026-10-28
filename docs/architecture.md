@@ -687,7 +687,11 @@ arms GitHub native auto-merge once and then waits for GitHub to merge. The
 approval label is the merge contract. The stage does not compare the head,
 read check runs, or evaluate merge policy. GitHub applies branch protection,
 the required checks, and any merge queue to whatever head is current. If the
-merge reports a real conflict, the agent rebases and continues. When
+merge reports a real conflict, the agent rebases and continues. While the
+auto-merge is armed, a cycle that GitHub reports `BLOCKED` with open review
+threads routes the item back to `pr_review` with the thread count recorded, so
+the implementation agent answers and resolves those threads instead of the
+stage waiting for a merge that cannot happen. When
 `state:implementation-no-go` is applied, Hephaestus runs
 `gh pr merge --disable-auto`
 ([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
@@ -695,6 +699,8 @@ merge reports a real conflict, the agent rebases and continues. When
 The coordinator records the cycle outcome in the durable event journal:
 
 - `merge_admission.outcome` — the cycle outcome, normally `auto_merge_enabled`.
+  `merge_blocked_by_unresolved_threads` names an armed pull request GitHub
+  reports blocked with open review threads.
 - `merge_admission.attempted` — whether an auto-merge enablement was attempted.
 
 Plan-review labels remain durable routing state. Native review records remain

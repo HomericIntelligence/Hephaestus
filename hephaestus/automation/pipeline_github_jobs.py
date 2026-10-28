@@ -257,6 +257,7 @@ class PipelineGitHubJobRunner:
             attempted: bool = False,
             can_retry: bool = False,
             merge_sha: str | None = None,
+            unresolved_thread_count: int = 0,
         ) -> MergeWaitCycleCompleted:
             return MergeWaitCycleCompleted(
                 request=request,
@@ -264,6 +265,7 @@ class PipelineGitHubJobRunner:
                 attempted=attempted,
                 retryable=can_retry,
                 merge_sha=merge_sha,
+                unresolved_thread_count=unresolved_thread_count,
             )
 
         def terminal(state: object) -> str | None:
@@ -334,6 +336,15 @@ class PipelineGitHubJobRunner:
         if request.auto_merge_armed:
             # The auto-merge is already armed. Observe the pull request
             # without enabling it again. GitHub owns the merge from here.
+            blocked_threads = _blocked_unresolved_review_thread_count(github, request.pr_number)
+            if blocked_threads:
+                # GitHub reports the pull request blocked and lists open review
+                # threads. Name the count: the merge cannot happen until the
+                # review loop answers and resolves those threads.
+                return complete(
+                    "merge_blocked_by_unresolved_threads",
+                    unresolved_thread_count=blocked_threads,
+                )
             return complete("auto_merge_enabled", attempted=False)
         # The implementation-GO label is the whole merge contract. GitHub owns
         # everything after this: branch protection, the required checks, any merge
@@ -359,6 +370,31 @@ class PipelineGitHubJobRunner:
         if result.malformed:
             return complete("auto_merge_malformed", attempted=True)
         return complete("auto_merge_not_enabled", attempted=True, can_retry=True)
+
+
+def _blocked_unresolved_review_thread_count(github: Any, pr_number: int) -> int:
+    """Return the open review-thread count when GitHub reports the PR blocked.
+
+    A failed read, a state other than ``BLOCKED``, or an empty thread list
+    returns zero. The merge cycle then keeps its observe-and-poll behavior: an
+    unreadable block is never reported as a review-thread block.
+    """
+    try:
+        readiness = github.gh_pr_merge_readiness(pr_number)
+        if not isinstance(readiness, dict) or readiness.get("mergeStateStatus") != "BLOCKED":
+            return 0
+        threads = github.list_unresolved_review_threads(pr_number)
+    except Exception as error:
+        logger.warning(
+            "merge_wait: PR #%s: could not check the review-thread block (%s); "
+            "continuing to poll the merge",
+            pr_number,
+            type(error).__name__,
+        )
+        return 0
+    if not isinstance(threads, list):
+        return 0
+    return len(threads)
 
 
 def _read_dirty_direct_state(

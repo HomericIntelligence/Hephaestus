@@ -8,6 +8,7 @@ on required status evidence, and does not rebase first.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from hephaestus.automation.pipeline.github_jobs import (
@@ -356,3 +357,129 @@ def test_an_armed_auto_merge_is_not_enabled_again(tmp_path: Any) -> None:
     assert receipt.outcome == "auto_merge_enabled"
     assert receipt.attempted is False
     assert github.enable_calls == []
+
+
+class _MergeBlockGitHub(_AutoMergeGitHub):
+    """Stage fake with scripted merge-readiness and review-thread reads."""
+
+    def __init__(
+        self,
+        *,
+        readiness: list[dict[str, object] | None] | None = None,
+        threads: list[dict[str, object]] | None = None,
+        threads_raise: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """Script the block-check reads for one merge cycle."""
+        super().__init__(**kwargs)
+        self._readiness = list(readiness if readiness is not None else [None])
+        self._threads = list(threads or [])
+        self._threads_raise = threads_raise
+        self.readiness_reads: list[int] = []
+
+    def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
+        """Return each scripted readiness record once, then repeat the last one."""
+        self.readiness_reads.append(pr_number)
+        if not self._readiness:
+            return None
+        value = self._readiness[0] if len(self._readiness) == 1 else self._readiness.pop(0)
+        return dict(value) if isinstance(value, dict) else value
+
+    def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return the scripted open threads, or fail the read."""
+        del pr_number
+        if self._threads_raise:
+            raise RuntimeError("thread read failed")
+        return [dict(thread) for thread in self._threads]
+
+
+def _blocked_readiness() -> dict[str, object]:
+    """Return one merge-readiness record that GitHub reports as blocked."""
+    return {"state": "OPEN", "mergeStateStatus": "BLOCKED", "mergeable": "MERGEABLE"}
+
+
+def _armed_request() -> RunMergeWaitCycleRequest:
+    """Build one already-armed cycle request: the observation path."""
+    return RunMergeWaitCycleRequest(
+        issue_number=1,
+        pr_number=7,
+        deadline_s=60.0,
+        cancellation=threading.Event(),
+        auto_merge_armed=True,
+    )
+
+
+def test_an_armed_pr_blocked_by_review_threads_names_the_count() -> None:
+    """A blocked pull request reports the open review-thread count as its reason."""
+    github = _MergeBlockGitHub(
+        readiness=[_blocked_readiness()], threads=[{"id": "T1"}, {"id": "T2"}]
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "merge_blocked_by_unresolved_threads"
+    assert receipt.unresolved_thread_count == 2
+    assert receipt.attempted is False
+    assert github.enable_calls == []
+
+
+def test_the_block_check_runs_only_after_the_arm() -> None:
+    """The enabling cycle arms the auto-merge without spending a block read."""
+    github = _MergeBlockGitHub(readiness=[_blocked_readiness()], threads=[{"id": "T1"}])
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+        RunMergeWaitCycleRequest(
+            issue_number=1,
+            pr_number=7,
+            deadline_s=60.0,
+            cancellation=threading.Event(),
+        ),
+        github,
+    )
+
+    assert receipt.outcome == "auto_merge_enabled"
+    assert receipt.attempted is True
+    assert github.readiness_reads == []
+
+
+def test_a_blocked_pr_with_no_open_threads_keeps_polling() -> None:
+    """A block that names no review thread is not reported as a review-thread block."""
+    github = _MergeBlockGitHub(readiness=[_blocked_readiness()], threads=[])
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "auto_merge_enabled"
+    assert receipt.unresolved_thread_count == 0
+
+
+def test_an_unblocked_pr_with_open_threads_keeps_polling() -> None:
+    """Open threads alone do not explain a block GitHub does not report."""
+    github = _MergeBlockGitHub(
+        readiness=[{"state": "OPEN", "mergeStateStatus": "CLEAN"}],
+        threads=[{"id": "T1"}],
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "auto_merge_enabled"
+    assert receipt.unresolved_thread_count == 0
+
+
+def test_an_unreadable_readiness_record_keeps_polling() -> None:
+    """An unreadable readiness record never becomes a reported review-thread block."""
+    github = _MergeBlockGitHub(readiness=[None], threads=[{"id": "T1"}])
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "auto_merge_enabled"
+    assert receipt.unresolved_thread_count == 0
+
+
+def test_an_unreadable_thread_list_keeps_polling() -> None:
+    """A failed thread read keeps the poll behavior instead of guessing a block."""
+    github = _MergeBlockGitHub(readiness=[_blocked_readiness()], threads_raise=True)
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "auto_merge_enabled"
+    assert receipt.unresolved_thread_count == 0
