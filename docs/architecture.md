@@ -689,9 +689,9 @@ read check runs, or evaluate merge policy. GitHub applies branch protection,
 the required checks, and any merge queue to whatever head is current. If the
 merge reports a real conflict, the agent rebases and continues. While the
 auto-merge is armed, a cycle that GitHub reports `BLOCKED` with open review
-threads routes the item back to `pr_review` with the thread count recorded, so
-the implementation agent answers and resolves those threads instead of the
-stage waiting for a merge that cannot happen. When
+threads routes the item back to `pr_review` and names the thread count in the
+run event, so the implementation agent answers and resolves those threads
+instead of the stage waiting for a merge that cannot happen. When
 `state:implementation-no-go` is applied, Hephaestus runs
 `gh pr merge --disable-auto`
 ([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).

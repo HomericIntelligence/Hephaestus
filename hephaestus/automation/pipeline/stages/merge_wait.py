@@ -203,7 +203,6 @@ class MergeWaitStage(Stage):
                 item.pr,
                 receipt.unresolved_thread_count,
             )
-            item.payload["merge_blocked_unresolved_threads"] = receipt.unresolved_thread_count
             item.payload.pop(_AUTO_MERGE_ARMED, None)
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome == "merge_conflicting":

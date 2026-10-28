@@ -6,6 +6,7 @@ enabling auto-merge is to wait, and to fail closed when that wait expires.
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any
 
@@ -144,7 +145,7 @@ def test_lost_approval_label_fails_back_to_review(make_ctx: Any, make_work_item:
 
 
 def test_a_thread_blocked_merge_names_the_count_and_fails_back(
-    make_ctx: Any, make_work_item: Any
+    make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A merge GitHub blocks on open review threads returns to review, naming them."""
     item = _item_with_receipt(
@@ -155,12 +156,13 @@ def test_a_thread_blocked_merge_names_the_count_and_fails_back(
     )
     item.payload["merge_auto_merge_armed"] = True
 
-    outcome = MergeWaitStage()._merge_apply(item, make_ctx())
+    with caplog.at_level(logging.WARNING):
+        outcome = MergeWaitStage()._merge_apply(item, make_ctx())
 
     assert isinstance(outcome, StageOutcome)
     assert outcome.disposition is Disposition.FAIL_BACK
     assert outcome.note == "merge_blocked_by_unresolved_threads"
-    assert item.payload["merge_blocked_unresolved_threads"] == 2
+    assert "blocked by 2 unresolved review thread(s)" in caplog.text
     assert "merge_auto_merge_armed" not in item.payload
 
 
