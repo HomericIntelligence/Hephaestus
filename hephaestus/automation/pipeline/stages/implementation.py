@@ -85,6 +85,7 @@ from hephaestus.automation.prompts.implementation import (
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
     get_rebase_conflict_prompt,
+    get_scope_correction_directive,
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
 from hephaestus.automation.source_worktree import (
@@ -119,7 +120,12 @@ from ..jobs import (
     WORKTREE_MATERIALIZED_KEY,
     _writer_publication_matches_refresh,
 )
-from ..scope_retraction import is_safe_scope_retraction_path, scope_retraction_paths_for_threads
+from ..scope_retraction import (
+    SCOPE_VIOLATION_PATHS_KEY,
+    is_safe_scope_retraction_path,
+    scope_retraction_paths_for_threads,
+    validated_scope_violation_paths,
+)
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
@@ -563,6 +569,9 @@ def _scope_retraction_kwargs(item: WorkItem) -> dict[str, object] | StageOutcome
     return {"scope_retraction_paths": paths, "scope_retraction_base_sha": base_sha}
 
 
+#: The bounded unexpected paths that one implementation correction restores.
+_SCOPE_CORRECTION_PATHS = "scope_correction_paths"
+
 _COMMIT_PUSH_REFRESH = "_commit_push_refresh"
 _COMMIT_PUSH_TERMINAL = "_commit_push_terminal"
 
@@ -830,6 +839,31 @@ def _add_direct_publication_base(item: WorkItem, kwargs: dict[str, object]) -> S
     return None
 
 
+def _scope_correction_is_valid(item: WorkItem, ctx: StageContext) -> bool:
+    """Return whether one bounded implementation correction can run.
+
+    The refused publication turn already counted its implement attempt on
+    completion, so this check only reads the budget: the correction's own
+    completion counts the next attempt. A missing or drifted worktree
+    binding leaves nothing to correct, so the terminal scope result stands.
+
+    Args:
+        item: The work item that holds the refused publication evidence.
+        ctx: The stage context that supplies the implement budget.
+
+    Returns:
+        True when a correction turn may run.
+
+    """
+    if item.attempts.get("implement", 0) >= ctx.budget("implement"):
+        return False
+    try:
+        _existing_impl_workspace(item)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
 def _clear_remediation_cycle(item: WorkItem) -> None:
     """Remove state that is valid only for the completed remediation cycle."""
     item.payload.pop("implementation_remediation", None)
@@ -899,6 +933,7 @@ def build_implementation_prompt(
     branch_name: str = "",
     worktree_path: str = "",
     advise_findings: str = "",
+    scope_correction_paths: tuple[str, ...] = (),
 ) -> str:
     """Compose the implementation prompt with the advise-findings block.
 
@@ -915,10 +950,12 @@ def build_implementation_prompt(
         branch_name: Feature branch the worktree is on.
         worktree_path: Worktree the implementer works in.
         advise_findings: Advise-step findings; empty string means no block.
+        scope_correction_paths: Host-validated paths from a refused
+            publication. An empty tuple means no correction directive.
 
     Returns:
-        The full implementer prompt, with the findings block appended when
-        ``advise_findings`` is non-empty.
+        The full implementer prompt, with the findings block and the scope
+        correction directive appended when each is present.
 
     """
     prompt = get_implementation_prompt(
@@ -928,12 +965,14 @@ def build_implementation_prompt(
         branch_name=branch_name,
         worktree_path=worktree_path,
     )
-    if not advise_findings:
-        return prompt
-    return prompt + PromptCatalog.current().render(
-        "implementation/advise_append.j2",
-        advise_findings=advise_findings,
-    )
+    if advise_findings:
+        prompt += PromptCatalog.current().render(
+            "implementation/advise_append.j2",
+            advise_findings=advise_findings,
+        )
+    if scope_correction_paths:
+        prompt += get_scope_correction_directive(scope_correction_paths)
+    return prompt
 
 
 def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: str) -> str:
@@ -2496,6 +2535,9 @@ class ImplementationStage(Stage):
             workspace = _existing_impl_workspace(item)
         except (KeyError, TypeError, ValueError):
             return Continue(next_state=WORKTREE_WAIT)
+        scope_correction_paths = item.payload.pop(_SCOPE_CORRECTION_PATHS, ())
+        if not isinstance(scope_correction_paths, tuple):
+            scope_correction_paths = ()
         job = AgentJob(
             repo=item.repo,
             issue=issue,
@@ -2521,6 +2563,7 @@ class ImplementationStage(Stage):
                 "branch_name": item.branch,
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
+                "scope_correction_paths": scope_correction_paths,
             },
             **_codex_isolation_job_kwargs(ctx),
             descr="implement",
@@ -3184,6 +3227,12 @@ class ImplementationStage(Stage):
             # specific cause. The worktree is preserved for correction.
             item.payload["scope_violation"] = True
             item.payload["scope_violation_summary"] = _git_failure_fallback(result)
+            evidence = result.value if isinstance(result.value, dict) else {}
+            unexpected = validated_scope_violation_paths(evidence.get(SCOPE_VIOLATION_PATHS_KEY))
+            if unexpected is None:
+                item.payload.pop(SCOPE_VIOLATION_PATHS_KEY, None)
+            else:
+                item.payload[SCOPE_VIOLATION_PATHS_KEY] = unexpected
             item.payload.pop("git_error_retries", None)
             return
         logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
@@ -4108,6 +4157,16 @@ class ImplementationStage(Stage):
         if item.payload.pop("scope_violation", None):
             summary = item.payload.pop("scope_violation_summary", "")
             safe_summary = summary if isinstance(summary, str) and summary else ""
+            unexpected = validated_scope_violation_paths(
+                item.payload.pop(SCOPE_VIOLATION_PATHS_KEY, None)
+            )
+            if unexpected is not None and _scope_correction_is_valid(item, ctx):
+                item.payload[_SCOPE_CORRECTION_PATHS] = unexpected
+                logger.info(
+                    "implementation:%s: routing one bounded scope correction",
+                    item.issue,
+                )
+                return Continue(next_state=IMPLEMENT_WAIT)
             terminal_note = (
                 f"scope_violation: {safe_summary}" if safe_summary else "scope_violation"
             )

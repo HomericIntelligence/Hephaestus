@@ -197,7 +197,12 @@ from hephaestus.automation.pipeline.repository_validation_profiles import (
     plan_validation_profile,
 )
 from hephaestus.automation.pipeline.routing import StageName
-from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
+from hephaestus.automation.pipeline.scope_retraction import (
+    SCOPE_VIOLATION_PATH_LIMIT,
+    SCOPE_VIOLATION_PATH_MAX_CHARS,
+    SCOPE_VIOLATION_PATHS_KEY,
+    is_safe_scope_retraction_path,
+)
 from hephaestus.automation.pipeline.tool_scopes import (
     DEFAULT_TOOL_SCOPE,
     ToolScope,
@@ -477,6 +482,25 @@ def _invoke_claude_commit_message(
         allowed_tools="Read,Glob,Grep",
     )
     return (stdout or "").strip()
+
+
+def _bounded_unexpected_paths(paths: Collection[str]) -> list[str]:
+    """Return the rejected paths in bounded, redacted, stable order.
+
+    The stage validates this evidence before it routes one bounded
+    correction. Keep the shape closed: a sorted, truncated list of strings.
+
+    Args:
+        paths: The paths the publication scope guard rejected.
+
+    Returns:
+        The redacted, size-bounded evidence list.
+
+    """
+    return [
+        redact_diagnostic_text(path)[:SCOPE_VIOLATION_PATH_MAX_CHARS]
+        for path in sorted(paths)[:SCOPE_VIOLATION_PATH_LIMIT]
+    ]
 
 
 def _bounded_candidate_commit_paths(
@@ -13102,6 +13126,7 @@ class WorkerPool:
             return JobResult(
                 ok=False,
                 error="implementation changed paths outside approved scope",
+                value={SCOPE_VIOLATION_PATHS_KEY: _bounded_unexpected_paths(changed - permitted)},
             )
         logger.warning(
             "implementation changed paths outside the plan scope: %s",

@@ -1269,6 +1269,9 @@ def test_issue_2472_rejects_precommitted_unplanned_paths(pool: WorkerPool, tmp_p
 
     assert result.ok is False
     assert result.error == "implementation changed paths outside approved scope"
+    # The refusal carries bounded evidence so the stage can route one
+    # correction. The key is disjoint from every writer receipt key.
+    assert result.value == {"scope_violation_unexpected_paths": ["scripts/run_ci_local.sh"]}
     assert git_run.call_args_list[-1].args[0] == [
         "git",
         "diff",

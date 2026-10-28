@@ -63,6 +63,29 @@ def get_implementation_prompt(
     )
 
 
+def get_scope_correction_directive(paths: tuple[str, ...]) -> str:
+    """Build the bounded correction directive for one scope rejection.
+
+    Args:
+        paths: Host-validated paths that the publication guard rejected.
+
+    Returns:
+        The rendered directive that asks for the scope restoration.
+
+    Raises:
+        ValueError: When the paths are empty.
+
+    """
+    if not paths:
+        raise ValueError("a scope correction needs at least one path")
+    fenced = fence_content()
+    return PromptCatalog.current().render(
+        "implementation/scope_correction.j2",
+        unexpected_paths_block=fenced.fence("OUTSIDE_SCOPE_PATHS", "\n".join(paths)),
+        untrusted_notice=fenced.untrusted_notice,
+    )
+
+
 def get_rebase_conflict_prompt(
     *,
     conflict_paths: tuple[str, ...],
