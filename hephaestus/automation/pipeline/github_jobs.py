@@ -555,13 +555,19 @@ class PrReviewReconciled:
 
 @dataclass(frozen=True)
 class MergeWaitCycleCompleted:
-    """Immutable outcome of one merge admission/request cycle."""
+    """Immutable outcome of one merge admission/request cycle.
+
+    ``unresolved_thread_count`` carries the open review-thread count GitHub
+    lists when GitHub reports the pull request blocked, so the outcome names
+    the reason the merge cannot happen.
+    """
 
     request: RunMergeWaitCycleRequest
     outcome: str
     attempted: bool
     retryable: bool = False
     merge_sha: str | None = None
+    unresolved_thread_count: int = 0
 
     def __post_init__(self) -> None:
         """Validate merge-cycle outcome metadata."""
@@ -575,6 +581,8 @@ class MergeWaitCycleCompleted:
             or any(character not in "0123456789abcdef" for character in self.merge_sha)
         ):
             raise ValueError("merge_sha must be a full commit SHA or None")
+        if type(self.unresolved_thread_count) is not int or self.unresolved_thread_count < 0:
+            raise ValueError("unresolved_thread_count must be a non-negative integer")
 
 
 type GitHubReceipt = (

@@ -831,6 +831,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             "outcome": value.outcome,
             "attempted": value.attempted,
         }
+        if value.unresolved_thread_count:
+            # Name the reason a blocked merge could not proceed.
+            fields["merge_admission"]["unresolved_thread_count"] = value.unresolved_thread_count
 
     @staticmethod
     def _job_result_error_class(result: JobResult) -> str | None:

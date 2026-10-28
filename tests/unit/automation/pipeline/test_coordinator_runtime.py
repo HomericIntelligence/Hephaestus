@@ -1,10 +1,62 @@
 """Tests for durable coordinator runtime event classification."""
 
+import threading
+
 import pytest
 
 from hephaestus.automation.pipeline.coordinator_runtime import CoordinatorRuntime
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+from hephaestus.automation.pipeline.github_jobs import (
+    MergeWaitCycleCompleted,
+    RunMergeWaitCycleRequest,
+)
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
+
+
+def _merge_receipt(
+    outcome: str,
+    *,
+    attempted: bool = False,
+    unresolved_thread_count: int = 0,
+) -> MergeWaitCycleCompleted:
+    """Build one merge-wait cycle receipt for journal classification."""
+    return MergeWaitCycleCompleted(
+        request=RunMergeWaitCycleRequest(
+            issue_number=1,
+            pr_number=7,
+            deadline_s=60.0,
+            cancellation=threading.Event(),
+            auto_merge_armed=True,
+        ),
+        outcome=outcome,
+        attempted=attempted,
+        unresolved_thread_count=unresolved_thread_count,
+    )
+
+
+def test_thread_blocked_merge_admission_keeps_its_count_in_the_event() -> None:
+    """A thread-blocked merge names the open review-thread count durably."""
+    fields = CoordinatorRuntime._job_result_event_fields(
+        JobResult(
+            ok=True,
+            value=_merge_receipt("merge_blocked_by_unresolved_threads", unresolved_thread_count=3),
+        )
+    )
+
+    assert fields["merge_admission"]["outcome"] == "merge_blocked_by_unresolved_threads"
+    assert fields["merge_admission"]["unresolved_thread_count"] == 3
+
+
+def test_an_unblocked_merge_admission_carries_no_thread_count() -> None:
+    """A healthy merge admission keeps its existing journal shape."""
+    fields = CoordinatorRuntime._job_result_event_fields(
+        JobResult(ok=True, value=_merge_receipt("auto_merge_enabled", attempted=True))
+    )
+
+    assert fields["merge_admission"] == {
+        "outcome": "auto_merge_enabled",
+        "attempted": True,
+    }
 
 
 def test_pipeline_config_generates_one_bounded_run_identity() -> None:

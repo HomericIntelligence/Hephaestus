@@ -6,6 +6,7 @@ enabling auto-merge is to wait, and to fail closed when that wait expires.
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any
 
@@ -141,6 +142,53 @@ def test_lost_approval_label_fails_back_to_review(make_ctx: Any, make_work_item:
 
     assert isinstance(outcome, StageOutcome)
     assert outcome.disposition is Disposition.FAIL_BACK
+
+
+def test_a_thread_blocked_merge_names_the_count_and_fails_back(
+    make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A merge GitHub blocks on open review threads returns to review, naming them."""
+    item = _item_with_receipt(
+        make_work_item,
+        "merge_blocked_by_unresolved_threads",
+        attempted=False,
+        unresolved_thread_count=2,
+    )
+    item.payload["merge_auto_merge_armed"] = True
+
+    with caplog.at_level(logging.WARNING):
+        outcome = MergeWaitStage()._merge_apply(item, make_ctx())
+
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.FAIL_BACK
+    assert outcome.note == "merge_blocked_by_unresolved_threads"
+    assert "blocked by 2 unresolved review thread(s)" in caplog.text
+    assert "merge_auto_merge_armed" not in item.payload
+
+
+def test_a_fresh_visit_starts_a_new_readiness_window(make_ctx: Any, make_work_item: Any) -> None:
+    """A poll window kept from an earlier visit cannot expire the new one at once."""
+    item = make_work_item(kind="pr", pr=7, issue=1)
+    item.payload["merge_poll_deadline_s"] = 1.0
+    item.payload["merge_poll_count"] = 4
+
+    assert MergeWaitStage().on_enter(item, make_ctx()) is None
+
+    assert "merge_poll_deadline_s" not in item.payload
+    assert "merge_poll_count" not in item.payload
+
+
+def test_a_thread_block_receipt_refuses_a_negative_count(
+    make_work_item: Any,
+) -> None:
+    """The receipt refuses a count that is not a non-negative integer."""
+    with pytest.raises(ValueError, match="unresolved_thread_count"):
+        _item_with_receipt(
+            make_work_item,
+            "merge_blocked_by_unresolved_threads",
+            attempted=False,
+            unresolved_thread_count=-1,
+        )
 
 
 def test_a_receipt_for_a_different_request_is_refused(make_ctx: Any, make_work_item: Any) -> None:

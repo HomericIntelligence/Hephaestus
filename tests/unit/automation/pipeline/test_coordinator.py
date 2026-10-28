@@ -1501,6 +1501,25 @@ class TestFailBackRouting:
         assert len(coordinator.queues[StageName.PLANNING]) == 1
         assert item.payload["update_plan_required"] is True
 
+    def test_a_thread_blocked_merge_routes_back_to_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A merge GitHub blocks on open review threads returns to review."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(5, StageName.MERGE_WAIT)
+        item.pr = 13
+        item.state = "MERGE"
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
+
+        coordinator._route(
+            claim_test_item(coordinator, item),
+            StageOutcome(Disposition.FAIL_BACK, "merge_blocked_by_unresolved_threads"),
+        )
+
+        assert item.stage is StageName.PR_REVIEW
+        assert len(coordinator.queues[StageName.PR_REVIEW]) == 1
+        assert item.state == "ENTER"
+
     def test_empty_pr_diff_routes_to_substantive_implementation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
