@@ -351,6 +351,22 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def get_pr_body(self, pr_number: int) -> str:
+        """Return the pull request's current body text.
+
+        The caller reads the body to edit one section of it. A read failure
+        raises so the caller can warn and continue without a guessed body.
+        """
+        ...
+
+    def update_pr_body(self, pr_number: int, body: str) -> None:
+        """Replace one pull request's body text.
+
+        The edit keeps the pull request's exact ``Closes #N`` line; a body
+        without it raises before any GitHub write.
+        """
+        ...
+
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Durably apply ``state:implementation-no-go`` to the PR.
 

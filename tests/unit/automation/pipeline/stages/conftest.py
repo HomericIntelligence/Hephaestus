@@ -514,6 +514,17 @@ class FakeStageGitHub(FakeGitHub):
         self.prs[number]["issue_number"] = issue_number
         return number
 
+    def get_pr_body(self, pr_number: int) -> str:
+        """Return the stored body of one PR."""
+        pr = self.prs.get(pr_number)
+        return str(pr.get("body", "")) if isinstance(pr, dict) else ""
+
+    def update_pr_body(self, pr_number: int, body: str) -> None:
+        """Replace the stored body of one PR and record the write."""
+        stored = self.prs.setdefault(pr_number, {})
+        stored["body"] = body
+        self._log("update_pr_body", pr_number)
+
     def post_review(
         self,
         pr_number: int,

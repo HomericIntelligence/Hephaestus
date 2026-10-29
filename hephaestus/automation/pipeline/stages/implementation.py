@@ -76,6 +76,7 @@ from hephaestus.automation.pipeline.git_jobs import (
     _strict_recovery_workspace,
 )
 from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
+from hephaestus.automation.pr_body import replace_testing_section
 from hephaestus.automation.prompts.address_review import (
     get_address_review_prompt,
 )
@@ -577,6 +578,40 @@ def _receipt_with_test_summary(receipt: str, result: JobResult) -> str:
     if summary_reports_no_executed_test(summary):
         text += " (no test executed)"
     return text
+
+
+def _refresh_pr_body_testing(item: WorkItem, ctx: StageContext) -> None:
+    """Refresh the open PR's ``## Testing`` text with the current receipt.
+
+    A remediation cycle runs the pre-PR tests again, so the reviewed pull
+    request must state the receipt that belongs to its head. The edit keeps
+    every other section. The receipt is evidence, not a gate: a failed read or
+    write warns and the stage continues.
+
+    Args:
+        item: The work item whose remediation cycle just completed.
+        ctx: The stage context that owns the GitHub accessor.
+
+    """
+    receipt = item.payload.get("test_receipt")
+    if item.pr is None or not isinstance(receipt, str) or not receipt.strip():
+        return
+    try:
+        body = ctx.github.get_pr_body(item.pr)
+        updated = replace_testing_section(body, receipt)
+        if updated == body:
+            return
+        ctx.github.update_pr_body(item.pr, updated)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "implementation:%s: PR #%s Testing refresh failed: %s; the receipt stays "
+            "in the run log and the next remediation cycle retries it",
+            item.issue,
+            item.pr,
+            exc,
+        )
+        return
+    logger.info("implementation:%s: refreshed PR #%s Testing section", item.issue, item.pr)
 
 
 def _native_pre_pr_fallback_is_authorized(item: WorkItem) -> bool:
@@ -4168,6 +4203,7 @@ class ImplementationStage(Stage):
             # The agent answered and resolved the threads without a code change.
             # GitHub holds the thread state, so the next review round judges it.
             item.payload.pop("no_commits", None)
+            _refresh_pr_body_testing(item, ctx)
             _clear_remediation_cycle(item)
             return StageOutcome(
                 Disposition.ADVANCE, f"PR #{item.pr} ready for fresh review after address-review"
@@ -4243,6 +4279,7 @@ class ImplementationStage(Stage):
             item.pr = pr_number
             logger.info("implementation:%d: created PR #%d", item.issue, pr_number)
         if item.payload.get("implementation_remediation"):
+            _refresh_pr_body_testing(item, ctx)
             _clear_remediation_cycle(item)
         return StageOutcome(Disposition.ADVANCE, f"PR #{item.pr} ready for review")
 

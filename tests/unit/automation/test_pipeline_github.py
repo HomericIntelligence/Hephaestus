@@ -2526,6 +2526,96 @@ class TestCreatePr:
         assert any(stdout in record.message for record in caplog.records)
 
 
+class TestPrBodyWrite:
+    """Read one PR body and rewrite it without losing the Closes link."""
+
+    def test_body_read_returns_the_stored_text(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
+        """The adapter returns exactly the body GitHub stores."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            return SimpleNamespace(stdout=json.dumps({"body": "## Testing\nold\n"}))
+
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
+
+        assert adapter.get_pr_body(12) == "## Testing\nold\n"
+        assert calls == [["pr", "view", "12", "--json", "body", "--repo", "org/repo-a"]]
+
+    def test_body_read_failure_raises_for_the_caller(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
+        """An answer that is not a PR object raises instead of inventing a body."""
+        command_runner.side_effect = lambda argv, **_kwargs: SimpleNamespace(stdout="[]")
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
+
+        with pytest.raises(RuntimeError, match="body read returned no object"):
+            adapter.get_pr_body(12)
+
+    def test_body_write_sends_the_edited_body_file(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
+        """The write carries the whole edited body through ``--body-file``."""
+        body = "## Summary\nS\n\n## Testing\n`uv run pytest tests` — passed\n\nCloses #7\n"
+        calls: list[list[str]] = []
+        written: list[str] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            written.append(Path(argv[argv.index("--body-file") + 1]).read_text())
+            _assert_bounded_command_kwargs(kwargs, time.monotonic())
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        command_runner.side_effect = fake_gh_call
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
+
+        adapter.update_pr_body(12, body)
+
+        assert written == [body]
+        assert calls[0][:4] == ["pr", "edit", "12", "--body-file"]
+        assert calls[0][-2:] == ["--repo", "org/repo-a"]
+
+    def test_body_write_rejects_a_body_without_the_closes_line(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
+        """A partial read must not drop the link that closes the issue."""
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
+
+        with pytest.raises(ValueError, match="Closes #"):
+            adapter.update_pr_body(12, "## Testing\n`uv run pytest tests` — passed\n")
+
+        command_runner.assert_not_called()
+
+    def test_dry_run_body_write_reaches_no_transport(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
+        """A dry run logs the write and sends nothing."""
+        call_mock = MagicMock()
+        command_runner.side_effect = call_mock
+        adapter = PipelineGitHub(
+            "org",
+            repo="repo-a",
+            dry_run=True,
+            repo_root=tmp_path,
+            command_runner=command_runner,
+        )
+
+        adapter.update_pr_body(12, "## Testing\nnew\n\nCloses #7\n")
+
+        call_mock.assert_not_called()
+
+
 class TestReadSurface:
     """Reads delegate verbatim (and stay LIVE even under dry-run)."""
 

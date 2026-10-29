@@ -191,6 +191,28 @@ class PipelineGitHubMutations(PipelineGitHubMergeMutations):
             shutdown=self._operation_shutdown,
         )
 
+    def update_pr_body(self, pr_number: int, body: str) -> None:
+        """Replace one pull request's body text through ``gh pr edit``.
+
+        The caller edits one section of a body it read from GitHub. The edit
+        must keep the pull request's exact ``Closes #N`` line: a partial or
+        stale read must not drop the link that closes the issue.
+
+        Raises:
+            RuntimeError: the write needs a repository identity.
+            ValueError: *body* has no exact ``Closes #N`` line.
+
+        """
+        if self._repo_slug is None:
+            raise RuntimeError("PR body update requires a repo-scoped PipelineGitHub accessor")
+        if self._skip(f"update PR #{pr_number} body"):
+            return
+        deadline = self._operation_deadline_s or operation_deadline_after(self._gh_timeout)
+        with self.operation_deadline(deadline), git_runtime.operation_deadline(deadline):
+            github_api._assert_body_has_closes(body)
+            with github_api._body_file(body) as body_path:
+                self._gh(["pr", "edit", str(pr_number), "--body-file", body_path])
+
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Apply and read back exclusive ``state:implementation-no-go``."""
         if self._skip(f"mark PR #{pr_number} implementation-no-go"):
