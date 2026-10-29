@@ -2892,6 +2892,51 @@ def test_resume_codex_session_does_not_recover_a_deadline_race_as_success(
     terminate.assert_called_once_with(process)
 
 
+@pytest.mark.parametrize(
+    ("boundary_error", "error_type", "error_match"),
+    [
+        (
+            InterruptedError("compact operation cancelled"),
+            InterruptedError,
+            "compact operation",
+        ),
+        (
+            subprocess.TimeoutExpired("compact operation deadline", 0),
+            subprocess.TimeoutExpired,
+            "compact operation",
+        ),
+    ],
+    ids=("cancellation", "deadline"),
+)
+def test_resume_codex_session_stops_before_process_creation(
+    tmp_path: Path,
+    boundary_error: BaseException,
+    error_type: type[BaseException],
+    error_match: str,
+) -> None:
+    """An exhausted operation bound prevents the Codex process."""
+
+    def remaining_timeout() -> int:
+        raise boundary_error
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen") as popen,
+        pytest.raises(error_type, match=error_match),
+    ):
+        agent_runtime.resume_agent_session(
+            "codex",
+            "codex-session",
+            "/compact",
+            cwd=tmp_path,
+            timeout=30,
+            remaining_timeout=remaining_timeout,
+        )
+
+    popen.assert_not_called()
+
+
 def test_run_codex_session_strips_null_byte_from_stdin(tmp_path: Path) -> None:
     """#1661: a NUL in the prompt must not crash the Codex stdin path."""
     captured_input: list[str | None] = []
@@ -4908,6 +4953,49 @@ def test_resume_opencode_session_reaps_a_process_that_starts_during_cancellation
     terminate.assert_called_once_with(process)
 
 
+@pytest.mark.parametrize(
+    ("boundary_error", "error_type", "error_match"),
+    [
+        (
+            InterruptedError("compact operation cancelled"),
+            InterruptedError,
+            "compact operation",
+        ),
+        (
+            subprocess.TimeoutExpired("compact operation deadline", 0),
+            subprocess.TimeoutExpired,
+            "compact operation",
+        ),
+    ],
+    ids=("cancellation", "deadline"),
+)
+def test_resume_opencode_session_stops_before_process_creation(
+    tmp_path: Path,
+    boundary_error: BaseException,
+    error_type: type[BaseException],
+    error_match: str,
+) -> None:
+    """An exhausted operation bound prevents the OpenCode process."""
+
+    def remaining_timeout() -> int:
+        raise boundary_error
+
+    with (
+        patch("subprocess.Popen") as popen,
+        pytest.raises(error_type, match=error_match),
+    ):
+        agent_runtime.resume_agent_session(
+            "opencode",
+            "opencode-session",
+            "/compact",
+            cwd=tmp_path,
+            timeout=30,
+            remaining_timeout=remaining_timeout,
+        )
+
+    popen.assert_not_called()
+
+
 def test_run_opencode_session_raises_on_nonzero_exit(tmp_path: Path) -> None:
     """A failed OpenCode run surfaces as CalledProcessError with both streams."""
 
@@ -6176,6 +6264,115 @@ def test_resume_pi_session_reaps_a_process_that_starts_at_operation_boundary(
         "reap",
         "track_exit",
     ]
+
+
+@pytest.mark.parametrize(
+    ("boundary_error", "error_type", "error_match"),
+    [
+        (
+            InterruptedError("compact operation cancelled"),
+            InterruptedError,
+            "compact operation cancelled",
+        ),
+        (
+            subprocess.TimeoutExpired("compact operation deadline", 0),
+            subprocess.TimeoutExpired,
+            "compact operation deadline",
+        ),
+    ],
+    ids=("cancellation", "deadline"),
+)
+def test_resume_pi_session_stops_before_adapter_process_creation(
+    tmp_path: Path,
+    boundary_error: BaseException,
+    error_type: type[BaseException],
+    error_match: str,
+) -> None:
+    """A stop boundary before spawn keeps the Pi adapter from launching."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+    from hephaestus.agents.pi_session import create_pi_binding
+
+    executable = tmp_path / "pi"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+    spawned = False
+    tracked: list[int] = []
+    received_boundary: agent_runtime.RemainingTimeout | None = None
+
+    class PreSpawnAdapter:
+        """Check the operation bound before spawning the provider."""
+
+        def invoke(
+            self,
+            *,
+            policy: ExecutionPolicy,
+            command: list[str],
+            environment: dict[str, str],
+            prompt: str,
+            cwd: Path,
+            timeout: int,
+            model: str,
+            session_id: str | None,
+            process_tracker: agent_runtime.ProcessTracker | None,
+            remaining_timeout: agent_runtime.RemainingTimeout | None,
+        ) -> agent_runtime.AgentRunResult:
+            nonlocal spawned, received_boundary
+            del policy, command, environment, prompt, cwd, timeout, model, session_id
+            assert remaining_timeout is not None
+            received_boundary = remaining_timeout
+            remaining_timeout()  # the adapter checks its bound before spawn
+            spawned = True
+            raise AssertionError("a stop boundary must prevent adapter spawn")
+
+    def remaining_timeout() -> int:
+        raise boundary_error
+
+    @contextmanager
+    def track_process_group(pid: int) -> Any:
+        tracked.append(pid)
+        yield
+
+    @contextmanager
+    def profile(*_args: object, **_kwargs: object) -> Any:
+        yield tmp_path, {}
+
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.COMPACT,
+        SessionLifecycle.RESUME_REQUIRED,
+    )
+    binding = create_pi_binding(
+        session_id="pi-session",
+        cwd=tmp_path,
+        role=request.role,
+        model="private/provider-model:high",
+    )
+    with (
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", PreSpawnAdapter()),
+        patch(
+            "hephaestus.agents.runtime._require_pi_automation_admission",
+            return_value=PiPreflightResult.ready_result(executable=executable),
+        ),
+        patch("hephaestus.agents.runtime._pi_automation_profile", side_effect=profile),
+        patch("hephaestus.agents.runtime._pi_policy_args", return_value=[]),
+        pytest.raises(error_type, match=error_match),
+    ):
+        agent_runtime.resume_agent_session(
+            "pi",
+            "pi-session",
+            "/compact",
+            cwd=tmp_path,
+            timeout=30,
+            model="private/provider-model:high",
+            execution_request=request,
+            resume_binding=binding,
+            process_tracker=track_process_group,
+            remaining_timeout=remaining_timeout,
+        )
+
+    assert spawned is False
+    assert tracked == []
+    assert received_boundary is remaining_timeout
 
 
 def test_run_agent_text_preserves_ordinary_effort_words_in_pi_output(

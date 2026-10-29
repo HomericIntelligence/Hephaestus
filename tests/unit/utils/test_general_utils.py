@@ -850,3 +850,212 @@ class TestRunSubprocessTimeoutLogging:
                 child_pid = int(child_pid_path.read_text(encoding="utf-8"))
                 with suppress(ProcessLookupError):
                     os.kill(child_pid, signal.SIGKILL)
+
+
+def _controlled_child_script(guard_s: int) -> str:
+    """One child executable with an independent finite guard and a guarded descendant."""
+    return (
+        "import os,pathlib,signal,subprocess,sys,time\n"
+        "report=pathlib.Path(sys.argv[1])\n"
+        f"guard={int(guard_s)}\n"
+        "signal.alarm(guard)\n"
+        "def publish(name,value):\n"
+        "    tmp=report/(name+'.tmp')\n"
+        "    tmp.write_text(value,encoding='utf-8')\n"
+        "    tmp.replace(report/name)\n"
+        "publish('child.pid',f'{os.getpid()} {os.getpgid(0)}')\n"
+        "descendant=subprocess.Popen([sys.executable,'-c',"
+        f"'import signal,time; signal.alarm({int(guard_s)}); time.sleep({int(guard_s)})'])\n"
+        "publish('descendant.pid',str(descendant.pid))\n"
+        "publish('ready','')\n"
+        "time.sleep(guard)\n"
+    )
+
+
+def _wait_for_file(path: Path, *, timeout_s: float) -> bool:
+    """Return whether *path* appears before the finite wait expires."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.01)
+    return path.exists()
+
+
+def _pid_exists(pid: int) -> bool:
+    """Return whether *pid* still names a live or unreaped process."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _process_is_running(pid: int) -> bool:
+    """Return whether *pid* is running, rather than dead or a zombie.
+
+    The runner stops its owned process group. It cannot reap a descendant that
+    is not its own child: once that descendant's parent dies, reaping belongs
+    to init, and a container PID 1 often does not reap. The descendant then
+    stays a zombie. A zombie has stopped already, so it must not read as alive.
+    """
+    if not _pid_exists(pid):
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        # No procfs (macOS), or the process went away; the kill probe stands.
+        return True
+    fields = stat.rsplit(")", 1)[-1].split()
+    return not (fields and fields[0] == "Z")
+
+
+def _wait_for_death(pid: int, *, timeout_s: float) -> bool:
+    """Return whether *pid* stops running before the finite wait expires."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not _process_is_running(pid):
+            return True
+        with suppress(ChildProcessError, OSError):
+            os.waitpid(pid, os.WNOHANG)
+        time.sleep(0.02)
+    return not _process_is_running(pid)
+
+
+def _terminate_owned(child_pid: int | None, descendant_pid: int | None) -> None:
+    """Terminate remaining owned processes with bounded kill escalation."""
+    if child_pid is not None:
+        with suppress(ProcessLookupError, OSError):
+            os.killpg(child_pid, signal.SIGTERM)
+        if not _wait_for_death(child_pid, timeout_s=2):
+            with suppress(ProcessLookupError, OSError):
+                os.killpg(child_pid, signal.SIGKILL)
+            _wait_for_death(child_pid, timeout_s=2)
+    if descendant_pid is not None:
+        with suppress(ProcessLookupError, OSError):
+            os.kill(descendant_pid, signal.SIGKILL)
+        _wait_for_death(descendant_pid, timeout_s=2)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "killpg"),
+    reason="requires POSIX process groups",
+)
+class TestTrackedProcessRealChildCleanup:
+    """Real shared-runner children die with their tracked process group."""
+
+    def _prepare_controlled_child(self, tmp_path: Path) -> tuple[Path, Path]:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        child = bin_dir / "grouped_child.py"
+        child.write_text(_controlled_child_script(guard_s=20), encoding="utf-8")
+        child.chmod(0o700)
+        report_dir = tmp_path / "report"
+        report_dir.mkdir()
+        return child, report_dir
+
+    def _read_owned_pids(self, report_dir: Path) -> tuple[int, int]:
+        """Read the reported pids and prove the child owns its process group."""
+        child_line = (report_dir / "child.pid").read_text(encoding="utf-8").split()
+        child_pid, pgid = int(child_line[0]), int(child_line[1])
+        assert pgid == child_pid  # the runner owns one process group for the child
+        descendant_pid = int((report_dir / "descendant.pid").read_text(encoding="utf-8"))
+        return child_pid, descendant_pid
+
+    def test_cancellation_reaps_the_real_tracked_child_and_descendant(self, tmp_path: Path) -> None:
+        """A shutdown after process start reaps the child and stops the descendant."""
+        child, report_dir = self._prepare_controlled_child(tmp_path)
+        shutdown = threading.Event()
+        outcome: list[BaseException | subprocess.CompletedProcess[str]] = []
+
+        def run() -> None:
+            try:
+                outcome.append(
+                    run_subprocess(
+                        [sys.executable, str(child), str(report_dir)],
+                        env={"PATH": os.defpath},
+                        timeout=60,
+                        log_on_error=False,
+                        track_process_group=True,
+                        shutdown=shutdown,
+                    )
+                )
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=run, name="supervised-child-run", daemon=True)
+        child_pid: int | None = None
+        descendant_pid: int | None = None
+        try:
+            worker.start()
+            if not _wait_for_file(report_dir / "child.pid", timeout_s=10):
+                pytest.fail("the controlled child never reported process-group ownership")
+            if not _wait_for_file(report_dir / "ready", timeout_s=10):
+                pytest.fail("the controlled child never reported readiness")
+            child_pid, descendant_pid = self._read_owned_pids(report_dir)
+
+            shutdown.set()  # cancellation through the controlled event boundary
+            worker.join(timeout=15)
+            assert not worker.is_alive()
+
+            assert len(outcome) == 1
+            assert isinstance(outcome[0], InterruptedError)
+            assert _wait_for_death(child_pid, timeout_s=5)
+            assert _wait_for_death(descendant_pid, timeout_s=5)
+        finally:
+            shutdown.set()
+            _terminate_owned(child_pid, descendant_pid)
+            worker.join(timeout=10)
+
+    def test_deadline_reaps_the_real_tracked_child_and_descendant(self, tmp_path: Path) -> None:
+        """A post-start deadline reaps the child and stops the descendant."""
+        child, report_dir = self._prepare_controlled_child(tmp_path)
+        outcome: list[BaseException | subprocess.CompletedProcess[str]] = []
+        checks = 0
+
+        def remaining_timeout() -> int:
+            nonlocal checks
+            checks += 1
+            if checks == 1:
+                return 60  # pre-spawn operation bound
+            # Post-spawn: hold the check until the child reports its descendant,
+            # then expire the operation budget through the controlled callback.
+            if not _wait_for_file(report_dir / "ready", timeout_s=10):
+                raise RuntimeError("the controlled child never reported readiness")
+            raise subprocess.TimeoutExpired("compact operation deadline", 0)
+
+        def run() -> None:
+            try:
+                outcome.append(
+                    run_subprocess(
+                        [sys.executable, str(child), str(report_dir)],
+                        env={"PATH": os.defpath},
+                        timeout=60,
+                        log_on_error=False,
+                        track_process_group=True,
+                        remaining_timeout=remaining_timeout,
+                    )
+                )
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=run, name="supervised-deadline-run", daemon=True)
+        child_pid: int | None = None
+        descendant_pid: int | None = None
+        try:
+            worker.start()
+            worker.join(timeout=20)
+            assert not worker.is_alive()
+
+            assert len(outcome) == 1
+            assert isinstance(outcome[0], subprocess.TimeoutExpired)
+            if not _wait_for_file(report_dir / "ready", timeout_s=1):
+                pytest.fail("the controlled child never reported readiness")
+            child_pid, descendant_pid = self._read_owned_pids(report_dir)
+            assert _wait_for_death(child_pid, timeout_s=5)
+            assert _wait_for_death(descendant_pid, timeout_s=5)
+        finally:
+            _terminate_owned(child_pid, descendant_pid)
+            worker.join(timeout=10)

@@ -2972,6 +2972,98 @@ class TestWorkerPoolSubmitComplete:
         assert result.value is False
         provider.assert_not_called()
 
+    def test_compact_job_shutdown_before_execution_reports_interrupted_before_start(
+        self,
+        pool: WorkerPool,
+        shutdown_event: threading.Event,
+    ) -> None:
+        """A compact job never starts when shutdown precedes execution."""
+        job = CompactJob(
+            repo="test/repo",
+            issue=123,
+            agent="claude",
+            session_agent="pr-reviewer",
+            model="claude-haiku-4-5",
+            cwd=Path("/tmp"),
+            timeout_s=60,
+        )
+        shutdown_event.set()
+        with patch(f"{_WP}.compact_agent_session") as compact:
+            result = pool._run(job)
+
+        assert not result.ok
+        assert result.interrupted
+        assert result.error == "interrupted_before_start"
+        compact.assert_not_called()
+
+    def test_compact_job_shutdown_during_provider_run_is_interrupted(
+        self,
+        pool: WorkerPool,
+        shutdown_event: threading.Event,
+    ) -> None:
+        """Shutdown during compaction flips its best-effort failure to interrupted."""
+        job = CompactJob(
+            repo="test/repo",
+            issue=123,
+            agent="claude",
+            session_agent="pr-reviewer",
+            model="claude-haiku-4-5",
+            cwd=Path("/tmp"),
+            timeout_s=60,
+        )
+
+        def cancel_during_run(**_kwargs: object) -> bool:
+            shutdown_event.set()
+            return False  # ordinary compaction failure after shutdown landed
+
+        with patch(f"{_WP}.compact_agent_session", side_effect=cancel_during_run):
+            result = pool._run(job)
+
+        assert not result.ok
+        assert result.interrupted
+
+    def test_compact_job_remaining_time_callback_enforces_bounds(
+        self,
+        pool: WorkerPool,
+        shutdown_event: threading.Event,
+    ) -> None:
+        """The worker's remaining-time callback bounds or cancels provider work."""
+        clock = [100.0]
+        job = CompactJob(
+            repo="test/repo",
+            issue=123,
+            agent="claude",
+            session_agent="pr-reviewer",
+            model="claude-haiku-4-5",
+            cwd=Path("/tmp"),
+            timeout_s=30,
+        )
+        captured: dict[str, object] = {}
+
+        def capture(**kwargs: object) -> bool:
+            captured.update(kwargs)
+            return False
+
+        with (
+            patch(f"{_WP}.time.monotonic", side_effect=lambda: clock[0]),
+            patch(f"{_WP}.compact_agent_session", side_effect=capture),
+        ):
+            result = pool._run(job)
+
+            assert result.ok
+            assert captured["shutdown"] is shutdown_event
+            remaining_timeout = cast(Callable[[], int], captured["remaining_timeout"])
+            assert 0 < remaining_timeout() <= 30
+
+            clock[0] = 131.0  # the 100 + 30 dispatch budget is spent
+            with pytest.raises(subprocess.TimeoutExpired):
+                remaining_timeout()
+
+            clock[0] = 100.0
+            shutdown_event.set()
+            with pytest.raises(InterruptedError):
+                remaining_timeout()
+
     def test_submit_and_complete_non_claude_agent_job(
         self,
         pool: WorkerPool,
