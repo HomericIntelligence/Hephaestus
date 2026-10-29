@@ -4886,6 +4886,80 @@ class TestTestsAndFix:
 
         assert item.payload["test_receipt"] == "`uv run pytest tests -q --tb=short` — passed"
 
+    def test_green_tests_quote_the_pytest_summary(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A passing run reports what its retained output says ran."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
+        item = make_work_item(issue=1, state="TEST_WAIT")
+
+        stage.step(item, ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=0, stdout_tail="....\n\n1 passed in 0.12s\n"),
+            ctx,
+        )
+
+        assert item.payload["test_receipt"] == (
+            "`uv run pytest tests -q --tb=short` — passed; last pytest summary: 1 passed in 0.12s"
+        )
+
+    def test_green_tests_mark_a_summary_with_no_executed_test(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An all-skip run reports that no test body executed."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
+        item = make_work_item(issue=1, state="TEST_WAIT")
+
+        stage.step(item, ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=0, stdout_tail="ss\n1 skipped in 0.02s\n"),
+            ctx,
+        )
+
+        assert item.payload["test_receipt"] == (
+            "`uv run pytest tests -q --tb=short` — passed; "
+            "last pytest summary: 1 skipped in 0.02s (no test executed)"
+        )
+
+    def test_green_tests_make_no_claim_for_an_unreadable_tail(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A tail with no summary keeps the command-only receipt."""
+        stage = ImplementationStage()
+        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
+        item = make_work_item(issue=1, state="TEST_WAIT")
+
+        stage.step(item, ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=0, stdout_tail="collected 0 items\n"),
+            ctx,
+        )
+
+        assert item.payload["test_receipt"] == "`uv run pytest tests -q --tb=short` — passed"
+
+    def test_container_green_tests_quote_the_pytest_summary(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The container receipt quotes the summary too."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+
+        stage.step(item, ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=0, stdout_tail="7 passed, 1 warning in 4.20s\n"),
+            ctx,
+        )
+
+        assert item.payload["test_receipt"] == (
+            f"`{shlex.join(HEPHAESTUS_REQUIRED_CHECK_ARGV)}` — passed; "
+            "last pytest summary: 7 passed, 1 warning in 4.20s"
+        )
+
     def test_testfix_requests_resume_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """TESTFIX_WAIT submits the composed test-failure resume job."""
         stage = ImplementationStage()

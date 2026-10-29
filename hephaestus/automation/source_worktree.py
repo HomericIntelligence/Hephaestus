@@ -28,6 +28,7 @@ from hephaestus.agents.workspace import (
     WorkspaceBindingError,
     validate_workspace_binding,
 )
+from hephaestus.automation.commit_paths import parse_porcelain_status
 from hephaestus.automation.git_runtime import (
     current_operation_shutdown,
     operation_deadline,
@@ -56,6 +57,17 @@ from hephaestus.utils.directory_mode import (
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
+
+#: Bound on the named uncommitted paths in one recovery action. The action
+#: field accepts 8192 characters, and ten paths stay readable for an operator.
+_DIRTY_SUMMARY_LIMIT = 10
+_DIRTY_PATH_MAX = 160
+#: Terminal causes whose recovery action names the uncommitted work. The
+#: transition-incomplete action must stay byte-identical, because the terminal
+#: reader compares it to the action the transition journal derives.
+_NAMED_WORK_CAUSES = frozenset(
+    {"source_workspace_recovery_receipt_invalid", "source_workspace_legacy_unproven"}
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +213,29 @@ def _terminal_json_digest(value: dict[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _action_token(value: str, *, limit: int | None = None) -> str:
+    """Return one action-safe token for a porcelain status or path.
+
+    A porcelain path can hold a newline or another control character. The
+    ledger writes one line per item, so each control character becomes a
+    space and a long path is truncated.
+
+    Args:
+        value: The status code or repository path.
+        limit: Maximum characters to keep, including the extension mark.
+
+    Returns:
+        The cleaned and bounded token, or ``"?"`` when nothing remains.
+
+    """
+    cleaned = "".join(
+        " " if character < " " or character == "\x7f" else character for character in value
+    )
+    if limit is not None and len(cleaned) > limit:
+        cleaned = f"{cleaned[: limit - 1]}…"
+    return cleaned or "?"
 
 
 def _terminal_json_object(data: bytes) -> dict[str, Any]:
@@ -2286,6 +2321,70 @@ class SourceWorkspaceManager:
     def _terminal_path(self, item_number: int) -> Path:
         return self.state_dir / f"{item_number}-impl-terminal.json"
 
+    def _dirty_work_summary(self, path: Path) -> str:
+        """Name the uncommitted work a preserved lane holds.
+
+        An operator who receives a terminal strand must see the work, not only
+        the lane path. The summary names the first ten changed paths with their
+        porcelain status and the total count, so the operator can decide what
+        to keep.
+
+        Args:
+            path: The lane worktree path.
+
+        Returns:
+            One sentence, or an empty string when the tree is clean or the Git
+            read or parse fails. A failed read makes no claim.
+
+        """
+        if not path.exists():
+            return ""
+        try:
+            result = _git(
+                path,
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning(
+                "source workspace: could not read the uncommitted work in %s: %s",
+                path,
+                type(exc).__name__,
+            )
+            return ""
+        if result.returncode != 0:
+            logger.warning(
+                "source workspace: could not read the uncommitted work in %s: rc=%s",
+                path,
+                result.returncode,
+            )
+            return ""
+        try:
+            entries = parse_porcelain_status(result.stdout)
+        except RuntimeError as exc:
+            logger.warning(
+                "source workspace: could not parse the uncommitted work in %s: %s",
+                path,
+                exc,
+            )
+            return ""
+        if not entries:
+            return ""
+        shown = entries[:_DIRTY_SUMMARY_LIMIT]
+        listed = ", ".join(
+            f"{_action_token(status.replace(' ', ''))} "
+            f"{_action_token(target, limit=_DIRTY_PATH_MAX)}"
+            for status, target in shown
+        )
+        total = len(entries)
+        more = total - len(shown)
+        remainder = f", and {more} more" if more else ""
+        noun = "change" if total == 1 else "changes"
+        return f" It holds {total} uncommitted {noun}: {listed}{remainder}."
+
     def _capture_terminal_failure(
         self, item_number: int, failure: SourceWorkspaceTerminalError
     ) -> SourceWorkspaceTerminalReference:
@@ -2374,6 +2473,8 @@ class SourceWorkspaceManager:
                         )
         except (OSError, ValueError, SourceWorkspaceError, subprocess.SubprocessError):
             pass
+        if payload["cause"] in _NAMED_WORK_CAUSES:
+            payload["action"] = f"{payload['action']}{self._dirty_work_summary(path)}"
         payload["terminal_content_sha256"] = _terminal_json_digest(payload)
         target = self._terminal_path(item_number)
         if (
