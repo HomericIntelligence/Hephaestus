@@ -30,7 +30,10 @@ from hephaestus.automation.pipeline.host_capabilities import (
 )
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import HostCapabilityJob
-from hephaestus.automation.pipeline.rebase_adr_policy import HEPHAESTUS_ADR_REBASE_POLICY
+from hephaestus.automation.pipeline.rebase_adr_policy import (
+    HEPHAESTUS_ADR_REBASE_POLICY,
+    REBASE_STRUCTURAL_TEST_PATH,
+)
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.pipeline.test_worker_git_source_binding import (
@@ -57,6 +60,10 @@ def test_missing_quota_provider_retains_failure_evidence(
         manager = SourceWorkspaceManager(root, repository="example/project")
         lane = SourceLane.REVIEW if phase == "pr_review" else SourceLane.IMPLEMENTATION
         binding = manager.prepare(42, lane, head, branch=None if phase == "pr_review" else "writer")
+        if phase == "rebase":
+            structural_path = binding.cwd / REBASE_STRUCTURAL_TEST_PATH
+            structural_path.parent.mkdir(parents=True, exist_ok=True)
+            structural_path.write_text("# Repository-owned structural test.\n", encoding="utf-8")
         _supply_registered_worktree_listing(root, monkeypatch)
         target = CapabilityRequestTarget(
             "example/project",
