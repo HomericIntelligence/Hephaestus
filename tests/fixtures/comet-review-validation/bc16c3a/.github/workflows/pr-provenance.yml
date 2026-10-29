@@ -1,0 +1,42 @@
+name: PR commit provenance
+
+# Start only when the state:implementation-go label is applied. The label is
+# never removed or modified by CI/CD; a new commit re-runs the check on the
+# new head.
+on:
+  pull_request_target:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-commit-provenance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  commit-provenance:
+    name: commit-provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the implementation label
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          if ! grep -q '"state:implementation-go"' <<<"${LABELS}"; then
+            echo "The state:implementation-go label is not applied." >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check pull request commit provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 scripts/ci/check_pr_commit_provenance.py

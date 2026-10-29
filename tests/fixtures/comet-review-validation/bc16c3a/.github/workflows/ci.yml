@@ -1,0 +1,524 @@
+name: CI
+
+on:
+  push:
+    branches: [main, prod]
+  # A pull request starts CI only when the state:implementation-go label is
+  # applied. The label is never removed or modified by CI/CD. A new commit
+  # (synchronize) re-runs the gated jobs on the new head while the label is
+  # applied. Do not add the opened or reopened types.
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  promotion_policy:
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    name: promotion-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Validate production promotion policy
+        if: github.event_name == 'pull_request' && github.base_ref == 'prod'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: >-
+          uv run --locked --extra dev scripts/validate-pr-policy.sh
+          "$EVENT_NAME" "$HEAD_REF" "$BASE_REF"
+          "$HEAD_REPOSITORY" "$REPOSITORY"
+      - name: Validate production commit provenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PUSH_SHA: ${{ github.sha }}
+        run: python3 scripts/ci/check_pr_commit_provenance.py
+  lint:
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - run: uv run --locked --extra dev ruff format --check . --diff
+      - id: lint_check
+        run: uv run --locked --extra dev ruff check .
+      - if: failure() && steps.lint_check.outcome == 'failure'
+        run: uv run --locked --extra dev ruff check --diff .
+      - run: uv run --locked --extra dev pre-commit run --all-files
+      - name: Check import layers
+        run: python3 scripts/ci/check_import_layers.py
+
+  typecheck:
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - run: uv run --locked --extra dev ty check
+
+  test:
+    name: test (${{ matrix.python-version }}, shard ${{ matrix.shard }})
+    needs: [deployment_policy]
+    if: ${{ always() && needs.deployment_policy.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Require the test scope
+        if: needs.deployment_policy.result != 'success'
+        run: |
+          echo "The test scope is not available." >&2
+          exit 1
+      - name: Verify test source
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${HEAD_SHA}"
+          printf 'source_sha=%s shard=%s shard_count=32\n' "${HEAD_SHA}" '${{ matrix.shard }}'
+      - name: Install Bubblewrap
+        if: needs.deployment_policy.result == 'success'
+        timeout-minutes: 10
+        run: |
+          # Remove the unused Microsoft package source; it can reject runner requests (HTTP 403).
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.*
+          apt_ok=false
+          for attempt in 1 2 3; do
+            if timeout 120 sudo apt-get update && timeout 300 sudo apt-get install --no-install-recommends --yes bubblewrap; then
+              apt_ok=true
+              break
+            fi
+            echo "apt-get attempt ${attempt} of 3 failed or timed out." >&2
+            sleep 5
+          done
+          if [ "${apt_ok}" != true ]; then
+            echo "::error::apt-get failed after 3 attempts." >&2
+            exit 1
+          fi
+      - name: Record the no-op product test decision
+        if: >-
+          needs.deployment_policy.result == 'success' &&
+          fromJSON(needs.deployment_policy.outputs.test_scope).jobs.test.decision == 'unaffected'
+        run: |
+          echo "NO_OP: documentation-only change; the product test profile is not applicable."
+          echo "route=${{ fromJSON(needs.deployment_policy.outputs.test_scope).route }} head=${{ github.event.pull_request.head.sha || github.sha }} shard=${{ matrix.shard }}"
+      - name: Run the ordinary pull-request profile
+        if: >-
+          needs.deployment_policy.result == 'success' &&
+          fromJSON(needs.deployment_policy.outputs.test_scope).jobs.test.decision == 'affected' &&
+          ((github.event_name == 'pull_request' &&
+          !(github.head_ref == 'main' && github.base_ref == 'prod' &&
+          github.event.pull_request.head.repo.full_name == github.repository)) ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        run: >-
+          uv run --locked --extra dev python scripts/ci/run-test-tier.py pr
+          --shard-index ${{ matrix.shard }} --shard-count 32
+          --junitxml test-results.xml
+      - name: Run the promotion profile
+        if: >-
+          (github.event_name == 'pull_request' && github.head_ref == 'main' &&
+          github.base_ref == 'prod' && github.event.pull_request.head.repo.full_name == github.repository) ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/prod')
+        run: >-
+          uv run --locked --extra dev --python ${{ matrix.python-version }}
+          python scripts/ci/run-test-tier.py promotion
+          --shard-index ${{ matrix.shard }} --shard-count 32
+          --junitxml test-results.xml
+      - name: Keep test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: pytest-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: test-results.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+  postgres-integration:
+    name: postgres-integration
+    if: >-
+      (github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/prod'))
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/postgres-tests.yml
+    with:
+      source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
+      promotion_exception: >-
+        ${{ ((github.event_name == 'pull_request' && github.head_ref == 'main' &&
+        github.base_ref == 'prod' && github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/prod')) && 'v0.1.100' || '' }}
+      profile_id: >-
+        ${{ ((github.event_name == 'pull_request' && github.head_ref == 'main' &&
+        github.base_ref == 'prod' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' ||
+        github.ref == 'refs/heads/prod')))
+        && 'full' || 'quick' }}
+
+  postgres:
+    name: postgres
+    needs: postgres-integration
+    if: ${{ always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require the PostgreSQL result
+        if: >-
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/prod'))
+        env:
+          INTEGRATION_RESULT: ${{ needs.postgres-integration.result }}
+        run: test "${INTEGRATION_RESULT}" = success
+      - name: Record scheduled PostgreSQL coverage
+        if: >-
+          !(github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/prod')))
+        run: echo "PostgreSQL tests run for pull requests and main or prod pushes."
+
+  recycling-coverage:
+    name: recycling-coverage
+    needs: deployment_policy
+    # The coverage check takes about 30 minutes, so it does not gate a pull
+    # request. The job always exists so that the required-check summary can
+    # wait for it. On pull requests the job records an explicit no-op success.
+    # The coverage analysis runs for a push to main or prod and in the nightly
+    # workflow.
+    if: ${{ always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify recycling source
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "${HEAD_SHA}"
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Require the deployment policy result
+        if: needs.deployment_policy.result != 'success'
+        run: |
+          echo "The deployment policy result is not available." >&2
+          exit 1
+      - name: Record the pull-request no-op recycling coverage decision
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "NO_OP: recycling coverage does not gate a pull request."
+      - name: Record the no-op recycling coverage decision
+        if: >-
+          github.event_name != 'pull_request' &&
+          needs.deployment_policy.result == 'success' &&
+          fromJSON(needs.deployment_policy.outputs.test_scope).jobs['recycling-coverage'].decision == 'unaffected'
+        run: |
+          echo "NO_OP: documentation-only change; recycling coverage is not applicable."
+      - name: Require 85% line coverage for rolling recycling
+        if: >-
+          github.event_name != 'pull_request' &&
+          needs.deployment_policy.result == 'success' &&
+          fromJSON(needs.deployment_policy.outputs.test_scope).jobs['recycling-coverage'].decision == 'affected'
+        run: >-
+          uv run --locked --extra dev pytest
+          tests/test_recycling.py tests/test_gateway_client.py
+          --cov=comet.recycling --cov=comet.supervisor
+          --cov-report=term-missing --cov-report=json:recycling-coverage.json
+      - name: Check recycling implementation coverage
+        if: >-
+          github.event_name != 'pull_request' &&
+          needs.deployment_policy.result == 'success' &&
+          fromJSON(needs.deployment_policy.outputs.test_scope).jobs['recycling-coverage'].decision == 'affected'
+        run: >-
+          uv run --locked python scripts/check-recycling-coverage.py
+          recycling-coverage.json --fail-under 85
+
+  deployment_policy:
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    name: deployment-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      artifact_matrix: ${{ steps.classify.outputs.artifact_matrix || steps.defaults.outputs.artifact_matrix }}
+      test_scope: ${{ steps.classify.outputs.test_scope || steps.defaults.outputs.test_scope }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - id: defaults
+        name: Initialize safe downstream selections
+        run: |
+          echo 'artifact_matrix={"include":[{"id":"noop","check_name":"artifact-noop","engine":"none","kind":"noop"}]}' >> "${GITHUB_OUTPUT}"
+          echo 'test_scope={"route":"ordinary","rules":["ordinary-profile-v1"],"jobs":{"test":{"decision":"affected","reason":"The selection is not available: run the complete profile."},"recycling-coverage":{"decision":"affected","reason":"The selection is not available: run the complete profile."}}}' >> "${GITHUB_OUTPUT}"
+      - name: Collect immutable changed-path records
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CHANGES0: ${{ runner.temp }}/deployed-input-changes0
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            git diff --name-status --no-renames -z \
+              "${BASE_SHA}...${HEAD_SHA}" > "${CHANGES0}"
+          elif [[ -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            git diff-tree --no-commit-id --name-status --no-renames \
+              -r -z "${BEFORE_SHA}" "${HEAD_SHA}" > "${CHANGES0}"
+          else
+            git ls-files -z \
+              | while IFS= read -r -d '' changed_path; do
+                  printf 'M\0%s\0' "${changed_path}"
+                done > "${CHANGES0}"
+          fi
+      - id: classify
+        name: Validate inventory and classify inputs
+        env:
+          CHANGES0: ${{ runner.temp }}/deployed-input-changes0
+          SELECTION: ${{ ((github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'prod' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'push' && github.ref == 'refs/heads/prod')) && 'all' || 'changed' }}
+        run: >-
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py classify
+          --changes0 "${CHANGES0}"
+          --selection "${SELECTION}"
+          --github-output "${GITHUB_OUTPUT}"
+
+  secrets:
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/secrets.yml
+
+  docs:
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docs-check.yml
+    with:
+      run_strict_build: true
+      upload_site: false
+
+  artifacts:
+    needs: deployment_policy
+    if: needs.deployment_policy.result == 'success'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-image.yml
+    with:
+      matrix: ${{ needs.deployment_policy.outputs.artifact_matrix }}
+
+  # Keep the legacy required context until branch rules use only the aggregate.
+  build:
+    name: build
+    needs: artifacts
+    if: ${{ always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Report artifact gate result
+        env:
+          UPSTREAM_RESULT: ${{ needs.artifacts.result }}
+        run: |
+          if [ "${UPSTREAM_RESULT}" != "success" ]; then
+            echo "Artifact gate result is ${UPSTREAM_RESULT}." >&2
+            exit 1
+          fi
+          echo "Artifact gate passed."
+
+  # This compatibility context does not deploy from a pull request.
+  deploy:
+    name: deploy
+    needs: docs
+    if: ${{ always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Report documentation gate result
+        env:
+          UPSTREAM_RESULT: ${{ needs.docs.result }}
+        run: |
+          if [ "${UPSTREAM_RESULT}" != "success" ]; then
+            echo "Documentation gate result is ${UPSTREAM_RESULT}." >&2
+            exit 1
+          fi
+          echo "Documentation gate passed."
+
+  # Umbrella aggregator. Branch protection requires THIS single stable check
+  # name, so the matrix and individual jobs above can be reshaped freely
+  # without ever editing the protection rules. See docs/process/lifecycle.md.
+  lint-typecheck-test:
+    name: lint-typecheck-test
+    if: ${{ always() }}
+    needs:
+      - promotion_policy
+      - lint
+      - typecheck
+      - test
+      - postgres
+      - recycling-coverage
+      - deployment_policy
+      - secrets
+      - docs
+      - artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    steps:
+      # Fail before checkout so that no pull-request code runs without the label.
+      - name: Require the implementation label
+        if: github.event_name == 'pull_request'
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          if ! grep -q '"state:implementation-go"' <<<"${LABELS}"; then
+            echo "The state:implementation-go label is not applied." >&2
+            exit 1
+          fi
+      - if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go'))
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go'))
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Require all upstream jobs to have succeeded
+        if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go'))
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: >-
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py aggregate
+          --needs-json "${NEEDS_JSON}"
+          --required-job promotion_policy
+          --required-job lint
+          --required-job typecheck
+          --required-job test
+          --required-job postgres
+          --required-job recycling-coverage
+          --required-job deployment_policy
+          --required-job secrets
+          --required-job docs
+          --required-job artifacts
+      - name: Write the bounded jobs listing
+        if: always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go'))
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "RUN_JOBS=${RUNNER_TEMP}/run-jobs.json" >> "${GITHUB_ENV}"
+          # GitHub can report a completed job as unfinished for a short time
+          # while the run settles after a completion burst. Re-read the run
+          # jobs until the bounded listing settles, so the summary never fails
+          # on that transient read. A failed read also extends the bounded
+          # wait, and the step keeps the last complete read instead of a
+          # truncated file: the read first lands in a sibling and moves over
+          # the listing only after it succeeds. The wait is bounded: on its
+          # end the summary still validates the last complete read fail-closed.
+          deadline=$(( $(date +%s) + 300 ))
+          while true; do
+            if gh api --method GET "repos/${REPOSITORY}/actions/runs/${RUN_ID}/jobs" \
+              -f per_page=100 -f page=1 \
+              --jq '[.jobs[] | select(.name as $entry | (["promotion-policy", "lint", "typecheck", "postgres-integration", "postgres", "recycling-coverage", "deployment-policy", "secrets", "docs", "artifacts"] | index($entry) != null) or ($entry | startswith("test (")) or ($entry | startswith("secrets / ")) or ($entry | startswith("docs / ")) or ($entry | startswith("artifacts / "))) | {name, status, conclusion, started_at, completed_at}]' \
+              > "${RUNNER_TEMP}/run-jobs.candidate.json"; then
+              mv -f "${RUNNER_TEMP}/run-jobs.candidate.json" "${RUNNER_TEMP}/run-jobs.json"
+              status=0
+              uv run --locked --extra dev python scripts/check_deployed_inputs.py listing-settled \
+                --jobs-json "${RUNNER_TEMP}/run-jobs.json" || status=$?
+            else
+              echo "The jobs listing read failed; the step reads again." >&2
+              status=1
+            fi
+            if [[ ${status} -eq 0 ]]; then
+              break
+            fi
+            if [[ ${status} -ne 1 ]]; then
+              exit "${status}"
+            fi
+            if (( $(date +%s) >= deadline )); then
+              echo "The bounded jobs listing did not settle within five minutes." >&2
+              break
+            fi
+            sleep 10
+          done
+      - name: Publish the required-check summary
+        if: always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go'))
+        shell: bash
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          SCOPE_JSON: ${{ toJSON(needs.deployment_policy.outputs) }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          uv run --locked --extra dev python scripts/check_deployed_inputs.py report-summary
+          --needs-json "${NEEDS_JSON}"
+          --scope-json "${SCOPE_JSON}"
+          --jobs-json "${RUN_JOBS}"
+          --summary-out "${RUNNER_TEMP}/check-summary.json"
+          --step-summary-out "${GITHUB_STEP_SUMMARY}"
+          --head-sha "${HEAD_SHA}"
+          --required-job promotion_policy
+          --required-job lint
+          --required-job typecheck
+          --required-job test
+          --required-job postgres
+          --required-job recycling-coverage
+          --required-job deployment_policy
+          --required-job secrets
+          --required-job docs
+          --required-job artifacts
+      - name: Keep the required-check summary
+        if: always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go'))
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: check-summary-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/check-summary.json
+          if-no-files-found: error
+          retention-days: 30

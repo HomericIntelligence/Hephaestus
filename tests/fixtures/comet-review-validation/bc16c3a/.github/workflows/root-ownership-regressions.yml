@@ -1,0 +1,201 @@
+name: root-ownership-regressions
+
+on:
+  # Start only when the state:implementation-go label is applied. The label is
+  # never removed or modified by CI/CD; a new commit re-runs the gated jobs.
+  pull_request:
+    types: [labeled, synchronize]
+    paths:
+      - .github/workflows/root-ownership-regressions.yml
+      - scripts/ci/root-ownership-nodes.json
+      - src/comet/root_retirement.py
+      - tests/test_operator_retirement.py
+      - tests/test_root_retirement.py
+      - tests/test_service_paths.py
+      - scripts/ci/root_ownership_regressions.py
+      - scripts/configure-test-postgres-tls.sh
+      - src/comet/bootstrap_loader.py
+      - src/comet/bootstrap_verifier.py
+      - src/comet/capacity.py
+      - src/comet/context_transition.py
+      - src/comet/control_release_publisher.py
+      - src/comet/deployment_context.py
+      - src/comet/gateway_front.py
+      - src/comet/operational_context.py
+      - src/comet/public_context.py
+      - src/comet/release/bootstrap.py
+      - src/comet/release_bootstrap_correlation.py
+      - src/comet/release_bootstrap_staging.py
+      - src/comet/release_qualification_evidence.py
+      - src/comet/render.py
+      - src/comet/root_locator.py
+      - src/comet/root_operations.py
+      - src/comet/root_operator_service.py
+      - src/comet/root_publication.py
+      - src/comet/service_paths.py
+      - src/comet/slurm.py
+      - tests/conftest.py
+      - tests/deployment_context_helpers.py
+      - tests/postgres/conftest.py
+      - tests/postgres/test_release_state.py
+      - tests/test_bootstrap_verifier.py
+      - tests/test_capacity.py
+      - tests/test_cli.py
+      - tests/test_context_transition.py
+      - tests/test_control_release_publisher.py
+      - tests/test_deployment_context_coexistence.py
+      - tests/test_gateway_front.py
+      - tests/test_operational_context.py
+      - tests/test_public_context.py
+      - tests/test_release_bootstrap.py
+      - tests/test_release_contracts.py
+      - tests/test_release_qualification_evidence_binding.py
+      - tests/test_release_qualification_evidence_files.py
+      - tests/test_render.py
+      - tests/test_root_locator.py
+      - tests/test_slurm.py
+      - tests/test_supervisor.py
+      - tests/test_sdk.py
+      - tests/test_runtime_records.py
+      - tests/test_pool.py
+      - tests/test_inventory_audit.py
+
+permissions:
+  contents: read
+
+jobs:
+  root:
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check source identity
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: false
+      - name: Run fixed cases with a different GID
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          EVIDENCE: ${{ runner.temp }}/root-ownership-root
+        run: |
+          set -euo pipefail
+          uid=$(id -u)
+          gid=$(id -g)
+          test "${uid}" -ne 0
+          sudo groupadd --system comet-ownership-test
+          alternate_gid=$(getent group comet-ownership-test | cut -d: -f3)
+          test "${alternate_gid}" -ne "${gid}"
+          groups=$(id -G | tr ' ' ',')
+          uv_path=$(command -v uv)
+          mkdir -m 700 "${EVIDENCE}"
+          preserve=PATH,HOME,UV_CACHE_DIR,UV_PYTHON_INSTALL_DIR
+          preserve+=,COMET_POSTGRES_IMAGE,COMET_POSTGRES_USER,COMET_POSTGRES_DB
+          preserve+=,COMET_POSTGRES_PASSWORD,COMET_TEST_POSTGRES_HOST
+          preserve+=,COMET_TEST_POSTGRES_PORT,COMET_TEST_POSTGRES_CONTAINER
+          preserve+=,COMET_DB_CA_FILE,COMET_TEST_KEEP_DATABASES
+          sudo --preserve-env="${preserve}" /usr/bin/setpriv \
+            --reuid "${uid}" --regid "${gid}" --groups "${groups},${alternate_gid}" \
+            "${uv_path}" run --locked --extra dev python \
+            scripts/ci/root_ownership_regressions.py root \
+            "${SOURCE_SHA}" "${WORKFLOW_SHA}" "${EVIDENCE}" \
+            "${uid}" "${gid}" "${alternate_gid}" 2>&1 | tee "${EVIDENCE}/output.log"
+      - name: Keep selection and results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: root-ownership-root
+          path: ${{ runner.temp }}/root-ownership-root
+          if-no-files-found: error
+          retention-days: 7
+  postgres:
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'state:implementation-go')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: comet-postgres-test
+        ports: [5432]
+        options: >-
+          --health-cmd "pg_isready --username postgres --dbname postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      COMET_POSTGRES_IMAGE: postgres:17.11-alpine3.24@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
+      COMET_POSTGRES_USER: postgres
+      COMET_POSTGRES_DB: postgres
+      COMET_POSTGRES_PASSWORD: comet-postgres-test
+      COMET_TEST_POSTGRES_HOST: localhost
+      COMET_TEST_KEEP_DATABASES: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check source identity
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: false
+      - name: Configure encrypted PostgreSQL
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          POSTGRES_CA_FILE: ${{ runner.temp }}/comet-postgres-ca.pem
+        run: |
+          set -euo pipefail
+          scripts/configure-test-postgres-tls.sh "${POSTGRES_CONTAINER}" "${POSTGRES_CA_FILE}"
+          postgres_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "${POSTGRES_CONTAINER}")
+          echo "COMET_TEST_POSTGRES_CONTAINER=${POSTGRES_CONTAINER}" >> "${GITHUB_ENV}"
+          echo "COMET_DB_CA_FILE=${POSTGRES_CA_FILE}" >> "${GITHUB_ENV}"
+          echo "COMET_TEST_POSTGRES_PORT=${postgres_port}" >> "${GITHUB_ENV}"
+      - name: Run fixed cases with a different GID
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          EVIDENCE: ${{ runner.temp }}/root-ownership-postgres
+        run: |
+          set -euo pipefail
+          uid=$(id -u)
+          gid=$(id -g)
+          test "${uid}" -ne 0
+          sudo groupadd --system comet-ownership-test
+          alternate_gid=$(getent group comet-ownership-test | cut -d: -f3)
+          test "${alternate_gid}" -ne "${gid}"
+          groups=$(id -G | tr ' ' ',')
+          uv_path=$(command -v uv)
+          mkdir -m 700 "${EVIDENCE}"
+          preserve=PATH,HOME,UV_CACHE_DIR,UV_PYTHON_INSTALL_DIR
+          preserve+=,COMET_POSTGRES_IMAGE,COMET_POSTGRES_USER,COMET_POSTGRES_DB
+          preserve+=,COMET_POSTGRES_PASSWORD,COMET_TEST_POSTGRES_HOST
+          preserve+=,COMET_TEST_POSTGRES_PORT,COMET_TEST_POSTGRES_CONTAINER
+          preserve+=,COMET_DB_CA_FILE,COMET_TEST_KEEP_DATABASES
+          sudo --preserve-env="${preserve}" /usr/bin/setpriv \
+            --reuid "${uid}" --regid "${gid}" --groups "${groups},${alternate_gid}" \
+            "${uv_path}" run --locked --extra dev python \
+            scripts/ci/root_ownership_regressions.py postgres \
+            "${SOURCE_SHA}" "${WORKFLOW_SHA}" "${EVIDENCE}" \
+            "${uid}" "${gid}" "${alternate_gid}" 2>&1 | tee "${EVIDENCE}/output.log"
+      - name: Keep selection and results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: root-ownership-postgres
+          path: ${{ runner.temp }}/root-ownership-postgres
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,170 @@
+{
+  "schema": "comet-control-closure-inspection-v1",
+  "repository": "LLM360/comet",
+  "commit": "bc16c3ae6562799a229c54c82344e2fceb64ab9b",
+  "tree": "c0d0828f52ad61992a53769e6093c22386ad07da",
+  "status": "source-map-complete-with-explicit-payload-boundary; not runtime-admission-proof",
+  "entries": [
+    {
+      "path": ".gitattributes",
+      "mode": "100644",
+      "git_blob_sha": "14de280cbdda23a47fe71d6dfa749367bab1a942",
+      "sha256": "5a131fa6e6c16945dd1eb1dbc15327f37d2d88e2a5a2ccc179fa98877e98ef53",
+      "size": 115
+    },
+    {
+      "path": ".github/workflows/bootstrap-correlation.yml",
+      "mode": "100644",
+      "git_blob_sha": "1e2037df9b930663ae7134f7ddca68ea87a71a3b",
+      "sha256": "51f75d512f1173a4ef47995f7b53c03a5141b6cd438ea0f6fb13659fc4083939",
+      "size": 1513
+    },
+    {
+      "path": ".github/workflows/build-image.yml",
+      "mode": "100644",
+      "git_blob_sha": "ab43732888c5f29c186ad9ed1d0268d9f1732afc",
+      "sha256": "fa6130b18190ab666f82fd3811ac29bf0bc2f7142b40d7582af2a77cb0135e4e",
+      "size": 1711
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "git_blob_sha": "0adeccf9b510b71fd5a8de081fb659b5acd37937",
+      "sha256": "738f682246139354399baedaf6defe804cf5b8990e595138d892544f89fffd91",
+      "size": 24355
+    },
+    {
+      "path": ".github/workflows/docs-check.yml",
+      "mode": "100644",
+      "git_blob_sha": "174e98491e12b63b39db8ad929ecacf4f74d3186",
+      "sha256": "143a2a71ca24a5cf4750d3da476febbf0fc80f2410ec7dc375d9d4a8fb7eac0e",
+      "size": 1518
+    },
+    {
+      "path": ".github/workflows/docs.yml",
+      "mode": "100644",
+      "git_blob_sha": "e7ee9936d832aff7df62b966b6e8b1c7f5b7dea1",
+      "sha256": "dae11a449af4daf75d0d0e9e4870318cd8ac1e5ff0f6282af5d4ddfe17c400d9",
+      "size": 10703
+    },
+    {
+      "path": ".github/workflows/hosted-scope-qualification.yml",
+      "mode": "100644",
+      "git_blob_sha": "924651c8d2b0c8565917654cd02f779d590b5b6a",
+      "sha256": "7f12756f46a55ddb76eb002500b2b1097efe898123cd252daeb09cb4f42013a5",
+      "size": 29817
+    },
+    {
+      "path": ".github/workflows/nightly.yml",
+      "mode": "100644",
+      "git_blob_sha": "7aa12f7ef35bd2cba1b4bc0d3a3924953d469995",
+      "sha256": "bbe593171b70515680a995d6e0f296a8d7415476e9029d3edccc69aeb12203c4",
+      "size": 3629
+    },
+    {
+      "path": ".github/workflows/postgres-rootless-validation.yml",
+      "mode": "100644",
+      "git_blob_sha": "4fcccb619bd3f89d5be84b0896900927b5c1ae2b",
+      "sha256": "a95f596ff498cd76fff003da5110e525febfa808c4cbf2941f166f930e043d73",
+      "size": 3339
+    },
+    {
+      "path": ".github/workflows/postgres-tests.yml",
+      "mode": "100644",
+      "git_blob_sha": "80ff91c02e6f8684048e2cfba33b2baae2b76c29",
+      "sha256": "4e461b1f2aa2bb3835c5ae9dc5d9fc44e624c5356c137ed746699cf42ae77e97",
+      "size": 52669
+    },
+    {
+      "path": ".github/workflows/pr-provenance.yml",
+      "mode": "100644",
+      "git_blob_sha": "69cd43ffff88929c407db0796d313a5456f21c4c",
+      "sha256": "4fd399cdd549eda0e8722fabddd843a074092577e438f5e771a2cca489f04515",
+      "size": 1328
+    },
+    {
+      "path": ".github/workflows/release-conformance.yml",
+      "mode": "100644",
+      "git_blob_sha": "06c86229946f6231440cd44baf661074a83424df",
+      "sha256": "70fd752d34eead39a1bd214dd1ca5c2af3a9182ba8bdb180aebab5f7ad93ead4",
+      "size": 21528
+    },
+    {
+      "path": ".github/workflows/release-focused-validation.yml",
+      "mode": "100644",
+      "git_blob_sha": "d4d90938106fd602376ac5c883bf4e7e9c82c292",
+      "sha256": "126c530d9e6ec0b8a377c2833a9af9f56ad1b1e5a8f209d38287685163a62c28",
+      "size": 24108
+    },
+    {
+      "path": ".github/workflows/release-live-validation.yml",
+      "mode": "100644",
+      "git_blob_sha": "e04fb7af611a96f4a799a45bebf29fc992edf3c5",
+      "sha256": "eed5ce30ac7b8ee096d697dc935a4a92d726d5595da7903c86776b212d2db906",
+      "size": 21982
+    },
+    {
+      "path": ".github/workflows/root-ownership-regressions.yml",
+      "mode": "100644",
+      "git_blob_sha": "0ddcabf3c73d3b4118a026b95a49d3ce03390a91",
+      "sha256": "67c098a60037cac4fa0ce7f63920e0812b85d73233dc2925d68b1f7370db04da",
+      "size": 8811
+    },
+    {
+      "path": ".github/workflows/secrets.yml",
+      "mode": "100644",
+      "git_blob_sha": "d531dbcd70479226853d5622254f1030b27409c8",
+      "sha256": "a7316fa5457d822a07502cebc607295b862e8f608a9329b9d8cb06cda52b14bc",
+      "size": 626
+    },
+    {
+      "path": ".github/workflows/test-profile.yml",
+      "mode": "100644",
+      "git_blob_sha": "a5251fc4d18d244c77bd695cd5fc732bc04f4cf7",
+      "sha256": "9a8bf17fa3854808dd0099c8057c77cd38003ca7cae0cd4abe549f4afc07cd32",
+      "size": 196138
+    },
+    {
+      "path": "pyproject.toml",
+      "mode": "100644",
+      "git_blob_sha": "a3396777a737e7e46bac94a9011575fc7878c766",
+      "sha256": "8bf43c013cf5b8dc470a12401611013b5afad33fe5b3f0de3bc1e6aad50c01b3",
+      "size": 6246
+    },
+    {
+      "path": "tests/promotion_quarantine.py",
+      "mode": "100644",
+      "git_blob_sha": "7415682a24cf0bee0996e04ff5e0e4d65d07575b",
+      "sha256": "0125698ecdd2cfe30a8ed96ab894d1a407b9f59fbf92f5ac427770c6f56869fe",
+      "size": 1907
+    },
+    {
+      "path": "tests/release_effect_guard.py",
+      "mode": "100644",
+      "git_blob_sha": "78b6e5dce75b787ac86c855fa326d04e36856605",
+      "sha256": "d55dcd37e09092c4822d58b719792a54b26ba5a34e2ca14b694e60277ac0bc1d",
+      "size": 3494
+    },
+    {
+      "path": "tests/test-durations.json",
+      "mode": "100644",
+      "git_blob_sha": "92712621b4aa2e5c2d8055c519b0b4a9d0a950d7",
+      "sha256": "3ca65ad1a1e8532be0017da13c73315103b4036d7e15dd1544a7e9d1b2e3a91c",
+      "size": 86210
+    },
+    {
+      "path": "tests/test-tiers.yaml",
+      "mode": "100644",
+      "git_blob_sha": "e78714777fdd8714b73c50a341373ecc135d26e2",
+      "sha256": "85fb7e4068cabcbd2361b435fecde1c60f74c018ab4c2d74c2d9e21e2511bd3c",
+      "size": 12973
+    },
+    {
+      "path": "uv.lock",
+      "mode": "100644",
+      "git_blob_sha": "f64218fbfff47e1918223aead42b2ac98436fd8d",
+      "sha256": "d834026644d17fa1fd50d1e68018d8027a936bfacddcb4833b6bb85f3ca94e5d",
+      "size": 184600
+    }
+  ]
+}

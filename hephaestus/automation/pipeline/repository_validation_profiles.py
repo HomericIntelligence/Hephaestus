@@ -1,7 +1,9 @@
 """Resolve installed repository-validation profiles by entry point.
 
-Hephaestus owns the repository-validation mechanism. It ships no profile. An
-installed distribution supplies one factory per repository in the
+Hephaestus owns the repository-validation mechanism. The mechanism ships no
+profile; this distribution installs exactly one opt-in Comet sweep profile
+(``hephaestus.automation.comet_profile_post2267``). An installed distribution
+supplies one factory per repository in the
 ``hephaestus.repository_validation_profiles`` entry-point group. The factory
 returns a :class:`RepositoryValidationProfile`. That object binds the reviewed
 control inventory, the fixed command selection, and the provider CI

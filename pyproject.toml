@@ -178,6 +178,12 @@ hephaestus-check-api-reference = "hephaestus.validation.api_reference:main"
 hephaestus-check-unlinked-todo = "hephaestus.validation.unlinked_todo:main"
 hephaestus-check-environment-variables = "hephaestus.validation.environment_variables:main"
 
+# One opt-in repository-validation profile factory per repository. The
+# pipeline discovers factories through this group; see
+# hephaestus/automation/pipeline/repository_validation_profiles.py.
+[project.entry-points."hephaestus.repository_validation_profiles"]
+comet-post2267 = "hephaestus.automation.comet_profile_post2267:comet_post2267_profile"
+
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/Hephaestus"
 Repository = "https://github.com/HomericIntelligence/Hephaestus"
@@ -211,6 +217,11 @@ only-include = [
 line-length = 100
 target-version = "py313"
 exclude = ["hephaestus/_version.py"]
+# Keep exact upstream bytes in source-admission fixtures.
+force-exclude = true
+extend-exclude = [
+    "tests/fixtures/comet-review-validation/bc16c3a",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "D", "UP", "S101", "S102", "S105", "S106", "B", "SIM", "C4", "C901", "ANN204", "RUF"]
@@ -261,6 +272,8 @@ markers = [
 ]
 
 [tool.mypy]
+# Source fixtures execute in their own Comet environment.
+exclude = ["^tests/fixtures/comet-review-validation/"]
 python_version = "3.13"
 warn_unused_configs = true
 ignore_missing_imports = true

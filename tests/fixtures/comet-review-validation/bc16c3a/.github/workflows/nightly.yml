@@ -1,0 +1,100 @@
+name: nightly-tests
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-tests
+  cancel-in-progress: true
+
+jobs:
+  nightly:
+    name: nightly-tests (shard ${{ matrix.shard }})
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record the tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "${actual_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::The checked-out commit does not match the workflow commit." >&2
+            exit 1
+          fi
+          printf 'commit_sha=%s\nshard_index=%s\nshard_count=32\n' "${actual_sha}" '${{ matrix.shard }}' > nightly-source.txt
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Run the nightly test profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --locked --extra dev python scripts/ci/run-test-tier.py nightly \
+            --shard-index '${{ matrix.shard }}' --shard-count 32 \
+            -- --junitxml=nightly-junit.xml | tee nightly-duration.txt
+      - name: Upload nightly test evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-test-evidence-${{ github.sha }}-${{ matrix.shard }}
+          path: |
+            nightly-junit.xml
+            nightly-duration.txt
+            nightly-source.txt
+          if-no-files-found: warn
+
+  postgres:
+    needs: nightly
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/postgres-tests.yml
+
+  recycling-coverage:
+    name: recycling-coverage
+    # This check takes about 30 minutes. It does not gate a pull request, so it
+    # runs in the nightly workflow and for a push to main or prod.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify the checked-out commit
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Require 85% line coverage for rolling recycling
+        run: >-
+          uv run --locked --extra dev pytest
+          tests/test_recycling.py tests/test_gateway_client.py
+          --cov=comet.recycling --cov=comet.supervisor
+          --cov-report=term-missing --cov-report=json:recycling-coverage.json
+      - name: Check recycling implementation coverage
+        run: >-
+          uv run --locked python scripts/check-recycling-coverage.py
+          recycling-coverage.json --fail-under 85
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: recycling-coverage-${{ github.run_id }}
+          path: recycling-coverage.json
+          if-no-files-found: warn
