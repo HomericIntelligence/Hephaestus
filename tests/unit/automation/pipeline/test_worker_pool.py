@@ -915,11 +915,12 @@ def _prepare_rebase_execution_fixture(pool: WorkerPool, job: GitJob) -> tuple[Mo
         CapabilityReceiptTarget,
         HostCapabilityReceipt,
     )
+    from hephaestus.automation.pipeline.rebase_adr_policy import REBASE_STRUCTURAL_TEST_PATH
 
     binding = job.workspace
     assert binding is not None
     assert job.capability_target is not None
-    test_path = binding.cwd / "tests/unit/docs/test_adr_records.py"
+    test_path = binding.cwd / REBASE_STRUCTURAL_TEST_PATH
     test_path.parent.mkdir(parents=True, exist_ok=True)
     if not test_path.exists():
         test_path.write_text("# Repository-owned structural test.\n")
@@ -971,13 +972,16 @@ def _retained_continuation_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, scenario: str = "valid"
 ) -> Iterator[Any]:
     """Prepare policy inputs before a real conflict and retain its original intent."""
-    from hephaestus.automation.pipeline.rebase_adr_policy import select_rebase_policy
+    from hephaestus.automation.pipeline.rebase_adr_policy import (
+        REBASE_STRUCTURAL_TEST_PATH,
+        select_rebase_policy,
+    )
     from tests.unit.automation import test_rebase_recovery as recovery
     from tests.unit.automation.test_source_worktree import _repository
 
     def prepared_repository(*args: Any, **kwargs: Any) -> Any:
         root, first, _base = _repository(*args, **kwargs)
-        files = {"tests/unit/docs/test_adr_records.py": "# Structural fixture.\n"}
+        files = {REBASE_STRUCTURAL_TEST_PATH: "# Structural fixture.\n"}
         if scenario == "semantic":
             files.update(
                 {
@@ -13483,7 +13487,9 @@ class TestGitOps:
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
         """A failing repository test returns its bounded output without publishing."""
-        test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
+        from hephaestus.automation.pipeline.rebase_adr_policy import REBASE_STRUCTURAL_TEST_PATH
+
+        test_path = tmp_path / REBASE_STRUCTURAL_TEST_PATH
         test_path.parent.mkdir(parents=True)
         test_path.write_text("# repository-owned structural test\n")
         failed = JobResult(
@@ -13518,7 +13524,9 @@ class TestGitOps:
         self, pool: WorkerPool, tmp_path: Path, selected_policy: bool
     ) -> None:
         """Keep successful execution evidence distinct from an absent policy."""
-        test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
+        from hephaestus.automation.pipeline.rebase_adr_policy import REBASE_STRUCTURAL_TEST_PATH
+
+        test_path = tmp_path / REBASE_STRUCTURAL_TEST_PATH
         test_path.parent.mkdir(parents=True)
         test_path.write_text("# Repository-owned structural test.\n")
         resulting_head = "d" * 40
@@ -13552,6 +13560,46 @@ class TestGitOps:
         assert policy is not None
         assert execution_job.argv == policy.structural_test_argv
         assert result == executed
+
+    def test_rebase_structural_receipts_skip_a_test_the_tree_lacks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A stale policy path warns and leaves the semantic gate in charge."""
+        from hephaestus.automation.pipeline.rebase_adr_policy import (
+            HEPHAESTUS_ADR_REBASE_POLICY_NAME,
+            validate_rebased_adr_tree,
+        )
+        from hephaestus.automation.pipeline.rebase_policy import RebaseValidationPolicy
+        from tests.unit.automation.pipeline.test_rebase_policy import real_policy_case
+
+        with real_policy_case(tmp_path, monkeypatch, publish=False) as case:
+            policy = RebaseValidationPolicy(
+                HEPHAESTUS_ADR_REBASE_POLICY_NAME,
+                validate_rebased_adr_tree,
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    "tests/unit/docs/test_adr_records.py",
+                    "-q",
+                ),
+            )
+            monkeypatch.setattr(case.pool, "_rebase_policy_selector", lambda repo: policy)
+
+            with caplog.at_level(logging.WARNING):
+                result = case.pool._rebase_structural_receipts(
+                    case.job, case.binding, case.binding.revision
+                )
+
+        assert result is None
+        assert "tests/unit/docs/test_adr_records.py" in caplog.text
+        assert "Restore the test or update the policy" in caplog.text
+        case.backend.preflight.assert_not_called()
 
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path

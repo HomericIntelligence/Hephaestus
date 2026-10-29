@@ -26,7 +26,10 @@ ADR_REQUIRED_SECTIONS = (
     "## Alternatives considered",
     "## Consequences",
 )
-REBASE_STRUCTURAL_TEST_PATH = "tests/unit/docs/test_adr_records.py"
+# The rebase gate runs this module in the rebased tree. It holds the contract
+# test for the ADR policy. The retired record test repeated the semantic
+# validator, and the repository test policy excludes documentation tests.
+REBASE_STRUCTURAL_TEST_PATH = "tests/unit/automation/pipeline/test_rebase_adr_policy.py"
 REBASE_STRUCTURAL_TEST_ARGV = (
     "uv",
     "run",

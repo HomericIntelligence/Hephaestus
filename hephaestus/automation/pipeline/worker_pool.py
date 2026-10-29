@@ -9415,10 +9415,7 @@ class WorkerPool:
                 policy,
                 "structural validation",
             )
-        relative_test = next(
-            (part for part in argv if part.endswith(".py")),
-            None,
-        )
+        relative_test = self._structural_test_path(argv)
         if relative_test is None:
             return self._annotate_rebase_policy_failure(
                 JobResult(
@@ -9466,6 +9463,40 @@ class WorkerPool:
             return result
         return self._annotate_rebase_policy_failure(result, policy, "structural validation")
 
+    @staticmethod
+    def _structural_test_path(argv: tuple[str, ...]) -> str | None:
+        """Return the repository test path that a structural command names."""
+        return next((part for part in argv if part.endswith(".py")), None)
+
+    def _rebase_structural_evidence_policy(
+        self, repo: str, workspace: WorkspaceBinding
+    ) -> RebaseValidationPolicy | None:
+        """Return the policy that requires execution evidence for one tree.
+
+        A policy whose declared structural test the tree does not provide
+        requires no execution evidence. The semantic validator stays the gate,
+        and the host logs the recovery step. One stale policy path must not
+        stop every rebase.
+        """
+        policy = self._select_rebase_policy(repo)
+        if policy is None:
+            return None
+        missing = self._structural_test_path(policy.structural_test_argv)
+        if (
+            missing is not None
+            and isinstance(workspace, WorkspaceBinding)
+            and not (workspace.cwd / missing).is_file()
+        ):
+            logger.warning(
+                "rebase policy %s names structural test %s, which the rebased tree "
+                "does not provide; the semantic validator remains the gate. "
+                "Restore the test or update the policy.",
+                policy.name,
+                missing,
+            )
+            return None
+        return policy
+
     def _rebase_structural_receipts(
         self, job: GitJob, workspace: WorkspaceBinding, source_sha: str
     ) -> JobResult | None:
@@ -9475,8 +9506,11 @@ class WorkerPool:
         configured. Without any backend, the rebase proceeds with the
         operator-direct boundary and carries no capability receipt. A
         configured rear-end stays fail closed on every probe failure.
+
+        A policy that names a structural test the tree does not provide
+        carries no execution evidence. The semantic validator stays the gate.
         """
-        policy = self._select_rebase_policy(job.repo)
+        policy = self._rebase_structural_evidence_policy(job.repo, workspace)
         if policy is None:
             return None
         request = job.capability_target

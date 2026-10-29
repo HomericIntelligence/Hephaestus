@@ -81,6 +81,14 @@ def test_policy_selector_allows_current_head_fallback_only_for_mnemosyne() -> No
     assert hephaestus.allow_unrebased_writer_fallback is False
 
 
+def test_shipped_policy_structural_test_is_present_in_this_repository() -> None:
+    """The shipped policy does not name a structural test that the tree lacks."""
+    policy = _hephaestus_policy()
+    relative = next(part for part in policy.structural_test_argv if part.endswith(".py"))
+
+    assert (Path(__file__).resolve().parents[4] / relative).is_file()
+
+
 def test_policy_selector_returns_none_for_unconfigured_target() -> None:
     """The selector does not apply Hephaestus policy to another target."""
     selector = _selector()
