@@ -38,6 +38,17 @@ def _with_repo(cmd: list[str], repo: tuple[str, str] | None) -> list[str]:
     return [*cmd, "--repo", f"{owner}/{name}"]
 
 
+def _invalidate_read_cache(repo: tuple[str, str] | None) -> None:
+    """Drop read-cache entries for the repository after a label write.
+
+    Writers must never observe their own writes as stale (#3395). A disabled
+    cache makes this a no-op.
+    """
+    read_cache = getattr(_api, "_gh_read_cache", None)
+    if read_cache is not None:
+        read_cache.invalidate_repository(_label_cache_key(repo))
+
+
 def gh_list_labels(
     refresh: bool = False,
     *,
@@ -106,6 +117,7 @@ def gh_create_label(
         cmd.extend(["--description", description])
     _api._gh_call(_with_repo(cmd, repo))
     _api._label_cache.add_to_entry(_label_cache_key(repo), name)
+    _invalidate_read_cache(repo)
     _api.logger.info("Created missing label '%s'", name)
 
 
@@ -142,6 +154,7 @@ def gh_issue_add_labels(
     for label in labels:
         cmd += ["--add-label", label]
     _api._gh_call(_with_repo(cmd, repo))
+    _invalidate_read_cache(repo)
     _api.logger.info("Added labels %s to issue #%s", labels, issue_number)
 
 
@@ -178,6 +191,7 @@ def gh_issue_edit_labels(
     for label in remove_existing:
         cmd.extend(["--remove-label", label])
     _api._gh_call(_with_repo(cmd, repo))
+    _invalidate_read_cache(repo)
     _api.logger.info(
         "Edited labels on issue #%s: add=%s remove=%s",
         issue_number,
@@ -250,6 +264,7 @@ def gh_issue_remove_labels(issue_number: int, labels: list[str]) -> None:
     for label in labels_to_remove:
         cmd += ["--remove-label", label]
     _api._gh_call(cmd)
+    _invalidate_read_cache(None)
     _api.logger.info("Removed labels %s from issue #%s", labels_to_remove, issue_number)
 
 

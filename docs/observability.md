@@ -164,6 +164,39 @@ happens operationally against the scrape endpoint below; this document defines
 what "healthy" means, and source review keeps the definitions honest against the
 code.
 
+## GitHub read cache
+
+The automation loop can cache GitHub GraphQL read results on local disk. The
+cache reduces duplicate reads that consume the shared GitHub API rate budget.
+
+The cache is disabled by default: the time-to-live (TTL) is `0`. Use
+`--gh-cache-ttl <seconds>` to enable it. A positive value sets the entry
+lifetime. A starting value of `3600` seconds is recommended. Two more options
+control the store:
+
+- `--gh-cache-max-entries <count>`: the maximum number of cached entries.
+- `--gh-cache-dir <path>`: the store location (default
+  `build/.issue_implementer/gh-read-cache/`). The loop creates the directory
+  with owner-only permissions (`0700`); entry files use `0600`. All loop
+  processes for one repository share the store.
+
+Safety posture:
+
+- The cache serves only the allow-listed read operations. Mutations, label
+  writes, review-state reads, and comment reads always go to GitHub.
+- Each mutation and each label write invalidates the entries for its
+  repository.
+- The cache key includes a hash of the token, so two tokens never share an
+  entry.
+
+The coordinator writes one `gh_read_cache_stats` event to the JSONL event log
+for each run-loop poll cycle. The event fields are `hits`, `misses`,
+`bypasses`, `evictions`, `entries`, and `ttl_seconds`.
+
+To measure the effect on the rate budget, run
+`gh api rate_limit --jq '.resources.graphql'` before and after a loop run. The
+remaining points decrease more slowly as `hits` grows.
+
 ## Ownership and escalation
 
 This is a single-maintainer project. The owner of every alert is the

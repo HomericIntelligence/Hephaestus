@@ -273,6 +273,15 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             queue_gauge.set(snapshot["lane_queue_depths"][lane], labels={"lane": lane})
             inflight_gauge.set(snapshot["inflight_by_lane"][lane], labels={"lane": lane})
 
+    def _record_gh_read_cache_stats(self) -> None:
+        """Emit the enabled GitHub read-through cache counters (#3395)."""
+        from hephaestus.automation import github_api
+
+        cache_obj = getattr(github_api, "_gh_read_cache", None)
+        if cache_obj is None:
+            return
+        self._record_event("gh_read_cache_stats", cache_obj.stats())
+
     def _wake_completion_wait(self) -> None:
         """Wake the coordinator without writing a sentinel into its bounded queue."""
         self._completion_wakeup.set()
@@ -309,6 +318,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self._wake_timers()
                 self._drain_completions()
                 self._emit_observability_tick()
+                self._record_gh_read_cache_stats()
                 if self.shutdown.is_set():
                     # Graceful: stop admitting; drain in-flight to RESUMABLE.
                     if not self.in_flight and not self.auxiliary_in_flight:
