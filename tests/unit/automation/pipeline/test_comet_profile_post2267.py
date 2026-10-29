@@ -205,7 +205,11 @@ def test_every_control_row_matches_its_fixture_bytes() -> None:
     for path, mode, size, digest in CONTROLS:
         fixture = CAPTURE_DIR / path
         assert fixture.is_file(), f"missing fixture for control {path}"
-        assert stat.S_IMODE(fixture.stat().st_mode) == mode & 0o777
+        # Git tracks only the execute bit and applies the process umask to
+        # the rest on checkout, so a host with umask 002 shows 0o664 for a
+        # 100644 control. Compare the bit Git actually binds.
+        on_disk = stat.S_IMODE(fixture.stat().st_mode)
+        assert on_disk & 0o111 == mode & 0o111, f"mode drift for {path}"
         data = fixture.read_bytes()
         assert len(data) == size, f"size drift for {path}"
         assert hashlib.sha256(data).hexdigest() == digest, f"content drift for {path}"
