@@ -75,6 +75,11 @@ from hephaestus.automation.pipeline.git_jobs import (
     FIRST_PUBLICATION_CHECK_ARGV,
     _strict_recovery_workspace,
 )
+from hephaestus.automation.pipeline.implementer_checkpoint import (
+    interval_from_config,
+    resume_context_for,
+    stamp_turn,
+)
 from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
 from hephaestus.automation.pr_body import replace_testing_section
 from hephaestus.automation.prompts.address_review import (
@@ -1004,6 +1009,7 @@ def build_implementation_prompt(
     worktree_path: str = "",
     advise_findings: str = "",
     scope_correction_paths: tuple[str, ...] = (),
+    resume_context: str = "",
 ) -> str:
     """Compose the implementation prompt with the advise-findings block.
 
@@ -1022,10 +1028,13 @@ def build_implementation_prompt(
         advise_findings: Advise-step findings; empty string means no block.
         scope_correction_paths: Host-validated paths from a refused
             publication. An empty tuple means no correction directive.
+        resume_context: Advisory checkpoint block for a retry after a
+            timeout. An empty string means no block.
 
     Returns:
-        The full implementer prompt, with the findings block and the scope
-        correction directive appended when each is present.
+        The full implementer prompt, with the findings block, the scope
+        correction directive, and the resume-context block appended when
+        each is present.
 
     """
     prompt = get_implementation_prompt(
@@ -1042,6 +1051,8 @@ def build_implementation_prompt(
         )
     if scope_correction_paths:
         prompt += get_scope_correction_directive(scope_correction_paths)
+    if resume_context:
+        prompt += resume_context
     return prompt
 
 
@@ -2623,6 +2634,14 @@ class ImplementationStage(Stage):
         scope_correction_paths = item.payload.pop(_SCOPE_CORRECTION_PATHS, ())
         if not isinstance(scope_correction_paths, tuple):
             scope_correction_paths = ()
+        checkpoint_interval = interval_from_config(ctx.config)
+        resume_context = resume_context_for(
+            config=ctx.config,
+            worktree=workspace.cwd,
+            issue=issue,
+            branch=item.branch,
+            timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
+        )
         job = AgentJob(
             repo=item.repo,
             issue=issue,
@@ -2649,10 +2668,13 @@ class ImplementationStage(Stage):
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
                 "scope_correction_paths": scope_correction_paths,
+                "resume_context": resume_context,
             },
             **_codex_isolation_job_kwargs(ctx),
             descr="implement",
         )
+        if checkpoint_interval > 0:
+            stamp_turn(item, now=ctx.now())
         return JobRequest(job, on_done_state=TEST_WAIT)
 
     @staticmethod

@@ -1,0 +1,22 @@
+
+
+---
+
+## Mid-Run Checkpoint From the Previous Turn (Advisory)
+
+The previous implementer turn reached its invocation deadline before it
+finished. The pipeline recorded this bounded checkpoint from the lane
+worktree while the turn ran:
+
+- Elapsed time in the ended turn: {{ elapsed_s }} s (attempt {{ attempt }}).
+- Files the ended turn changed (at most {{ file_cap }} shown):
+{% for path in changed_files -%}
+  - {{ path }}
+{% endfor -%}
+- Last recorded step: {{ last_step }}
+- Last pre-PR test result: {{ last_test_result }}
+
+This checkpoint is advisory only. It is not authoritative state, it does not
+change any file, and it does not decide to skip work. Look at the worktree
+and the issue before you continue, then complete the remaining work in this
+turn.

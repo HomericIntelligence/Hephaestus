@@ -111,7 +111,7 @@ from hephaestus.automation.pipeline.work_item import (
     WorkItem as WorkItem,
 )
 from hephaestus.cli.localization import text
-from hephaestus.constants import AGENT_REVIEW_TIMEOUT
+from hephaestus.constants import AGENT_REVIEW_TIMEOUT, IMPLEMENTER_CHECKPOINT_INTERVAL_S
 from hephaestus.prompts import PromptCatalog as PromptCatalog
 
 if TYPE_CHECKING:
@@ -289,6 +289,9 @@ class PipelineConfig:
     planner_timeout: int = 1200
     reviewer_timeout: int = AGENT_REVIEW_TIMEOUT
     implementer_timeout: int = 1800
+    # Periodic implementer progress/checkpoint interval in seconds; zero
+    # disables the implementer checkpoint feature (kill switch, issue #3435).
+    implementer_checkpoint_interval: int = IMPLEMENTER_CHECKPOINT_INTERVAL_S
     address_review_timeout: int = 7200
     git_message_timeout: int = 1200
     poll_max_wait: int = 1200

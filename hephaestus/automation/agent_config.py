@@ -70,6 +70,7 @@ from hephaestus.constants import (
     AGENT_LEARN_TIMEOUT,
     AGENT_PLAN_TIMEOUT,
     AGENT_REVIEW_TIMEOUT,
+    IMPLEMENTER_CHECKPOINT_INTERVAL_S,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,17 @@ def plan_reviewer_claude_timeout() -> int:
 def implementer_claude_timeout() -> int:
     """Timeout for the implementer's agent invocation (default 1800s)."""
     return AGENT_IMPL_TIMEOUT
+
+
+def implementer_checkpoint_interval_s() -> int:
+    """Periodic implementer progress/checkpoint interval in seconds (default 300s).
+
+    The CLI/config value zero disables the checkpoint feature. This accessor
+    returns the fixed default only; see
+    :func:`hephaestus.automation.pipeline.implementer_checkpoint.interval_from_config`
+    for the config-backed value.
+    """
+    return IMPLEMENTER_CHECKPOINT_INTERVAL_S
 
 
 def advise_claude_timeout() -> int:
@@ -537,12 +549,14 @@ __all__ = [
     "DEFAULT_AGENT_TIMEOUT",
     "DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT",
     "DEFAULT_THROUGHPUT_TIMEOUT",
+    "IMPLEMENTER_CHECKPOINT_INTERVAL_S",
     "advise_claude_timeout",
     "advise_model",
     "agent_default_timeout",
     "fallback_model",
     "gh_cli_timeout",
     "git_message_agent_timeout",
+    "implementer_checkpoint_interval_s",
     "implementer_claude_timeout",
     "implementer_model",
     "issue_auto_impl_branch_name",

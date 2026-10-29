@@ -75,6 +75,9 @@ AGENT_AUTH_STATUS_TIMEOUT: int = 10
 AGENT_REBASE_TIMEOUT: int = 2400
 DIFF_COLLECT_TIMEOUT: int = 60
 PRE_PR_TEST_TIMEOUT: int = 600
+# Periodic progress and lane checkpoint interval for implementer turns.
+# The value zero disables the checkpoint feature (kill switch).
+IMPLEMENTER_CHECKPOINT_INTERVAL_S: int = 300
 
 # Marker file that identifies the repo root in a dev checkout.
 _REPO_ROOT_MARKER = "pyproject.toml"
