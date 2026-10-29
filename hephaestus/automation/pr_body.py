@@ -47,7 +47,7 @@ def _section_end(lines: list[str], start: int) -> int:
 
 
 def _join(body: str, lines: list[str]) -> str:
-    """Join edited lines with the line ending the body uses."""
+    """Join edited lines, keeping a single trailing newline when *body* had one."""
     while lines and not lines[-1].strip():
         lines.pop()
     joined = "\n".join(lines)

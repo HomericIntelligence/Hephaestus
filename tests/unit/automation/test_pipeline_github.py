@@ -2597,6 +2597,20 @@ class TestPrBodyWrite:
 
         command_runner.assert_not_called()
 
+    def test_body_write_failure_reports_the_exception_the_caller_catches(
+        self, tmp_path: Path, command_runner: MagicMock
+    ) -> None:
+        """A failed write raises RuntimeError, so the stage warns instead of failing."""
+        command_runner.side_effect = subprocess.CalledProcessError(
+            1, ["gh", "pr", "edit"], stderr="HTTP 502"
+        )
+        adapter = PipelineGitHub(
+            "org", repo="repo-a", repo_root=tmp_path, command_runner=command_runner
+        )
+
+        with pytest.raises(RuntimeError, match="body update failed"):
+            adapter.update_pr_body(12, "## Testing\nnew\n\nCloses #7\n")
+
     def test_dry_run_body_write_reaches_no_transport(
         self, tmp_path: Path, command_runner: MagicMock
     ) -> None:

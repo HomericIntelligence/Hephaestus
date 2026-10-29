@@ -199,7 +199,9 @@ class PipelineGitHubMutations(PipelineGitHubMergeMutations):
         stale read must not drop the link that closes the issue.
 
         Raises:
-            RuntimeError: the write needs a repository identity.
+            RuntimeError: the write needs a repository identity, or the write
+                itself failed. The caller treats a refresh as evidence and
+                warns, so this method reports one failure type.
             ValueError: *body* has no exact ``Closes #N`` line.
 
         """
@@ -211,7 +213,10 @@ class PipelineGitHubMutations(PipelineGitHubMergeMutations):
         with self.operation_deadline(deadline), git_runtime.operation_deadline(deadline):
             github_api._assert_body_has_closes(body)
             with github_api._body_file(body) as body_path:
-                self._gh(["pr", "edit", str(pr_number), "--body-file", body_path])
+                try:
+                    self._gh(["pr", "edit", str(pr_number), "--body-file", body_path])
+                except subprocess.SubprocessError as exc:
+                    raise RuntimeError(f"PR #{pr_number} body update failed: {exc}") from exc
 
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Apply and read back exclusive ``state:implementation-no-go``."""
