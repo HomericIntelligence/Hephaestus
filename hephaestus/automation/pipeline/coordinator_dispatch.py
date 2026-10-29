@@ -134,8 +134,6 @@ class ImplementationDispatcher(_CoordinatorHost):
             if item.pr is None and not item.worktree and item.state in ("", "ENTER")
         }
         for item, identity in candidates:
-            if item.issue is None:  # defensive: candidate construction excludes this case
-                continue
             # Fresh work respects every started owner. Returning owners can
             # compete with queued peers without releasing claims to fresh work.
             excluded_ids = fresh_candidate_ids if id(item) in fresh_candidate_ids else candidate_ids

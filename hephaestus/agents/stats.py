@@ -25,6 +25,7 @@ from typing import Any
 from hephaestus.agents.loader import AgentInfo, load_all_agents
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+from hephaestus.errors import boundary_main
 
 # ---------------------------------------------------------------------------
 # Stats computation
@@ -222,6 +223,15 @@ def format_stats_json(stats: dict[str, Any]) -> str:
 
 
 def main() -> int:
+    """Run hephaestus-agent-stats through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point: generate agent statistics report.
 
     Returns:

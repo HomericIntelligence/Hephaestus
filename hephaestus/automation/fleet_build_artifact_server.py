@@ -35,6 +35,7 @@ from hephaestus.automation.fleet_build_artifacts import (
 )
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.errors import boundary_main
 
 logger = logging.getLogger(__name__)
 _CONNECTIONS = 8
@@ -361,6 +362,15 @@ class BuildArtifactServer:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-fleet-build-artifacts through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Run the private service until an explicit interrupt or termination signal."""
     parser = argparse.ArgumentParser(description=text(__doc__ or ""))
     add_json_arg(parser)

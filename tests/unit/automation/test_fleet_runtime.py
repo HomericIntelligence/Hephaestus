@@ -25,6 +25,7 @@ import pytest
 from hephaestus.automation import fleet_podman, fleet_worker, fleet_worker_cli
 from hephaestus.automation.fleet_journal import WorkerJournal
 from hephaestus.automation.fleet_provider import CodexAppServer
+from hephaestus.errors import ExitCode
 from tests.unit.automation.test_fleet_attachment import PipeEngine
 from tests.unit.automation.test_fleet_containment import Kernel
 from tests.unit.automation.test_fleet_worker import command
@@ -503,7 +504,7 @@ def test_cli_serves_two_fixed_attachments_with_one_provider(
 
 
 def test_registry_program_keeps_its_virtual_environment(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The serialized interpreter must load packages from its configured environment."""
     root, config, path, arguments, _engine, providers = runtime_setup
@@ -557,20 +558,20 @@ def test_registry_program_keeps_its_virtual_environment(
         raise RuntimeError("fixture_registry_program_verified")
 
     monkeypatch.setattr(CodexAppServer, "start", inspect_registry)
-    with pytest.raises(RuntimeError, match="fixture_registry_program_verified"):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "fixture_registry_program_verified" in capsys.readouterr().err
     assert providers and all(provider.process is None for provider in providers)
 
 
 def test_second_creation_failure_releases_local_owners_without_disposal(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A partial startup retains both creation facts without launching a provider."""
     root, _config, _path, arguments, engine, providers = runtime_setup
     engine.fail_create = True
     monkeypatch.setattr(fleet_worker_cli, "serve", lambda _: pytest.fail("control served"))
-    with pytest.raises(RuntimeError, match="fixture_second_create_failure"):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "fixture_second_create_failure" in capsys.readouterr().err
     assert engine.closed
     assert len(engine.children) == 1
     assert providers and all(value.process is None for value in providers)
@@ -606,7 +607,7 @@ def test_second_creation_failure_releases_local_owners_without_disposal(
     ],
 )
 def test_invalid_inventory_fails_before_engine_acquisition(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch, invalid: str
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], invalid: str
 ) -> None:
     """Reject the whole inventory before the first local engine effect."""
     root, config, path, arguments, engine, providers = runtime_setup
@@ -632,8 +633,8 @@ def test_invalid_inventory_fails_before_engine_acquisition(
         second["spec"]["workspace"] = str(workspace)
     path.write_text(json.dumps(config))
     monkeypatch.setattr(fleet_worker_cli, "serve", lambda _: pytest.fail("control served"))
-    with pytest.raises(ValueError):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "ValueError: " in capsys.readouterr().err
     assert engine.acquired is False
     assert engine.children == {}
     assert providers and all(value.process is None for value in providers)
@@ -641,7 +642,7 @@ def test_invalid_inventory_fails_before_engine_acquisition(
 
 @pytest.mark.parametrize("overlap", ["invocation", "target"])
 def test_attachment_program_cannot_overlap_a_workspace(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch, overlap: str
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], overlap: str
 ) -> None:
     """Keep the invocation path and its resolved executable outside workspaces."""
     root, config, path, arguments, engine, providers = runtime_setup
@@ -658,14 +659,14 @@ def test_attachment_program_cannot_overlap_a_workspace(
     config["attachmentProgram"] = str(program)
     path.write_text(json.dumps(config))
     monkeypatch.setattr(fleet_worker_cli, "serve", lambda _: pytest.fail("control served"))
-    with pytest.raises(ValueError, match="runtime_authority_overlap"):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "runtime_authority_overlap" in capsys.readouterr().err
     assert engine.acquired is False
     assert providers and all(provider.process is None for provider in providers)
 
 
 def test_retained_registry_without_leases_cannot_create_containers(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A known incompatible configuration must stop before container creation."""
     root, _config, _path, arguments, engine, providers = runtime_setup
@@ -674,8 +675,8 @@ def test_retained_registry_without_leases_cannot_create_containers(
     retained.chmod(0o600)
     before = retained.read_bytes()
     monkeypatch.setattr(fleet_worker_cli, "serve", lambda _: pytest.fail("control served"))
-    with pytest.raises((ValueError, RuntimeError)):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "Error: " in capsys.readouterr().err
     assert engine.children == {}
     assert retained.read_bytes() == before
     assert providers and all(value.process is None for value in providers)
@@ -704,7 +705,7 @@ def test_restart_reuses_created_leases_and_exact_registry(
 
 
 def test_endpoint_listen_failure_removes_only_its_owned_socket(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A constructor failure after bind must not leave an orphan attachment path."""
     root, _config, _path, arguments, engine, providers = runtime_setup
@@ -719,8 +720,8 @@ def test_endpoint_listen_failure_removes_only_its_owned_socket(
         original(channel, backlog)
 
     monkeypatch.setattr(socket.socket, "listen", fail_second)
-    with pytest.raises(OSError, match="fixture_listen_failure"):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "fixture_listen_failure" in capsys.readouterr().err
     assert engine.closed
     assert providers and all(value.process is None for value in providers)
     assert list((root / "supervisor").glob("*.sock")) == []
@@ -772,7 +773,7 @@ def test_uncertain_engine_cleanup_keeps_supervisor_writer_for_retry(
 
 @pytest.mark.parametrize("prior", ["generation", "uncertain", "pid"])
 def test_worker_preflight_precedes_engine_acquisition(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch, prior: str
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], prior: str
 ) -> None:
     """Retained worker ownership blocks resource preparation without receipt changes."""
     root, _config, _path, arguments, engine, providers = runtime_setup
@@ -788,8 +789,8 @@ def test_worker_preflight_precedes_engine_acquisition(
     receipts = root / "worker" / "receipts.jsonl"
     before = receipts.read_bytes()
     monkeypatch.setattr(fleet_worker_cli, "serve", lambda _: pytest.fail("control served"))
-    with pytest.raises(RuntimeError):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "RuntimeError: " in capsys.readouterr().err
     assert not engine.acquired
     assert all(value.process is None for value in providers)
     assert receipts.read_bytes() == before
@@ -797,7 +798,10 @@ def test_worker_preflight_precedes_engine_acquisition(
 
 @pytest.mark.parametrize("failure_point", ["provider", "pid", "control"])
 def test_partial_runtime_failure_closes_all_local_resources(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch, failure_point: str
+    runtime_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_point: str,
 ) -> None:
     """Keep prepared leases after a failed shared provider or control startup."""
     root, _config, _path, arguments, engine, providers = runtime_setup
@@ -824,8 +828,8 @@ def test_partial_runtime_failure_closes_all_local_resources(
     monkeypatch.setattr(CodexAppServer, "start", start)
     monkeypatch.setattr(WorkerJournal, "append", append)
     monkeypatch.setattr(fleet_worker_cli, "serve", serve)
-    with pytest.raises(RuntimeError, match=f"fixture_{failure_point}_failure"):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert f"fixture_{failure_point}_failure" in capsys.readouterr().err
     assert engine.closed
     assert len(engine.children) == 2
     assert len(processes) == 1
@@ -847,7 +851,7 @@ def test_partial_runtime_failure_closes_all_local_resources(
 
 
 def test_failed_worker_construction_releases_its_journal(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Keep no writer lock when the unstarted provider object cannot be created."""
     root, _config, _path, arguments, engine, _providers = runtime_setup
@@ -856,9 +860,8 @@ def test_failed_worker_construction_releases_its_journal(
         raise RuntimeError("fixture_provider_construction_failure")
 
     monkeypatch.setattr(fleet_worker, "CodexAppServer", fail_provider)
-    with pytest.raises(RuntimeError, match="fixture_provider_construction_failure") as failed:
-        fleet_worker_cli.main(arguments)
-    assert failed.value is not None
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "fixture_provider_construction_failure" in capsys.readouterr().err
     assert not engine.acquired
     journal = WorkerJournal(root / "worker")
     journal.close()
@@ -877,9 +880,7 @@ def test_failed_attachment_loop_blocks_provider_start(
 
     monkeypatch.setattr(AttachmentEndpoint, "serve_once", fail_server)
     monkeypatch.setattr(fleet_worker_cli, "serve", lambda _: pytest.fail("control served"))
-    with pytest.raises(BaseExceptionGroup) as failed:
-        fleet_worker_cli.main(arguments)
-    assert any(str(error) == "fixture_server_entry_failure" for error in failed.value.exceptions)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
     assert providers and all(value.process is None for value in providers)
     assert engine.closed
     assert list((root / "supervisor").glob("*.sock")) == []
@@ -913,8 +914,7 @@ def test_shutdown_deadline_keeps_writer_while_a_serving_thread_remains(
     monkeypatch.setattr(fleet_worker_cli, "serve", serve)
     started = time.monotonic()
     try:
-        with pytest.raises(BaseExceptionGroup):
-            fleet_worker_cli.main(arguments)
+        assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
         assert time.monotonic() - started < 2
         assert not engine.closed
         with pytest.raises(RuntimeError, match="another journal writer"):
@@ -930,7 +930,7 @@ def test_shutdown_deadline_keeps_writer_while_a_serving_thread_remains(
 
 
 def test_runtime_retains_uncertain_provider_cleanup_after_failed_start(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Closing the local owner cannot erase a failed provider cleanup observation."""
     root, _config, _path, arguments, engine, _providers = runtime_setup
@@ -947,8 +947,8 @@ def test_runtime_retains_uncertain_provider_cleanup_after_failed_start(
 
     monkeypatch.setattr(CodexAppServer, "start", start)
     monkeypatch.setattr(CodexAppServer, "close", close)
-    with pytest.raises(RuntimeError, match="fixture_initialization_failure"):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "fixture_initialization_failure" in capsys.readouterr().err
     assert engine.closed
     journal = WorkerJournal(root / "worker")
     try:
@@ -958,13 +958,15 @@ def test_runtime_retains_uncertain_provider_cleanup_after_failed_start(
         journal.close()
 
 
-def test_auth_owner_conflict_preserves_prepared_leases(runtime_setup) -> None:
+def test_auth_owner_conflict_preserves_prepared_leases(
+    runtime_setup, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Authentication ownership failure must not erase container preparation."""
     root, _config, _path, arguments, engine, providers = runtime_setup
     with (root / "auth" / "fleet-owner.lock").open("a+b") as owner:
         fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with pytest.raises(RuntimeError, match="another authentication owner"):
-            fleet_worker_cli.main(arguments)
+        assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+        assert "another authentication owner" in capsys.readouterr().err
     assert engine.closed
     assert len(engine.children) == 2
     assert all(value.process is None for value in providers)
@@ -983,7 +985,7 @@ def test_auth_owner_conflict_preserves_prepared_leases(runtime_setup) -> None:
 
 
 def test_changed_retained_registry_stops_before_provider_restart(
-    runtime_setup, monkeypatch: pytest.MonkeyPatch
+    runtime_setup, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Retain configuration and container identities after a registry mismatch."""
     root, _config, _path, arguments, engine, providers = runtime_setup
@@ -993,8 +995,8 @@ def test_changed_retained_registry_stops_before_provider_restart(
     registry.write_bytes(b"# changed\n" + registry.read_bytes())
     changed = registry.read_bytes()
     identities = set(engine.children)
-    with pytest.raises(ValueError, match="environment_configuration_changed"):
-        fleet_worker_cli.main(arguments)
+    assert fleet_worker_cli.main(arguments) == int(ExitCode.ERROR)
+    assert "environment_configuration_changed" in capsys.readouterr().err
     assert len(providers) == 2
     assert all(value.process is None for value in providers)
     assert set(engine.children) == identities

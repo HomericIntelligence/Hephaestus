@@ -30,6 +30,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -150,8 +151,6 @@ def _closed_issue_snapshot_outcome(
     issue_snapshot: object,
 ) -> StageOutcome | None:
     """Fail closed on malformed state and terminalize a fresh close/merge race."""
-    if item.issue is None:  # Defensive; callers validate this first.
-        return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
     if not isinstance(issue_snapshot, dict) or issue_snapshot.get("number") != item.issue:
         logger.error("planning:%d: malformed issue snapshot", item.issue)
         return StageOutcome(Disposition.FINISH_FAIL, "malformed issue snapshot")
@@ -161,7 +160,7 @@ def _closed_issue_snapshot_outcome(
         return StageOutcome(Disposition.FINISH_FAIL, "malformed issue snapshot state")
     if issue_state.upper() == "OPEN":
         return None
-    merged_pr = ctx.github.find_merged_pr_for_issue(item.issue)
+    merged_pr = ctx.github.find_merged_pr_for_issue(cast(int, item.issue))
     if merged_pr is None:
         logger.error("planning:%d: closed without an exact merged closing PR", item.issue)
         return StageOutcome(
@@ -174,9 +173,8 @@ def _closed_issue_snapshot_outcome(
 
 def _closed_issue_entry_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
     """Read current issue state and classify a close/merge race."""
-    if item.issue is None:  # Defensive; on_enter rejects this before calling.
-        return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
-    return _closed_issue_snapshot_outcome(item, ctx, ctx.github.gh_issue_json(item.issue))
+    snapshot = ctx.github.gh_issue_json(cast(int, item.issue))
+    return _closed_issue_snapshot_outcome(item, ctx, snapshot)
 
 
 def build_plan_prompt(

@@ -58,6 +58,15 @@ def _is_full_commit_sha(value: object) -> TypeGuard[str]:
     )
 
 
+def _is_full_digest(value: object) -> TypeGuard[str]:
+    """Return whether *value* is a lowercase 64-character hexadecimal digest."""
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _cwd_arg(cwd: Path | str | None) -> str | None:
     """Return a subprocess-compatible cwd value."""
     return str(cwd) if isinstance(cwd, Path) else cwd

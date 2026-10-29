@@ -24,6 +24,7 @@ from pathlib import Path
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+from hephaestus.errors import boundary_main
 
 _BROKEN_ANCHOR_ERROR = re.compile(
     r"^(?P<source>.+): broken anchor '#(?P<anchor>.*)' in link "
@@ -227,6 +228,15 @@ def check_anchors(
 
 
 def main() -> int:
+    """Run hephaestus-validate-anchors through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point for anchor validation.
 
     Returns:

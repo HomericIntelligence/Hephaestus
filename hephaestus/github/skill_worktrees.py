@@ -20,6 +20,7 @@ from typing import Any
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, create_parser, emit_json_status
+from hephaestus.errors import boundary_main
 from hephaestus.utils.git import run_git
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,15 @@ def worktree_status(path: Path) -> str:
 
 
 def prepare_worktree_main(argv: Sequence[str] | None = None) -> int:
+    """Run hephaestus-prepare-worktree through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_prepare_worktree_run, argv)
+
+
+def _prepare_worktree_run(argv: Sequence[str] | None = None) -> int:
     """Select, validate, and optionally create an isolated Git worktree."""
     parser = create_parser("hephaestus-prepare-worktree", description=__doc__)
     parser.add_argument("branch")
@@ -238,6 +248,15 @@ def parse_worktree_porcelain(output: str) -> list[dict[str, Any]]:
 
 
 def audit_worktrees_main(argv: Sequence[str] | None = None) -> int:
+    """Run hephaestus-audit-worktrees through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_audit_worktrees_run, argv)
+
+
+def _audit_worktrees_run(argv: Sequence[str] | None = None) -> int:
     """Emit a read-only, machine-readable inventory of registered worktrees."""
     parser = create_parser("hephaestus-audit-worktrees", description=__doc__)
     add_json_arg(parser)
@@ -275,6 +294,15 @@ def audit_worktrees_main(argv: Sequence[str] | None = None) -> int:
 
 
 def remove_worktree_main(argv: Sequence[str] | None = None) -> int:
+    """Run hephaestus-remove-worktree through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_remove_worktree_run, argv)
+
+
+def _remove_worktree_run(argv: Sequence[str] | None = None) -> int:
     """Safely remove one clean, non-current registered worktree after approval."""
     parser = create_parser("hephaestus-remove-worktree", description=__doc__)
     parser.add_argument("path", type=Path)

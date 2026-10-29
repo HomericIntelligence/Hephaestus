@@ -43,6 +43,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.errors import boundary_main
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
@@ -719,6 +720,15 @@ class EMNISTDownloader(DatasetDownloader):
 
 
 def main() -> int:
+    """Run hephaestus-download-dataset through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """Serve as the main entry point for dataset downloading."""
     import argparse
 

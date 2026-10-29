@@ -55,6 +55,7 @@ from typing import BinaryIO
 
 from hephaestus.cli.localization import get_localizer, text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.errors import boundary_main
 
 #: Default candidate output directories, tried in order. The first that
 #: already exists wins; if none exist, the last is created. A CI job
@@ -414,6 +415,15 @@ def _run_verify(target_dirs: list[str] | None, as_json: bool) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-coredump-handler through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Entry point for the ``hephaestus-coredump-handler`` console script.
 
     Repeatable ``--target-dir`` values provide ordered candidates and survive

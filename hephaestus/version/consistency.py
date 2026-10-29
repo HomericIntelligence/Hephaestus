@@ -45,6 +45,7 @@ from hephaestus.cli.utils import (
     resolve_repo_root,
 )
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.errors import boundary_main
 from hephaestus.utils.helpers import METADATA_TIMEOUT
 from hephaestus.version.manager import VersionManager, parse_version
 from hephaestus.version.parsing import parse_version_tuple
@@ -564,6 +565,15 @@ def bump_version(
 
 
 def check_version_consistency_main() -> int:
+    """Run hephaestus-check-version-consistency through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_check_version_consistency_run)
+
+
+def _check_version_consistency_run() -> int:
     """CLI entry point for hephaestus-check-version-consistency.
 
     Returns:
@@ -605,6 +615,15 @@ def check_version_consistency_main() -> int:
 
 
 def check_package_versions_main() -> int:
+    """Run hephaestus-check-package-versions through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_check_package_versions_run)
+
+
+def _check_package_versions_run() -> int:
     """CLI entry point for hephaestus-check-package-versions.
 
     Returns:
@@ -665,6 +684,15 @@ def check_package_versions_main() -> int:
 
 
 def bump_version_main() -> int:
+    """Run hephaestus-bump-version through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_bump_version_run)
+
+
+def _bump_version_run() -> int:
     """CLI entry point for hephaestus-bump-version.
 
     Returns:

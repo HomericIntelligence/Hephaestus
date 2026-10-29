@@ -25,6 +25,7 @@ from pathlib import Path
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output
+from hephaestus.errors import boundary_main
 
 _TYPE_ALIAS_ERROR = re.compile(
     r"^(?P<path>.+):(?P<line>\d+): Type alias shadows domain-specific name\n"
@@ -346,6 +347,15 @@ def _check_files(file_paths: list[Path]) -> _BatchResult:
 
 
 def main() -> int:
+    """Run hephaestus-check-type-aliases through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point for type alias shadowing detection.
 
     Returns:

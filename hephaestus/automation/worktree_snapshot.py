@@ -236,9 +236,7 @@ def _path_content_identity(  # noqa: C901
 
     def destination_path(parts: tuple[str, ...]) -> Path:
         """Return one trusted snapshot path without following copied links."""
-        if copy_root is None:  # pragma: no cover - guarded by callers
-            raise RuntimeError("candidate snapshot root is unavailable")
-        parent = copy_root
+        parent = cast(Path, copy_root)
         for component in parts[:-1]:
             candidate = parent / component
             try:

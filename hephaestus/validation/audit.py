@@ -22,6 +22,7 @@ from typing import Any, cast
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, format_output
+from hephaestus.errors import boundary_main
 from hephaestus.utils.helpers import get_repo_root
 
 HIGH_THRESHOLD: float = 7.0
@@ -305,6 +306,15 @@ def filter_audit_results(
 
 
 def main() -> int:
+    """Run hephaestus-filter-audit through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """Parse pip-audit JSON and exit non-zero on blocking findings.
 
     Returns:

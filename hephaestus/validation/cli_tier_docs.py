@@ -24,6 +24,7 @@ from pathlib import Path
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
+from hephaestus.errors import boundary_main
 from hephaestus.io.toml import import_tomllib
 
 VALID_TIERS: frozenset[str] = frozenset({"Stable", "Provisional", "Internal"})
@@ -218,6 +219,15 @@ def format_json(findings: list[TierDocFinding]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-check-cli-tier-docs through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Entry point for ``hephaestus-check-cli-tier-docs``."""
     parser = create_validation_parser(__doc__)
     args = parser.parse_args(argv)

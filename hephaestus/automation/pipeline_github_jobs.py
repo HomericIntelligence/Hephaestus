@@ -8,7 +8,7 @@ import subprocess
 from concurrent.futures import CancelledError
 from dataclasses import asdict, dataclass
 from threading import Event
-from typing import Any, assert_never
+from typing import Any
 
 from hephaestus.automation.comment_identity import CommentAliasConflictError
 from hephaestus.automation.current_plan import read_current_plan
@@ -179,9 +179,6 @@ class PipelineGitHubJobRunner:
                 return self._reconcile_pr_review(job.request, github)
             case RunMergeWaitCycleRequest():
                 return self._run_merge_wait_cycle(job.request, github)
-            case unknown:
-                return assert_never(unknown)
-        raise AssertionError("unreachable closed GitHub request dispatch")
 
     @staticmethod
     def _read_current_plan_scope(

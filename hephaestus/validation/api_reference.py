@@ -22,6 +22,7 @@ from pathlib import Path
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
+from hephaestus.errors import boundary_main
 
 PACKAGE_NAME = "hephaestus"
 EXCLUDED_SUBPACKAGES = frozenset({"automation"})
@@ -148,6 +149,15 @@ def format_json(findings: list[ApiReferenceFinding]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-check-api-reference through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Entry point for ``hephaestus-check-api-reference``."""
     parser = create_validation_parser(__doc__, prog="hephaestus-check-api-reference")
     parser.add_argument(

@@ -18,6 +18,7 @@ from typing import Any
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 from hephaestus.config.environment_registry import RETIRED_ENV_NAMES
+from hephaestus.errors import boundary_main
 
 SCANNED_ROOT = "hephaestus"
 EXCLUDED_PATHS = frozenset({"hephaestus/_version.py"})
@@ -707,6 +708,15 @@ def validate_repository(repo_root: Path) -> list[PolicyFinding]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-check-environment-variables through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Run the environment-variable policy validation CLI."""
     parser = create_validation_parser(__doc__, prog="hephaestus-check-environment-variables")
     args = parser.parse_args(argv)

@@ -38,6 +38,7 @@ from pathlib import Path
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
+from hephaestus.errors import boundary_main
 
 # ---------------------------------------------------------------------------
 # Canonical mapping (source of truth)
@@ -319,6 +320,15 @@ def check_tier_label_consistency(target: Path) -> int:
 
 
 def main() -> int:
+    """Run hephaestus-check-tier-labels through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """Run the tier label consistency check.
 
     Returns:
@@ -368,15 +378,7 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    # Resolve repository root.
-    try:
-        repo_root = resolve_repo_root(args)
-    except Exception as exc:
-        print(
-            text("ERROR: Could not determine repository root: %(value0)s", value0=exc),
-            file=sys.stderr,
-        )
-        return 2
+    repo_root = resolve_repo_root(args)
 
     scan_root = args.directory if args.directory is not None else repo_root
 

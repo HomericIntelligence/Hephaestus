@@ -18,6 +18,7 @@ from hephaestus.cli.utils import (
     create_parser,
     emit_json_status,
 )
+from hephaestus.errors import boundary_main
 from hephaestus.github.client import positive_timeout
 from hephaestus.github.fleet_sync.config import resolve_fleet_config
 from hephaestus.github.fleet_sync.models import (
@@ -143,6 +144,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-fleet-sync through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Entry point for hephaestus-fleet-sync."""
     parser = _build_parser()
     args = parser.parse_args(argv)

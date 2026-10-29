@@ -172,9 +172,7 @@ class TestMain:
 
     def test_help_exits_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.argv", ["hephaestus-check-links", "--help"])
-        with pytest.raises(SystemExit) as exc:
-            main()
-        assert exc.value.code == 0
+        assert main() == 0
 
     def test_check_mode_clean_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         (tmp_path / "clean.md").write_text("No bad links here.\n")

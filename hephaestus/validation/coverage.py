@@ -21,6 +21,7 @@ from typing import Any, cast
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, format_output
+from hephaestus.errors import boundary_main
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root
 
@@ -410,6 +411,15 @@ def _emit_json_report(args: argparse.Namespace, threshold: float) -> int:
 
 
 def main() -> int:
+    """Run hephaestus-check-coverage through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point for coverage checking.
 
     Returns:

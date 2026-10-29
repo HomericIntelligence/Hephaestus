@@ -10,7 +10,6 @@ must stay off the coordinator thread), so :class:`AgentJob` carries a
 from __future__ import annotations
 
 import math
-import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -24,6 +23,7 @@ from hephaestus.agents.workspace import (
     WorkspaceBinding,
     validate_workspace_binding,
 )
+from hephaestus.utils.git import _is_full_commit_sha
 
 from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
 from .host_capabilities import CapabilityRequestTarget
@@ -314,9 +314,7 @@ def _valid_writer_publication_facts(value: object) -> bool:
         value[key] for key in ("head_sha", "baseline_remote_sha", "observed_remote_sha")
     )
     for sha in (head, baseline, observed):
-        if sha is not None and (
-            not isinstance(sha, str) or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha) is None
-        ):
+        if sha is not None and not _is_full_commit_sha(sha):
             return False
     if (
         head is None
@@ -349,7 +347,7 @@ def _writer_publication_matches_refresh(value: object, refresh: object) -> bool:
         return False
     for key in ("source_sha", "expected_remote_sha"):
         sha = refresh[key]
-        if not isinstance(sha, str) or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha) is None:
+        if not _is_full_commit_sha(sha):
             return False
     return bool(
         refresh["phase"] in ("rebase", "publish")

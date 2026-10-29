@@ -23,6 +23,7 @@ import yaml
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
+from hephaestus.errors import boundary_main
 
 SchemaMapping = list[tuple[re.Pattern[str], Path]]
 
@@ -288,6 +289,15 @@ def _check_files(
 
 
 def main() -> int:
+    """Run hephaestus-validate-schemas through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point for config schema validation.
 
     Returns:

@@ -24,6 +24,7 @@ from hephaestus.cli.utils import (
     resolve_repo_root,
 )
 from hephaestus.config.child_environments import build_python_phase_env
+from hephaestus.errors import boundary_main
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, get_repo_root
 
 
@@ -240,6 +241,15 @@ def check_max_complexity(
 
 
 def main() -> int:
+    """Run hephaestus-check-complexity through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point for complexity checking.
 
     Returns:
