@@ -228,6 +228,9 @@ class Coordinator(
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
         self.auxiliary_in_flight: dict[JobHandle, WorkItem] = {}
+        # Implementer checkpoint tick state: item key -> (turn start, next due)
+        # in monotonic seconds (#3435). Pruned by the periodic progress walk.
+        self._impl_checkpoint_ticks: dict[str, tuple[float, float]] = {}
         # A holder path reported by Git becomes a safe supersession signal
         # only after a successful create-worktree completion registered it
         # here.  Paths discovered from Git alone can belong to a human or a

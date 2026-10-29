@@ -9,6 +9,7 @@ from math import ceil
 from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_types as ct
+import hephaestus.automation.pipeline.implementer_checkpoint as _checkpoint
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 from hephaestus.resilience import is_transient_subprocess_error
@@ -348,10 +349,23 @@ class ExecutionCoordinator(_CoordinatorHost):
             self._park_resumable(item)
             return
         if isinstance(handle.job, AgentJob):
+            result = _checkpoint.apply_timeout_session_continuity(
+                item,
+                result,
+                job=handle.job,
+                interval_s=_checkpoint.interval_from_config(self.config),
+            )
             session_error = store_agent_session_result(item, handle.job, result)
             if session_error is not None:
                 self._finish(item, passed=False, reason=session_error)
                 return
+            _checkpoint.classify_agent_completion(
+                item,
+                result,
+                interval_s=_checkpoint.interval_from_config(self.config),
+                metadata_timeout_s=self.config.metadata_timeout,
+                now=self._monotonic(),
+            )
         try:
             stage.on_job_done(item, result, ctx)
         except Exception as exc:
