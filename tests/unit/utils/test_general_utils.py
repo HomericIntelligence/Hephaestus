@@ -893,16 +893,35 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
+def _process_is_running(pid: int) -> bool:
+    """Return whether *pid* is running, rather than dead or a zombie.
+
+    The runner stops its owned process group. It cannot reap a descendant that
+    is not its own child: once that descendant's parent dies, reaping belongs
+    to init, and a container PID 1 often does not reap. The descendant then
+    stays a zombie. A zombie has stopped already, so it must not read as alive.
+    """
+    if not _pid_exists(pid):
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        # No procfs (macOS), or the process went away; the kill probe stands.
+        return True
+    fields = stat.rsplit(")", 1)[-1].split()
+    return not (fields and fields[0] == "Z")
+
+
 def _wait_for_death(pid: int, *, timeout_s: float) -> bool:
-    """Return whether *pid* disappears before the finite wait expires."""
+    """Return whether *pid* stops running before the finite wait expires."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        if not _pid_exists(pid):
+        if not _process_is_running(pid):
             return True
         with suppress(ChildProcessError, OSError):
             os.waitpid(pid, os.WNOHANG)
         time.sleep(0.02)
-    return not _pid_exists(pid)
+    return not _process_is_running(pid)
 
 
 def _terminate_owned(child_pid: int | None, descendant_pid: int | None) -> None:
@@ -946,7 +965,7 @@ class TestTrackedProcessRealChildCleanup:
         return child_pid, descendant_pid
 
     def test_cancellation_reaps_the_real_tracked_child_and_descendant(self, tmp_path: Path) -> None:
-        """A shutdown after process start stops and reaps the child and descendant."""
+        """A shutdown after process start reaps the child and stops the descendant."""
         child, report_dir = self._prepare_controlled_child(tmp_path)
         shutdown = threading.Event()
         outcome: list[BaseException | subprocess.CompletedProcess[str]] = []
@@ -991,7 +1010,7 @@ class TestTrackedProcessRealChildCleanup:
             worker.join(timeout=10)
 
     def test_deadline_reaps_the_real_tracked_child_and_descendant(self, tmp_path: Path) -> None:
-        """A post-start deadline stops and reaps the child and descendant."""
+        """A post-start deadline reaps the child and stops the descendant."""
         child, report_dir = self._prepare_controlled_child(tmp_path)
         outcome: list[BaseException | subprocess.CompletedProcess[str]] = []
         checks = 0
