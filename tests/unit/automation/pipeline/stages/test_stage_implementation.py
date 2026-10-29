@@ -7300,3 +7300,28 @@ class TestRemediationTestingRefresh:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         assert [entry for entry in ctx.github.mutation_log if entry[0] == "update_pr_body"] == []
+
+    def test_remediation_without_a_commit_still_refreshes_the_section(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A resolved-thread cycle ran the tests, so its receipt is current."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = self._item(make_work_item, self._body("`uv run pytest tests` — passed"))
+        item.payload["no_commits"] = True
+        ctx.github.prs[1001] = {
+            "branch": item.branch,
+            "title": "fix(automation): a change",
+            "body": self._body("`uv run pytest tests` — passed"),
+            "state": "OPEN",
+        }
+
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+        assert "fresh review after address-review" in outcome.note
+        body = ctx.github.prs[1001]["body"]
+        assert "## Testing\n`bash scripts/run_ci_local.sh all` — passed\n\n## Closes\n" in body
+        assert "no_commits" not in item.payload
+        assert "implementation_remediation" not in item.payload
