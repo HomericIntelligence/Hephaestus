@@ -13,6 +13,15 @@ permissions:
   contents: read
 
 jobs:
+  # The retained governance check (issue #2853). The protected signed tag
+  # agent-contract-v1.0.0 and its immutable release pin this external
+  # provider; retargeting the tag is the operator-visible update path (see
+  # SECURITY.md). A full-length commit SHA is not applicable to the
+  # tag-based released contract.
+  agent-contract:
+    uses: HomericIntelligence/Athena/.github/workflows/_agent-contract.yml@agent-contract-v1.0.0  # zizmor: ignore[unpinned-uses]
+    permissions:
+      contents: read
   worker-pool-load:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -55,7 +64,7 @@ jobs:
 
   notify-failure:
     name: Open or update failure tracking issue
-    needs: [worker-pool-load]
+    needs: [agent-contract, worker-pool-load]
     # Only scheduled runs open issues — manual dispatch runs are attended.
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-24.04
