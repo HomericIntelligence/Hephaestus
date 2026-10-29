@@ -13601,6 +13601,39 @@ class TestGitOps:
         assert "Restore the test or update the policy" in caplog.text
         case.backend.preflight.assert_not_called()
 
+    def test_mechanical_rebase_rejects_duplicate_adr_numbers_before_publish(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The mechanical path keeps the semantic gate when the test is absent."""
+        from hephaestus.automation.pipeline.rebase_adr_policy import select_rebase_policy
+        from tests.unit.automation import test_rebase_recovery as recovery
+        from tests.unit.automation.pipeline.test_rebase_policy import real_policy_case
+        from tests.unit.automation.test_source_worktree import _git, _repository
+
+        def duplicate_adr_base(*args: Any, **kwargs: Any) -> Any:
+            root, first, _base = _repository(*args, **kwargs)
+            adr_dir = root / "docs" / "adr"
+            adr_dir.mkdir(parents=True)
+            (adr_dir / "0027-first-decision.md").write_text("# First\n", encoding="utf-8")
+            (adr_dir / "0027-second-decision.md").write_text("# Second\n", encoding="utf-8")
+            _git(root, "add", "docs")
+            _git(root, "commit", "-s", "-m", "test: add duplicate ADR numbers")
+            return root, first, _git(root, "rev-parse", "HEAD")
+
+        monkeypatch.setattr(recovery, "_repository", duplicate_adr_base)
+        with real_policy_case(tmp_path, monkeypatch, publish=True) as case:
+            policy = select_rebase_policy("HomericIntelligence", "Hephaestus")
+            assert policy is not None
+            monkeypatch.setattr(case.pool, "_rebase_policy_selector", lambda repo: policy)
+
+            result = case.pool._run_git(case.job)
+
+        assert not result.ok, result
+        assert result.value is not None, result.error
+        assert result.value["failure_kind"] == "semantic_validation"
+        assert "duplicate ADR number 0027" in (result.error or "")
+        assert case.events == []
+
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:

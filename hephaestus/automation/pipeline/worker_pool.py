@@ -8843,6 +8843,9 @@ class WorkerPool:
         structural = self._rebase_structural_receipts(job, resulting_workspace, source_sha)
         if structural is not None and not structural.ok:
             return structural
+        semantic = self._validate_rebased_tree(cwd, policy=self._select_rebase_policy(job.repo))
+        if semantic is not None:
+            return self._retain_rebase_execution(semantic, structural)
         if publish:
             revalidate = self._authenticated_remote_revalidator(
                 cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
