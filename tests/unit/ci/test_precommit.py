@@ -107,9 +107,7 @@ def test_benchmark_cli_reports_json(capsys: pytest.CaptureFixture[str]) -> None:
 )
 def test_benchmark_cli_rejects_invalid_inputs_with_usage_error(argv: list[str]) -> None:
     """Invalid CLI metric values use argparse's exit-2 usage error."""
-    with pytest.raises(SystemExit) as exc_info:
-        bench_precommit_main(argv)
-    assert exc_info.value.code == 2
+    assert bench_precommit_main(argv) == 2
 
 
 def test_mypy_hook_checks_the_configured_source_tree() -> None:

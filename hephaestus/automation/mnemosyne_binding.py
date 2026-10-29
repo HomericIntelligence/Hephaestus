@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import subprocess
 import tomllib
 from collections.abc import Callable
@@ -29,6 +28,7 @@ from hephaestus.github.mnemosyne_repo import (
     MnemosyneTrustBasis,
     resolve_mnemosyne_target,
 )
+from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
 logger = logging.getLogger(__name__)
@@ -373,7 +373,7 @@ class MnemosyneBindingService:
 
     def _head(self, root: Path) -> str:
         head = _require_success(self._git(root, "rev-parse", "HEAD"), "HEAD read")
-        if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        if not _is_full_commit_sha(head):
             raise MnemosyneBindingError(f"invalid HEAD SHA: {head}")
         return head
 

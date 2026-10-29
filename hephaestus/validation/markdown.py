@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
+from hephaestus.errors import boundary_main
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
 from hephaestus.scripts_lib.check_cli_table_sync import has_accepted_adr_status
@@ -504,6 +505,15 @@ def _print_readme_summary(results: list[ReadmeValidationResult]) -> None:
 
 
 def check_readmes_main() -> int:
+    """Run hephaestus-check-readmes through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_check_readmes_run)
+
+
+def _check_readmes_run() -> int:
     """CLI entry point for README validation.
 
     Parses command-line arguments, validates README files, and prints results.
@@ -787,6 +797,15 @@ def print_link_summary(results: dict[str, Any]) -> None:
 
 
 def main() -> int:
+    """Run hephaestus-validate-links through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point for markdown link validation.
 
     Returns:

@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 
 from hephaestus.cli.utils import add_json_arg, create_parser, emit_json_status
+from hephaestus.errors import boundary_main
 from hephaestus.utils.git import run_git
 
 
@@ -20,6 +21,15 @@ def _git_output(*arguments: str, accepted_codes: tuple[int, ...] = (0,)) -> str:
 
 
 def repository_evidence_main(argv: Sequence[str] | None = None) -> int:
+    """Run hephaestus-repository-evidence through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_repository_evidence_run, argv)
+
+
+def _repository_evidence_run(argv: Sequence[str] | None = None) -> int:
     """Collect reproducible recent-change and source-pattern evidence."""
     parser = create_parser("hephaestus-repository-evidence", description=__doc__)
     parser.add_argument("pattern")

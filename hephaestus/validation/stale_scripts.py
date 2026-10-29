@@ -33,6 +33,7 @@ from pathlib import Path
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
+from hephaestus.errors import boundary_main
 
 # Scripts that are imported by other scripts (not invoked directly) — always active.
 _ALWAYS_ACTIVE: frozenset[str] = frozenset(
@@ -268,6 +269,15 @@ def check_stale_scripts(
 
 
 def main() -> int:
+    """Run hephaestus-check-stale-scripts through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point for stale-script detection.
 
     Returns:

@@ -34,6 +34,7 @@ import yaml
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.config.child_environments import build_python_phase_env
+from hephaestus.errors import boundary_main
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
@@ -144,15 +145,8 @@ def _load_pyproject(repo_root: Path) -> dict[str, Any]:
         )
         sys.exit(1)
 
-    try:
-        with open(pyproject_path, "rb") as f:
-            return cast(dict[str, Any], _tomllib.load(f))
-    except Exception as exc:
-        print(
-            text("ERROR: Could not parse %(path)s: %(error)s", path=pyproject_path, error=exc),
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    with open(pyproject_path, "rb") as f:
+        return cast(dict[str, Any], _tomllib.load(f))
 
 
 def load_coverage_threshold(repo_root: Path) -> int:
@@ -610,6 +604,15 @@ def _run_test_count_check(repo_root: Path, verbose: bool) -> list[str]:
 
 
 def main() -> int:
+    """Run hephaestus-check-doc-config through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point for doc/config consistency checking.
 
     Returns:

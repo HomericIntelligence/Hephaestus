@@ -34,6 +34,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.errors import boundary_main
 from hephaestus.github.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
 
 # Allow-list: the only labels this tool may ever apply. Mirrors the provisioned
@@ -143,6 +144,15 @@ def _read_body(path: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-label-severity through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Reconcile an issue severity label from explicit CLI inputs.
 
     Args:

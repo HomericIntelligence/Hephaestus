@@ -25,6 +25,7 @@ from typing import Any
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+from hephaestus.errors import boundary_main
 
 _yaml: Any | None = None
 try:
@@ -308,6 +309,15 @@ def _emit_validate_agents_json(
 
 
 def validate_agents_main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-validate-agents through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_validate_agents_run, argv)
+
+
+def _validate_agents_run(argv: list[str] | None = None) -> int:
     """CLI entry point: validate agent frontmatter files in a directory.
 
     Args:

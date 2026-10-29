@@ -15,6 +15,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.errors import boundary_main
 from hephaestus.github.client import (
     DEFAULT_GH_TIMEOUT,
     ClaudeUsageCapError,
@@ -136,6 +137,15 @@ def _handle_success(result: subprocess.CompletedProcess[str], *, json_out: bool)
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-gh through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Run ``gh`` via :func:`hephaestus.github.client.gh_call`."""
     parser = build_parser()
     args = parser.parse_args(argv)

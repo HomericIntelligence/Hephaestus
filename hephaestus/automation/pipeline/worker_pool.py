@@ -7812,12 +7812,7 @@ class WorkerPool:
         elif job.op == "prepare_intake":
             return self._git_prepare_intake(job)
 
-        elif job.op == "verify_issue_wave_ancestry":
-            return self._git_verify_issue_wave_ancestry(job)
-
-        else:
-            # Should be impossible due to GitJob.__post_init__ validation
-            return JobResult(ok=False, error=f"unknown op {job.op!r}")
+        return self._git_verify_issue_wave_ancestry(job)
 
     def _git_verify_issue_wave_ancestry(self, job: GitJob) -> JobResult:
         """Verify checkpoint commits are ancestors of synchronized main."""

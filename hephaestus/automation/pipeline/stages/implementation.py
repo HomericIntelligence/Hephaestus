@@ -111,6 +111,7 @@ from hephaestus.automation.test_summary import (
 )
 from hephaestus.automation.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
+from hephaestus.utils.git import _is_full_digest
 
 from ..admission import dependency_block_reason, parse_issue_dependencies
 from ..coordinator_sessions import agent_session_lifecycle
@@ -370,10 +371,7 @@ def _is_valid_dirty_content_snapshot(value: object) -> bool:
     return (
         isinstance(value, dict)
         and set(value) == _DIRTY_CONTENT_SNAPSHOT_KEYS
-        and all(
-            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
-            for digest in value.values()
-        )
+        and all(_is_full_digest(digest) for digest in value.values())
     )
 
 
@@ -3453,8 +3451,7 @@ class ImplementationStage(Stage):
             or set(hunks) != set(paths)
             or not all(isinstance(hunks.get(path), str) and hunks[path] for path in paths)
             or not _is_valid_dirty_content_snapshot(content_snapshot)
-            or not isinstance(index_snapshot, str)
-            or re.fullmatch(r"[0-9a-f]{64}", index_snapshot) is None
+            or not _is_full_digest(index_snapshot)
             or not is_full_commit_sha(paused_head_sha)
             or not is_full_commit_sha(base_sha)
             or not is_full_commit_sha(expected_remote_sha)

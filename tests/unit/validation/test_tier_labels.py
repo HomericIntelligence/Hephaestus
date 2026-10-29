@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.errors import ExitCode
 from hephaestus.validation import tier_labels
 from hephaestus.validation.tier_labels import (
     BAD_PATTERNS,
@@ -494,15 +495,15 @@ class TestMain:
     def test_reports_repository_resolution_failure(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Repository resolution failures return the documented I/O exit status."""
+        """The boundary reports a repository resolution failure as a generic error."""
         monkeypatch.setattr("hephaestus.validation.tier_labels.sys.argv", ["check-tier-labels"])
         monkeypatch.setattr(
             tier_labels,
             "resolve_repo_root",
             lambda args: (_ for _ in ()).throw(RuntimeError("not a repository")),
         )
-        assert tier_labels.main() == 2
-        assert "Could not determine repository root" in capsys.readouterr().err
+        assert tier_labels.main() == int(ExitCode.ERROR)
+        assert "not a repository" in capsys.readouterr().err
 
     def test_reports_scan_io_failure(
         self,

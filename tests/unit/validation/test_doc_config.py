@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -123,16 +124,12 @@ class TestLoadCoverageThreshold:
             load_coverage_threshold(tmp_path)
         assert exc.value.code == 1
 
-    def test_invalid_toml_exits_with_parse_error(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_invalid_toml_raises_parse_error(self, tmp_path: Path) -> None:
+        """Invalid TOML raises a parse error; the console boundary reports it."""
         _write_pyproject(tmp_path, "[tool.coverage\n")
 
-        with pytest.raises(SystemExit) as exc:
+        with pytest.raises(tomllib.TOMLDecodeError):
             load_coverage_threshold(tmp_path)
-
-        assert exc.value.code == 1
-        assert "Could not parse" in capsys.readouterr().err
 
 
 class TestExtractCovPath:
@@ -541,9 +538,7 @@ class TestMain:
 
     def test_help(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.argv", ["hephaestus-check-doc-config", "--help"])
-        with pytest.raises(SystemExit) as exc:
-            main()
-        assert exc.value.code == 0
+        assert main() == 0
 
     def test_valid_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=80))

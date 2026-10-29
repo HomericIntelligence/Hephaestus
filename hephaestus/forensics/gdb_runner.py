@@ -70,6 +70,7 @@ from pathlib import Path
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.config.child_environments import read_approved_parent_env
+from hephaestus.errors import boundary_main
 
 # A literal space is permitted because tokens are produced by ``shlex.split``
 # and spliced into ``subprocess.run`` WITHOUT a shell: an embedded space can
@@ -575,6 +576,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-run-under-gdb through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Entry point for the ``hephaestus-run-under-gdb`` console script.
 
     The explicit ``--direct`` and ``--gdb-cmd-prefix`` options control the

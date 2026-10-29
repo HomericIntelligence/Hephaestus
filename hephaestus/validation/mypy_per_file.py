@@ -27,6 +27,7 @@ from tempfile import TemporaryDirectory
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status
 from hephaestus.config.child_environments import build_python_phase_env
+from hephaestus.errors import boundary_main
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 # mypy flags that consume the next argument as their value.
@@ -156,6 +157,15 @@ def check_mypy_per_file(
 
 
 def main() -> int:
+    """Run hephaestus-mypy-each-file through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point.
 
     Accepts mypy flags and file paths.  All flags (arguments starting with ``-``)

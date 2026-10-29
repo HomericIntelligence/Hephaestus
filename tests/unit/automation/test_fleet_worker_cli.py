@@ -35,10 +35,7 @@ def test_worker_cli_supports_the_shared_version_contract(
     from hephaestus.automation.fleet_worker_cli import main
 
     monkeypatch.setattr(sys, "argv", ["hephaestus-fleet-worker"])
-    with pytest.raises(SystemExit) as exited:
-        main([flag])
-
-    assert exited.value.code == 0
+    assert main([flag]) == 0
     assert capsys.readouterr().out.startswith("hephaestus-fleet-worker ")
 
 

@@ -159,8 +159,5 @@ class TestMain:
         self,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        with pytest.raises(SystemExit) as exc_info:
-            main(["--min-subpackage-pages", "999"])
-
-        assert exc_info.value.code == 2
+        assert main(["--min-subpackage-pages", "999"]) == 2
         assert "unrecognized arguments: --min-subpackage-pages 999" in capsys.readouterr().err

@@ -588,8 +588,6 @@ def record_direct_review_recovery(
         "worktree_marker": worktree_marker,
     }
     with _open_receipt_directory(normalized_root, create=True) as (receipt_dir, receipt_fd):
-        if receipt_fd is None and _DIR_FD_SUPPORTED:  # pragma: no cover - create=True guarantees it
-            raise ValueError("direct review recovery receipt directory is unavailable")
         target = _receipt_path(receipt_dir, pr, normalized_worktree)
         with _receipt_lock(receipt_dir, receipt_fd, pr):
             _write_receipt(

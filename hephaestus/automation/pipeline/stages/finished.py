@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import cast
 
 from hephaestus.agents.runtime import archive_and_prune_opencode_session
 from hephaestus.automation.direct_review_recovery import (
@@ -134,10 +135,7 @@ class FinishedStage(Stage):
                 "_recorded", False
             ):
                 self._resolve_source_terminal(item, ctx)
-            if item.result is None:  # defensive: router always sets it
-                item.result = ItemResult(
-                    passed=False, reason="internal: no result recorded", final_stage=item.stage
-                )
+            result = cast(ItemResult, item.result)
             lease = item.payload.get(WAVE_LEASE_PAYLOAD)
             if (
                 isinstance(lease, WaveLease)
@@ -151,8 +149,8 @@ class FinishedStage(Stage):
                     ).record_terminal_outcome(
                         lease,
                         issue_number=item.issue,
-                        passed=item.result.passed,
-                        reason=item.result.reason,
+                        passed=result.passed,
+                        reason=result.reason,
                         pr_number=None if non_code else item.pr,
                         non_code=non_code,
                     )
@@ -160,7 +158,7 @@ class FinishedStage(Stage):
                     # The checkpoint is authoritative for wave advancement.
                     # Convert a successful-looking item to a failure and make
                     # one best-effort failed write before preserving its tree.
-                    item.result = ItemResult(
+                    item.result = result = ItemResult(
                         passed=False,
                         reason=f"wave checkpoint write failed: {exc}",
                         final_stage=item.stage,
@@ -172,7 +170,7 @@ class FinishedStage(Stage):
                             lease,
                             issue_number=item.issue,
                             passed=False,
-                            reason=item.result.reason,
+                            reason=result.reason,
                             pr_number=item.pr,
                             non_code=False,
                         )
@@ -180,7 +178,7 @@ class FinishedStage(Stage):
                         logger.exception("finished:%s: failed to persist wave failure", item.issue)
                 item.payload["_wave_outcome_recorded"] = True
             if not item.payload.get("_recorded", False):
-                self._ledger.append(item.result)
+                self._ledger.append(result)
                 item.payload["_recorded"] = True
             return Continue(next_state="CLEANUP")
 

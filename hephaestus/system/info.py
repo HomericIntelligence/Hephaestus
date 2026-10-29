@@ -15,6 +15,7 @@ from typing import Any
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 from hephaestus.config.child_environments import read_approved_parent_env
+from hephaestus.errors import boundary_main
 from hephaestus.utils.helpers import run_subprocess
 
 
@@ -290,6 +291,15 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
 
 
 def main() -> int:
+    """Run hephaestus-system-info through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """Collect and display system information."""
     import argparse
 

@@ -261,9 +261,7 @@ class TestMain:
 
     def test_help(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.argv", ["hephaestus-check-stale-scripts", "--help"])
-        with pytest.raises(SystemExit) as exc:
-            main()
-        assert exc.value.code == 0
+        assert main() == 0
 
     def test_no_stale_exits_zero(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         scripts_dir = tmp_path / "scripts"

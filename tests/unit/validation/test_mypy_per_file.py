@@ -192,9 +192,7 @@ class TestMain:
 
     def test_help_exits_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.argv", ["hephaestus-mypy-each-file", "--help"])
-        with pytest.raises(SystemExit) as exc:
-            main()
-        assert exc.value.code == 0
+        assert main() == 0
 
     def test_json_keeps_mypy_diagnostics_out_of_stdout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd

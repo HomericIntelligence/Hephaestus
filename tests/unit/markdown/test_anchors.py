@@ -228,15 +228,11 @@ class TestMain:
 
     def test_help(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.argv", ["hephaestus-validate-anchors", "--help"])
-        with pytest.raises(SystemExit) as exc:
-            main()
-        assert exc.value.code == 0
+        assert main() == 0
 
     def test_missing_target_required(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("sys.argv", ["hephaestus-validate-anchors"])
-        with pytest.raises(SystemExit) as exc:
-            main()
-        assert exc.value.code != 0
+        assert main() != 0
 
     def test_valid_anchor(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         target = tmp_path / "install.md"

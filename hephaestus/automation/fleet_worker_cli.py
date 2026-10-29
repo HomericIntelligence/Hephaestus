@@ -18,6 +18,7 @@ from hephaestus.automation.fleet_session_output import export_session_output
 from hephaestus.automation.fleet_worker import FleetWorker
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg
+from hephaestus.errors import boundary_main
 
 _MAX_MESSAGE = 1024 * 1024
 
@@ -128,6 +129,15 @@ def _export_output(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-fleet-worker through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Run a private worker or attach through an existing authenticated transport."""
     parser = argparse.ArgumentParser(description=text(__doc__ or ""))
     add_json_arg(parser)

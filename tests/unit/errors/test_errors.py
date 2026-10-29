@@ -157,6 +157,26 @@ def test_boundary_error_accepts_a_per_instance_exit_code_override() -> None:
     assert error.exit_code is ExitCode.EXTERNAL_TOOL
 
 
+def test_console_script_wrapper_routes_through_boundary_main(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An installed console-script entry reports through the shared boundary.
+
+    A wrapper without the boundary would re-raise; the wired entry returns the
+    boundary exit code and writes the boundary report instead.
+    """
+    import hephaestus.validation.cli_tier_docs as cli_tier_docs_cli
+
+    def fail(_argv: list[str] | None = None) -> int:
+        raise ConfigurationError("required python version file is missing")
+
+    monkeypatch.setattr(cli_tier_docs_cli, "_run", fail)
+
+    assert cli_tier_docs_cli.main([]) == int(ExitCode.CONFIGURATION)
+    captured = capsys.readouterr()
+    assert captured.err == "ConfigurationError: required python version file is missing\n"
+
+
 def test_importing_the_library_does_not_load_automation() -> None:
     """`hephaestus.errors` must not pull the product layer in.
 

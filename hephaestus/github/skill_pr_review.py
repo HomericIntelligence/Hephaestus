@@ -21,6 +21,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.errors import boundary_main
 from hephaestus.github.client import gh_call
 from hephaestus.utils.git import run_git
 
@@ -349,6 +350,15 @@ def _format_human_error(error: Exception) -> str:
 
 
 def resolve_pr_main(argv: Sequence[str] | None = None) -> int:
+    """Run hephaestus-resolve-pr through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_resolve_pr_run, argv)
+
+
+def _resolve_pr_run(argv: Sequence[str] | None = None) -> int:
     """Resolve an explicit PR or the sole open PR for the current branch."""
     parser = create_parser("hephaestus-resolve-pr", description=__doc__)
     parser.add_argument("--target-host", metavar="HOST")
@@ -449,6 +459,15 @@ def metadata_error(metadata: object) -> str | None:
 
 
 def collect_pr_evidence_main(argv: Sequence[str] | None = None) -> int:
+    """Run hephaestus-collect-pr-evidence through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_collect_pr_evidence_run, argv)
+
+
+def _collect_pr_evidence_run(argv: Sequence[str] | None = None) -> int:
     """Collect GitHub PR metadata, changed paths, and current check output."""
     parser = create_parser("hephaestus-collect-pr-evidence", description=__doc__)
     parser.add_argument("pull_request", metavar="PR_NUMBER_OR_URL")
@@ -541,6 +560,15 @@ def collect_pr_evidence_main(argv: Sequence[str] | None = None) -> int:
 
 
 def pr_diff_context_main(argv: Sequence[str] | None = None) -> int:
+    """Run hephaestus-pr-diff-context through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_pr_diff_context_run, argv)
+
+
+def _pr_diff_context_run(argv: Sequence[str] | None = None) -> int:
     """Compute the two required pull-request diff lenses."""
     parser = create_parser("hephaestus-pr-diff-context", description=__doc__)
     parser.add_argument("base_ref", metavar="BASE_REF")

@@ -18324,20 +18324,6 @@ class TestGitOps:
         assert result.stdout_tail == "clone stdout tail"
         assert result.stderr_tail == "fatal: repository access denied"
 
-    def test_unknown_op_fallback(self, pool: WorkerPool) -> None:
-        """The defensive unknown-op branch returns an error result.
-
-        Unreachable via GitJob.__post_init__ validation, so exercised by
-        bypassing the constructor.
-        """
-        bogus = MagicMock(spec=GitJob)
-        bogus.op = "bogus"
-        bogus.repo = "test/repo"
-        bogus.kwargs = {}
-        result = pool._dispatch_git_op(cast(GitJob, bogus))
-        assert result.ok is False
-        assert "unknown op" in (result.error or "")
-
 
 class TestGitLocking:
     """Tests for per-repo serialization and cross-process file locking."""

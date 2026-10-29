@@ -21,6 +21,7 @@ from typing import NamedTuple
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg
+from hephaestus.errors import boundary_main
 
 _VALID_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -111,6 +112,15 @@ def _validate_name(name: str) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-scaffold-subpackage through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run, argv)
+
+
+def _run(argv: list[str] | None = None) -> int:
     """Entry point for the scaffold-subpackage CLI.
 
     Args:

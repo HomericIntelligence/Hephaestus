@@ -43,6 +43,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.config.child_environments import build_gh_child_env
+from hephaestus.errors import boundary_main
 from hephaestus.github.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
 from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
 from hephaestus.utils.git import (
@@ -1230,6 +1231,15 @@ def _handle_tidy_problem_branches(
 
 
 def main() -> int:
+    """Run hephaestus-tidy through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """Entry point for hephaestus-tidy."""
     args = _build_arg_parser().parse_args()
     configure_github_throttle_from_args(args)

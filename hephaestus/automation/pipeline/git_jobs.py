@@ -14,6 +14,7 @@ from hephaestus.automation.worktree_snapshot import (
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES as DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
     DIRTY_SNAPSHOT_GIT_MAX_BYTES as DIRTY_SNAPSHOT_GIT_MAX_BYTES,
 )
+from hephaestus.utils.git import _is_full_commit_sha
 
 from .host_capabilities import CapabilityRequestTarget
 from .repository_validation import repository_workspace_name_matches
@@ -260,7 +261,7 @@ def _strict_recovery_workspace(value: object) -> WorkspaceBinding:
 
 def _recovery_sha_valid(value: object) -> bool:
     """Accept only a complete lowercase Git object ID."""
-    return type(value) is str and re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", value) is not None
+    return _is_full_commit_sha(value)
 
 
 def _recovery_branch_valid(value: object) -> bool:

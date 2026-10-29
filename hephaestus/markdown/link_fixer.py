@@ -25,6 +25,7 @@ from pathlib import Path
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
+from hephaestus.errors import boundary_main
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
 from hephaestus.utils.helpers import get_repo_root
@@ -233,6 +234,15 @@ def check_links(
 
 
 def main() -> int:
+    """Run hephaestus-check-links through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """CLI entry point: validate (``--check``) or fix absolute-path links.
 
     Returns:

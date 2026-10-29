@@ -12,6 +12,7 @@ import yaml
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+from hephaestus.errors import boundary_main
 
 _VALID_HOOK_STATUSES = ("failed", "passed")
 
@@ -103,6 +104,15 @@ def write_step_summary(content: str, summary_path: str | None = None) -> None:
 
 
 def bench_precommit_main(argv: list[str] | None = None) -> int:
+    """Run hephaestus-bench-precommit through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_bench_precommit_run, argv)
+
+
+def _bench_precommit_run(argv: list[str] | None = None) -> int:
     """Report pre-commit timing without making performance advisory-only."""
     parser = argparse.ArgumentParser(description=text("Report pre-commit hook benchmark results."))
     parser.add_argument(

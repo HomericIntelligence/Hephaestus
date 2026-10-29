@@ -31,6 +31,7 @@ from typing import Any, NamedTuple
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
+from hephaestus.errors import boundary_main
 
 _yaml: Any | None = None
 try:
@@ -427,6 +428,15 @@ def collect_workflow_files(paths: list[str]) -> list[Path]:
 
 
 def check_workflow_inventory_main() -> int:
+    """Run hephaestus-check-workflow-inventory through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_check_workflow_inventory_run)
+
+
+def _check_workflow_inventory_run() -> int:
     """CLI entry point for workflow inventory drift detection.
 
     Returns:
@@ -496,6 +506,15 @@ def check_workflow_inventory_main() -> int:
 
 
 def validate_workflow_checkout_main() -> int:
+    """Run hephaestus-validate-workflow-checkout through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_validate_workflow_checkout_run)
+
+
+def _validate_workflow_checkout_run() -> int:
     """CLI entry point for checkout-order validation.
 
     Returns:

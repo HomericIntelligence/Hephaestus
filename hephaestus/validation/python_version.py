@@ -8,6 +8,7 @@ from pathlib import Path
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
+from hephaestus.errors import boundary_main
 from hephaestus.io.toml import import_tomllib
 
 tomllib = import_tomllib()
@@ -130,6 +131,15 @@ def check_python_version_consistency(
 
 
 def main() -> int:
+    """Run hephaestus-check-python-version through the shared console-script boundary.
+
+    The boundary reports a failure with one exit code and one stderr line.
+    A usage error still exits 2 from argparse.
+    """
+    return boundary_main(_run)
+
+
+def _run() -> int:
     """Run Python-version consistency checks for local hooks and CI."""
     parser = create_validation_parser(
         "Check Python version consistency across project configuration"

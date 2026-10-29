@@ -137,19 +137,6 @@ class TestRecord:
         assert isinstance(second, Continue)
         assert ledger == [item.result]
 
-    def test_missing_result_records_internal_failure(
-        self, stage: FinishedStage, ledger: list[ItemResult], make_ctx: Any
-    ) -> None:
-        """Defensive: an item without a result is recorded as failed, not lost."""
-        item = _item(state="RECORD")
-        item.result = None
-
-        stage.step(item, make_ctx())
-
-        assert len(ledger) == 1
-        assert not ledger[0].passed
-        assert "no result" in ledger[0].reason
-
     def test_reviewed_non_code_result_completes_wave_without_merge_receipt(
         self,
         tmp_path: Path,
