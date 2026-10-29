@@ -515,6 +515,28 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             and owner_login.casefold() == self.org.casefold()
         )
 
+    def get_pr_body(self, pr_number: int) -> str:
+        """Return the pull request's current body text.
+
+        Raises:
+            RuntimeError: GitHub did not answer with a body object. The caller
+                warns and continues rather than inventing a body.
+
+        """
+        if self._skip(f"read PR #{pr_number} body"):
+            return ""
+        try:
+            result = self._gh(
+                ["pr", "view", str(pr_number), "--json", "body"],
+                check=False,
+            )
+            data = json.loads(result.stdout or "{}")
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"PR #{pr_number} body read failed: {exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"PR #{pr_number} body read returned no object")
+        return str(data.get("body") or "")
+
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
         """Return the exclusive implementation-state label flags."""
         try:
