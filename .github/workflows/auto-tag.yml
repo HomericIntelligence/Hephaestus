@@ -13,9 +13,12 @@ on:
           - minor
           - major
 
+# The tag-push job requires these workflow-level write grants; the
+# read-only governance provider job declares its own minimal permissions
+# and does not inherit them (issue #2853).
 permissions:
-  actions: write
-  contents: write
+  actions: write  # zizmor: ignore[excessive-permissions]
+  contents: write  # zizmor: ignore[excessive-permissions]
 
 # Serialize manual dispatches: this workflow pushes a signed vX.Y.Z tag, a
 # non-idempotent write. Two overlapping runs could compute the same next version
@@ -25,9 +28,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The retained governance check (issue #2853). The protected signed tag
+  # agent-contract-v1.0.0 and its immutable release pin this external
+  # provider; retargeting the tag is the operator-visible update path (see
+  # SECURITY.md). A full-length commit SHA is not applicable to the
+  # tag-based released contract.
+  agent-contract:
+    uses: HomericIntelligence/Athena/.github/workflows/_agent-contract.yml@agent-contract-v1.0.0  # zizmor: ignore[unpinned-uses]
+    permissions:
+      contents: read
   auto-tag:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    needs: [agent-contract]
 
     steps:
       # Credentials are intentionally persisted here: this job pushes the

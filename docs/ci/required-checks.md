@@ -346,6 +346,30 @@ more. Enumerating each one individually in branch protection is brittle: renamin
 a job, adding a job, or splitting one silently changes what's required, and nobody
 notices until something slips through.
 
+## Agent contract governance
+
+The `agent-contract` job is the retained governance check from issue #2853.
+Each `_required.yml` run on pull-request, merge-group, and exact-main push
+calls the released Athena validator. The call goes through the reusable
+workflow at the protected signed tag `agent-contract-v1.0.0`. That tag has an
+immutable GitHub release, so the called validator content cannot change. The
+job is a member of the aggregate fan-in only. It is not a direct required
+context in the tables above.
+
+The local CI container cannot run an external reusable workflow. The focused
+tests in `tests/unit/docs/test_agent_contract.py`,
+`tests/unit/ci/test_agent_contract_inventory.py`, and
+`tests/unit/ci/test_merge_queue_required_checks.py` are wiring checks. The
+GitHub `agent-contract` jobs supply the authoritative provider result.
+
+Six additional direct callers run the same read-only job: `auto-tag.yml`
+(`auto-tag` needs), `contract.yml` (`github-contract` needs),
+`nightly-tests.yml` (`notify-failure` needs), `performance.yml`
+(`notify-failure` needs), `security.yml` (`notify-failure` needs), and
+`release.yml` (`build-and-publish` needs; `deploy-docs` inherits the check
+through that dependency). Issue-event and comment-event workflows carry no
+contract job.
+
 ## Hosted cache behavior
 
 The required-checks workflow no longer caches the rootless Podman storage
