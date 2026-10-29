@@ -9,7 +9,14 @@ from math import ceil
 from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_types as ct
-from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobHandle, JobResult
+from hephaestus.automation.pipeline.jobs import (
+    AgentJob,
+    BuildTestJob,
+    GitJob,
+    JobHandle,
+    JobResult,
+)
+from hephaestus.automation.pipeline.phase_timing import PHASE_FOR_STAGE, PUBLICATION_OPS, PhaseName
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 from hephaestus.resilience import is_transient_subprocess_error
 
@@ -255,7 +262,7 @@ class ExecutionCoordinator(_CoordinatorHost):
         if facts.remaining is not None and facts.remaining < self.config.rate_guard_threshold:
             assert facts.reset_epoch is not None  # noqa: S101
             delay = max(0.0, facts.reset_epoch - self._wall_time() + 5.0)
-            self._timer_park(item, delay)
+            self._timer_park(item, delay, wait_cause="rate_guard")
             return
         self._submit_ready_job(item, request)
 
@@ -327,6 +334,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             elif not result.ok:
                 self._auxiliary_job_failure_count += 1
         self._record_completion_metrics(item, handle, result, auxiliary=auxiliary)
+        self._record_job_timing(item, handle, result)
 
         if isinstance(handle.job, GitHubJob) and isinstance(
             handle.job.request, ReadRateBudgetRequest
@@ -467,3 +475,29 @@ class ExecutionCoordinator(_CoordinatorHost):
                 allowed_labels={},
                 series_cap=1,
             ).inc(max(result.duration_s, 0.0))
+
+    def _record_job_timing(self, item: ct.WorkItem, handle: JobHandle, result: JobResult) -> None:
+        """Attribute one job completion to the item's phase timing accumulator.
+
+        Observation only: a timing validation failure logs a warning through
+        the guard and never changes the item's route.
+        """
+        job = handle.job
+        if isinstance(job, BuildTestJob):
+            phase: PhaseName | None = PhaseName.TEST_EXECUTION
+        elif isinstance(job, GitJob) and job.op in PUBLICATION_OPS:
+            phase = PhaseName.PUBLICATION
+        else:
+            phase = PHASE_FOR_STAGE.get(item.stage)
+        if phase is None:
+            return
+
+        def track() -> None:
+            item.timing.record_job(
+                phase,
+                result.duration_s,
+                self._job_result_error_class(result),
+                self._wall_time(),
+            )
+
+        self._record_timing(item, track)

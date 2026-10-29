@@ -10,9 +10,15 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 import pytest
 
+from hephaestus.automation.pipeline.phase_timing import (
+    PhaseName,
+    RetryCause,
+    encode_timing_receipt,
+)
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.summary import (
     RunStats,
@@ -506,3 +512,134 @@ class TestJsonEnvelope:
             print_summary([item], _stats(), [], json_out=False)
 
         assert "merge-admission" not in caplog.text
+
+
+class TestPhaseTimingSummary:
+    """Per-item phase-time lines, aggregate totals, and JSON records (#3295)."""
+
+    def _timed_item(self, issue: int = 7) -> WorkItem:
+        item = _item(issue, StageName.FINISHED, passed=True, reason="ok")
+        item.timing.enter_phase(PhaseName.PLANNING, 10.0)
+        item.timing.leave_phase(PhaseName.PLANNING, 16.0)
+        item.timing.begin_wait(PhaseName.CI_WAIT, 16.0)
+        item.timing.end_wait(19.0)
+        item.timing.record_cause(RetryCause.REVIEW_FINDINGS)
+        item.timing.close(20.0)
+        return item
+
+    def test_per_item_phase_time_line(self, caplog: pytest.LogCaptureFixture) -> None:
+        item = self._timed_item()
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "phase-time: wall=10.0s active=6.0s wait=3.0s" in caplog.text
+        assert "'planning': {'elapsed_s': 6.0, 'active_s': 6.0, 'wait_s': 0.0, 'attempts': 0}" in (
+            caplog.text
+        )
+        assert "'ci_wait': {'elapsed_s': 3.0, 'active_s': 0.0, 'wait_s': 3.0, 'attempts': 1}" in (
+            caplog.text
+        )
+        assert "causes={'review_findings': 1}" in caplog.text
+        assert "phase-time totals: wall=10.0s active=6.0s wait=3.0s" in caplog.text
+
+    def test_item_without_timing_prints_no_phase_time_line(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        item = _item(9, StageName.FINISHED, passed=True, reason="ok")
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "phase-time" not in caplog.text
+
+    def test_json_envelope_includes_closed_phase_timing_records(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        item = self._timed_item()
+        item.payload["_impl_source_revision"] = "c" * 40
+
+        print_summary([item], _stats(), [], json_out=True, run_identity="run-9")
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        records = envelope["phase_timing"]
+        assert len(records) == 1
+        record = records[0]
+        assert set(record) == {
+            "repo",
+            "issue",
+            "pr",
+            "head_sha",
+            "run_identity",
+            "wall_s",
+            "active_s",
+            "wait_s",
+            "phases",
+            "causes",
+            "current_phase",
+            "current_waiting",
+            "last_cause",
+            "last_error_class",
+            "passed",
+            "final_stage",
+        }
+        assert record["repo"] == "repo-a"
+        assert record["issue"] == 7
+        assert record["head_sha"] == "c" * 40
+        assert record["run_identity"] == "run-9"
+        assert record["passed"] is True
+        assert record["final_stage"] == "finished"
+        assert record["wall_s"] == pytest.approx(10.0)
+        assert record["active_s"] == pytest.approx(6.0)
+        assert record["wait_s"] == pytest.approx(3.0)
+        assert record["causes"] == {"review_findings": 1}
+        assert set(record["phases"]) == {"planning", "ci_wait"}
+        assert record["phases"]["ci_wait"]["class"] == "waiting"
+
+    def test_json_envelope_phase_timing_matches_durable_receipt_encoder(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The JSON record equals the fail-closed receipt the coordinator emits."""
+        item = self._timed_item(issue=11)
+
+        print_summary([item], _stats(), [], json_out=True, run_identity="run-1")
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        (record,) = envelope["phase_timing"]
+        expected = encode_timing_receipt(
+            {"repo": "repo-a", "issue": 11, "pr": None, "head_sha": None},
+            item.timing,
+            run_identity="run-1",
+            passed=True,
+            final_stage="finished",
+            now_fn=time.monotonic,
+        )
+        assert record == expected
+
+    def test_json_envelope_omits_items_without_timing(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        print_summary([_item(5, StageName.FINISHED, passed=True)], _stats(), [], json_out=True)
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["phase_timing"] == []
+
+    def test_phase_timing_records_carry_no_free_text(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Reason text, paths, and host-shaped strings never enter the records."""
+        item = self._timed_item()
+        item.result = ItemResult(
+            passed=False,
+            reason="failure in /home/operator/token.txt on host build-01",
+            final_stage=StageName.FINISHED,
+        )
+
+        print_summary([item], _stats(exit_code=1), [], json_out=True, run_identity="run-2")
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        (record,) = envelope["phase_timing"]
+        serialized = json.dumps(record)
+        assert "/home/operator/token.txt" not in serialized
+        assert "build-01" not in serialized
+        assert record["passed"] is False

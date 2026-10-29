@@ -15,11 +15,14 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import time
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
+from typing import Any
 
+from hephaestus.automation.pipeline.phase_timing import encode_timing_receipt, receipt_head_sha
 from hephaestus.automation.pipeline.work_item import ItemKind, PreservedWorktree, WorkItem
 from hephaestus.cli.localization import Localizer, get_localizer
 from hephaestus.cli.utils import emit_json_status
@@ -404,6 +407,55 @@ def _merge_admission_evidence(item: WorkItem) -> dict[str, object] | None:
     }
 
 
+def _timing_phase_map(item: WorkItem) -> dict[str, dict[str, object]] | None:
+    """Return bounded per-phase timing facts, or None when nothing recorded.
+
+    Values come from validated :class:`WorkItemTiming` fields only: closed
+    phase names, finite durations, and attempt/cause counts. No free text.
+    """
+    timing = item.timing
+    if not timing.phases:
+        return None
+    return {
+        phase.value: {
+            "elapsed_s": round(record.elapsed_s, 1),
+            "active_s": round(record.active_s, 1),
+            "wait_s": round(record.wait_s, 1),
+            "attempts": record.attempts,
+        }
+        for phase, record in timing.phases.items()
+    }
+
+
+def _timing_receipt_record(item: WorkItem, *, run_identity: str) -> dict[str, Any] | None:
+    """Encode the closed per-item receipt for the JSON envelope, fail closed.
+
+    Returns None for items without recorded timing and for any record the
+    fail-closed encoder rejects; the JSON envelope never carries free text.
+    """
+    timing = item.timing
+    if not timing.phases and not timing.closed:
+        return None
+    if item.result is None:
+        return None
+    try:
+        return encode_timing_receipt(
+            {
+                "repo": item.repo,
+                "issue": item.issue,
+                "pr": item.pr,
+                "head_sha": receipt_head_sha(item.payload),
+            },
+            timing,
+            run_identity=run_identity,
+            passed=item.result.passed,
+            final_stage=item.result.final_stage.value,
+            now_fn=time.monotonic,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def print_summary(  # noqa: C901
     items: list[WorkItem],
     stats: RunStats,
@@ -412,6 +464,7 @@ def print_summary(  # noqa: C901
     json_out: bool,
     recovery_preserved: Sequence[PreservedWorktree] = (),
     terminal_summary: TerminalSummary | None = None,
+    run_identity: str = "",
 ) -> None:
     """Log the end-of-run summary; emit the JSON envelope when requested.
 
@@ -426,9 +479,15 @@ def print_summary(  # noqa: C901
         terminal_summary: Optional constant-space aggregate for all terminal
             outcomes.  When supplied, it controls aggregate counts while
             ``items`` remains the bounded detailed reporting window.
+        run_identity: Closed run label embedded in per-item timing receipts.
 
     """
     items = latest_logical_items(items)
+    timing_wall_s = 0.0
+    timing_active_s = 0.0
+    timing_wait_s_total = 0.0
+    timing_items = 0
+    timing_causes: Counter[str] = Counter()
 
     logger.info("")
     logger.info("=== Pipeline summary ===")
@@ -466,6 +525,23 @@ def print_summary(  # noqa: C901
                 merge_admission.get("detail"),
                 merge_admission.get("contexts"),
             )
+        timing_phases = _timing_phase_map(item)
+        if timing_phases is not None:
+            timing_items += 1
+            active_s, wait_s = item.timing.totals()
+            logger.info(
+                "    phase-time: wall=%.1fs active=%.1fs wait=%.1fs phases=%s causes=%s",
+                item.timing.wall_s(),
+                active_s,
+                wait_s,
+                timing_phases,
+                dict(sorted(item.timing.causes.items())),
+            )
+        timing_wall_s += item.timing.wall_s()
+        timing_active_wait = item.timing.totals()
+        timing_active_s += timing_active_wait[0]
+        timing_wait_s_total += timing_active_wait[1]
+        timing_causes.update(item.timing.causes)
 
     if terminal_summary is None:
         dispositions: dict[str, int] = {}
@@ -495,6 +571,14 @@ def print_summary(  # noqa: C901
         logger.info("  planning-actions: %s", planning_actions)
     if review_run_reasons:
         logger.info("  review-run reasons: %s", review_run_reasons)
+    if timing_items:
+        logger.info(
+            "  phase-time totals: wall=%.1fs active=%.1fs wait=%.1fs causes=%s",
+            timing_wall_s,
+            timing_active_s,
+            timing_wait_s_total,
+            dict(sorted(timing_causes.items())),
+        )
     if terminal_summary is not None and total_items > len(items):
         logger.info("  detailed terminal rows retained: %d of %d", len(items), total_items)
     logger.info(
@@ -536,6 +620,11 @@ def print_summary(  # noqa: C901
         )
 
     if json_out:
+        phase_timing_records = [
+            record
+            for item in items
+            if (record := _timing_receipt_record(item, run_identity=run_identity)) is not None
+        ]
         review_sessions = [
             {
                 "repo": item.repo,
@@ -571,4 +660,5 @@ def print_summary(  # noqa: C901
             preserved_worktrees=[[number, path] for _, number, path in preserved],
             recovery_worktrees=[[number, path] for _, number, path in recovery_preserved],
             plan_review_sessions=review_sessions,
+            phase_timing=phase_timing_records,
         )

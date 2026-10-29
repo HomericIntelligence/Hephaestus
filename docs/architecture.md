@@ -2620,6 +2620,46 @@ under configurable age/count limits. Locking or cleanup failures preserve
 files, emit warnings, and do not affect pipeline routing. See
 [`observability.md`](observability.md#enabling-monitoring).
 
+### Per-work-item phase timing and retry causes
+
+The coordinator records where pipeline time goes and why work repeats
+([`phase_timing.py`](../hephaestus/automation/pipeline/phase_timing.py)).
+Each `WorkItem` owns one `WorkItemTiming` accumulator. The coordinator
+thread is the only writer. Workers and stages do not write timing data.
+
+Time is recorded against a closed vocabulary of nine phases in
+`PhaseName`: `issue_intake`, `planning`, `implementation`,
+`test_execution`, `publication`, `ci_wait`, `correction`,
+`merge_admission`, and `external_wait`. `PHASE_FOR_STAGE` maps each
+pipeline stage to one phase. Build/test job completions add time to
+`test_execution`. Publication `GitJob` completions add time to
+`publication`. Timer parks add wait time to the classified wait phase.
+
+Repeated work is recorded against a closed vocabulary of seven causes in
+`RetryCause`: `source_change`, `review_findings`, `test_failure`,
+`check_failure`, `remote_movement`, `tool_failure`, and `external_wait`.
+`classify_retry_cause` maps the closed fail-route note and the closed job
+error class to one cause. Free text is never a cause.
+
+The recording points are coordinator seams only: stage entry and exit,
+timer park and wake, job completion, RETRY and FAIL_BACK routing, and the
+terminal result. Each call runs inside a guard. A timing failure logs a
+warning and records nothing. Timing never routes, labels, merges, or
+fails an item. Timing observes the workflow only and grants no authority.
+
+Two bounded sinks report the data. The terminal summary prints one
+per-item `phase-time` line and run-wide totals. It prints enumerations,
+counts, and durations only. The durable event log receives one
+`work_item_timing` receipt per terminal item through the existing
+`_record_event` path. `encode_timing_receipt` is fail-closed: it rejects
+foreign keys, unbounded text, and invalid values. The closed schema holds
+the item identity, the run identity, wall/active/wait totals, per-phase
+`{start_s, end_s, elapsed_s, active_s, wait_s, attempts}` records,
+per-cause counts, `current_phase`, `current_waiting`, `last_cause`,
+`last_error_class`, `passed`, and `final_stage`. No note or reason text
+enters the receipt. The `--json` envelope carries the same records in
+`phase_timing`, bounded by the `terminal_detail_capacity` window.
+
 ### Gauges
 
 [`_emit_observability_tick`](../hephaestus/automation/pipeline/coordinator.py)

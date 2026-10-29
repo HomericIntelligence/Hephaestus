@@ -3,6 +3,7 @@ from __future__ import annotations
 import heapq
 import logging
 import signal
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -21,6 +22,13 @@ from hephaestus.automation.issue_waves import IssueWaveError, IssueWaveStore
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.github_jobs import MergeWaitCycleCompleted
 from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
+from hephaestus.automation.pipeline.phase_timing import (
+    PHASE_FOR_STAGE,
+    PhaseName,
+    classify_retry_cause,
+    encode_timing_receipt,
+    receipt_head_sha,
+)
 from hephaestus.automation.pipeline.routing import Disposition, Route
 from hephaestus.resilience import is_transient_subprocess_error
 
@@ -140,6 +148,13 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         """Validate and persist a closed-schema event emitted by a stage."""
         event_name, fields = encode_stage_event(event)
         self._record_event(event_name, fields)
+
+    def _record_timing(self, item: ct.WorkItem, action: Callable[[], None]) -> None:
+        """Run one observation-only timing action; failures log, never route."""
+        try:
+            action()
+        except (TypeError, ValueError):
+            logger.warning("phase timing record failed for %s", self._item_key(item), exc_info=True)
 
     def _record_event(self, event: str, *fields: ct.Any) -> None:
         """Append an event to memory and, when configured, to JSONL on disk."""
@@ -369,6 +384,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                         terminal_summary=(
                             self._terminal_summary if self._terminal_summary.total else None
                         ),
+                        run_identity=self.config.run_identity,
                     )
                 finally:
                     if self._metrics_server is not None:
@@ -455,6 +471,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if item.result is None or item.payload.get("_summary_recorded", False):
             return
         item.payload["_summary_recorded"] = True
+        self._record_timing(item, lambda: self._emit_timing_receipt(item))
         self._terminal_summary.record(item)
         self._seen_item_ids.discard(id(item))
 
@@ -486,6 +503,31 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             del self.preserved[:-retained]
         if len(self.recovery_preserved) > retained:
             del self.recovery_preserved[:-retained]
+
+    def _emit_timing_receipt(self, item: ct.WorkItem) -> None:
+        """Emit the closed-schema work-item timing receipt once per terminal item.
+
+        Validation failures log a warning through the caller's guard and emit
+        nothing; no free text can enter the durable log.
+        """
+        if item.result is None or item.payload.get("_timing_receipt_recorded", False):
+            return
+        item.payload["_timing_receipt_recorded"] = True
+        item.timing.close(self._wall_time())
+        receipt = encode_timing_receipt(
+            {
+                "repo": item.repo,
+                "issue": item.issue,
+                "pr": item.pr,
+                "head_sha": receipt_head_sha(item.payload),
+            },
+            item.timing,
+            run_identity=self.config.run_identity,
+            passed=item.result.passed,
+            final_stage=item.result.final_stage.value,
+            now_fn=self._wall_time,
+        )
+        self._record_event("work_item_timing", receipt)
 
     def _claim_item(self, stage_name: ct.StageName, *, index: int = 0) -> ct.WorkItem | None:
         """Claim one ready item while retaining its source-stage capacity."""
@@ -541,6 +583,18 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._learning_work_permit_ids.discard(id(item))
             self._live_work_permit_ids.add(id(item))
         item.stage = target
+        source_phase = PHASE_FOR_STAGE.get(source)
+        target_phase = PHASE_FOR_STAGE.get(target)
+
+        def track() -> None:
+            now = self._wall_time()
+            if source_phase is not None and source_phase is not target_phase:
+                item.timing.leave_phase(source_phase, now)
+            if enter and target_phase is not None:
+                item.timing.enter_phase(target_phase, now)
+
+        if source_phase is not None or target_phase is not None:
+            self._record_timing(item, track)
         if enter:
             item.state = "ENTER"
             item.payload["_enter_pending"] = True
@@ -652,7 +706,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
         self._drain_queues()
 
-    def _timer_park(self, item: ct.WorkItem, delay_s: float) -> None:
+    def _timer_park(self, item: ct.WorkItem, delay_s: float, *, wait_cause: str = "stage") -> None:
         """Park *item* on the timer heap for ``delay_s`` seconds."""
         # A timer is outside every stage queue.  Release a normal drain's
         # source lease before parking so its capacity is not stranded while
@@ -661,6 +715,18 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         wake = self._monotonic() + max(0.0, delay_s)
         heapq.heappush(self.timers, (wake, self._seq, item))
         self._seq += 1
+        if wait_cause == "rate_guard":
+            wait_phase: PhaseName | None = PhaseName.EXTERNAL_WAIT
+        elif item.stage is ct.StageName.MERGE_WAIT:
+            wait_phase = PhaseName.CI_WAIT
+        else:
+            wait_phase = PHASE_FOR_STAGE.get(item.stage)
+
+        def track() -> None:
+            if wait_phase is not None:
+                item.timing.begin_wait(wait_phase, self._wall_time())
+
+        self._record_timing(item, track)
         item.add_history_event(item.stage, item.state, note=f"timer-parked {delay_s:.1f}s")
         self._record_event("timer_park", item.stage.value, self._item_key(item), delay_s)
 
@@ -676,6 +742,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             _, _, item = self.timers[0]
             if not self._push_item(item, item.stage, enter=False, defer_if_full=True):
                 return
+
+            def track(item: ct.WorkItem = item) -> None:
+                item.timing.end_wait(self._wall_time())
+
+            self._record_timing(item, track)
             heapq.heappop(self.timers)
             self._progress = True
 
@@ -688,6 +759,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         """
         self._record_resumable_recovery_worktrees(item)
         self._release_source_lease(item)
+        self._record_timing(item, lambda: item.timing.close(self._wall_time()))
         item.result = ct.ItemResult(
             passed=False,
             reason=f"resumable at {item.stage.value}",
@@ -1191,6 +1263,13 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         retry waits on real-world progress (for example, PR merges) the preview
         will never make, so the item finishes instead of stalling the heap.
         """
+
+        def track() -> None:
+            cause = classify_retry_cause(item.stage, outcome.note, item.timing.last_error_class)
+            if cause is not None:
+                item.timing.record_cause(cause)
+
+        self._record_timing(item, track)
         delay = item.payload.pop("retry_delay_s", None)
         if delay is None:
             if not self._restore_source_lease(item):
@@ -1294,6 +1373,13 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if self.config.dry_run:
             self._finish(item, passed=False, reason=f"[dry-run] would fail_back: {outcome.note}")
             return
+
+        def track() -> None:
+            cause = classify_retry_cause(item.stage, outcome.note, item.timing.last_error_class)
+            if cause is not None:
+                item.timing.record_correction(cause, self._wall_time())
+
+        self._record_timing(item, track)
         fail_backs = int(item.payload.get("_fail_backs", 0)) + 1
         item.payload["_fail_backs"] = fail_backs
         if fail_backs > ct._FAIL_BACK_CAP:
