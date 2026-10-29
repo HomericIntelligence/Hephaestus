@@ -415,6 +415,55 @@ def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _non_negative_int(value: str) -> int:
+    """Parse a non-negative integer."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            text("expected a non-negative integer, got %(value0)r", value0=value)
+        ) from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(
+            text("expected a non-negative integer, got %(value0)r", value0=value)
+        )
+    return parsed
+
+
+def add_github_read_cache_args(parser: argparse.ArgumentParser) -> None:
+    """Add GitHub GraphQL read-cache configuration flags to a CLI parser."""
+    group = parser.add_argument_group(text("GitHub read-cache options"))
+    group.add_argument(
+        "--gh-cache-ttl",
+        type=_non_negative_int,
+        default=3600,
+        metavar="SECONDS",
+        help=text(
+            "Read-through cache TTL for GitHub GraphQL reads in seconds "
+            "(default: 3600). Pass 0 to disable the read cache."
+        ),
+    )
+    group.add_argument(
+        "--gh-cache-max-entries",
+        type=positive_int,
+        default=2000,
+        metavar="COUNT",
+        help=text(
+            "Bound on cached read entries in process memory and in the "
+            "shared entry-file store (default: 2000)."
+        ),
+    )
+    group.add_argument(
+        "--gh-cache-dir",
+        default=None,
+        metavar="PATH",
+        help=text(
+            "Directory for shared read-cache entry files. The default is "
+            "build/.issue_implementer/gh-read-cache under the repository root."
+        ),
+    )
+
+
 def configure_github_throttle_from_args(args: argparse.Namespace) -> None:
     """Apply GitHub global-throttle options parsed from CLI args."""
     from hephaestus.github.rate_limit import configure_gh_global_throttle

@@ -9,10 +9,13 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+import hephaestus.automation.github_api as github_api
+from hephaestus.automation.github_api.cache import GraphQLReadCache
 from hephaestus.automation.github_api.graphql import (
     GraphQLDeterministicError,
     GraphQLMutationIntent,
     GraphQLMutationOutcomeUnknownError,
+    GraphQLMutationSpec,
     GraphQLQuerySpec,
     GraphQLResponseError,
     GraphQLRetryableError,
@@ -615,3 +618,129 @@ def test_resolve_receipt_mismatch_is_unknown_without_replay(
     assert error.value.intent.operation == "resolveReviewThread"
     assert error.value.intent.targets == (("threadId", "THREAD"),)
     _assert_one_attempt(receipt_call)
+
+
+# --- Read-through cache integration (issue #3395) ----------------------------
+
+
+@pytest.fixture()
+def read_cache(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> GraphQLReadCache:
+    """Bind an intentionally small read cache to the package seam."""
+    cache = GraphQLReadCache(
+        ttl_seconds=3600.0,
+        max_entries=100,
+        directory=tmp_path / "gh-read-cache",
+        token_identity=lambda: "test-token",
+    )
+    monkeypatch.setattr(github_api, "_gh_read_cache", cache)
+    return cache
+
+
+def cacheable_query_spec() -> GraphQLQuerySpec[dict[str, Any]]:
+    """Return a query spec whose operation the cache may save."""
+    return GraphQLQuerySpec(
+        operation="batchIssueStates",
+        query="query batchIssueStates { viewer { login } }",
+        validate=lambda data: data,
+    )
+
+
+def trivial_mutation_spec() -> GraphQLMutationSpec[dict[str, Any]]:
+    """Return a minimal mutation spec for invalidation tests."""
+    return GraphQLMutationSpec(
+        operation="testMutation",
+        query="mutation testMutation($id:ID!,$clientMutationId:String){noop(input:{id:$id}){ok}}",
+        variables={"id": "X"},
+        target_fields=("id",),
+        content_fields=(),
+        validate=lambda data, intent: data,
+    )
+
+
+def test_repeated_identical_query_uses_one_upstream_call_in_window(
+    read_cache: GraphQLReadCache,
+) -> None:
+    """AC1: identical reads within the TTL share one upstream transport call."""
+    raw_call = Mock(return_value=completed())
+    variables = {"owner": "o", "name": "r"}
+    first = run_graphql(cacheable_query_spec(), variables, call=raw_call)
+    second = run_graphql(cacheable_query_spec(), variables, call=raw_call)
+    assert raw_call.call_count == 1
+    assert first == second
+
+
+def test_executed_mutation_invalidates_affected_keys(
+    read_cache: GraphQLReadCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2: an executed mutation drops the entries its repository scope owns."""
+    monkeypatch.setattr(
+        "hephaestus.automation.github_api.cache.get_repo_info",
+        lambda: ("o", "r"),
+    )
+    raw_call = Mock(return_value=completed())
+    variables = {"owner": "o", "name": "r"}
+    run_graphql(cacheable_query_spec(), variables, call=raw_call)
+    assert raw_call.call_count == 1
+    run_graphql(trivial_mutation_spec(), call=raw_call)
+    assert raw_call.call_count == 2
+    run_graphql(cacheable_query_spec(), variables, call=raw_call)
+    assert raw_call.call_count == 3
+
+
+def test_label_write_invalidates_affected_keys(
+    read_cache: GraphQLReadCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2: a label write through the client layer invalidates the repository."""
+    raw_call = Mock(return_value=completed())
+    variables = {"owner": "o", "name": "r"}
+    run_graphql(cacheable_query_spec(), variables, call=raw_call)
+    assert raw_call.call_count == 1
+    monkeypatch.setattr(
+        "hephaestus.automation.github_api._gh_call",
+        Mock(return_value=Mock(stdout="[]", stderr="", returncode=0)),
+    )
+    github_api.gh_issue_add_labels(7, ["state:plan"], repo=("o", "r"))
+    run_graphql(cacheable_query_spec(), variables, call=raw_call)
+    assert raw_call.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["reviewedPrState", "issueComments", "BatchIssueComments", "issueCommentIds"],
+)
+def test_bypass_operations_always_read_upstream(
+    read_cache: GraphQLReadCache, operation: str
+) -> None:
+    """AC3: each freshness bypass point runs upstream on every call."""
+    spec = GraphQLQuerySpec(
+        operation=operation,
+        query=f"query {operation} {{ viewer {{ login }} }}",
+        validate=lambda data: data,
+    )
+    raw_call = Mock(return_value=completed())
+    variables = {"owner": "o", "name": "r"}
+    run_graphql(spec, variables, call=raw_call)
+    run_graphql(spec, variables, call=raw_call)
+    assert raw_call.call_count == 2
+
+
+def test_unlisted_operation_is_not_cached(read_cache: GraphQLReadCache) -> None:
+    """AC3: an operation absent from both allow-lists is never cached."""
+    spec = GraphQLQuerySpec(
+        operation="githubSchemaContract",
+        query="query githubSchemaContract { viewer { login } }",
+        validate=lambda data: data,
+    )
+    raw_call = Mock(return_value=completed())
+    variables = {"owner": "o", "name": "r"}
+    run_graphql(spec, variables, call=raw_call)
+    run_graphql(spec, variables, call=raw_call)
+    assert raw_call.call_count == 2
+    assert read_cache.stats() == {
+        "hits": 0,
+        "misses": 0,
+        "bypasses": 0,
+        "evictions": 0,
+        "entries": 0,
+        "ttl_seconds": 3600,
+    }
