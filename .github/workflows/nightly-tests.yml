@@ -158,7 +158,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/provision_codex_sigstore_fixture.py --root "$PWD/build/test-fixtures/codex-sigstore/rust-v0.153.4"
       - name: Build CI image
-        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
       - name: Validate offline Codex artifacts
         run: >
           podman run --rm --network=none --tmpfs /tmp:rw,size=4g,mode=1777

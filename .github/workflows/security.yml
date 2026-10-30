@@ -47,7 +47,7 @@ jobs:
           persist-credentials: false
 
       - name: Build CI image (podman)
-        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
 
       - name: Run pip-audit (in container)
         id: pip-audit
@@ -83,7 +83,7 @@ jobs:
           persist-credentials: false
 
       - name: Build CI image (podman)
-        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
 
       - name: Run bandit (SAST, in container)
         id: bandit
@@ -131,7 +131,7 @@ jobs:
           persist-credentials: false
 
       - name: Build CI image (podman)
-        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
 
       - name: Run zizmor (GitHub Actions SAST with online audits, in container)
         id: zizmor
@@ -170,7 +170,7 @@ jobs:
           persist-credentials: false
 
       - name: Build CI image (podman)
-        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
 
       - name: Run license scan (in container)
         id: license-scan

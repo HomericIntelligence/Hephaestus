@@ -11,11 +11,18 @@
 # Git is built from a pinned kernel.org release into /usr/local. The pipeline's
 # checkout isolation sets GIT_CONFIG_GLOBAL=/dev/null, and the automation code
 # only trusts a real (non-symlink) Git binary under a trusted root. See issue
-# #2821 and hephaestus/automation/worktree_snapshot.py.
+# #2821 and hephaestus/automation/worktree_snapshot.py. The image holds this one
+# Git only: every tool that needs Git, including the GitHub CLI, uses it.
 #
 # Build (OCI-compliant — works with both podman and docker):
-#   podman build -f ci/Containerfile -t hephaestus-ci:local .
+#   podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
 #   docker build -f ci/Containerfile -t hephaestus-ci:local .
+#
+# The stages are independent where they can be: the runtime package install and
+# the builder dependency sync run while the pinned Git compiles. Podman needs
+# --jobs to overlap them; Docker's BuildKit does this by default. Two jobs suit
+# a four-core runner, where make -j inside the Git build already uses every
+# core.
 #
 # Run:
 #   podman run --rm -v .:/workspace:Z hephaestus-ci:local uv run pytest tests/unit
@@ -78,14 +85,16 @@ ARG GIT_VERSION
 ARG GIT_SHA256
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     ca-certificates \
     curl \
+    gcc \
     gettext \
+    libc6-dev \
     libcurl4-openssl-dev \
     libexpat1-dev \
     libpcre2-dev \
     libssl-dev \
+    make \
     perl \
     xz-utils \
     zlib1g-dev \
@@ -125,6 +134,11 @@ RUN pi_spec="$(node -e 'const p=require("/tmp/pi_package_catalog.json").compatib
 
 # ============================================================================
 # Stage 1: Builder — install uv and the locked project environment
+#
+# The dependency sync needs Git: the automation extra depends on the
+# homericintelligence-agamemnon source package, which uv clones over Git. The
+# pinned Git above is therefore a prerequisite of this stage, not a parallel
+# stage.
 # ============================================================================
 FROM python-snapshot AS builder
 
@@ -145,7 +159,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Install build dependencies from the immutable Debian snapshot configured by
 # python-snapshot. Git is not installed here: the git-source stage supplies the
-# pinned binary that pre-commit hooks run.
+# pinned binary that the dependency sync and pre-commit hooks run.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -214,17 +228,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/hephaestus-venv/bin:/usr/local/bin:$PATH"
 
 # Runtime-only system packages (no build tools), resolved from the same
-# immutable snapshot as the builder stage. The pinned Git comes from the
-# git-source stage. Debian's git stays installed because the GitHub CLI package
-# declares a dependency on it. PATH puts /usr/local/bin first and the final
-# assertions prove the pinned binary is the one the image runs, so the Debian
-# binary is never selected. The remaining packages are the shared libraries and
-# Perl runtime that the pinned binary and its helpers load.
+# immutable snapshot as the builder stage. No package-manager Git is installed:
+# the pinned binary from the git-source stage is the only Git in the image, and
+# the final assertions prove it. The remaining packages are the shared
+# libraries and Perl runtime that the pinned binary and its helpers load.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bats="${BATS_VERSION}" \
     curl \
     ca-certificates \
-    git \
     jq \
     liberror-perl \
     libcurl4t64 \
@@ -242,16 +253,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && shellcheck --version | grep -Fx "version: 0.10.0"
 
 # GitHub CLI (gh) — pinned release; native runners ship it preinstalled and the
-# automation pipeline's _trusted_gh_executable() requires it.
+# automation pipeline's _trusted_gh_executable() requires it. The release
+# archive is installed, not the .deb: the .deb declares a dependency on the
+# distribution Git, which this image must not carry. /usr/local/bin/gh is a
+# trusted candidate in remote_git.py and worker_pool.py.
+# Checksums: https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_checksums.txt
 RUN case "$TARGETARCH" in \
-        amd64) gh_arch="amd64"; gh_sha256="7c7fa3bb890db0934baf65910d97b8c0fa437b2e590f7f7daf6bdf82c5c486d7" ;; \
-        arm64) gh_arch="arm64"; gh_sha256="0ba7a76739c865d82ebde24667d875d9b8caa55db47c7597c24accdd4defd2bb" ;; \
+        amd64) gh_arch="amd64"; gh_sha256="a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112" ;; \
+        arm64) gh_arch="arm64"; gh_sha256="73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5" ;; \
         *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
-    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 --connect-timeout 30 --max-time 300 "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_${gh_arch}.deb" -o /tmp/gh.deb \
-    && echo "${gh_sha256}  /tmp/gh.deb" | sha256sum --check \
-    && apt-get install -y /tmp/gh.deb \
-    && rm -f /tmp/gh.deb
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 --connect-timeout 30 --max-time 300 "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_${gh_arch}.tar.gz" -o /tmp/gh.tar.gz \
+    && echo "${gh_sha256}  /tmp/gh.tar.gz" | sha256sum --check \
+    && tar xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1 --no-same-owner "gh_2.97.0_linux_${gh_arch}/bin/gh" \
+    && rm -f /tmp/gh.tar.gz \
+    && test "$(command -v gh)" = "/usr/local/bin/gh" \
+    && gh --version | grep -qx 'gh version 2.97.0.*'
 
 # just — same release as the required justfile and shell-test jobs.
 RUN case "$TARGETARCH" in \
@@ -300,6 +317,7 @@ ENV HOME=/home/ci \
 # PATH, a real file rather than a symlink, its HTTP transport helper, complete
 # shared-library resolution, and the Perl runtime its subcommands need.
 RUN test "$(command -v git)" = "/usr/local/bin/git" \
+    && test ! -e /usr/bin/git \
     && test ! -L /usr/local/bin/git \
     && test "$(git --version)" = "git version ${GIT_VERSION}" \
     && test -x /usr/local/libexec/git-core/git-remote-http \
