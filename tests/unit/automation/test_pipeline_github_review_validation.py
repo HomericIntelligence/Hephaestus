@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import logging
 import os
 import subprocess
 import threading
@@ -198,10 +199,13 @@ def test_source_plan_retains_target_base_and_real_statuses(
 
 
 @pytest.mark.parametrize("revision", ["head", "base"])
-def test_source_plan_rejects_changed_committed_control(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: str
+def test_source_plan_degrades_on_a_changed_committed_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    revision: str,
 ) -> None:
-    """Reject a changed control in either admitted commit."""
+    """Continue without local coverage when a control changed in either commit."""
     from dataclasses import replace
 
     install_profile(monkeypatch)
@@ -219,8 +223,8 @@ def test_source_plan_rejects_changed_committed_control(
         _git(root, "checkout", "--detach", head)
     else:
         workspace = replace(workspace, revision=changed)
-    with pytest.raises(ValueError, match=r"control|profile"):
-        _source_plan_api()(
+    with caplog.at_level(logging.WARNING):
+        plan = _source_plan_api()(
             workspace,
             repository=REPOSITORY,
             issue_number=ISSUE_NUMBER,
@@ -228,6 +232,43 @@ def test_source_plan_rejects_changed_committed_control(
             reviewed_base=base,
             timeout_s=30,
         )
+    assert plan.execution_allowed is False
+    assert plan.checks == ()
+    assert plan.coverage_reason
+    assert plan.diff_base_sha is None
+    assert "continuing without local validation coverage" in caplog.text
+
+
+def test_source_plan_degrades_on_an_absent_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Continue without local coverage when a control path is missing."""
+    from dataclasses import replace
+
+    install_profile(monkeypatch)
+    workspace, base, _head = _source_fixture(tmp_path)
+    root = workspace.cwd
+    (root / "uv.lock").unlink()
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "Remove a reviewed control.")
+    workspace = replace(workspace, revision=_git(root, "rev-parse", "HEAD"))
+    with caplog.at_level(logging.WARNING):
+        plan = _source_plan_api()(
+            workspace,
+            repository=REPOSITORY,
+            issue_number=ISSUE_NUMBER,
+            pr_number=ISSUE_NUMBER,
+            reviewed_base=base,
+            timeout_s=30,
+        )
+    assert plan.execution_allowed is False
+    assert plan.checks == ()
+    assert plan.coverage_reason
+    assert plan.diff_base_sha is None
+    assert "uv.lock" in caplog.text
+    assert "continuing without local validation coverage" in caplog.text
 
 
 def test_source_plan_rejects_unsupported_repository_before_git(

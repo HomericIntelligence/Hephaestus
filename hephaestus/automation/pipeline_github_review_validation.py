@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -46,6 +47,8 @@ from .pipeline.repository_validation_profiles import (
 )
 from .remote_git import trusted_gh_executable
 from .worktree_snapshot import _controlled_git_env, _run_bounded_git_output
+
+logger = logging.getLogger(__name__)
 
 SOURCE_INVENTORY_MAX = 500_000
 TREE_PATH_BYTES_MAX = 64 * 1024 * 1024
@@ -114,8 +117,13 @@ class _ProfileGitSource:
         result.text.encode("utf-8", errors="strict")
         return result.text
 
-    def admit_revision(self, revision: str, profile: RepositoryValidationProfile) -> str:
-        """Return the profile admitted at one immutable revision."""
+    def admit_revision(self, revision: str, profile: RepositoryValidationProfile) -> str | None:
+        """Return the profile admitted at one immutable revision.
+
+        A revision whose controls the profile does not bind returns ``None``.
+        The caller then continues without local validation coverage instead of
+        refusing the review.
+        """
         tree = self.read("ls-tree", "-r", "-z", "--full-tree", revision, limit=TREE_PATH_BYTES_MAX)
         if not tree or not tree.endswith("\0"):
             raise ValueError("The Git source inventory is incomplete.")
@@ -141,20 +149,48 @@ class _ProfileGitSource:
             members[path] = (mode, fields[2])
             if len(inventory) > SOURCE_INVENTORY_MAX:
                 raise ValueError("The Git source inventory exceeds its limit.")
+        absent = tuple(sorted(profile.control_paths - members.keys()))
+        if absent:
+            logger.warning(
+                "validation profile %s names %d control path(s) absent from revision %s: %s; "
+                "continuing without local validation coverage",
+                profile.profile_id,
+                len(absent),
+                revision,
+                ", ".join(absent[:4]),
+            )
+            return None
         sizes = _control_sizes(profile)
-        if not members.keys() >= profile.control_paths:
-            raise ValueError("The Git control inventory is incomplete.")
         controls: dict[str, tuple[int, bytes]] = {}
         for path in sorted(members.keys() & profile.control_paths):
             mode, object_id = members[path]
             object_size = self.read("cat-file", "-s", object_id, limit=CONTROL_BLOB_LIMIT).strip()
             if not object_size.isdigit() or int(object_size) != sizes[path]:
-                raise ValueError("The Git control size does not match the profile.")
+                logger.warning(
+                    "validation profile %s binds control %s at %d bytes but revision %s has %s; "
+                    "continuing without local validation coverage",
+                    profile.profile_id,
+                    path,
+                    sizes[path],
+                    revision,
+                    object_size if object_size.isdigit() else "an unreadable size",
+                )
+                return None
             data = self.read("cat-file", "blob", object_id, limit=int(object_size) + 1).encode(
                 "utf-8"
             )
             controls[path] = (mode, data)
-        return profile.admit_controls(controls, tuple(inventory))
+        try:
+            return profile.admit_controls(controls, tuple(inventory))
+        except ValueError as error:
+            logger.warning(
+                "validation profile %s did not admit the controls at revision %s: %s; "
+                "continuing without local validation coverage",
+                profile.profile_id,
+                revision,
+                error,
+            )
+            return None
 
     def changes(self, base: str, head: str) -> tuple[str, tuple[tuple[str, str], ...]]:
         """Return the unique merge base and the complete changed-path records."""
@@ -197,6 +233,9 @@ def validation_plan_for_workspace(
 
     The caller holds the source lease. The PR target commit remains distinct
     from the merge base used to collect changes. No worktree file is executed.
+    When the installed profile does not admit the controls at both reviewed
+    revisions, this returns a plan that does not permit execution, so the
+    review continues on provider evidence instead of stopping.
     """
     profile = require_repository_validation_profile(repository)
     if type(workspace) is not WorkspaceBinding or not isinstance(workspace.revision, str):
@@ -220,14 +259,25 @@ def validation_plan_for_workspace(
     source = _ProfileGitSource(workspace.cwd, min(timeout_s, SOURCE_TIMEOUT_MAX_S), shutdown)
     if source.read("rev-parse", "--is-shallow-repository", limit=16).strip() != "false":
         raise ValueError("A complete Git history is necessary for source inspection.")
-    profiles = []
+    profiles: list[str | None] = []
     for revision in (plan.reviewed_head, plan.reviewed_base):
         commit = source.read("rev-parse", "--verify", f"{revision}^{{commit}}", limit=64).strip()
         if commit != revision:
             raise ValueError("The source revision is not an immutable commit.")
         profiles.append(source.admit_revision(revision, profile))
-    if profiles[0] != profiles[1]:
-        raise ValueError("The source revisions have different control profiles.")
+    if profiles[0] != profiles[1] or profiles[0] is None:
+        logger.warning(
+            "validation profile %s admits reviewed revisions %s and %s differently; "
+            "continuing without local validation coverage",
+            profile.profile_id,
+            plan.reviewed_head,
+            plan.reviewed_base,
+        )
+        return replace(
+            plan,
+            execution_allowed=False,
+            coverage_reason="The validation controls are unavailable for one reviewed revision.",
+        )
     diff_base, changes = source.changes(plan.reviewed_base, plan.reviewed_head)
     checks = profile.select(changes)
     return replace(
