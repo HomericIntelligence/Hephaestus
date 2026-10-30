@@ -14,6 +14,7 @@ from hephaestus.automation import worktree_manager as worktree_manager_module
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
+    DirectScopeStaleStateError,
     RemoteGitRefreshError,
     WorktreeCreationReceiptError,
     WorktreeDirtyError,
@@ -358,6 +359,43 @@ class TestWorktreeManager:
         assert raised.value.owner_path == expected
         assert manager.worktrees == {}
         clean.assert_not_called()
+        worktree_mocks.run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("holder", "local_branch", "predicate"),
+        [
+            (None, True, "local_ref"),
+            (Path("/tmp/holder"), False, "branch_holder"),
+        ],
+    )
+    def test_direct_scope_stale_state_is_typed(
+        self,
+        worktree_mocks: Any,
+        tmp_path: Any,
+        holder: Path | None,
+        local_branch: bool,
+        predicate: str,
+    ) -> None:
+        """Deterministic stale local state names its failed predicate (#2905)."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        branch = "2460-auto-impl-direct-abc123"
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=holder),
+            patch.object(manager, "_direct_scope_local_branch_exists", return_value=local_branch),
+            pytest.raises(DirectScopeStaleStateError) as raised,
+        ):
+            manager.create_worktree(
+                2460,
+                branch,
+                base_sha="a" * 40,
+                remote_branch_reserved=True,
+            )
+
+        assert raised.value.predicate == predicate
+        assert raised.value.branch == branch
+        assert manager.worktrees == {}
         worktree_mocks.run.assert_not_called()
 
     def test_direct_scope_rejects_refresh_before_any_git_mutation(

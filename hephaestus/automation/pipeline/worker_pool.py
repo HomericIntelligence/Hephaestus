@@ -260,6 +260,7 @@ from hephaestus.automation.worktree_manager import (
     ADOPTED_HEAD_VALIDATION_FAILED,
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
+    DirectScopeStaleStateError,
     ImplementationWriterAuthority,
     RemoteGitRefreshError,
     WorktreeCreationReceiptError,
@@ -11439,9 +11440,15 @@ class WorkerPool:
                     )
                 value = result.value if isinstance(result.value, dict) else {}
                 reservation = value.get("direct_scope_reservation")
-                if not result.ok and (
-                    isinstance(reservation, dict)
-                    or (result.error or "").startswith("source_workspace_ownership_unavailable:")
+                if (
+                    not result.ok
+                    and not (result.error or "").startswith("direct_scope_stale_state:")
+                    and (
+                        isinstance(reservation, dict)
+                        or (result.error or "").startswith(
+                            "source_workspace_ownership_unavailable:"
+                        )
+                    )
                 ):
                     raise SourceWorkspaceTerminalError(
                         "writer creation failed",
@@ -11800,6 +11807,29 @@ class WorkerPool:
                 if kwargs.get("implementation_writer_handoff") is not None
                 else None,
             )
+        except DirectScopeStaleStateError as exc:
+            # Deterministic local state: the same inputs fail on every attempt.
+            # Report the failed predicate and let the stage stop (#2905).
+            value: dict[str, object] = {
+                "failure_kind": "direct_scope_stale_state",
+                "direct_scope_stale_state": {
+                    "predicate": exc.predicate,
+                    "branch": exc.branch,
+                    "detail": exc.detail,
+                },
+            }
+            error = f"direct_scope_stale_state:{exc.predicate}"
+            if base_sha is None:
+                return JobResult(ok=False, error=error, value=value)
+            return self._rollback_direct_scope_reservation(
+                branch_name=branch_name,
+                base_sha=base_sha,
+                repo_root=repo_root,
+                expected_repo=expected_repo,
+                timeout_s=timeout_s,
+                error=error,
+                extra_value=value,
+            )
         except Exception as exc:
             if base_sha is not None and kwargs.get("implementation_writer_handoff") is not None:
                 raise SourceWorkspaceTerminalError(
@@ -11895,8 +11925,10 @@ class WorkerPool:
         expected_repo: str,
         timeout_s: int,
         error: str,
+        extra_value: dict[str, object] | None = None,
     ) -> JobResult:
         """Release an early reservation or preserve its receipt for Finished."""
+        value: dict[str, object] = dict(extra_value or {})
         try:
             released = self._release_direct_scope_reservation(
                 branch_name,
@@ -11908,15 +11940,19 @@ class WorkerPool:
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
             return JobResult(
                 ok=False,
-                value={"direct_scope_reservation": {"branch": branch_name, "base_sha": base_sha}},
+                value={
+                    **value,
+                    "direct_scope_reservation": {"branch": branch_name, "base_sha": base_sha},
+                },
                 error=f"{error}; reservation rollback failed: {exc}",
             )
         if not released:
             return JobResult(
                 ok=False,
+                value=value or None,
                 error=f"{error}; direct scope reservation changed before it could be released",
             )
-        return JobResult(ok=False, error=error)
+        return JobResult(ok=False, error=error, value=value or None)
 
     def _finalize_created_worktree(  # noqa: C901
         self,
