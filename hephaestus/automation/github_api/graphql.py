@@ -29,6 +29,8 @@ from hephaestus.github.client import (
 )
 from hephaestus.github.rate_limit import detect_rate_limit, detect_secondary_rate_limit
 
+from . import cache as _read_cache_mod
+
 T = TypeVar("T")
 GraphQLScalar = int | str
 GraphQLTransport = Callable[..., subprocess.CompletedProcess[str]]
@@ -457,6 +459,30 @@ def _validate_result[T](
         raise _mutation_unknown(message, prepared) from error
 
 
+def _query_cache_lookup[T](
+    spec: GraphQLQuerySpec[T],
+    variables: Mapping[str, GraphQLScalar],
+) -> tuple[_read_cache_mod.ReadKey | None, bool, T | None]:
+    """Apply the read-cache policy for one query; return (key, hit, value)."""
+    read_cache = _read_cache_mod.configured_read_cache()
+    if read_cache is None:
+        return None, False, None
+    if read_cache.is_bypass_operation(spec.operation):
+        # Freshness bypass point: always run upstream, never serve stale.
+        read_cache.note_bypass()
+        read_cache.remove_key(read_cache.build_key(spec.operation, variables))
+        return None, False, None
+    if not read_cache.is_cacheable_operation(spec.operation):
+        return None, False, None
+    key = read_cache.build_key(spec.operation, variables)
+    if key is None:
+        return None, False, None
+    hit, value = read_cache.get(key)
+    if not hit:
+        return key, False, None
+    return key, True, cast(T, value)
+
+
 @overload
 def run_graphql[T](
     spec: GraphQLQuerySpec[T],
@@ -482,11 +508,16 @@ def run_graphql[T](
     call: GraphQLTransport | None = None,
 ) -> T:
     """Execute exactly one typed GraphQL operation and validate its result."""
+    read_cache = _read_cache_mod.configured_read_cache()
+    cache_key: _read_cache_mod.ReadKey | None = None
     if isinstance(spec, GraphQLQuerySpec):
         if variables is None:
             raise TypeError("query variables are required")
         prepared: _PreparedGraphQLMutation[T] | None = None
         request_variables = variables
+        cache_key, cache_hit, cached_value = _query_cache_lookup(spec, variables)
+        if cache_hit:
+            return cast(T, cached_value)
     else:
         if variables is not None:
             raise TypeError("mutation variables are owned by the mutation spec")
@@ -496,30 +527,55 @@ def run_graphql[T](
         prepared = prepared_result
         request_variables = prepared.variables
     try:
-        transport_args = _graphql_argv(spec.query, request_variables)
-        transport_kwargs = {
-            "check": False,
-            "retry_on_rate_limit": False,
-            "max_retries": 1,
-            "log_on_error": False,
-            "throttle": False,
-        }
-        if call is None:
-            result = _execute_graphql(transport_args, **transport_kwargs)
-        elif call is gh_call:
-            result = call(
-                transport_args,
-                _graphql_internal=True,
-                **transport_kwargs,
-            )
-        else:
-            # An explicit transport seam is already the raw one-attempt
-            # executor. Keep its call signature exact so tests and adapters
-            # can assert the no-retry contract without façade-only metadata.
-            result = call(transport_args, **transport_kwargs)
-    except BaseException as error:
-        classified = _classify_transport_error(spec, prepared, error)
-        raise classified from error
+        try:
+            result = _raw_transport(spec, request_variables, call)
+        except BaseException as error:
+            raise _classify_transport_error(spec, prepared, error) from error
+        validated = _checked_transport_result(spec, prepared, result)
+    finally:
+        # A prepared mutation may have reached GitHub; invalidate immediately
+        # so a writer never reads its own write as stale, on every outcome.
+        if prepared is not None and read_cache is not None:
+            read_cache.invalidate_current_repository()
+    if cache_key is not None and read_cache is not None:
+        read_cache.store(cache_key, validated)
+    return validated
+
+
+def _raw_transport[T](
+    spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
+    request_variables: Mapping[str, GraphQLScalar],
+    call: GraphQLTransport | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the one-attempt transport for a prepared operation."""
+    transport_args = _graphql_argv(spec.query, request_variables)
+    transport_kwargs = {
+        "check": False,
+        "retry_on_rate_limit": False,
+        "max_retries": 1,
+        "log_on_error": False,
+        "throttle": False,
+    }
+    if call is None:
+        return _execute_graphql(transport_args, **transport_kwargs)
+    if call is gh_call:
+        return call(
+            transport_args,
+            _graphql_internal=True,
+            **transport_kwargs,
+        )
+    # An explicit transport seam is already the raw one-attempt executor.
+    # Keep its call signature exact so tests and adapters can assert the
+    # no-retry contract without façade-only metadata.
+    return call(transport_args, **transport_kwargs)
+
+
+def _checked_transport_result[T](
+    spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
+    prepared: _PreparedGraphQLMutation[T] | None,
+    result: subprocess.CompletedProcess[str],
+) -> T:
+    """Classify the process status and validate the response payload."""
     returncode = getattr(result, "returncode", None)
     if not isinstance(returncode, int):
         message = "GraphQL transport result had no integer process status"
