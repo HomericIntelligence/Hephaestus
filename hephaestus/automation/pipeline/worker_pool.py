@@ -4700,25 +4700,36 @@ class WorkerPool:
         """Shut down the pool.
 
         When ``mark_interrupted`` is true, sets the shutdown event before
-        cancelling pending futures and SIGTERMing every in-flight agent process
+        cancelling pending futures and stopping every in-flight agent process
         group. Coordinators pass false for ordinary ``finally`` cleanup so
         releasing pool resources cannot reclassify a completed run as a signal
         interruption. ``executor.shutdown(cancel_futures=True)`` only cancels
         UN-STARTED futures; a job already blocked in a ``claude`` subprocess
         would keep running and pin its non-daemon worker thread (holding the
-        interpreter open at exit — the #2059 leak). Terminating tracked process
+        interpreter open at exit — the #2059 leak). Stopping tracked process
         groups frees those workers promptly. An interrupted shutdown waits for
         active workers before the coordinator releases their ownership records.
+
+        Group teardown is bounded (#2966). Each owned group gets
+        ``subprocess_registry.TERM_GRACE_S`` to honour ``SIGTERM``, then
+        ``SIGKILL``. A final sweep covers a child that a worker registered
+        while another lane was still stopping.
         """
         if mark_interrupted:
             self._shutdown.set()
+            subprocess_registry.begin_shutdown()
         if self._athena_skill_executor is not None:
             self._athena_skill_executor.cancel()
         if mark_interrupted:
-            subprocess_registry.terminate_all()
+            killed = subprocess_registry.escalate(subprocess_registry.TERM_GRACE_S)
+            if killed:
+                logger.warning(
+                    "stopped %d child process group(s) that ignored SIGTERM", len(killed)
+                )
         self._executor.shutdown(wait=mark_interrupted, cancel_futures=True)
-        if not mark_interrupted:
-            subprocess_registry.terminate_all()
+        # Late or stray registrations: a worker can start a child after the
+        # sweep above and before its thread stops.
+        subprocess_registry.force_kill()
 
     def release_repo_intake_leases(self) -> None:
         """Release all run-lifetime repository-intake leases once."""
