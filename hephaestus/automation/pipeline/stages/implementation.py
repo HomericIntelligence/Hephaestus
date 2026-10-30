@@ -164,6 +164,7 @@ from .repo import (
     DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
     DIRECT_SCOPE_RESERVATION_COLLISION_KEY,
     DIRECT_SCOPE_RESERVATION_KEY,
+    DIRECT_SCOPE_STALE_STATE_KEY,
     DIRECT_SCOPE_WORKTREE_NONCE_KEY,
     is_direct_scope_worktree_nonce,
     is_full_commit_sha,
@@ -1457,6 +1458,21 @@ class ImplementationStage(Stage):
             # pre-agent work and must never be interpreted as permission to
             # overwrite the other owner.
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_reservation_collision")
+        stale_state = item.payload.pop(DIRECT_SCOPE_STALE_STATE_KEY, None)
+        if isinstance(stale_state, dict):
+            # Deterministic local state fails on every attempt. Stop with the
+            # failed predicate instead of spending the Git retry budget (#2905).
+            item.payload.pop("git_error", None)
+            item.payload.pop("git_error_retries", None)
+            predicate = str(stale_state.get("predicate") or "unknown")
+            logger.error(
+                "implementation:%d: direct scope stale state at %s for branch %s (%s)",
+                issue,
+                predicate,
+                stale_state.get("branch"),
+                stale_state.get("detail"),
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, f"direct_scope_stale_state: {predicate}")
         lock_failure = item.payload.pop("git_lock_failure", None)
         if lock_failure in _TERMINAL_GIT_LOCK_FAILURES:
             item.payload.pop("git_error_retries", None)
@@ -3623,6 +3639,27 @@ class ImplementationStage(Stage):
             )
             if isinstance(collision, dict) and collision.get("branch") == item.branch:
                 item.payload[DIRECT_SCOPE_RESERVATION_COLLISION_KEY] = True
+                item.worktree = ""
+                return
+            stale_state = (
+                result.value.get("direct_scope_stale_state")
+                if (result.error or "").startswith("direct_scope_stale_state:")
+                and isinstance(result.value, dict)
+                else None
+            )
+            if isinstance(stale_state, dict) and stale_state.get("branch") == item.branch:
+                item.payload[DIRECT_SCOPE_STALE_STATE_KEY] = {
+                    "predicate": stale_state.get("predicate"),
+                    "branch": stale_state.get("branch"),
+                    "detail": stale_state.get("detail"),
+                }
+                reservation = (
+                    result.value.get("direct_scope_reservation")
+                    if isinstance(result.value, dict)
+                    else None
+                )
+                if isinstance(reservation, dict):
+                    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = reservation
                 item.worktree = ""
                 return
             materialized_path = (

@@ -144,6 +144,7 @@ from hephaestus.automation.verified_runner import build_verified_runner_argv
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
+    DirectScopeStaleStateError,
     ImplementationWriterAuthority,
     WorktreeCreationReceiptError,
     WorktreeManager,
@@ -20859,6 +20860,37 @@ def test_commit_push_rejects_stale_writer_replay_without_mutation(
         assert _git(repo, "status", "--porcelain") == ""
         assert _git(repo, "ls-remote", "origin", "refs/heads/writer").split()[0] == remote
         assert manager._require_receipt(9, SourceLane.IMPLEMENTATION) == first_receipt
+
+
+def test_direct_scope_stale_state_is_a_typed_worktree_result(pool: WorkerPool) -> None:
+    """A deterministic stale rejection crosses the worker boundary typed (#2905)."""
+    manager = MagicMock()
+    manager.create_worktree.side_effect = DirectScopeStaleStateError(
+        "local_ref", "7-auto-impl-direct-abc", "local branch reference"
+    )
+
+    result = pool._create_managed_worktree(
+        manager=manager,
+        kwargs={},
+        base_dir=Path("/unused/build/.worktrees"),
+        base_sha=None,
+        branch_name="7-auto-impl-direct-abc",
+        repo_root=Path("/unused"),
+        expected_repo="test/repo",
+        timeout_s=60,
+    )
+
+    assert isinstance(result, JobResult)
+    assert result.ok is False
+    assert result.error == "direct_scope_stale_state:local_ref"
+    assert result.value == {
+        "failure_kind": "direct_scope_stale_state",
+        "direct_scope_stale_state": {
+            "predicate": "local_ref",
+            "branch": "7-auto-impl-direct-abc",
+            "detail": "local branch reference",
+        },
+    }
 
 
 def test_direct_writer_creation_failure_does_not_rollback_reservation(pool: WorkerPool) -> None:
