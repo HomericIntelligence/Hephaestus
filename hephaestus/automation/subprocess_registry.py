@@ -12,8 +12,13 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     _register: Callable[[int], None]
+    _shutdown_started: bool
     _unregister: Callable[[int], None]
+    begin_shutdown: Callable[[], None]
+    escalate: Callable[..., tuple[int, ...]]
+    force_kill: Callable[..., tuple[int, ...]]
     live_count: Callable[[], int]
+    shutdown_started: Callable[[], bool]
     supported: Callable[[], bool]
     terminate_all: Callable[..., int]
     track_process_group: Callable[[int], AbstractContextManager[None]]
