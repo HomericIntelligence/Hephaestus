@@ -1187,18 +1187,21 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
         RETRY timer contract (base.py): the stage records its backoff in
         ``payload["retry_delay_s"]`` immediately before returning; a missing
-        key means "retry on the next drain tick". Under dry-run a DELAYED
-        retry waits on real-world progress (for example, PR merges) the preview
-        will never make, so the item finishes instead of stalling the heap.
+        key means "retry on the next drain tick".
+
+        A preview cannot make the label or comment change that a retry waits
+        for, so under dry-run the item finishes with the planned work. A
+        delay-less retry would otherwise read the same unchanged state on every
+        tick and keep later issues out of the preview (#2948).
         """
         delay = item.payload.pop("retry_delay_s", None)
+        if self.config.dry_run:
+            pending = f"would wait {delay}s" if delay is not None else "would retry"
+            self._finish(item, passed=False, reason=f"[dry-run] {pending}: {outcome.note}")
+            return
         if delay is None:
             if not self._restore_source_lease(item):
                 raise RuntimeError("retry requires an owned source lease")
-        elif self.config.dry_run:
-            self._finish(
-                item, passed=False, reason=f"[dry-run] would wait {delay}s: {outcome.note}"
-            )
         else:
             self._timer_park(item, float(delay))
 

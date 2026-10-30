@@ -67,6 +67,7 @@ from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkI
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.automation.state_labels import STATE_NEEDS_PLAN
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -1321,6 +1322,63 @@ class TestDryRun:
 
         with pytest.raises(AssertionError, match="dry-run must never submit"):
             coordinator._submit(claim_test_item(coordinator, _issue_item(1)), request)
+
+    @pytest.mark.parametrize(
+        ("delay", "prefix"),
+        [(None, "[dry-run] would retry: "), (30.0, "[dry-run] would wait 30.0s: ")],
+    )
+    def test_retry_finishes_the_preview_instead_of_stalling(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        delay: float | None,
+        prefix: str,
+    ) -> None:
+        """A preview cannot make the change a retry waits for (#2948)."""
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, dry_run=True)
+        item = _issue_item(850)
+        if delay is not None:
+            item.payload["retry_delay_s"] = delay
+        note = f"exclusive {STATE_NEEDS_PLAN} label was not confirmed"
+
+        coordinator._route(
+            claim_test_item(coordinator, item), StageOutcome(Disposition.RETRY, note)
+        )
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None
+        assert item.result.passed is False
+        assert item.result.reason == prefix + note
+        assert pool.submitted == []
+
+    def test_dry_run_retry_does_not_starve_the_next_issue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An item that retries on unchanged preview labels still ends (#2948)."""
+        seeds = [
+            [
+                SeedEntry(kind="issue", identifier=850, stage=StageName.PLANNING, reason="r"),
+                SeedEntry(kind="issue", identifier=851, stage=StageName.PLANNING, reason="r"),
+            ]
+        ]
+        coordinator, pool, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=seeds, dry_run=True
+        )
+        retry = StageOutcome(
+            Disposition.RETRY, f"exclusive {STATE_NEEDS_PLAN} label was not confirmed"
+        )
+        coordinator.stages[StageName.PLANNING] = StubStage(retry, retry)
+
+        exit_code = coordinator.run()
+
+        # A preview that cannot proceed is not a pass, so the run reports it.
+        assert exit_code == 1
+        assert pool.submitted == []
+        assert len(coordinator.ledger) == 2
+        assert all(
+            result.reason.startswith("[dry-run] would retry: ") for result in coordinator.ledger
+        )
+        assert all(STATE_NEEDS_PLAN in result.reason for result in coordinator.ledger)
 
 
 class TestFailBackRouting:
