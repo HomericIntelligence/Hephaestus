@@ -8,6 +8,7 @@ from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 import hephaestus.automation.pipeline.coordinator_types as ct
+import hephaestus.automation.pipeline.implementer_checkpoint as _checkpoint
 import hephaestus.automation.pipeline.stages as stages_mod
 import hephaestus.automation.pipeline.stages.base as stage_base_mod
 import hephaestus.automation.pipeline.stages.repo as repo_stage_mod
@@ -155,6 +156,18 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self,
             logger=logger,
             stalled_ticks_threshold=self._stall_ticks_before_retry,
+        )
+
+    def _observe_implementer_progress(self) -> None:
+        """Write due implementer checkpoints and progress events (#3435)."""
+        _checkpoint.observe_in_flight(
+            self.in_flight,
+            ticks=self._impl_checkpoint_ticks,
+            now=self._monotonic(),
+            interval_s=_checkpoint.interval_from_config(self.config),
+            item_key=self._item_key,
+            metadata_timeout_s=self.config.metadata_timeout,
+            emit=self._record_event,
         )
 
     def _emit_observability_tick(self) -> None:
@@ -309,6 +322,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self._wake_timers()
                 self._drain_completions()
                 self._emit_observability_tick()
+                self._observe_implementer_progress()
                 if self.shutdown.is_set():
                     # Graceful: stop admitting; drain in-flight to RESUMABLE.
                     if not self.in_flight and not self.auxiliary_in_flight:

@@ -102,6 +102,7 @@ if TYPE_CHECKING:
         _event_log_disabled: bool
         _observed_inflight_repos: set[str]
         _observed_circuit_breaker_states: dict[str, str]
+        _impl_checkpoint_ticks: dict[str, tuple[float, float]]
         _metrics_registry: Any | None
         _metrics_server: Any | None
         _alert_tracker: Any | None
