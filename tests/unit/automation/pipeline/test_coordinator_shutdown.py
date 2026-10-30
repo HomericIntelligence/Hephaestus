@@ -20,7 +20,6 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.pipeline import coordinator_runtime
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
@@ -47,6 +46,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
+from hephaestus.utils import subprocess_registry
 from tests.unit.automation.pipeline.conftest import (
     FakeWorkerPool,
     fake_worker_factories,
@@ -371,11 +371,12 @@ class TestInterruptSemantics:
         coordinator = _coordinator(tmp_path, monkeypatch, grace_s=17.0)
         coordinator._install_signal_handlers()
         escalations: list[int] = []
-        monkeypatch.setattr(
-            coordinator_runtime.subprocess_registry,
-            "force_kill",
-            lambda **_kwargs: escalations.append(1) or (),
-        )
+
+        def escalate_once(**_kwargs: object) -> tuple[int, ...]:
+            escalations.append(1)
+            return ()
+
+        monkeypatch.setattr(subprocess_registry, "force_kill", escalate_once)
         handler = signal_mod.getsignal(signal_mod.SIGINT)
         assert callable(handler)
 
