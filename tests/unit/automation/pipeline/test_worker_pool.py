@@ -20196,6 +20196,38 @@ class TestShutdownReapsSubprocess:
         with pytest.raises(ProcessLookupError):
             os.kill(child_pid, 0)
 
+    def test_shutdown_sigkills_a_child_that_ignores_sigterm(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unresponsive child cannot hold the pool open (#2966)."""
+        marker = tmp_path / "unresponsive.pid"
+        child = (
+            "import os,pathlib,signal,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); "
+            "time.sleep(60)"
+        )
+        monkeypatch.setattr(subprocess_registry, "TERM_GRACE_S", 0.3)
+        process = subprocess.Popen([sys.executable, "-c", child], start_new_session=True)
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists(), "unresponsive child did not start"
+        try:
+            with subprocess_registry.track_process_group(process.pid):
+                started = time.monotonic()
+                pool.shutdown()
+                assert time.monotonic() - started < 10
+                process.wait(timeout=10)
+                assert process.returncode != 0
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+
     @pytest.mark.parametrize("global_settings", ["absent", "invalid", "valid"])
     def test_shutdown_terminates_registered_pi_adapter_subprocess_fast(
         self,

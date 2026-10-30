@@ -23,6 +23,7 @@ from hephaestus.automation.pipeline.github_jobs import MergeWaitCycleCompleted
 from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, Route
 from hephaestus.resilience import is_transient_subprocess_error
+from hephaestus.utils import subprocess_registry
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
@@ -1349,6 +1350,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             if self.shutdown.is_set():
                 logger.warning(shutdown_signal_message(signum, self.config.grace_s, immediate=True))
                 self._immediate = True
+                self._escalate_teardown()
                 self._wake_completion_wait()
             else:
                 logger.warning(
@@ -1368,12 +1370,24 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             except ValueError:  # pragma: no cover - not on the main thread
                 logger.debug("cannot install handler for %s off the main thread", sig)
 
+    def _escalate_teardown(self) -> None:
+        """Send ``SIGKILL`` to every owned child group again.
+
+        A repeated signal must act, even after a completed pool shutdown
+        (#2966). This method only sends signals and does not wait, so a signal
+        handler can call it. The bounded wait stays in the event loop.
+        """
+        killed = subprocess_registry.force_kill()
+        if killed:
+            logger.warning("forced teardown killed %d child process group(s)", len(killed))
+
     def _teardown_immediate(self) -> None:
         """Cancel the pool and synthesize interrupted results for in-flight items."""
         self.shutdown.set()
         self._worker_shutdown.set()
         self._force_shutdown.set()
         self._shutdown_pool()
+        self._escalate_teardown()
 
     def _shutdown_pool(self) -> None:
         """Cancel the pool and park in-flight items RESUMABLE. Idempotent.

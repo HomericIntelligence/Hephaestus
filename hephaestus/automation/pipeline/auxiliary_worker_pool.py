@@ -12,6 +12,7 @@ from dataclasses import replace
 
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 from hephaestus.automation.source_worktree import _PreparationDeadline
+from hephaestus.utils import subprocess_registry
 
 from .athena_skill_jobs import (
     AthenaSkillExecutor,
@@ -210,13 +211,23 @@ class AuxiliaryWorkerPool:
                 self._completion_wakeup.set()
 
     def shutdown(self, *, mark_interrupted: bool = True) -> None:
-        """Stop pending work and wait for active work after an interruption."""
+        """Stop pending work and wait for active work after an interruption.
+
+        The learning lane owns the same child process groups as the main lane,
+        so an interrupted shutdown applies the same bounded contract (#2966):
+        ``SIGTERM``, a bounded wait, then ``SIGKILL`` for each survivor.
+        """
         if mark_interrupted:
             self._shutdown.set()
+            subprocess_registry.begin_shutdown()
         if self._athena_skill_executor is not None:
             self._athena_skill_executor.cancel()
         with self._futures_guard:
             futures = tuple(self._futures)
         for future in futures:
             future.cancel()
+        if mark_interrupted:
+            subprocess_registry.escalate(subprocess_registry.TERM_GRACE_S)
         self._executor.shutdown(wait=mark_interrupted, cancel_futures=True)
+        if mark_interrupted:
+            subprocess_registry.force_kill()

@@ -345,8 +345,12 @@ class MnemosyneSkillHost:
 
     @staticmethod
     def cancel() -> None:
-        """Stop active host-owned subprocess groups during forced shutdown."""
-        subprocess_registry.terminate_all()
+        """Stop active host-owned subprocess groups during forced shutdown.
+
+        The call sends ``SIGTERM``, waits the registry bound, and then sends
+        ``SIGKILL`` to each survivor (#2966).
+        """
+        subprocess_registry.escalate()
 
     @staticmethod
     def _load_contract() -> AthenaContractReceipt:
