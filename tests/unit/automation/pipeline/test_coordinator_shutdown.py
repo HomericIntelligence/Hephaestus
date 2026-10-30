@@ -46,6 +46,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
+from hephaestus.utils import subprocess_registry
 from tests.unit.automation.pipeline.conftest import (
     FakeWorkerPool,
     fake_worker_factories,
@@ -362,6 +363,32 @@ class TestInterruptSemantics:
         assert coordinator._immediate is True
         assert coordinator._completion_wakeup.is_set()
         assert coordinator.completion_q.empty()
+
+    def test_repeated_signal_escalates_after_pool_shutdown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each repeat signal acts, even after the pool shut down (#2966)."""
+        coordinator = _coordinator(tmp_path, monkeypatch, grace_s=17.0)
+        coordinator._install_signal_handlers()
+        escalations: list[int] = []
+
+        def escalate_once(**_kwargs: object) -> tuple[int, ...]:
+            escalations.append(1)
+            return ()
+
+        monkeypatch.setattr(subprocess_registry, "force_kill", escalate_once)
+        handler = signal_mod.getsignal(signal_mod.SIGINT)
+        assert callable(handler)
+
+        handler(signal_mod.SIGINT, None)
+        assert escalations == []  # the first signal only starts the graceful drain
+
+        coordinator._pool_shut_down = True  # a completed teardown must not block this
+        handler(signal_mod.SIGINT, None)
+        handler(signal_mod.SIGINT, None)
+
+        assert coordinator._immediate is True
+        assert len(escalations) == 2
 
     def test_sigint_reports_timed_grace_and_second_ctrl_c_instruction(
         self,
