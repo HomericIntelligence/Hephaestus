@@ -8,6 +8,11 @@
 #
 # Toolchain: uv (Odysseus ADR-017). Pattern mirrors Scylla ci/Containerfile.
 #
+# Git is built from a pinned kernel.org release into /usr/local. The pipeline's
+# checkout isolation sets GIT_CONFIG_GLOBAL=/dev/null, and the automation code
+# only trusts a real (non-symlink) Git binary under a trusted root. See issue
+# #2821 and hephaestus/automation/worktree_snapshot.py.
+#
 # Build (OCI-compliant — works with both podman and docker):
 #   podman build -f ci/Containerfile -t hephaestus-ci:local .
 #   docker build -f ci/Containerfile -t hephaestus-ci:local .
@@ -25,6 +30,10 @@
 # ============================================================================
 ARG TARGETARCH
 ARG DEBIAN_SNAPSHOT=20260701T000000Z
+# Pinned Git source release. The SHA-256 is from the signed kernel.org
+# checksum list: https://www.kernel.org/pub/software/scm/git/sha256sums.asc
+ARG GIT_VERSION=2.49.0
+ARG GIT_SHA256=618190cf590b7e9f6c11f91f23b1d267cd98c3ab33b850416d8758f8b5a85628
 
 # All Python stages inherit immutable Debian package indexes. The base image is
 # digest-pinned, and the dated snapshot fixes both package candidates and their
@@ -55,6 +64,49 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && echo "${uv_sha256}  /tmp/uv.tar.gz" | sha256sum --check \
     && tar xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 \
     && rm /tmp/uv.tar.gz
+
+# ============================================================================
+# Stage: git-source — pinned Git built from source into /usr/local.
+#
+# Debian's Git is replaced so the image runs one exact, trusted Git. A source
+# build under /usr/local gives a real binary (not a symlink) inside the trusted
+# discovery root, so the automation allowlist selects it first.
+# ============================================================================
+FROM python-snapshot AS git-source
+
+ARG GIT_VERSION
+ARG GIT_SHA256
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    gettext \
+    libcurl4-openssl-dev \
+    libexpat1-dev \
+    libpcre2-dev \
+    libssl-dev \
+    perl \
+    xz-utils \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 --connect-timeout 30 --max-time 600 "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /tmp/git.tar.xz \
+    && echo "${GIT_SHA256}  /tmp/git.tar.xz" | sha256sum --check \
+    && mkdir -p /tmp/git-src \
+    && tar xJf /tmp/git.tar.xz -C /tmp/git-src --strip-components=1 \
+    && make -C /tmp/git-src -j"$(nproc)" prefix=/usr/local NO_TCLTK=YesPlease all \
+    && make -C /tmp/git-src prefix=/usr/local NO_TCLTK=YesPlease install \
+    && rm -rf /tmp/git-src /tmp/git.tar.xz \
+    && test ! -L /usr/local/bin/git \
+    && test "$(/usr/local/bin/git --version)" = "git version ${GIT_VERSION}" \
+    && test -x /usr/local/libexec/git-core/git-remote-http \
+    && for binary in /usr/local/bin/git /usr/local/libexec/git-core/*; do \
+        if [ -f "$binary" ] && [ "$(od -An -tx1 -N4 "$binary" | tr -d ' \n')" = "7f454c46" ]; then \
+            if ldd "$binary" 2>&1 | grep -q 'not found'; then \
+                echo "unresolved shared library for $binary" >&2; ldd "$binary" >&2; exit 1; \
+            fi; \
+        fi; \
+    done
 
 # ============================================================================
 # Stage: node — pinned Node 22 runtime for the Pi coding-agent CLI used by the
@@ -89,12 +141,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     # Keep the absolute repository paths in the pre-commit database valid when
     # the runtime stage copies the cache.
     PRE_COMMIT_HOME=/opt/pre-commit-cache \
-    PATH="/opt/hephaestus-venv/bin:$PATH"
+    PATH="/opt/hephaestus-venv/bin:/usr/local/bin:$PATH"
 
-# Install build dependencies + git (required by pre-commit hooks) from the
-# immutable Debian snapshot configured by python-snapshot.
+# Install build dependencies from the immutable Debian snapshot configured by
+# python-snapshot. Git is not installed here: the git-source stage supplies the
+# pinned binary that pre-commit hooks run.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
     curl \
     ca-certificates \
     gcc \
@@ -109,6 +161,9 @@ COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 # Prepare hooks with the same pinned Node/npm prefix used by the runtime.
 # Both stages must select the same pre-commit system Node environment.
 COPY --from=node /usr/local/ /usr/local/
+
+# Pinned Git binary for the pre-commit hooks and the synthetic repository below.
+COPY --from=git-source /usr/local/ /usr/local/
 
 # Layer 1: Dependency files + the package source the hatchling build needs.
 # The package tree is copied so `uv sync` can install the project itself,
@@ -141,6 +196,7 @@ RUN uv run --no-sync pre-commit install-hooks && \
 FROM python-snapshot
 
 ARG TARGETARCH
+ARG GIT_VERSION
 ARG BATS_VERSION=1.11.1-1
 ARG SHELLCHECK_VERSION=0.10.0-1
 
@@ -155,19 +211,31 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_PROJECT_ENVIRONMENT=/opt/hephaestus-venv \
     UV_LINK_MODE=copy \
     PRE_COMMIT_HOME=/opt/pre-commit-cache \
-    PATH="/opt/hephaestus-venv/bin:$PATH"
+    PATH="/opt/hephaestus-venv/bin:/usr/local/bin:$PATH"
 
 # Runtime-only system packages (no build tools), resolved from the same
-# immutable snapshot as the builder stage.
+# immutable snapshot as the builder stage. The pinned Git comes from the
+# git-source stage. Debian's git stays installed because the GitHub CLI package
+# declares a dependency on it. PATH puts /usr/local/bin first and the final
+# assertions prove the pinned binary is the one the image runs, so the Debian
+# binary is never selected. The remaining packages are the shared libraries and
+# Perl runtime that the pinned binary and its helpers load.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bats="${BATS_VERSION}" \
-    git \
     curl \
     ca-certificates \
+    git \
     jq \
+    liberror-perl \
+    libcurl4t64 \
+    libexpat1 \
+    libpcre2-8-0 \
+    libssl3t64 \
     openssh-client \
+    perl \
     shellcheck="${SHELLCHECK_VERSION}" \
     util-linux \
+    zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && test -x /usr/bin/unshare && test -x /usr/bin/setpriv && test -x /usr/bin/prlimit \
     && test "$(bats --version)" = "Bats 1.11.1" \
@@ -200,6 +268,10 @@ RUN case "$TARGETARCH" in \
 # as one consistent /usr/local tree from the node stage.
 COPY --from=node /usr/local/ /usr/local/
 
+# Pinned source-built Git under /usr/local, so PATH and the automation trusted
+# Git allowlist both select it instead of a Debian package binary.
+COPY --from=git-source /usr/local/ /usr/local/
+
 # Copy the uv binaries and the pre-installed project virtualenv from builder.
 COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 COPY --from=builder /opt/hephaestus-venv /opt/hephaestus-venv
@@ -223,6 +295,26 @@ RUN chown -R ci:ci /opt/hephaestus-venv
 
 ENV HOME=/home/ci \
     PI_CODING_AGENT_DIR=/home/ci/.pi/agent
+
+# Fail the build if the image cannot run the pinned Git: the correct binary on
+# PATH, a real file rather than a symlink, its HTTP transport helper, complete
+# shared-library resolution, and the Perl runtime its subcommands need.
+RUN test "$(command -v git)" = "/usr/local/bin/git" \
+    && test ! -L /usr/local/bin/git \
+    && test "$(git --version)" = "git version ${GIT_VERSION}" \
+    && test -x /usr/local/libexec/git-core/git-remote-http \
+    && for binary in /usr/local/bin/git /usr/local/libexec/git-core/*; do \
+        if [ -f "$binary" ] && [ "$(od -An -tx1 -N4 "$binary" | tr -d ' \n')" = "7f454c46" ]; then \
+            if ldd "$binary" 2>&1 | grep -q 'not found'; then \
+                echo "unresolved shared library for $binary" >&2; ldd "$binary" >&2; exit 1; \
+            fi; \
+        fi; \
+    done \
+    && perl -MError -e 'print qq(ok\n)' \
+    && mkdir -p /tmp/git-config-check \
+    && printf '[credential]\n\thelper = !/unsafe/helper\n' > /tmp/git-config-check/.gitconfig \
+    && test -z "$(HOME=/tmp/git-config-check GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git config --global --get credential.helper)" \
+    && rm -rf /tmp/git-config-check
 
 WORKDIR /home/ci
 
