@@ -118,6 +118,30 @@ class BranchWorktreeOwnedError(RuntimeError):
         super().__init__(f"{branch!r} is already checked out at {owner_path}")
 
 
+# Direct-scope predicates that prove deterministic stale local state. A retry
+# cannot clear any of them, because the same branch, base SHA, and local Git
+# state stay in place (#2905).
+STALE_PREDICATE_IN_MEMORY_KEY = "in_memory_key"
+STALE_PREDICATE_PATH = "path"
+STALE_PREDICATE_BRANCH_HOLDER = "branch_holder"
+STALE_PREDICATE_LOCAL_REF = "local_ref"
+
+
+class DirectScopeStaleStateError(RuntimeError):
+    """A direct-scope allocation met deterministic stale local state.
+
+    ``predicate`` names the failed check, so the pipeline can report a stable
+    error kind and stop instead of spending its transient Git retry budget.
+    """
+
+    def __init__(self, predicate: str, branch: str, detail: str) -> None:
+        """Initialize the error with its predicate, branch, and detail."""
+        self.predicate = predicate
+        self.branch = branch
+        self.detail = detail
+        super().__init__(f"direct scope refuses stale {detail}")
+
+
 @dataclass(frozen=True, slots=True)
 class ImplementationWriterAuthority:
     """Opaque, single-use authority for one process-created writer checkout."""
@@ -861,6 +885,7 @@ class WorktreeManager:
 
             except (
                 BranchWorktreeOwnedError,
+                DirectScopeStaleStateError,
                 InterruptedError,
                 RemoteGitRefreshError,
                 WorktreeCreationReceiptError,
@@ -1344,19 +1369,26 @@ class WorktreeManager:
         if isolated:
             raise RuntimeError("direct scope base pin cannot create an isolated worktree")
         if worktree_key in self.worktrees:
-            raise RuntimeError("direct scope refuses stale worktree reuse")
+            raise DirectScopeStaleStateError(
+                STALE_PREDICATE_IN_MEMORY_KEY, branch_name, "worktree reuse"
+            )
+        if worktree_path.exists():
+            raise DirectScopeStaleStateError(STALE_PREDICATE_PATH, branch_name, "worktree path")
+        holder = self._worktree_holding_branch(branch_name, timeout=timeout)
+        if holder is not None:
+            raise DirectScopeStaleStateError(
+                STALE_PREDICATE_BRANCH_HOLDER, branch_name, f"branch holder at {holder}"
+            )
         local_branch_changed = (
             self._direct_scope_local_branch_exists(branch_name, timeout=timeout)
             if allowed_local_branch_revision is None
             else self._local_branch_revision(branch_name, timeout=timeout)
             != allowed_local_branch_revision
         )
-        if (
-            worktree_path.exists()
-            or self._worktree_holding_branch(branch_name, timeout=timeout) is not None
-            or local_branch_changed
-        ):
-            raise RuntimeError("direct scope refuses stale branch or worktree reuse")
+        if local_branch_changed:
+            raise DirectScopeStaleStateError(
+                STALE_PREDICATE_LOCAL_REF, branch_name, "local branch reference"
+            )
 
     def _direct_scope_local_branch_exists(self, branch_name: str, *, timeout: int | None) -> bool:
         """Return whether a local branch exists, propagating lookup failures."""

@@ -3360,6 +3360,52 @@ class TestWorktreeAndAdvise:
         assert item.attempts["implement"] == 0
         assert "git_error_retries" not in item.payload
 
+    def test_direct_scope_stale_state_stops_without_a_git_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Deterministic stale state stops the item with its predicate (#2905)."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl-direct-abc123"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="direct_scope_stale_state:local_ref",
+                value={
+                    "direct_scope_stale_state": {
+                        "predicate": "local_ref",
+                        "branch": "1-auto-impl-direct-abc123",
+                        "detail": "local branch reference",
+                    },
+                    "direct_scope_reservation": {
+                        "branch": "1-auto-impl-direct-abc123",
+                        "base_sha": "a" * 40,
+                    },
+                },
+            ),
+            ctx,
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "direct_scope_stale_state: local_ref",
+        )
+        assert item.attempts["implement"] == 0
+        assert "git_error" not in item.payload
+        assert "git_error_retries" not in item.payload
+        # The rollback may have left the server reservation, so Finished keeps
+        # its receipt for the bounded conditional release.
+        assert item.payload["_direct_scope_reservation"] == {
+            "branch": "1-auto-impl-direct-abc123",
+            "base_sha": "a" * 40,
+        }
+
     def test_worktree_rollback_failure_preserves_direct_reservation_receipt(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

@@ -91,6 +91,10 @@ DIRECT_SCOPE_RESERVATION_KEY = "_direct_scope_reservation"
 # rather than a generic infrastructure retry: retrying cannot make a branch
 # owned by another run safe to overwrite.
 DIRECT_SCOPE_RESERVATION_COLLISION_KEY = "_direct_scope_reservation_collision"
+# Typed result retained only between the direct worktree worker and
+# implementation's next step. Deterministic stale local state fails on every
+# attempt, so it stops the item instead of spending the Git retry budget.
+DIRECT_SCOPE_STALE_STATE_KEY = "_direct_scope_stale_state"
 # The remote reservation is already released after a direct no-op.  Finished
 # uses this receipt to compare-and-delete the now-detached local branch only
 # after removing its worktree.
