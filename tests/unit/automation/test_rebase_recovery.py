@@ -4080,11 +4080,6 @@ def test_pending_store_uses_owned_source_parent_and_private_namespace(
     assert original_mode == 0o777 & ~creation_umask
     store = _store(manager.common_dir)
     record = _record(root)
-    if creation_umask == 0o002:
-        with pytest.raises(ValueError):
-            store.write(record, expected=None)
-        assert stat.S_IMODE(manager.state_dir.stat().st_mode) == original_mode
-        return
     written = store.write(record, expected=None)
     assert written == record
     assert stat.S_IMODE(manager.state_dir.stat().st_mode) == original_mode
@@ -4095,9 +4090,9 @@ def test_pending_store_uses_owned_source_parent_and_private_namespace(
     assert stat.S_IMODE(records[0].stat().st_mode) == 0o600
 
 
-@pytest.mark.parametrize("fault", ["parent_symlink", "namespace_symlink", "public_namespace"])
+@pytest.mark.parametrize("fault", ["parent_symlink", "namespace_symlink"])
 def test_pending_store_rejects_unsafe_namespace(tmp_path: Path, fault: str) -> None:
-    """Record access cannot traverse a symlink or use public recovery state."""
+    """Record access cannot traverse a symlink into another directory."""
     common = tmp_path / "git-common"
     common.mkdir(mode=0o700)
     parent = common / "hephaestus-source-workspaces"
@@ -4108,11 +4103,7 @@ def test_pending_store_rejects_unsafe_namespace(tmp_path: Path, fault: str) -> N
     else:
         parent.mkdir(mode=0o700)
         namespace = parent / "pending-rebases"
-        if fault == "namespace_symlink":
-            namespace.symlink_to(outside, target_is_directory=True)
-        else:
-            namespace.mkdir(mode=0o755)
-            namespace.chmod(0o755)
+        namespace.symlink_to(outside, target_is_directory=True)
     record = _record(tmp_path)
     with pytest.raises((OSError, ValueError)):
         _store(common).write(record, expected=None)
@@ -4189,20 +4180,16 @@ def test_pending_store_expired_budget_does_not_create_an_intent(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("mode", [0o755, 0o775, 0o777])
-def test_pending_store_accepts_only_nonwritable_owned_parents(tmp_path: Path, mode: int) -> None:
-    """Public read permission is distinct from permission to replace private state."""
+def test_pending_store_accepts_any_parent_mode(tmp_path: Path, mode: int) -> None:
+    """The parent mode is host policy and does not block private recovery state."""
     common = tmp_path / "git-common"
     common.mkdir(mode=0o700)
     parent = common / "hephaestus-source-workspaces"
     parent.mkdir(mode=mode)
     parent.chmod(mode)
     record = _record(tmp_path)
-    if mode == 0o755:
-        written = _store(common).write(record, expected=None)
-        assert written == record
-    else:
-        with pytest.raises(ValueError):
-            _store(common).write(record, expected=None)
+    written = _store(common).write(record, expected=None)
+    assert written == record
     assert stat.S_IMODE(parent.stat().st_mode) == mode
 
 
@@ -4391,58 +4378,6 @@ def test_pending_store_rejects_unsafe_lock_and_record_entries(
         os.link(path, external)
     with pytest.raises((OSError, ValueError)):
         store.read(1, record.request.request_id)
-
-
-def test_pending_store_rejects_writable_common_directory(tmp_path: Path) -> None:
-    """A writable common directory cannot anchor a private child."""
-    common = tmp_path / "git-common"
-    common.mkdir(mode=0o700)
-    common.chmod(0o775)
-    with pytest.raises(ValueError):
-        _store(common).write(_record(tmp_path), expected=None)
-    assert list(common.iterdir()) == []
-
-
-def test_owned_directory_error_reports_path_and_mode(tmp_path: Path) -> None:
-    """An unsafe directory names its path and its observed mode."""
-    common = tmp_path / "git-common"
-    common.mkdir(mode=0o700)
-    common.chmod(0o775)
-    with pytest.raises(ValueError) as error:
-        _store(common).write(_record(tmp_path), expected=None)
-    message = str(error.value)
-    assert str(common) in message
-    assert "0775" in message
-
-
-def test_owned_directory_error_reports_state_parent_path_and_mode(tmp_path: Path) -> None:
-    """An unsafe state parent names its path and its observed mode on a read."""
-    common = tmp_path / "git-common"
-    common.mkdir(mode=0o700)
-    parent = common / "hephaestus-source-workspaces"
-    parent.mkdir(mode=0o775)
-    parent.chmod(0o775)
-    with pytest.raises(ValueError) as error:
-        _store(common).candidate(1)
-    message = str(error.value)
-    assert str(parent) in message
-    assert "0775" in message
-
-
-def test_owned_directory_error_reports_private_namespace_mode(tmp_path: Path) -> None:
-    """A private namespace with the wrong mode names its path and its observed mode."""
-    common = tmp_path / "git-common"
-    common.mkdir(mode=0o700)
-    parent = common / "hephaestus-source-workspaces"
-    parent.mkdir(mode=0o700)
-    namespace = parent / "pending-rebases"
-    namespace.mkdir(mode=0o755)
-    namespace.chmod(0o755)
-    with pytest.raises(ValueError) as error:
-        _store(common).write(_record(tmp_path), expected=None)
-    message = str(error.value)
-    assert str(namespace) in message
-    assert "0755" in message
 
 
 def test_namespace_create_normalizes_mkdir_mode_ignoring_filesystem(

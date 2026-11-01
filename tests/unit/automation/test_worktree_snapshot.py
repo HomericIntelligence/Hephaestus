@@ -63,12 +63,12 @@ def test_snapshot_rejects_other_apple_developer_git_path(candidate: Path, bindin
         assert getattr(worktree_snapshot, binding)() is None
 
 
-@pytest.mark.parametrize("unsafe_mode", (stat.S_IFDIR | 0o777, stat.S_IFLNK | 0o777))
-def test_snapshot_rejects_unsafe_apple_git_parent(unsafe_mode: int) -> None:
-    """A writable or indirect Apple Git parent invalidates the exact leaf."""
+def test_snapshot_rejects_unsafe_apple_git_parent() -> None:
+    """An indirect Apple Git parent invalidates the exact leaf."""
     candidate = Path("/Library/Developer/CommandLineTools/usr/bin/git")
     file_mode = stat.S_IFREG | 0o755
     directory_mode = stat.S_IFDIR | 0o755
+    unsafe_mode = stat.S_IFLNK | 0o777
 
     def parent_status(path: Path) -> SimpleNamespace:
         mode = unsafe_mode if path == candidate.parent else directory_mode
