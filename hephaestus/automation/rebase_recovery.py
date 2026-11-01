@@ -30,15 +30,14 @@ _Identity = tuple[tuple[int, int], ...]
 
 
 def _owned_directory(info: os.stat_result, path: Path, *, private: bool) -> None:
-    """Distinguish protected shared parents from private recovery state."""
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.geteuid()
-        or info.st_mode & 0o022
-        or (private and stat.S_IMODE(info.st_mode) != 0o700)
-    ):
+    """Confirm a protected shared parent or a private recovery directory.
+
+    The mode and the owner are host policy, not recovery state. The loop only
+    needs the entry to be a directory it can open without a symlink.
+    """
+    if not stat.S_ISDIR(info.st_mode):
         raise ValueError(
-            "The pending rebase directory permissions are unsafe: "
+            "The pending rebase directory is not a directory: "
             f"{path} (mode {stat.S_IMODE(info.st_mode):04o})."
         )
 

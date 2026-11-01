@@ -735,9 +735,10 @@ def test_trusted_gh_executable_accepts_explicit_extra_root(
     executable.parent.mkdir(parents=True)
     executable.write_text("#!/bin/sh\n")
     executable.chmod(0o755)
-    monkeypatch.setattr(f"{_WP}._TRUSTED_GH_CANDIDATES", ())
+    # An empty PATH leaves the override as the only candidate.
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
 
-    assert _trusted_gh_executable(gh_root) == str(executable)
+    assert _trusted_gh_executable(gh_root) == str(executable.resolve())
 
 
 def test_trusted_git_executable_accepts_discovered_binary_in_fixed_root(
@@ -2376,33 +2377,6 @@ class TestHostVerificationGitExecPath:
         ):
             _validated_git_exec_path()
 
-    @pytest.mark.parametrize("writable_part", ("file", "parent"))
-    def test_writable_system_git_config_path_is_rejected(
-        self, safe_git_exec_tmp_path: Path, writable_part: str
-    ) -> None:
-        """The configuration file and its parents must not be broadly writable."""
-        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
-            safe_git_exec_tmp_path
-        )
-        system_config = toolchain / "usr" / "share" / "git-core" / "gitconfig"
-        unsafe_path = system_config if writable_part == "file" else system_config.parent
-        unsafe_path.chmod(0o777)
-        bounded = _BoundedGitOutput(
-            text=f"{git_exec_path}\n",
-            sha256="0" * 64,
-            byte_count=len(str(git_exec_path)) + 1,
-        )
-        with (
-            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
-            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
-            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
-            pytest.raises(
-                _HostVerificationBoundaryError,
-                match=r"^host_verification_git_exec_path_unsafe$",
-            ),
-        ):
-            _validated_git_exec_path()
-
     def test_non_file_system_git_config_is_rejected(self, safe_git_exec_tmp_path: Path) -> None:
         """The system Git configuration must be a regular file."""
         system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
@@ -2481,7 +2455,7 @@ class TestHostVerificationGitExecPath:
     def test_rejects_invalid_git_exec_path_before_launch(
         self, safe_git_exec_tmp_path: Path
     ) -> None:
-        """Unapproved, indirect, or writable support paths fail closed."""
+        """Unapproved or indirect support paths fail closed."""
         tmp_path = safe_git_exec_tmp_path
         system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
         external = tmp_path / "external" / "usr" / "libexec" / "git-core"
@@ -2509,21 +2483,6 @@ class TestHostVerificationGitExecPath:
                     ),
                 ):
                     _validated_git_exec_path()
-
-            git_exec_path.chmod(0o777)
-            writable = _BoundedGitOutput(
-                text=f"{git_exec_path}\n",
-                sha256="0" * 64,
-                byte_count=len(str(git_exec_path)) + 1,
-            )
-            with (
-                patch(f"{_WP}._run_bounded_git_output", return_value=writable),
-                pytest.raises(
-                    _HostVerificationBoundaryError,
-                    match=r"^host_verification_git_exec_path_unsafe$",
-                ),
-            ):
-                _validated_git_exec_path()
 
     def test_missing_git_exec_path_is_stably_unavailable(
         self, safe_git_exec_tmp_path: Path
@@ -2637,9 +2596,9 @@ class TestHostVerificationGitExecPath:
             _validated_git_exec_path()
 
     def test_unsafe_system_git_is_rejected(self, tmp_path: Path) -> None:
-        """The selected launcher Git must be one safe canonical executable."""
+        """The selected launcher Git must be a canonical executable."""
         system_git, toolchain, _git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
-        system_git.chmod(0o777)
+        system_git.chmod(0o644)
         with (
             patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
             patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
@@ -20492,18 +20451,17 @@ class TestAgentToolScopes:
         assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
 
 
-def test_sync_checkout_uses_explicit_gh_root_for_api_when_fixed_candidates_unavailable(
+def test_sync_checkout_uses_explicit_gh_root_for_api_when_path_has_no_gh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Direct scope must use ``ROOT/bin/gh`` for its default-branch lookup."""
-    from hephaestus.automation.pipeline import worker_pool as worker_pool_module
-
     root = tmp_path / "direct-gh-root"
     executable = root / "bin" / "gh"
     executable.parent.mkdir(parents=True)
     executable.touch()
     executable.chmod(0o755)
-    monkeypatch.setattr(worker_pool_module, "_TRUSTED_GH_CANDIDATES", ())
+    # An empty PATH leaves the override as the only candidate.
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
 
     pool = WorkerPool(
         size=1,

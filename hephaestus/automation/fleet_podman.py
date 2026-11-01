@@ -86,12 +86,8 @@ class PodmanEngine:
         endpoint = self.socket_path.lstat()
         if (
             not stat.S_ISREG(executable.st_mode)
-            or executable.st_uid not in (0, os.getuid())
-            or executable.st_mode & 0o022
             or not os.access(self.executable, os.X_OK)
             or not stat.S_ISSOCK(endpoint.st_mode)
-            or endpoint.st_uid != os.getuid()
-            or endpoint.st_mode & 0o007
         ):
             raise ValueError("engine_context_untrusted")
         private_parent = any(

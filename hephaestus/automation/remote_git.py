@@ -6,45 +6,36 @@ import os
 import shlex
 import shutil
 import subprocess
-from collections.abc import Sequence
 from pathlib import Path
-
-_SYSTEM_GH_CANDIDATES = (
-    Path("/opt/homebrew/bin/gh"),
-    Path("/usr/local/bin/gh"),
-    Path("/usr/bin/gh"),
-)
-_SYSTEM_GH_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
 
 
 def trusted_gh_executable(
     extra_path_root: Path | None = None,
     *,
-    system_candidates: Sequence[Path] = _SYSTEM_GH_CANDIDATES,
-    system_roots: Sequence[Path] = _SYSTEM_GH_ROOTS,
+    path: str | None = None,
 ) -> str | None:
-    """Return an allowed absolute ``gh`` executable without use of ``PATH``."""
-    candidates = tuple(system_candidates)
+    """Return the ``gh`` executable to run, or None when it is not found.
+
+    The operator override is tested first. Otherwise the lookup uses ``PATH``,
+    the same way every other command lookup on the host works. The earlier
+    version accepted only three hard-coded absolute paths and refused ``PATH``,
+    so a correct ``gh`` on a normal system was reported as missing.
+
+    Args:
+        extra_path_root: Operator root from ``--gh-extra-path-root``. When it
+            holds ``ROOT/bin/gh``, that file wins.
+        path: Search path for the fallback lookup. Defaults to the process
+            ``PATH``.
+
+    Returns:
+        An absolute path to ``gh``, or None when no candidate exists.
+
+    """
     if extra_path_root is not None:
-        candidates = (*candidates, extra_path_root / "bin" / "gh")
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve(strict=True)
-        except OSError:
-            continue
-        if not resolved.is_file() or not os.access(resolved, os.X_OK):
-            continue
-        if any(resolved.is_relative_to(root) for root in system_roots):
-            return str(resolved)
-        if extra_path_root is None:
-            continue
-        try:
-            resolved_root = extra_path_root.resolve(strict=True)
-        except OSError:
-            continue
-        if resolved.is_relative_to(resolved_root):
-            return str(resolved)
-    return None
+        override = extra_path_root / "bin" / "gh"
+        if override.is_file() and os.access(override, os.X_OK):
+            return str(override.resolve())
+    return shutil.which("gh", path=path)
 
 
 def trusted_remote_git_config(gh_command: str) -> tuple[str, ...] | None:

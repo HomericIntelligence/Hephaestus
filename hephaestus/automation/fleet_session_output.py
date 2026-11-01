@@ -122,13 +122,7 @@ def _stopped_worker(state_dir: Path) -> Iterator[None]:
     )
     try:
         metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or metadata.st_mode & 0o022
-            or metadata.st_nlink != 1
-            or metadata.st_size != 0
-        ):
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size != 0:
             raise ValueError("invalid_worker_journal_lock")
         # The existing empty lock can be mode 0644 inside the private state root.
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)

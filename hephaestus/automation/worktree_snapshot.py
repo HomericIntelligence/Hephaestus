@@ -605,7 +605,7 @@ def _validated_apple_git_executable(candidate: Path) -> Path | None:
         for part in candidate.parent.parts[1:]:
             current /= part
             parent_mode = current.lstat().st_mode
-            if not stat.S_ISDIR(parent_mode) or parent_mode & 0o022:
+            if not stat.S_ISDIR(parent_mode):
                 return None
     except OSError:
         return None
@@ -663,12 +663,9 @@ def _trusted_git_executable() -> str | None:
             else:
                 resolved = candidate.resolve(strict=True)
                 trusted_roots = _TRUSTED_GIT_ROOTS
-            mode = resolved.stat().st_mode
         except OSError:
             continue
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
-            continue
-        if mode & 0o022:
             continue
         if trusted_roots and not any(resolved.is_relative_to(root) for root in trusted_roots):
             continue

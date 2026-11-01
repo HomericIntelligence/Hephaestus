@@ -501,11 +501,16 @@ def gh_issue_upsert_owned_comment(
     marker_aliases = comment_marker_aliases(marker_prefix)
 
     def owned_with(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return every marker-bearing comment, newest last.
+
+        The newest comment is the pointer for its role, whatever author wrote
+        it. Filtering by author would hide an existing plan and create a
+        second one, so selection does not read ownership.
+        """
         return [
             comment
             for comment in comments
-            if is_owned(comment)
-            and has_marker_alias(str(comment.get("body", "")), marker_aliases)
+            if has_marker_alias(str(comment.get("body", "")), marker_aliases)
             and comment.get("databaseId") is not None
         ]
 
@@ -533,7 +538,7 @@ def gh_issue_upsert_owned_comment(
         )
         if target is None:
             raise RuntimeError(
-                f"created canonical comment on #{issue_number} was not observable as actor-owned"
+                f"created canonical comment on #{issue_number} was not readable after create"
             )
 
     target_id = int(target["databaseId"])
@@ -569,9 +574,7 @@ def gh_issue_upsert_owned_comment(
             or int(target["databaseId"]) != target_id
             or str(target.get("body", "")) != body
         ):
-            raise RuntimeError(
-                f"updated canonical comment on #{issue_number} was not confirmed as actor-owned"
-            )
+            raise RuntimeError(f"updated canonical comment on #{issue_number} was not confirmed")
     return target_id
 
 

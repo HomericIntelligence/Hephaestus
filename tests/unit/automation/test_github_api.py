@@ -2596,10 +2596,11 @@ class TestUpsertAndDeleteComment:
     @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
     @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
     @patch("hephaestus.automation.github_api.gh_issue_comment")
-    def test_owned_upsert_rejects_foreign_marker_without_shadow_comment(
-        self, mock_create: Any, mock_fetch: Any, _mock_login: Any
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_owned_upsert_patches_a_foreign_marker_without_a_shadow_comment(
+        self, mock_gh_call: Any, mock_create: Any, mock_fetch: Any, _mock_login: Any
     ) -> None:
-        """A foreign planning marker is an identity conflict, not an absence."""
+        """A foreign planning marker is the pointer; it is patched, not duplicated."""
         marker = PLAN_REVIEW_CANONICAL_MARKER
         body = f"{marker}\nowned review"
         foreign = {
@@ -2607,12 +2608,14 @@ class TestUpsertAndDeleteComment:
             "body": f"{marker}\nforeign review",
             "user": {"login": "someone-else"},
         }
-        mock_fetch.return_value = [foreign]
+        mock_fetch.side_effect = [[foreign], [{**foreign, "body": body}]]
 
-        with pytest.raises(RuntimeError, match="foreign or unverifiable"):
-            gh_issue_upsert_owned_comment(5, marker, body)
+        result = gh_issue_upsert_owned_comment(5, marker, body)
 
+        assert result == 9
         mock_create.assert_not_called()
+        patched = [call for call in mock_gh_call.call_args_list if "PATCH" in call.args[0]]
+        assert len(patched) == 1
 
     def test_owned_upsert_rejects_cross_role_outgoing_body_before_any_write(self) -> None:
         """One outgoing comment cannot claim both shared planning roles."""
@@ -2773,7 +2776,7 @@ class TestUpsertAndDeleteComment:
         mock_fetch: Any,
         _mock_login: Any,
     ) -> None:
-        """Two actor-owned aliases require manual recovery before either artifact changes."""
+        """Two marker-bearing comments patch the newest one and delete nothing."""
         body = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew plan"
         legacy = {
             "databaseId": 101,
@@ -2785,14 +2788,13 @@ class TestUpsertAndDeleteComment:
             "body": f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nold current plan",
             "user": {"login": "hephaestus-bot"},
         }
-        mock_fetch.return_value = [legacy, current]
+        mock_fetch.side_effect = [[legacy, current], [{**current, "body": body}]]
 
-        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
-            gh_issue_upsert_owned_comment(5, PLAN_CANONICAL_MARKER, body)
+        result = gh_issue_upsert_owned_comment(5, PLAN_CANONICAL_MARKER, body)
 
+        assert result == 102
         mock_create.assert_not_called()
         mock_delete.assert_not_called()
-        mock_gh_call.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
     @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
@@ -2805,7 +2807,7 @@ class TestUpsertAndDeleteComment:
         mock_fetch: Any,
         _mock_login: Any,
     ) -> None:
-        """A post-create duplicate is a conflict, not a license to delete either comment."""
+        """A post-create duplicate patches one comment and deletes nothing."""
         repo = ("other-owner", "other-repo")
         marker = PLAN_REVIEW_CANONICAL_MARKER
         body = f"{marker}\nreview"
@@ -2817,9 +2819,9 @@ class TestUpsertAndDeleteComment:
             ],
         ]
 
-        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
-            gh_issue_upsert_owned_comment(5, marker, body, repo=repo)
+        result = gh_issue_upsert_owned_comment(5, marker, body, repo=repo)
 
+        assert result == 11
         mock_create.assert_called_once_with(5, body, repo=repo)
         mock_delete.assert_not_called()
 
@@ -2899,8 +2901,7 @@ class TestUpsertAndDeleteComment:
                 thread.join(timeout=5)
 
         assert all(not thread.is_alive() for thread in threads)
-        assert len(errors) == 2
-        assert all("ambiguous actor-owned comment aliases" in str(error) for error in errors)
+        assert errors == []
         assert [comment["body"] for comment in comments] == [body, body]
 
     @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
@@ -2993,7 +2994,7 @@ class TestUpsertAndDeleteComment:
         assert patched, mock_gh_call.call_args_list
 
     def test_upsert_rejects_older_duplicates_without_deleting_them(self) -> None:
-        """More than one matching canonical comment requires manual recovery."""
+        """The newest marker-bearing comment is patched and nothing is deleted."""
         comments = [
             {
                 "databaseId": index,
@@ -3013,17 +3014,21 @@ class TestUpsertAndDeleteComment:
             ),
             patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
         ):
-            with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+            mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
+
+            with pytest.raises(RuntimeError, match="Failed to update issue comment 3"):
                 gh_issue_upsert_comment(
                     5,
                     PLAN_CANONICAL_MARKER,
                     f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew",
                 )
 
-        mock_gh_call.assert_not_called()
+        patched = [call for call in mock_gh_call.call_args_list if "PATCH" in call.args[0]]
+        assert len(patched) == 1
+        assert patched[0].args[0][-3].endswith("/3")
 
     def test_upsert_rejects_duplicate_candidates_before_a_replacement_patch(self) -> None:
-        """Ambiguous duplicates stop before a PATCH or delete can destroy one."""
+        """Duplicates patch the newest comment and never destroy either."""
         old = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nold"
         comments = [
             {"databaseId": 1, "body": old, "user": {"login": "hephaestus-bot"}},
@@ -3043,7 +3048,7 @@ class TestUpsertAndDeleteComment:
         ):
             mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
 
-            with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+            with pytest.raises(RuntimeError, match="Failed to update issue comment 2"):
                 gh_issue_upsert_comment(
                     5,
                     PLAN_CANONICAL_MARKER,
@@ -3051,7 +3056,7 @@ class TestUpsertAndDeleteComment:
                 )
 
         mock_delete.assert_not_called()
-        mock_gh_call.assert_not_called()
+        assert len(mock_gh_call.call_args_list) == 1
 
     def test_upsert_preserves_the_existing_comment_when_its_patch_fails(self) -> None:
         """A failed PATCH leaves the existing actor-visible artifact untouched."""

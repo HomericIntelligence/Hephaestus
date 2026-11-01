@@ -300,20 +300,29 @@ def _is_safe_pipeline_diagnostics_dir(path: Path, projects_dir: Path) -> bool:
 
 
 def _has_git_worktree_ancestor(path: Path) -> bool:
-    """Return whether the path is in a Git worktree or cannot be resolved safely."""
+    """Return whether Git reports the path inside a worktree.
+
+    A stray or broken ``.git`` entry in a parent directory is not a worktree.
+    Ask Git, and treat an inconclusive answer as "not a worktree" so a host
+    layout never removes the only available diagnostics directory. The probe
+    never creates a directory, because the caller owns the mode of every
+    directory it creates.
+    """
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
     try:
-        resolved = path.resolve()
-    except (OSError, RuntimeError):
-        return True
-    for candidate in (resolved, *resolved.parents):
-        try:
-            (candidate / ".git").lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return True
-        return True
-    return False
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=probe,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0 and bool(completed.stdout.strip())
 
 
 def _preflight_token_scopes(org: str, probe_repo: str, *, timeout: int = 120) -> None:

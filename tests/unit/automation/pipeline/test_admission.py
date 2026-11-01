@@ -18,7 +18,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.comment_identity import CommentAliasConflictError
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline.admission import (
     DependencyFact,
@@ -212,7 +211,7 @@ class TestFetchPlannedFiles:
         assert self.read_files(103, comments) == {"src/worker.py"}
 
     @pytest.mark.parametrize("preceding_count", [0, 100])
-    def test_foreign_marker_is_a_typed_conflict(self, preceding_count: int) -> None:
+    def test_foreign_marker_plan_is_read(self, preceding_count: int) -> None:
         comments = [
             {"body": f"Comment {index}.", "user": {"login": "other"}}
             for index in range(preceding_count)
@@ -223,8 +222,10 @@ class TestFetchPlannedFiles:
                 "user": {"login": "other"},
             }
         )
-        with pytest.raises(CommentAliasConflictError, match="plan marker identity conflict"):
-            self.read_files(104, comments)
+
+        # The newest marker-bearing comment is the plan, whatever author wrote
+        # it, so its declared files are read.
+        assert self.read_files(104, comments) == {"src/worker.py"}
 
     def test_selected_repository_owns_the_comment_read(self) -> None:
         assert self.read_files(188, [], repo=("HomericIntelligence", "Myrmidons")) is None
