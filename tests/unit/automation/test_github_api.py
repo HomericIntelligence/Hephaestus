@@ -2597,10 +2597,10 @@ class TestUpsertAndDeleteComment:
     @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
     @patch("hephaestus.automation.github_api.gh_issue_comment")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_owned_upsert_patches_a_foreign_marker_without_a_shadow_comment(
+    def test_owned_upsert_leaves_a_foreign_marker_alone(
         self, mock_gh_call: Any, mock_create: Any, mock_fetch: Any, _mock_login: Any
     ) -> None:
-        """A foreign planning marker is the pointer; it is patched, not duplicated."""
+        """Another author's planning marker is kept; no write touches it."""
         marker = PLAN_REVIEW_CANONICAL_MARKER
         body = f"{marker}\nowned review"
         foreign = {
@@ -2608,14 +2608,13 @@ class TestUpsertAndDeleteComment:
             "body": f"{marker}\nforeign review",
             "user": {"login": "someone-else"},
         }
-        mock_fetch.side_effect = [[foreign], [{**foreign, "body": body}]]
+        mock_fetch.return_value = [foreign]
 
         result = gh_issue_upsert_owned_comment(5, marker, body)
 
-        assert result == 9
+        assert result is None
         mock_create.assert_not_called()
-        patched = [call for call in mock_gh_call.call_args_list if "PATCH" in call.args[0]]
-        assert len(patched) == 1
+        mock_gh_call.assert_not_called()
 
     def test_owned_upsert_rejects_cross_role_outgoing_body_before_any_write(self) -> None:
         """One outgoing comment cannot claim both shared planning roles."""

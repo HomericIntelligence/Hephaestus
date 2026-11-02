@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -30,6 +31,8 @@ from ..protocol import comment_marker_aliases
 from ..review_journal import (
     has_exact_leading_marker,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
 MAX_ISSUE_JOURNAL_BODY_BYTES = 16 * 1024 * 1024
@@ -469,6 +472,79 @@ def _validate_shared_planning_identities(
         )
 
 
+def _comment_is_owned(viewer_login: str, comment: dict[str, Any]) -> bool:
+    """Return whether the authenticated actor wrote ``comment``."""
+    if "viewerDidAuthor" in comment:
+        return bool(comment.get("viewerDidAuthor"))
+    user = comment.get("user") or comment.get("author")
+    login = user.get("login") if isinstance(user, dict) else ""
+    return bool(login) and str(login).lower() == viewer_login
+
+
+def _marker_comments(
+    comments: list[dict[str, Any]],
+    marker_aliases: tuple[str, ...],
+    viewer_login: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return marker-bearing comments, newest last, optionally actor-filtered.
+
+    Set ``viewer_login`` when the caller patches a comment in place. That
+    caller never rewrites a comment another author wrote, so selection reads
+    ownership there.
+    """
+    return [
+        comment
+        for comment in comments
+        if has_marker_alias(str(comment.get("body", "")), marker_aliases)
+        and comment.get("databaseId") is not None
+        and (viewer_login is None or _comment_is_owned(viewer_login, comment))
+    ]
+
+
+def _select_pointer(
+    issue_number: int,
+    marker_prefix: str,
+    marker_aliases: tuple[str, ...],
+    viewer_login: str,
+    repo: tuple[str, str] | None,
+    comments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Return this actor's newest pointer from a fresh read of the issue."""
+    if comments is None:
+        comments = _api.fetch_issue_comments_metadata(issue_number, repo)
+        _validate_shared_planning_identities(
+            marker_prefix,
+            comments,
+            owned_of=lambda comment: _comment_is_owned(viewer_login, comment),
+        )
+    return select_unambiguous_comment(
+        _marker_comments(comments, marker_aliases, viewer_login),
+        marker=marker_prefix,
+        aliases=marker_aliases,
+        body_of=lambda comment: str(comment.get("body", "")),
+    )
+
+
+def _only_foreign_pointer_exists(
+    foreign: list[dict[str, Any]], marker_prefix: str, issue_number: int
+) -> bool:
+    """Report when another author holds the only planning pointer.
+
+    The helper never patches or deletes a comment that another author wrote,
+    and it does not add a second comment for the same role. The caller stops
+    without a write when this returns True.
+    """
+    if not foreign:
+        return False
+    logger.warning(
+        "comment_identity: a planning comment for %r exists on #%s, but this actor "
+        "does not own it; leaving it in place and writing no duplicate",
+        marker_prefix,
+        issue_number,
+    )
+    return True
+
+
 def gh_issue_upsert_owned_comment(
     issue_number: int,
     marker_prefix: str,
@@ -477,10 +553,11 @@ def gh_issue_upsert_owned_comment(
 ) -> int | None:
     """Upsert only the authenticated actor's canonical comment.
 
-    A shared or legacy planning marker on a foreign or unverifiable comment is
-    an identity conflict. Other marker families keep their existing ownership
-    behavior. This helper is the standalone automation equivalent of
-    ``PipelineGitHub.upsert_issue_comment``.
+    The helper patches only a comment that the authenticated actor wrote. When
+    another author holds the only planning pointer, it logs a warning, leaves
+    that comment in place, and writes no duplicate. Other marker families keep
+    their existing ownership behavior. This helper is the standalone
+    automation equivalent of ``PipelineGitHub.upsert_issue_comment``.
     """
     if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
         raise ValueError("new planning comments must use a shared HomericIntelligence marker")
@@ -491,51 +568,26 @@ def gh_issue_upsert_owned_comment(
     if not viewer_login:
         raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
 
-    def is_owned(comment: dict[str, Any]) -> bool:
-        if "viewerDidAuthor" in comment:
-            return bool(comment.get("viewerDidAuthor"))
-        user = comment.get("user") or comment.get("author")
-        login = user.get("login") if isinstance(user, dict) else ""
-        return bool(login) and str(login).lower() == viewer_login
-
     marker_aliases = comment_marker_aliases(marker_prefix)
 
-    def owned_with(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Return every marker-bearing comment, newest last.
-
-        The newest comment is the pointer for its role, whatever author wrote
-        it. Filtering by author would hide an existing plan and create a
-        second one, so selection does not read ownership.
-        """
-        return [
-            comment
-            for comment in comments
-            if has_marker_alias(str(comment.get("body", "")), marker_aliases)
-            and comment.get("databaseId") is not None
-        ]
-
     comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-    _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
-    owned = owned_with(comments)
-    target = select_unambiguous_comment(
-        owned,
-        marker=marker_prefix,
-        aliases=marker_aliases,
-        body_of=lambda comment: str(comment.get("body", "")),
+    _validate_shared_planning_identities(
+        marker_prefix,
+        comments,
+        owned_of=lambda comment: _comment_is_owned(viewer_login, comment),
+    )
+    target = _select_pointer(
+        issue_number, marker_prefix, marker_aliases, viewer_login, repo, comments
     )
     if target is None:
+        if _only_foreign_pointer_exists(
+            _marker_comments(comments, marker_aliases), marker_prefix, issue_number
+        ):
+            return None
         _api.gh_issue_comment(issue_number, body, repo=repo)
         # Re-read after create. This closes the concurrent-create window and
         # proves that the authenticated actor owns the canonical pointer.
-        comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-        _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
-        owned = owned_with(comments)
-        target = select_unambiguous_comment(
-            owned,
-            marker=marker_prefix,
-            aliases=marker_aliases,
-            body_of=lambda comment: str(comment.get("body", "")),
-        )
+        target = _select_pointer(issue_number, marker_prefix, marker_aliases, viewer_login, repo)
         if target is None:
             raise RuntimeError(
                 f"created canonical comment on #{issue_number} was not readable after create"
@@ -560,15 +612,7 @@ def gh_issue_upsert_owned_comment(
             raise RuntimeError(
                 f"Failed to update issue comment {target_id} on #{issue_number}: {error}"
             ) from error
-        comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-        _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
-        owned = owned_with(comments)
-        target = select_unambiguous_comment(
-            owned,
-            marker=marker_prefix,
-            aliases=marker_aliases,
-            body_of=lambda comment: str(comment.get("body", "")),
-        )
+        target = _select_pointer(issue_number, marker_prefix, marker_aliases, viewer_login, repo)
         if (
             target is None
             or int(target["databaseId"]) != target_id

@@ -131,12 +131,13 @@ def _obsolete_comment_ids(
     owned: Sequence[IssueComment],
     *,
     keep_ids: set[int],
-    pointer_ids: set[int] | frozenset[int] = frozenset(),
+    pointer_ids: set[int],
 ) -> list[int]:
     """Return owned obsolete IDs whose canonical replacement is durable.
 
-    A comment that still carries exactly one planning alias stays. It can be
-    the newest pointer for the other alias, so it is not obsolete.
+    ``pointer_ids`` holds every comment that is still the newest bearer of one
+    marker alias. The caller computes that set, and a pointer is never an
+    obsolete target.
     """
     delete_ids: list[int] = []
     for comment in owned:
@@ -236,7 +237,8 @@ def plan_issue_timeline_compaction(
         if comment is not None and comment.database_id is not None
     }
     # Each marker keeps its own newest bearer. A mixed current and legacy pair is
-    # not one duplicate pointer, so neither bearer is an obsolete target.
+    # not one duplicate pointer, so neither bearer is an obsolete target. That
+    # is why the bearer scan is per marker, not per alias family.
     for marker in (*plan_aliases, *review_aliases):
         newest = next(
             (

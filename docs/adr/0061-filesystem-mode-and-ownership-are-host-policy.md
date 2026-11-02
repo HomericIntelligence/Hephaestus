@@ -70,4 +70,5 @@ another process's work, which is a question about the work, not about a mode.
   worktree.
 - `hephaestus/` holds no `0o022` check. A new mode check needs this ADR to
   change.
-- A test does not assert a host filesystem mode or owner.
+- A test does not refuse on a host filesystem mode or owner. A test may
+  still confirm that the host mode is left unchanged.

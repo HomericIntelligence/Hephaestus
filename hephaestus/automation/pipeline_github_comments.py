@@ -38,12 +38,14 @@ def _validate_shared_planning_identities(
 def marker_matching(
     comments: list[dict[str, Any]], markers: tuple[str, ...]
 ) -> list[dict[str, Any]]:
-    """Return every marker-bearing comment, newest last, whatever author."""
+    """Return every marker-bearing comment, newest last, whatever author.
+
+    This answers "does a pointer exist". It does not read ``databaseId``,
+    because a comment without one would otherwise look absent and the caller
+    would post a duplicate.
+    """
     return [
-        comment
-        for comment in comments
-        if has_marker_alias(str(comment.get("body", "")), markers)
-        and comment.get("databaseId") is not None
+        comment for comment in comments if has_marker_alias(str(comment.get("body", "")), markers)
     ]
 
 
@@ -68,11 +70,11 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
     ) -> None:
         """Upsert one actor-owned canonical comment keyed on an opaque marker.
 
-        A shared or legacy planning marker on a foreign or unverifiable
-        comment is an identity conflict and stops the upsert. Other
-        human-authored marker collisions remain inert: they are not trusted,
-        patched, or deleted. Historical heading-only comments are never
-        migration candidates.
+        Only a comment that this actor wrote is patched. A pointer that only
+        another author holds is reported and left in place, and the call
+        writes no duplicate. Other human-authored marker collisions remain
+        inert: they are not trusted, patched, or deleted. Historical
+        heading-only comments are never migration candidates.
         """
         try:
             self._upsert_issue_comment(
