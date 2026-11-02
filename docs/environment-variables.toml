@@ -61,6 +61,7 @@ validation = "non-empty"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "build_gh_child_env", access = "read" },
+  { path = "hephaestus/automation/github_api/cache.py", reader = "_default_token_identity", access = "read" },
 ]
 
 [[variables]]
@@ -85,6 +86,7 @@ validation = "non-empty"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "build_gh_child_env", access = "read" },
+  { path = "hephaestus/automation/github_api/cache.py", reader = "_default_token_identity", access = "read" },
 ]
 
 [[variables]]
