@@ -166,10 +166,11 @@ def implementer_claude_timeout() -> int:
 
 
 def implementer_checkpoint_interval_s() -> int:
-    """Periodic implementer progress/checkpoint interval in seconds (default 300s).
+    """Periodic implementer progress/checkpoint interval in seconds.
 
-    The CLI/config value zero disables the checkpoint feature. This accessor
-    returns the fixed default only; see
+    The default is zero, which disables the checkpoint feature. An operator
+    selects an interval to enable it. This accessor returns the fixed default
+    only; see
     :func:`hephaestus.automation.pipeline.implementer_checkpoint.interval_from_config`
     for the config-backed value.
     """

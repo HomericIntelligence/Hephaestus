@@ -152,7 +152,9 @@ class TestIntervalFromConfig:
     """Config-read behavior of the interval accessor."""
 
     def test_default_when_unset(self) -> None:
-        assert interval_from_config(_config()) == IMPLEMENTER_CHECKPOINT_INTERVAL_S
+        """The kill switch is the shipped default: the feature stays off."""
+        assert IMPLEMENTER_CHECKPOINT_INTERVAL_S == 0
+        assert interval_from_config(_config()) == 0
 
     def test_zero_is_accepted(self) -> None:
         assert interval_from_config(_config(implementer_checkpoint_interval=0)) == 0

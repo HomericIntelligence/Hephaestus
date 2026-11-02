@@ -759,8 +759,8 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
         default=IMPLEMENTER_CHECKPOINT_INTERVAL_S,
         metavar="SECONDS",
         help=text(
-            "Periodic implementer progress and lane checkpoint interval in seconds; "
-            "0 disables the checkpoint feature."
+            "Periodic implementer progress and lane checkpoint interval in seconds "
+            "(default: 0, disabled); a positive value enables the checkpoint feature."
         ),
     )
     parser.add_argument(

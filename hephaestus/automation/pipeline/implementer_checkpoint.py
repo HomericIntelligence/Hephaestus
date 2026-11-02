@@ -22,9 +22,10 @@ head-superseded checkpoint fails closed: it is discarded and the retry
 runs a fresh turn.
 
 Config: ``implementer_checkpoint_interval`` (CLI
-``--implementer-checkpoint-interval``) selects the interval; zero disables
-the whole feature. With the feature disabled there is no new branch on the
-hot path beyond one config read.
+``--implementer-checkpoint-interval``) selects the interval. The default is
+zero, which disables the whole feature; an operator selects a positive
+interval to enable it. With the feature disabled there is no new branch on
+the hot path beyond one config read.
 """
 
 from __future__ import annotations
