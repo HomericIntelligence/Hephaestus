@@ -276,7 +276,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _record_gh_read_cache_stats(self) -> None:
         """Emit the enabled GitHub read-through cache counters (#3395)."""
-        from hephaestus.automation import github_api
+        import hephaestus.automation.github_api as github_api
 
         cache_obj = getattr(github_api, "_gh_read_cache", None)
         if cache_obj is None:

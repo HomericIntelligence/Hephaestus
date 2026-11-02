@@ -292,6 +292,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `add_dry_run_arg` | 0.9.0 | Add a `--dry-run` flag to a parser |
 | `add_follow_up_timeout_arg` | 0.9.8 | Add a `--follow-up-timeout` flag to a parser |
 | `add_git_message_timeout_arg` | 0.9.8 | Add a `--git-message-timeout` flag to a parser |
+| `add_github_read_cache_args` | TBD | Add `--gh-cache-ttl`/`--gh-cache-max-entries` flags for the GitHub read cache |
 | `add_github_throttle_args` | 0.9.0 | Add GitHub API throttle flags to a parser |
 | `add_host_verification_pyxis_image_arg` | TBD | Add the Linux Pyxis image authority flags to a parser |
 | `add_json_arg` | 0.6.0 | Add a `--json` output flag to a parser |
