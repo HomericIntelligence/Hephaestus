@@ -94,7 +94,6 @@ _LOCK_DIR_NAME = "locks"
 _WRITE_LOCK_NAME = "write.lock"
 _SALT_FILE_NAME = "scope-key"
 _SALT_BYTES = 32
-_SALT_TEXT_LENGTH = 2 * _SALT_BYTES
 
 
 class _CacheMissError(RuntimeError):
@@ -120,9 +119,9 @@ class ReadKey:
 
 def _default_token_identity() -> str:
     """Return the token that ``gh`` uses, or an empty string when unknown."""
-    # Read the approved tokens from the child-environment boundary so the
-    # approval rules apply, and so this module never reads the ambient
-    # environment itself.
+    # Read the approved tokens from the child-environment boundary. The
+    # boundary owns the ambient read and applies the registry validation, so
+    # this module takes the value from one audited place.
     approved = build_gh_child_env()
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
         value = approved.get(name)
@@ -156,22 +155,15 @@ def _write_new_file(path: Path, text: str) -> None:
     ``link`` it into place: ``link`` fails with ``FileExistsError`` when
     another process won, and it publishes the complete file in one step.
     """
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     try:
         handle = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(handle, "wb") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                stream.write(text.encode("utf-8"))
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.link(temporary, path)
-        except FileExistsError:
-            raise
-        except BaseException:
-            with suppress(OSError):
-                os.unlink(temporary)
-            raise
+        with os.fdopen(handle, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(text.encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
     finally:
         with suppress(OSError):
             os.unlink(temporary)
