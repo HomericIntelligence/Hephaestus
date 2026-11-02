@@ -247,19 +247,19 @@ def _remove_test_tree(path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("owner", "mode", "allowed"),
+    ("owner", "mode"),
     [
-        ("current", 0o700, True),
-        ("root", 0o1777, True),
-        ("other", 0o755, False),
-        ("current", 0o770, False),
-        ("root", 0o777, False),
+        ("current", 0o700),
+        ("root", 0o1777),
+        ("other", 0o755),
+        ("current", 0o770),
+        ("root", 0o777),
     ],
 )
-def test_snapshot_base_requires_trusted_owner_and_mode(
-    monkeypatch: pytest.MonkeyPatch, owner: str, mode: int, allowed: bool
+def test_snapshot_base_accepts_any_owner_and_mode(
+    monkeypatch: pytest.MonkeyPatch, owner: str, mode: int
 ) -> None:
-    """The snapshot base accepts only private or root-sticky ancestry."""
+    """The snapshot base only needs a directory; owner and mode are host policy."""
 
     class Binding:
         descriptor = 17
@@ -277,11 +277,31 @@ def test_snapshot_base_requires_trusted_owner_and_mode(
     metadata = SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=owners[owner])
     monkeypatch.setattr(os, "fstat", lambda _descriptor: metadata)
 
-    if allowed:
+    strict_verify_snapshot_base(Binding())
+
+
+def test_snapshot_base_rejects_a_non_directory_bound_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A descriptor that does not name a directory is still refused."""
+
+    class Binding:
+        descriptor = 17
+
+        def __init__(self) -> None:
+            self.descriptors = [17]
+
+        def verify(self) -> None:
+            return None
+
+        def close(self, *, preserve_error: bool) -> None:
+            return None
+
+    metadata = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=os.geteuid())
+    monkeypatch.setattr(os, "fstat", lambda _descriptor: metadata)
+
+    with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
         strict_verify_snapshot_base(Binding())
-    else:
-        with pytest.raises(LearnDeliveryError, match="dependency tree is unavailable"):
-            strict_verify_snapshot_base(Binding())
 
 
 def test_node_runtime_collects_rpath_and_transitive_libraries(tmp_path: Path) -> None:

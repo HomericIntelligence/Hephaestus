@@ -56,6 +56,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.config.child_environments import build_check_only_git_env
 from hephaestus.config.paths import resolve_projects_dir
 from hephaestus.constants import AGENT_REVIEW_TIMEOUT, IMPLEMENTER_CHECKPOINT_INTERVAL_S
 from hephaestus.utils.git import _is_full_commit_sha, run_git
@@ -319,6 +320,7 @@ def _has_git_worktree_ancestor(path: Path) -> bool:
             text=True,
             timeout=30,
             check=False,
+            env=build_check_only_git_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return False
