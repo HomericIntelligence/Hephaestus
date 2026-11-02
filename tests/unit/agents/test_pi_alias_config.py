@@ -23,7 +23,7 @@ def _write_alias_config(
 
 
 def test_load_pi_alias_config_accepts_exact_private_toml(tmp_path: Path) -> None:
-    """The two aliases load only from an owner-only regular TOML file."""
+    """The two aliases load from a regular TOML file, whatever its host mode."""
     path = _write_alias_config(tmp_path / "aliases.toml")
 
     assert agent_runtime.load_pi_alias_config(path) == agent_runtime.PiAliasConfig(
@@ -63,26 +63,90 @@ def test_load_pi_alias_config_rejects_symlink(tmp_path: Path) -> None:
         agent_runtime.load_pi_alias_config(link)
 
 
-@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership is unavailable")
-def test_load_pi_alias_config_rejects_wrong_owner(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Only a file owned by the invoking user may provide private aliases."""
-    path = _write_alias_config(tmp_path / "aliases.toml")
-    monkeypatch.setattr(os, "getuid", lambda: path.stat().st_uid + 1)
-
-    with pytest.raises(OSError, match="owned by the current user"):
-        agent_runtime.load_pi_alias_config(path)
-
-
-@pytest.mark.parametrize("mode", [0o400, 0o640, 0o644, 0o660, 0o666])
-def test_load_pi_alias_config_requires_mode_0600(tmp_path: Path, mode: int) -> None:
-    """Readability by peers and weaker owner modes are both rejected."""
+@pytest.mark.parametrize("mode", [0o400, 0o644, 0o660, 0o666])
+def test_load_pi_alias_config_reads_any_host_mode(tmp_path: Path, mode: int) -> None:
+    """A host permission mode does not stop the reader (ADR-0061)."""
     path = _write_alias_config(tmp_path / "aliases.toml")
     path.chmod(mode)
 
-    with pytest.raises(OSError, match="mode 0600"):
+    assert agent_runtime.load_pi_alias_config(path) == agent_runtime.PiAliasConfig(
+        provider="private-provider",
+        model="private-model",
+    )
+
+
+def test_load_pi_alias_config_rejects_a_directory(tmp_path: Path) -> None:
+    """A directory is not a regular file, so the read refuses."""
+    directory = tmp_path / "aliases.toml"
+    directory.mkdir()
+
+    with pytest.raises(OSError, match="Pi alias config must be a regular file"):
+        agent_runtime.load_pi_alias_config(directory)
+
+
+def _config_at_size(size: int) -> str:
+    """Return a valid alias document padded to exactly ``size`` bytes."""
+    head = 'provider = "private-provider"\nmodel = "private-model"\n'
+    return head + "#" * (size - len(head) - 1) + "\n"
+
+
+def test_load_pi_alias_config_accepts_a_file_at_the_cap(tmp_path: Path) -> None:
+    """The cap is inclusive, so the boundary value loads."""
+    cap = agent_runtime.PI_CONFIG_MAX_BYTES
+    path = _write_alias_config(tmp_path / "aliases.toml", _config_at_size(cap))
+
+    assert path.stat().st_size == cap
+    assert agent_runtime.load_pi_alias_config(path).provider == "private-provider"
+
+
+def test_load_pi_alias_config_rejects_an_oversized_file(tmp_path: Path) -> None:
+    """A file above the shared configuration cap refuses before it is parsed."""
+    cap = agent_runtime.PI_CONFIG_MAX_BYTES
+    path = _write_alias_config(tmp_path / "aliases.toml", _config_at_size(cap + 1))
+
+    with pytest.raises(OSError, match="bounded regular file"):
+        agent_runtime.load_pi_alias_config(path)
+
+
+def test_load_pi_alias_config_bounds_a_file_that_grows_after_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A file that grows before the read cannot make the read unbounded."""
+    cap = agent_runtime.PI_CONFIG_MAX_BYTES
+    path = _write_alias_config(tmp_path / "aliases.toml")
+    real_fdopen = os.fdopen
+
+    class Growing:
+        """Wrap the descriptor and append past the cap before the real read."""
+
+        def __init__(self, descriptor: int) -> None:
+            self._file = real_fdopen(descriptor, "rb", closefd=False)
+
+        def __enter__(self) -> Growing:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            self._file.close()
+
+        def read(self, size: int) -> bytes:
+            with path.open("ab") as handle:
+                handle.write(b"#" * (cap + 1))
+            return self._file.read(size)
+
+    monkeypatch.setattr(os, "fdopen", lambda descriptor, mode, closefd: Growing(descriptor))
+
+    with pytest.raises(OSError, match="bounded regular file"):
+        agent_runtime.load_pi_alias_config(path)
+
+
+def test_load_pi_alias_config_rejects_invalid_utf8(tmp_path: Path) -> None:
+    """A binary file is not valid TOML and does not raise a decode error."""
+    path = tmp_path / "aliases.toml"
+    path.write_bytes(b'provider = "\xff\xfe"\nmodel = "m"\n')
+    path.chmod(0o600)
+
+    with pytest.raises(ValueError, match="not valid TOML"):
         agent_runtime.load_pi_alias_config(path)
 
 

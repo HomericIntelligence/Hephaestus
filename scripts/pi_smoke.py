@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pi-alias-config",
         type=Path,
-        help="Owner-only mode-0600 TOML file containing provider and model aliases",
+        help="Private TOML file containing provider and model aliases",
     )
     parser.add_argument(
         "--pi-dir",
