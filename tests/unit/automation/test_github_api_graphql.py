@@ -669,22 +669,21 @@ def test_repeated_identical_query_uses_one_upstream_call_in_window(
     assert first == second
 
 
-def test_executed_mutation_invalidates_affected_keys(
-    read_cache: GraphQLReadCache, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2: an executed mutation drops the entries its repository scope owns."""
-    monkeypatch.setattr(
-        "hephaestus.automation.github_api.cache.get_repo_info",
-        lambda: ("o", "r"),
-    )
+def test_executed_mutation_invalidates_affected_keys(read_cache: GraphQLReadCache) -> None:
+    """AC2: an executed mutation drops the entries of every repository."""
     raw_call = Mock(return_value=completed())
     variables = {"owner": "o", "name": "r"}
+    other = {"owner": "o", "name": "other"}
     run_graphql(cacheable_query_spec(), variables, call=raw_call)
-    assert raw_call.call_count == 1
-    run_graphql(trivial_mutation_spec(), call=raw_call)
+    run_graphql(cacheable_query_spec(), other, call=raw_call)
     assert raw_call.call_count == 2
-    run_graphql(cacheable_query_spec(), variables, call=raw_call)
+    run_graphql(trivial_mutation_spec(), call=raw_call)
     assert raw_call.call_count == 3
+    # Both repositories were dropped: the mutation names no repository, so the
+    # token scope is the only safe invalidation target.
+    run_graphql(cacheable_query_spec(), variables, call=raw_call)
+    run_graphql(cacheable_query_spec(), other, call=raw_call)
+    assert raw_call.call_count == 5
 
 
 def test_label_write_invalidates_affected_keys(

@@ -50,7 +50,6 @@ from hephaestus.utils.directory_mode import create_private_directory
 from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.helpers import get_repo_root
 
-from ..git_runtime import get_repo_info
 from ..models import DEFAULT_STATE_DIR
 
 if TYPE_CHECKING:
@@ -298,18 +297,6 @@ class GraphQLReadCache:
             self._forget_entry(key)
         self._unlink_matching(f"{_sanitize_component(token)}.")
 
-    def invalidate_current_repository(self) -> None:
-        """Invalidate the ambient repository; fall back to the token scope."""
-        try:
-            owner, name = get_repo_info()
-        except RuntimeError:
-            logger.warning(
-                "Could not resolve the repository for cache invalidation; clearing the token scope"
-            )
-            self.invalidate_token_scope()
-            return
-        self.invalidate_repository(f"{owner}/{name}")
-
     def stats(self) -> dict[str, int | float]:
         """Return the event-log counter snapshot (JSON-safe)."""
         with self._lock:
@@ -468,7 +455,7 @@ def configure_github_read_cache(
 ) -> GraphQLReadCache | None:
     """Create and bind the process-wide read cache; None disables it.
 
-    A TTL of zero disables the cache (the operator default is one hour).
+    A TTL of zero disables the cache (the operator default is zero).
     """
     cache: GraphQLReadCache | None
     if ttl_seconds <= 0:

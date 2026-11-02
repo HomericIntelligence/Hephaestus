@@ -533,10 +533,12 @@ def run_graphql[T](
             raise _classify_transport_error(spec, prepared, error) from error
         validated = _checked_transport_result(spec, prepared, result)
     finally:
-        # A prepared mutation may have reached GitHub; invalidate immediately
-        # so a writer never reads its own write as stale, on every outcome.
+        # A prepared mutation may have reached GitHub. The mutation carries no
+        # repository variable, and the process working directory can be a
+        # different repository in a multi-repository loop. Drop the token scope
+        # so no repository keeps an entry this write may have changed.
         if prepared is not None and read_cache is not None:
-            read_cache.invalidate_current_repository()
+            read_cache.invalidate_token_scope()
     if cache_key is not None and read_cache is not None:
         read_cache.store(cache_key, validated)
     return validated

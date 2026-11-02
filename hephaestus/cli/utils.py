@@ -436,11 +436,11 @@ def add_github_read_cache_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--gh-cache-ttl",
         type=_non_negative_int,
-        default=3600,
+        default=0,
         metavar="SECONDS",
         help=text(
             "Read-through cache TTL for GitHub GraphQL reads in seconds "
-            "(default: 3600). Pass 0 to disable the read cache."
+            "(default: 0, disabled). Pass a positive value to enable the read cache."
         ),
     )
     group.add_argument(

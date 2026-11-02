@@ -17,6 +17,7 @@ from hephaestus.cli.utils import (
     CommandRegistry,
     add_agent_timeout_arg,
     add_dry_run_arg,
+    add_github_read_cache_args,
     add_github_throttle_args,
     add_json_arg,
     add_logging_args,
@@ -484,6 +485,42 @@ class TestAddGithubThrottleArgs:
         with patch("hephaestus.github.rate_limit.configure_gh_global_throttle") as mock_configure:
             configure_github_throttle_from_args(args)
         mock_configure.assert_called_once_with(rate=4.0, burst=9.0)
+
+
+class TestAddGithubReadCacheArgs:
+    """Tests for the shared GitHub read-cache CLI options."""
+
+    def test_default_is_disabled(self) -> None:
+        """The cache stays off until an operator enables it."""
+        parser = argparse.ArgumentParser()
+        add_github_read_cache_args(parser)
+        args = parser.parse_args([])
+        assert args.gh_cache_ttl == 0
+        assert args.gh_cache_max_entries == 2000
+        assert args.gh_cache_dir is None
+
+    def test_custom_values(self) -> None:
+        """Each read-cache option accepts an explicit value."""
+        parser = argparse.ArgumentParser()
+        add_github_read_cache_args(parser)
+        args = parser.parse_args(
+            ["--gh-cache-ttl", "3600", "--gh-cache-max-entries", "10", "--gh-cache-dir", "c"]
+        )
+        assert args.gh_cache_ttl == 3600
+        assert args.gh_cache_max_entries == 10
+        assert args.gh_cache_dir == "c"
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [("--gh-cache-ttl", "-1"), ("--gh-cache-max-entries", "0")],
+    )
+    def test_invalid_values_exit_2(self, flag: str, value: str) -> None:
+        """A negative TTL and a non-positive bound are refused."""
+        parser = argparse.ArgumentParser()
+        add_github_read_cache_args(parser)
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args([flag, value])
+        assert exc.value.code == 2
 
 
 class TestFormatTable:

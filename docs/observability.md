@@ -182,10 +182,14 @@ control the store:
 
 Safety posture:
 
-- The cache serves only the allow-listed read operations. Mutations, label
-  writes, review-state reads, and comment reads always go to GitHub.
-- Each mutation and each label write invalidates the entries for its
-  repository.
+- The cache serves only the allow-listed read operations. Mutations and label
+  writes always go to GitHub.
+- Each label write invalidates the entries for its repository.
+- Each GraphQL mutation invalidates the entries for the whole token scope. The
+  mutation carries no repository variable, so it cannot name one repository.
+- The exact-head review binding and the first-publication state reads bypass
+  the cache. `reviewedPrState`, `issueComments`, `BatchIssueComments`, and
+  `issueCommentIds` always run upstream.
 - The cache key includes a hash of the token, so two tokens never share an
   entry.
 
