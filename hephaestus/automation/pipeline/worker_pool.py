@@ -949,17 +949,6 @@ _FETCH_ENV_BLOCKLIST = frozenset(
     }
 )
 
-# ``gh`` must not be discovered through a caller-controlled ``PATH``: the
-# checkout synchronizer executes it as the GitHub credential helper.  These
-# are the system and package-manager locations we support for the automation
-# host.  Resolving candidates also rejects a symlink that escapes its trusted
-# installation root.
-_TRUSTED_GH_CANDIDATES = (
-    Path("/opt/homebrew/bin/gh"),
-    Path("/usr/local/bin/gh"),
-    Path("/usr/bin/gh"),
-)
-_TRUSTED_GH_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
 _TRUSTED_UV_CANDIDATES = (
     Path("/opt/homebrew/bin/uv"),
     Path("/usr/local/bin/uv"),
@@ -1311,7 +1300,6 @@ def _validated_system_git_executable(git_executable: str | None) -> str:
         or canonical_git != git_path
         or not stat.S_ISREG(git_mode)
         or not os.access(git_path, os.X_OK)
-        or git_mode & 0o022
     ):
         raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
     return git_executable
@@ -1364,10 +1352,14 @@ def _absolute_directory_components(path: Path) -> tuple[Path, ...]:
 
 
 def _validate_git_exec_components(path: Path) -> None:
-    """Reject an indirect, non-directory, or writable path component."""
+    """Reject an indirect or non-directory path component.
+
+    The host umask sets the mode of system directories. The loop does not
+    read that mode.
+    """
     for directory in _absolute_directory_components(path):
         mode = directory.lstat().st_mode
-        if directory.is_symlink() or not stat.S_ISDIR(mode) or mode & 0o022:
+        if directory.is_symlink() or not stat.S_ISDIR(mode):
             raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
 
 
@@ -1406,7 +1398,7 @@ def _validated_git_system_config(toolchain_root: Path) -> Path:
         raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe") from exc
     except OSError as exc:
         raise _HostVerificationBoundaryError("host_verification_git_exec_path_unavailable") from exc
-    if candidate.is_symlink() or canonical != candidate or not stat.S_ISREG(mode) or mode & 0o022:
+    if candidate.is_symlink() or canonical != candidate or not stat.S_ISREG(mode):
         raise _HostVerificationBoundaryError("host_verification_git_exec_path_unsafe")
     return canonical
 
@@ -2534,15 +2526,9 @@ def _validated_signing_key(value: str) -> Path | None:
     try:
         signing_key = Path(value).expanduser()
         resolved_key = signing_key.resolve(strict=True)
-        mode = resolved_key.stat().st_mode
     except (OSError, RuntimeError, ValueError):
         return None
-    if (
-        not signing_key.is_absolute()
-        or signing_key.is_symlink()
-        or not resolved_key.is_file()
-        or mode & 0o022
-    ):
+    if not signing_key.is_absolute() or signing_key.is_symlink() or not resolved_key.is_file():
         return None
     return resolved_key
 
@@ -2638,29 +2624,22 @@ def _trusted_uv_executable() -> str | None:
     for candidate in _TRUSTED_UV_CANDIDATES:
         try:
             resolved = candidate.resolve(strict=True)
-            mode = resolved.stat().st_mode
         except OSError:
             continue
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
-            continue
-        if mode & 0o022:
             continue
         return str(resolved)
     return None
 
 
 def _trusted_gh_executable(extra_path_root: Path | None = None) -> str | None:
-    """Return an allowed absolute ``gh`` binary without consulting ``PATH``.
+    """Return the ``gh`` binary to run.
 
-    ``extra_path_root`` is an explicit operator authority passed only through
-    the loop CLI.  It contributes exactly ``<root>/bin/gh`` and rejects a
-    candidate whose resolved path escapes that root.
+    ``extra_path_root`` is an explicit operator choice from the loop CLI. It
+    contributes exactly ``<root>/bin/gh`` and is tested first. The fallback is
+    an ordinary ``PATH`` lookup.
     """
-    return _shared_trusted_gh_executable(
-        extra_path_root,
-        system_candidates=_TRUSTED_GH_CANDIDATES,
-        system_roots=_TRUSTED_GH_ROOTS,
-    )
+    return _shared_trusted_gh_executable(extra_path_root)
 
 
 def _unsafe_local_git_config_key(config: str) -> str | None:

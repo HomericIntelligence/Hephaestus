@@ -529,7 +529,7 @@ def _require_bound_kind(
             raise PyxisArtifactIOError("cross-node artifact is not a directory")
     elif not stat.S_ISREG(metadata.st_mode):
         raise PyxisArtifactIOError("cross-node artifact is not a regular file")
-    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+    if metadata.st_uid != os.geteuid():
         raise PyxisArtifactIOError("cross-node artifact permissions are unsafe")
     if require_read_only and stat.S_IMODE(metadata.st_mode) & 0o222:
         raise PyxisArtifactIOError("cross-node artifact is writable")
@@ -556,14 +556,7 @@ def _require_trusted_ancestry(path: Path) -> None:
         raise PyxisArtifactIOError("cross-node path ancestry contains a symlink")
     for component in reversed((resolved, *resolved.parents)):
         metadata = component.lstat()
-        mode = stat.S_IMODE(metadata.st_mode)
-        root_owned_sticky = metadata.st_uid == 0 and bool(mode & stat.S_ISVTX)
-        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid not in {
-            0,
-            os.geteuid(),
-        }:
-            raise PyxisArtifactIOError("cross-node path ancestry is not trusted")
-        if mode & 0o022 and not root_owned_sticky:
+        if not stat.S_ISDIR(metadata.st_mode):
             raise PyxisArtifactIOError("cross-node path ancestry is not trusted")
 
 

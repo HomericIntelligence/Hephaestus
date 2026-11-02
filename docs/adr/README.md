@@ -73,3 +73,4 @@ confirm all three.
 | [0058](0058-durable-nats-failure-delivery.md) | Durable NATS failure delivery and replay | Accepted |
 | [0059](0059-standalone-pr-merge-cli-stays-retired.md) | Standalone PR-merge CLI stays retired | Accepted |
 | [0060](0060-pi-capability-sourceinfo-provenance-binding-removed.md) | Pi capability admission drops the sourceInfo provenance binding | Accepted |
+| [0061](0061-filesystem-mode-and-ownership-are-host-policy.md) | Filesystem mode and ownership are host policy | Accepted |

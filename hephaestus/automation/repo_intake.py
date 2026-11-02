@@ -206,11 +206,7 @@ def intake_worker_base(
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         with os.fdopen(os.open(receipt_path, flags), "rb") as stream:
             metadata = os.fstat(stream.fileno())
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_mode & 0o077
-                or (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
-            ):
+            if not stat.S_ISREG(metadata.st_mode):
                 raise RepoIntakeError("repository-intake worker receipt is unsafe")
             encoded = stream.read(65537)
         if len(encoded) > 65536:
@@ -615,27 +611,16 @@ class RepoIntakeManager:
         )
 
     def _require_safe_common_dir(self) -> None:
-        """Reject a common directory that another user can change.
+        """Confirm the common directory exists as a directory.
 
-        The caller owns the checkout, so the loop does not change its mode.
-        It reports the path, the observed mode, and the operator remedy. A
-        foreign owner and a writable mode need different remedies, so each
-        condition reports its own.
+        The loop runs in a caller-owned checkout on a shared host. The host
+        umask and the parent directory modes are not the loop's policy, so
+        the intake check does not read the mode or the owner of the common
+        directory. An operator can see the mode with ``git rev-parse``.
         """
-        info = self.common_dir.stat()
-        mode = f"{stat.S_IMODE(info.st_mode):04o}"
-        if info.st_uid != os.geteuid():
+        if not self.common_dir.is_dir():
             raise RepoIntakeError(
-                "repository-intake Git common directory is owned by another user: "
-                f"{self.common_dir} (mode {mode}); "
-                "re-clone the checkout as the current user, then rerun"
-            )
-        if info.st_mode & 0o022:
-            raise RepoIntakeError(
-                "repository-intake Git common directory permissions are unsafe: "
-                f"{self.common_dir} (mode {mode}); "
-                f"run: chmod 755 {self.common_dir}, or re-clone with umask 022, then rerun. "
-                "A mode of 0755 is enough for the intake check."
+                f"repository-intake Git common directory is missing: {self.common_dir}"
             )
 
     def _resolve_common_dir(self) -> Path:
@@ -736,18 +721,12 @@ class RepoIntakeManager:
                     )
         self.state_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.state_dir.mkdir(mode=0o700, exist_ok=True)
-        if self.state_parent.stat().st_mode & 0o077 or self.state_dir.stat().st_mode & 0o077:
-            raise RepoIntakeError(
-                f"repository-intake state permissions are unsafe: {self.state_dir}"
-            )
 
     def _read_receipt(self) -> RepoIntakeReceipt | None:
         """Read the owned receipt, if one exists."""
         if not self.receipt_path.exists():
             return None
         try:
-            if self.receipt_path.stat().st_mode & 0o077:
-                raise RepoIntakeError("repository-intake receipt permissions are unsafe")
             payload = json.loads(self.receipt_path.read_text(encoding="utf-8"))
         except RepoIntakeError:
             raise

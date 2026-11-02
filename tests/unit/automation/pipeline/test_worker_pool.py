@@ -735,9 +735,10 @@ def test_trusted_gh_executable_accepts_explicit_extra_root(
     executable.parent.mkdir(parents=True)
     executable.write_text("#!/bin/sh\n")
     executable.chmod(0o755)
-    monkeypatch.setattr(f"{_WP}._TRUSTED_GH_CANDIDATES", ())
+    # An empty PATH leaves the override as the only candidate.
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
 
-    assert _trusted_gh_executable(gh_root) == str(executable)
+    assert _trusted_gh_executable(gh_root) == str(executable.resolve())
 
 
 def test_trusted_git_executable_accepts_discovered_binary_in_fixed_root(
@@ -1857,13 +1858,11 @@ def safe_git_exec_tmp_path(tmp_path: Path) -> Generator[Path]:
             shutil.rmtree(root, ignore_errors=True)
 
 
-@pytest.mark.parametrize("unsafe_component", ("cache", "fixture", "cache_symlink"))
-def test_safe_git_exec_tmp_path_rejects_unsafe_existing_ancestor(
+def test_safe_git_exec_tmp_path_rejects_symlinked_cache_ancestor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    unsafe_component: str,
 ) -> None:
-    """Reject an unsafe cache ancestor before the fixture creates a child."""
+    """Reject a symlinked cache ancestor before the fixture creates a child."""
     real_home = Path.home()
     safe_home = Path(tempfile.mkdtemp(prefix="hephaestus-test-home-", dir=real_home))
     safe_home.chmod(0o700)
@@ -1883,25 +1882,16 @@ def test_safe_git_exec_tmp_path_rejects_unsafe_existing_ancestor(
         finally:
             baseline.close()
 
-        target: Path | None = None
-        if unsafe_component == "cache_symlink":
-            fixture_root.rmdir()
-            cache_root.rmdir()
-            target = safe_home / "cache-target"
-            target.mkdir(mode=0o700)
-            cache_root.symlink_to(target, target_is_directory=True)
-            unsafe_path = cache_root
-        elif unsafe_component == "cache":
-            cache_root.chmod(0o777)
-            unsafe_path = cache_root
-        else:
-            fixture_root.chmod(0o777)
-            unsafe_path = fixture_root
+        target = safe_home / "cache-target"
+        fixture_root.rmdir()
+        cache_root.rmdir()
+        target.mkdir(mode=0o700)
+        cache_root.symlink_to(target, target_is_directory=True)
+        unsafe_path = cache_root
         original_paths: list[Path] = [safe_home, cache_root]
         if fixture_root.exists() and not fixture_root.is_symlink():
             original_paths.append(fixture_root)
-        if target is not None:
-            original_paths.append(target)
+        original_paths.append(target)
         original_modes = {path: stat.S_IMODE(path.lstat().st_mode) for path in original_paths}
 
         mkdir_calls: list[Path] = []
@@ -1936,9 +1926,8 @@ def test_safe_git_exec_tmp_path_rejects_unsafe_existing_ancestor(
             )
             for path, mode in original_modes.items():
                 assert stat.S_IMODE(path.lstat().st_mode) == mode
-            if target is not None:
-                assert cache_root.is_symlink()
-                assert not any(target.iterdir())
+            assert cache_root.is_symlink()
+            assert not any(target.iterdir())
         finally:
             generator.close()
     finally:
@@ -1981,57 +1970,6 @@ def test_safe_git_exec_tmp_path_accepts_parent_creation_race(
         assert root.parent == fixture_root
         assert stat.S_IMODE(cache_root.stat().st_mode) == 0o700
         assert stat.S_IMODE(fixture_root.stat().st_mode) == 0o700
-    finally:
-        generator.close()
-        shutil.rmtree(safe_home, ignore_errors=True)
-
-
-def test_safe_git_exec_tmp_path_rejects_unsafe_parent_creation_race(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reject an unsafe cache directory that another process creates first."""
-    real_home = Path.home()
-    safe_home = Path(tempfile.mkdtemp(prefix="hephaestus-test-home-", dir=real_home))
-    safe_home.chmod(0o700)
-    cache_root = safe_home / ".cache"
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: safe_home))
-    fixture_function = cast(
-        Callable[[Path], Generator[Path]],
-        inspect.unwrap(cast(Callable[..., Any], safe_git_exec_tmp_path)),
-    )
-    original_mkdir = Path.mkdir
-    original_mkdtemp = tempfile.mkdtemp
-    allocation_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    race_exercised = False
-
-    def mkdir_with_unsafe_cache_race(self: Path, *args: Any, **kwargs: Any) -> None:
-        nonlocal race_exercised
-        if self == cache_root and not race_exercised:
-            race_exercised = True
-            original_mkdir(self, mode=0o700)
-            self.chmod(0o777)
-            if not kwargs.get("exist_ok", False):
-                raise FileExistsError(self)
-            return
-        original_mkdir(self, *args, **kwargs)
-
-    def mkdtemp_spy(*args: Any, **kwargs: Any) -> str:
-        allocation_calls.append((args, kwargs))
-        return original_mkdtemp(*args, **kwargs)
-
-    monkeypatch.setattr(Path, "mkdir", mkdir_with_unsafe_cache_race)
-    monkeypatch.setattr(tempfile, "mkdtemp", mkdtemp_spy)
-    generator = fixture_function(tmp_path)
-    try:
-        with pytest.raises(
-            _HostVerificationBoundaryError,
-            match=r"^host_verification_git_exec_path_unsafe$",
-        ):
-            next(generator)
-        assert race_exercised is True
-        assert allocation_calls == []
-        assert stat.S_IMODE(cache_root.stat().st_mode) == 0o777
     finally:
         generator.close()
         shutil.rmtree(safe_home, ignore_errors=True)
@@ -2376,33 +2314,6 @@ class TestHostVerificationGitExecPath:
         ):
             _validated_git_exec_path()
 
-    @pytest.mark.parametrize("writable_part", ("file", "parent"))
-    def test_writable_system_git_config_path_is_rejected(
-        self, safe_git_exec_tmp_path: Path, writable_part: str
-    ) -> None:
-        """The configuration file and its parents must not be broadly writable."""
-        system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
-            safe_git_exec_tmp_path
-        )
-        system_config = toolchain / "usr" / "share" / "git-core" / "gitconfig"
-        unsafe_path = system_config if writable_part == "file" else system_config.parent
-        unsafe_path.chmod(0o777)
-        bounded = _BoundedGitOutput(
-            text=f"{git_exec_path}\n",
-            sha256="0" * 64,
-            byte_count=len(str(git_exec_path)) + 1,
-        )
-        with (
-            patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
-            patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
-            patch(f"{_WP}._run_bounded_git_output", return_value=bounded),
-            pytest.raises(
-                _HostVerificationBoundaryError,
-                match=r"^host_verification_git_exec_path_unsafe$",
-            ),
-        ):
-            _validated_git_exec_path()
-
     def test_non_file_system_git_config_is_rejected(self, safe_git_exec_tmp_path: Path) -> None:
         """The system Git configuration must be a regular file."""
         system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(
@@ -2481,7 +2392,7 @@ class TestHostVerificationGitExecPath:
     def test_rejects_invalid_git_exec_path_before_launch(
         self, safe_git_exec_tmp_path: Path
     ) -> None:
-        """Unapproved, indirect, or writable support paths fail closed."""
+        """Unapproved or indirect support paths fail closed."""
         tmp_path = safe_git_exec_tmp_path
         system_git, toolchain, git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
         external = tmp_path / "external" / "usr" / "libexec" / "git-core"
@@ -2509,21 +2420,6 @@ class TestHostVerificationGitExecPath:
                     ),
                 ):
                     _validated_git_exec_path()
-
-            git_exec_path.chmod(0o777)
-            writable = _BoundedGitOutput(
-                text=f"{git_exec_path}\n",
-                sha256="0" * 64,
-                byte_count=len(str(git_exec_path)) + 1,
-            )
-            with (
-                patch(f"{_WP}._run_bounded_git_output", return_value=writable),
-                pytest.raises(
-                    _HostVerificationBoundaryError,
-                    match=r"^host_verification_git_exec_path_unsafe$",
-                ),
-            ):
-                _validated_git_exec_path()
 
     def test_missing_git_exec_path_is_stably_unavailable(
         self, safe_git_exec_tmp_path: Path
@@ -2637,9 +2533,9 @@ class TestHostVerificationGitExecPath:
             _validated_git_exec_path()
 
     def test_unsafe_system_git_is_rejected(self, tmp_path: Path) -> None:
-        """The selected launcher Git must be one safe canonical executable."""
+        """The selected launcher Git must be a canonical executable."""
         system_git, toolchain, _git_exec_path, _developer_git = _git_exec_path_fixture(tmp_path)
-        system_git.chmod(0o777)
+        system_git.chmod(0o644)
         with (
             patch(f"{_WP}._TRUSTED_GIT_EXEC_ROOTS", (toolchain,)),
             patch(f"{_WP}._trusted_executable", return_value=str(system_git)),
@@ -20492,18 +20388,17 @@ class TestAgentToolScopes:
         assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
 
 
-def test_sync_checkout_uses_explicit_gh_root_for_api_when_fixed_candidates_unavailable(
+def test_sync_checkout_uses_explicit_gh_root_for_api_when_path_has_no_gh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Direct scope must use ``ROOT/bin/gh`` for its default-branch lookup."""
-    from hephaestus.automation.pipeline import worker_pool as worker_pool_module
-
     root = tmp_path / "direct-gh-root"
     executable = root / "bin" / "gh"
     executable.parent.mkdir(parents=True)
     executable.touch()
     executable.chmod(0o755)
-    monkeypatch.setattr(worker_pool_module, "_TRUSTED_GH_CANDIDATES", ())
+    # An empty PATH leaves the override as the only candidate.
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
 
     pool = WorkerPool(
         size=1,

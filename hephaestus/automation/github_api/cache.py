@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hephaestus.config.child_environments import build_gh_child_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.cache import ThreadSafeCache
 from hephaestus.utils.directory_mode import create_private_directory
@@ -124,6 +125,7 @@ def _default_token_identity() -> str:
             text=True,
             timeout=10,
             check=False,
+            env=build_gh_child_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return ""

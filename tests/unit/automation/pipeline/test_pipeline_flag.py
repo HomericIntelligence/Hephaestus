@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -338,7 +339,8 @@ def test_default_pipeline_event_log_path_disables_unverified_candidates(
 ) -> None:
     """The optional event log stays off when all candidates are in a worktree."""
     checkout = tmp_path / "checkout"
-    (checkout / ".git").mkdir(parents=True)
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: checkout))
     monkeypatch.setattr(
         tempfile,

@@ -725,14 +725,15 @@ def _pi_models_configured(pi_dir: Path | None = None) -> bool:
 
 
 def _validate_pi_settings_metadata(metadata: os.stat_result) -> None:
-    """Validate one snapshot of the trusted global Pi settings file."""
+    """Validate one snapshot of the operator-global Pi settings file.
+
+    The check keeps the bounded-regular-file guard. Ownership and permission
+    bits are host policy. Hephaestus does not read them, so a shared check-out
+    keeps its own mode without stopping the reader.
+    """
     if not stat.S_ISREG(metadata.st_mode):
         raise OSError
     if metadata.st_size > PI_CONFIG_MAX_BYTES:
-        raise OSError
-    if not hasattr(os, "getuid") or metadata.st_uid != os.getuid():
-        raise OSError
-    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise OSError
 
 
@@ -2461,12 +2462,9 @@ def _open_codex_rollout_directory(path: Path) -> int:
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
         )
         opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISDIR(opened.st_mode)
-            or opened.st_uid != os.geteuid()
-            or stat.S_IMODE(opened.st_mode) & 0o022
-            or _codex_file_fingerprint(lexical) != _codex_file_fingerprint(opened)
-        ):
+        if not stat.S_ISDIR(opened.st_mode) or _codex_file_fingerprint(
+            lexical
+        ) != _codex_file_fingerprint(opened):
             raise OSError("invalid rollout directory")
         return descriptor
     except OSError:
@@ -2498,12 +2496,9 @@ def _open_codex_rollout_child_directory(
             dir_fd=descriptor,
         )
         opened = os.fstat(child)
-        if (
-            not stat.S_ISDIR(opened.st_mode)
-            or opened.st_uid != os.geteuid()
-            or stat.S_IMODE(opened.st_mode) & 0o022
-            or _codex_file_fingerprint(lexical) != _codex_file_fingerprint(opened)
-        ):
+        if not stat.S_ISDIR(opened.st_mode) or _codex_file_fingerprint(
+            lexical
+        ) != _codex_file_fingerprint(opened):
             raise OSError("invalid rollout directory")
         if create:
             os.fchmod(child, 0o700)
@@ -3392,8 +3387,6 @@ def _read_codex_regular_file(path: Path, *, max_bytes: int) -> tuple[int, bytes]
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
-            or opened.st_uid != os.geteuid()
-            or stat.S_IMODE(opened.st_mode) & 0o022
             or opened.st_size > max_bytes
             or _codex_file_fingerprint(initial) != _codex_file_fingerprint(opened)
         ):
@@ -3427,11 +3420,7 @@ def _codex_athena_snapshot(root: Path) -> tuple[tuple[Path, int, bytes], ...]:
         root_status = root.lstat()
     except OSError:
         raise CodexIsolationError("codex_adapter_initialization_failed") from None
-    if (
-        not stat.S_ISDIR(root_status.st_mode)
-        or root_status.st_uid != os.geteuid()
-        or stat.S_IMODE(root_status.st_mode) & 0o022
-    ):
+    if not stat.S_ISDIR(root_status.st_mode):
         raise CodexIsolationError("codex_adapter_initialization_failed")
     files: list[tuple[Path, int, bytes]] = []
     total = 0
@@ -3447,8 +3436,6 @@ def _codex_athena_snapshot(root: Path) -> tuple[tuple[Path, int, bytes], ...]:
             if path.suffix in {".pyc", ".pyo"}:
                 continue
             if stat.S_ISDIR(status.st_mode):
-                if status.st_uid != os.geteuid() or stat.S_IMODE(status.st_mode) & 0o022:
-                    raise CodexIsolationError("codex_adapter_initialization_failed")
                 continue
             mode, payload = _read_codex_regular_file(
                 path,

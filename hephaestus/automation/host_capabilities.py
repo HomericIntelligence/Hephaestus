@@ -362,9 +362,13 @@ def _remove_probe_directory(root: Path, identity: tuple[int, int, int, int]) -> 
 
 
 def _protected_parent(info: os.stat_result) -> None:
-    """Accept owned shared directories only without shared write access."""
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
-        raise ValueError("The capability parent directory permissions are unsafe.")
+    """Confirm the capability parent is a directory.
+
+    The host umask sets a mode that the loop does not control, so this check
+    does not read the mode or the owner.
+    """
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("The capability parent path is not a directory.")
 
 
 def _private_entry(info: os.stat_result, *, directory: bool) -> None:

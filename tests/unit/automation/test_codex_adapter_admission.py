@@ -600,25 +600,6 @@ def test_linked_deployment_lock_fails_before_adapter_import(tmp_path: Path) -> N
     assert imported is False
 
 
-def test_unsafe_deployment_lock_parent_fails_before_adapter_import(tmp_path: Path) -> None:
-    """A writable non-sticky parent cannot carry the detached trust anchor."""
-    unsafe = tmp_path / "unsafe"
-    unsafe.mkdir(mode=0o777)
-    unsafe.chmod(0o777)
-    lock, digest, _ = _deployment(unsafe)
-    imported = False
-
-    def importer(_root: str, _module: str, _factory: str) -> object:
-        nonlocal imported
-        imported = True
-        return object()
-
-    module = _module()
-    with pytest.raises(module.CodexAdapterAdmissionError, match="path component"):
-        _admit(module, lock, digest, importer=importer)
-    assert imported is False
-
-
 def test_lock_rejects_unsorted_installed_tree_manifest(tmp_path: Path) -> None:
     """The detached lock has one canonical sorted tree inventory."""
     lock, _, payload = _deployment(tmp_path)

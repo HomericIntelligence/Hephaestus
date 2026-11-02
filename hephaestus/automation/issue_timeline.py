@@ -9,6 +9,7 @@ from typing import Any
 
 from hephaestus.automation.comment_identity import (
     has_marker_alias,
+    marker_aliases_in_body,
     select_unambiguous_comment,
     validate_planning_comment_identities,
 )
@@ -130,14 +131,23 @@ def _obsolete_comment_ids(
     owned: Sequence[IssueComment],
     *,
     keep_ids: set[int],
+    pointer_ids: set[int],
 ) -> list[int]:
-    """Return owned obsolete IDs whose canonical replacement is durable."""
+    """Return owned obsolete IDs whose canonical replacement is durable.
+
+    ``pointer_ids`` holds every comment that is still the newest bearer of one
+    marker alias. The caller computes that set, and a pointer is never an
+    obsolete target.
+    """
     delete_ids: list[int] = []
     for comment in owned:
         if not _is_obsolete_automation_comment(comment.body) or comment.database_id in keep_ids:
             continue
         if HISTORY_RE.match(comment.body) is not None:
             # Retired archives remain stored but supply no current authority.
+            continue
+        if comment.database_id in pointer_ids:
+            # A single-alias pointer is never an obsolete target.
             continue
         if comment.database_id is None:
             raise RuntimeError("owned obsolete automation comment has no database id")
@@ -192,7 +202,9 @@ def plan_issue_timeline_compaction(
     target_obsolete = _latest_owned_role(owned, OBSOLETE_EXPLANATION_MARKER)
 
     prior_fingerprints = list(snapshot.prior_plan_fingerprints)
-    for comment in plan_comments[:-1]:
+    for comment in plan_comments:
+        if comment is target_plan:
+            continue
         prior_fingerprints.append(plan_fingerprint(comment.body))
 
     plan_body = (
@@ -219,9 +231,29 @@ def plan_issue_timeline_compaction(
         for comment in (target_plan, target_review, target_obsolete)
         if comment is not None and comment.database_id is not None
     }
+    pointer_ids = {
+        comment.database_id
+        for comment in (target_plan, target_review)
+        if comment is not None and comment.database_id is not None
+    }
+    # Each marker keeps its own newest bearer. A mixed current and legacy pair is
+    # not one duplicate pointer, so neither bearer is an obsolete target. That
+    # is why the bearer scan is per marker, not per alias family.
+    for marker in (*plan_aliases, *review_aliases):
+        newest = next(
+            (
+                comment
+                for comment in reversed(comments)
+                if marker_aliases_in_body(comment.body, (marker,)) == (marker,)
+            ),
+            None,
+        )
+        if newest is not None and newest.database_id is not None:
+            pointer_ids.add(newest.database_id)
     delete_ids = _obsolete_comment_ids(
         owned,
         keep_ids=keep_ids,
+        pointer_ids=pointer_ids,
     )
 
     # Canonical target bodies are PATCHed in place by the caller. Prefixing is

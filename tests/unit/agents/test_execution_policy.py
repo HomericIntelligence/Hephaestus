@@ -613,6 +613,8 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """New and one-shot calls reject a resume binding."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
     binding = create_pi_binding(
         session_id="pi-session-123", cwd=tmp_path, role=AgentRole.PLANNER, model="model"
     )
@@ -632,6 +634,7 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
             cwd=tmp_path,
             timeout=30,
             model="model",
+            pi_dir=pi_dir,
             execution_request=start_request,
             resume_binding=binding,
         )
@@ -648,6 +651,7 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
             cwd=tmp_path,
             timeout=30,
             model="model",
+            pi_dir=pi_dir,
             execution_request=one_shot_request,
             resume_binding=binding,
         )
@@ -669,6 +673,7 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
         cwd=tmp_path,
         timeout=30,
         model="model",
+        pi_dir=pi_dir,
         execution_request=resume_request,
         resume_binding=binding,
     )

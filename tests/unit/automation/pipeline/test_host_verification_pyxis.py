@@ -370,16 +370,28 @@ def test_validate_pyxis_quota_root_rejects_polling_only_storage(
         validate_pyxis_quota_root(tmp_path)
 
 
-def test_validate_pyxis_quota_root_rejects_untrusted_ancestry(tmp_path: Path) -> None:
-    """A group-writable ancestor cannot authorize a cross-node mount."""
+def test_validate_pyxis_quota_root_accepts_shared_ancestry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A group-writable ancestor mode is host policy and does not block the root."""
     shared = tmp_path / "shared"
     shared.mkdir(mode=0o770)
     shared.chmod(0o770)
     quota = shared / "quota"
     quota.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "hephaestus.automation.pyxis_artifact_io.os.fstatvfs",
+        lambda _: SimpleNamespace(
+            f_bsize=4096,
+            f_frsize=4096,
+            f_blocks=262_144,
+            f_fsid=1,
+            f_flag=0,
+            f_namemax=255,
+        ),
+    )
 
-    with pytest.raises(PyxisImageValidationError, match="quota root"):
-        validate_pyxis_quota_root(quota)
+    assert validate_pyxis_quota_root(quota) == quota.resolve()
 
 
 def test_cross_node_root_accepts_root_owned_sticky_temporary_ancestor(
@@ -400,10 +412,10 @@ def test_cross_node_root_accepts_root_owned_sticky_temporary_ancestor(
         binding.revalidate()
 
 
-def test_cross_node_root_rejects_root_owned_writable_nonsticky_ancestor(
+def test_cross_node_root_accepts_writable_nonsticky_ancestor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A root-owned writable directory needs sticky entry protection."""
+    """A writable ancestor mode is host policy and does not block the binding."""
     original_lstat = Path.lstat
     writable_ancestor = tmp_path.parent
 
@@ -414,8 +426,8 @@ def test_cross_node_root_rejects_root_owned_writable_nonsticky_ancestor(
 
     monkeypatch.setattr(Path, "lstat", writable_lstat)
 
-    with pytest.raises(OSError, match="ancestry is not trusted"):
-        bind_cross_node_root(tmp_path)
+    with bind_cross_node_root(tmp_path) as binding:
+        binding.revalidate()
 
 
 def test_retained_quota_binding_revalidates_the_filesystem(

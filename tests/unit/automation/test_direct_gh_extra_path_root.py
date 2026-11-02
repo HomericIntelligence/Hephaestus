@@ -94,18 +94,19 @@ def test_direct_cli_propagates_explicit_trusted_gh_root(
     assert config.gh_extra_path_root == trusted_root.resolve()
 
 
-def test_direct_issue_sync_uses_explicit_gh_root_when_fixed_candidates_unavailable(
+def test_direct_issue_sync_uses_explicit_gh_root_when_path_has_no_gh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A direct issue run uses the admitted ``ROOT/bin/gh`` during checkout sync."""
-    from hephaestus.automation.pipeline import worker_pool as worker_pool_module
-
     trusted_root = tmp_path / "trusted-gh"
     executable = _make_executable_gh(trusted_root)
     checkout = tmp_path / "checkout"
     checkout.mkdir()
-    monkeypatch.setattr(worker_pool_module, "_TRUSTED_GH_CANDIDATES", ())
+    # Simulate a host with no ``gh`` on PATH, so only the override can serve.
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
     gh_api_call: Any = None
 
     def _run_direct_pipeline(config: Any) -> int:

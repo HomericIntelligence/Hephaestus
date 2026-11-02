@@ -320,11 +320,14 @@ def normalize_issue_comments(
 def discover_plan_from_comments(
     comments: Sequence[IssueComment],
 ) -> PlanDiscoveryResult:
-    """Select the latest actor-owned plan from a validated complete journal.
+    """Select the newest plan from a validated complete journal.
 
-    The identity checks stay all-or-nothing. More than one comment or marker
-    alias that claims the same automation role means the host cannot tell which
-    artifact is current, so it must not select one.
+    The newest comment that carries a plan marker is the plan, whatever
+    author wrote it. A duplicated marker is not a conflict: the host patches
+    the newest one in place.
+
+    A body that cannot carry one clean marker still reports a conflict, so the
+    caller does not write over it.
     """
     try:
         validate_planning_comment_identities(
@@ -335,8 +338,6 @@ def discover_plan_from_comments(
     except CommentAliasConflictError as exc:
         return PlanDiscoveryResult.identity_conflict(exc)
     for comment in reversed(comments):
-        if not comment.viewer_did_author:
-            continue
         body = comment.body
         if is_plan_review_comment(body):
             continue

@@ -56,6 +56,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.config.child_environments import build_check_only_git_env
 from hephaestus.config.paths import resolve_projects_dir
 from hephaestus.constants import AGENT_REVIEW_TIMEOUT, IMPLEMENTER_CHECKPOINT_INTERVAL_S
 from hephaestus.utils.git import _is_full_commit_sha, run_git
@@ -300,20 +301,37 @@ def _is_safe_pipeline_diagnostics_dir(path: Path, projects_dir: Path) -> bool:
 
 
 def _has_git_worktree_ancestor(path: Path) -> bool:
-    """Return whether the path is in a Git worktree or cannot be resolved safely."""
+    """Return whether Git reports the path inside a worktree.
+
+    A stray or broken ``.git`` entry in a parent directory is not a worktree.
+    Ask Git, and treat an inconclusive answer as "not a worktree" so a host
+    layout never removes the only available diagnostics directory. The probe
+    never creates a directory, because the caller owns the mode of every
+    directory it creates.
+    """
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
     try:
-        resolved = path.resolve()
-    except (OSError, RuntimeError):
-        return True
-    for candidate in (resolved, *resolved.parents):
-        try:
-            (candidate / ".git").lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return True
-        return True
-    return False
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=probe,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=build_check_only_git_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        LOG.warning(
+            "git worktree probe failed for %s (%s); treating the path as outside a "
+            "worktree. Install git or set --state-dir to a path outside every checkout "
+            "when this host keeps its diagnostics elsewhere.",
+            probe,
+            error,
+        )
+        return False
+    return completed.returncode == 0 and bool(completed.stdout.strip())
 
 
 def _preflight_token_scopes(org: str, probe_repo: str, *, timeout: int = 120) -> None:

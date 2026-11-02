@@ -35,6 +35,20 @@ def _validate_shared_planning_identities(
         )
 
 
+def marker_matching(
+    comments: list[dict[str, Any]], markers: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    """Return every marker-bearing comment, newest last, whatever author.
+
+    This answers "does a pointer exist". It does not read ``databaseId``,
+    because a comment without one would otherwise look absent and the caller
+    would post a duplicate.
+    """
+    return [
+        comment for comment in comments if has_marker_alias(str(comment.get("body", "")), markers)
+    ]
+
+
 class PipelineGitHubIssueComments(_PipelineGitHubHost):
     """Own issue-comment mutations with planning identity checks."""
 
@@ -56,11 +70,11 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
     ) -> None:
         """Upsert one actor-owned canonical comment keyed on an opaque marker.
 
-        A shared or legacy planning marker on a foreign or unverifiable
-        comment is an identity conflict and stops the upsert. Other
-        human-authored marker collisions remain inert: they are not trusted,
-        patched, or deleted. Historical heading-only comments are never
-        migration candidates.
+        Only a comment that this actor wrote is patched. A pointer that only
+        another author holds is reported and left in place, and the call
+        writes no duplicate. Other human-authored marker collisions remain
+        inert: they are not trusted, patched, or deleted. Historical
+        heading-only comments are never migration candidates.
         """
         try:
             self._upsert_issue_comment(
@@ -122,6 +136,8 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             body_of=lambda comment: str(comment.get("body", "")),
         )
         if target is None:
+            if self._only_foreign_pointer_exists(marker, marker_matching(comments, markers)):
+                return
             self._post_issue_comment(issue_number, body)
             comments = self._repo_issue_comments(issue_number)
             _validate_shared_planning_identities(
@@ -166,6 +182,22 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
             or str(target.get("body", "")) != body
         ):
             raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
+
+    def _only_foreign_pointer_exists(self, marker: str, foreign: list[dict[str, Any]]) -> bool:
+        """Report when another author holds the only planning pointer.
+
+        The host does not patch or delete a comment that another author wrote,
+        and it does not add a second comment for the same role. The caller
+        stops without a write when this returns True.
+        """
+        if not foreign:
+            return False
+        logger.warning(
+            "comment_identity: a planning comment for %r exists, but this actor "
+            "does not own it; leaving it in place and writing no duplicate",
+            marker,
+        )
+        return True
 
     def _post_issue_comment(self, issue_number: int, body: str) -> None:
         """Post one issue comment in the adapter's configured repository."""

@@ -126,12 +126,7 @@ class RuntimeConfiguration:
         program = _path(value["attachmentProgram"])
         program_target = program.resolve(strict=True)
         program_info = program_target.stat()
-        if (
-            not stat.S_ISREG(program_info.st_mode)
-            or not os.access(program_target, os.X_OK)
-            or program_info.st_uid not in {0, os.getuid()}
-            or program_info.st_mode & 0o022
-        ):
+        if not stat.S_ISREG(program_info.st_mode) or not os.access(program_target, os.X_OK):
             raise ValueError("runtime_attachment_program_untrusted")
         authorities = value["authorityRoots"]
         if not isinstance(authorities, dict) or set(authorities) != {

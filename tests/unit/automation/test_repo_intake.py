@@ -1801,20 +1801,18 @@ def test_a_dirty_source_lane_beside_the_caller_does_not_block_intake(tmp_path: P
     assert (lane / "tracked.txt").read_text(encoding="utf-8") == "writer work\n"
 
 
-def test_prepare_rejects_a_group_writable_common_directory(tmp_path: Path) -> None:
-    """A group-writable Git common directory fails fast with an actionable message."""
+def test_prepare_accepts_a_group_writable_common_directory(tmp_path: Path) -> None:
+    """A group-writable Git common directory is host policy, not intake state.
+
+    The host umask sets this mode. The intake check does not read it.
+    """
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
-    common_dir = manager.common_dir
-    common_dir.chmod(0o775)
+    manager.common_dir.chmod(0o775)
 
-    with pytest.raises(RepoIntakeError) as caught:
-        manager.prepare()
+    receipt = manager.prepare()
 
-    message = str(caught.value)
-    assert str(common_dir) in message
-    assert "0775" in message
-    assert "chmod 755" in message
+    assert receipt.common_dir == manager.common_dir
 
 
 def test_prepare_accepts_a_group_readable_common_directory(tmp_path: Path) -> None:
@@ -1828,19 +1826,17 @@ def test_prepare_accepts_a_group_readable_common_directory(tmp_path: Path) -> No
     assert receipt.common_dir == manager.common_dir
 
 
-def test_prepare_rejects_a_common_directory_owned_by_another_user(
+def test_prepare_accepts_a_common_directory_owned_by_another_user(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A foreign-owned common directory reports the remedy that applies to it."""
+    """A foreign-owned common directory does not block intake.
+
+    The loop runs in a caller-owned checkout. Ownership is not its policy.
+    """
     caller, remote = _make_repository(tmp_path)
     manager = _manager(caller, remote)
     monkeypatch.setattr("hephaestus.automation.repo_intake.os.geteuid", lambda: 0)
 
-    with pytest.raises(RepoIntakeError) as caught:
-        manager.prepare()
+    receipt = manager.prepare()
 
-    message = str(caught.value)
-    assert str(manager.common_dir) in message
-    assert "owned by another user" in message
-    assert "re-clone" in message
-    assert "chmod" not in message
+    assert receipt.common_dir == manager.common_dir

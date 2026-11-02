@@ -41,8 +41,8 @@ def test_plan_discovery_distinguishes_found_absent_and_read_error() -> None:
     assert failed.status is PlanDiscoveryStatus.READ_ERROR
 
 
-def test_plan_discovery_reports_foreign_shared_marker_as_identity_conflict() -> None:
-    """A foreign planning marker is a conflict and not an absent plan."""
+def test_plan_discovery_reads_a_foreign_shared_marker_as_the_plan() -> None:
+    """The newest marker-bearing comment is the plan, whatever author wrote it."""
     foreign = IssueComment(
         body="<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nForeign plan",
         author_login="other-bot",
@@ -51,8 +51,8 @@ def test_plan_discovery_reports_foreign_shared_marker_as_identity_conflict() -> 
 
     result = discover_plan_from_comments([foreign])
 
-    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
-    assert result.error is not None
+    assert result.status is PlanDiscoveryStatus.FOUND
+    assert result.plan_text is not None and "Foreign plan" in result.plan_text
 
 
 @pytest.mark.parametrize(
@@ -70,14 +70,14 @@ def test_plan_discovery_reports_foreign_shared_marker_as_identity_conflict() -> 
         ],
     ],
 )
-def test_plan_discovery_reports_ambiguous_owned_plan_identity(
+def test_plan_discovery_uses_the_newest_plan_alias(
     comments: list[IssueComment],
 ) -> None:
-    """Multiple qualifying plan aliases do not select a latest plan."""
+    """The newest plan alias is the pointer; an older or repeated one is left alone."""
     result = discover_plan_from_comments(comments)
 
-    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
-    assert result.error is not None
+    assert result.status is PlanDiscoveryStatus.FOUND
+    assert result.plan_text is not None
 
 
 def test_journal_snapshot_rejects_one_owned_comment_with_plan_and_review_markers() -> None:
@@ -246,8 +246,8 @@ def test_plan_discovery_rejects_whitespace_prefixed_journal_markers(body: str) -
     assert result.status is PlanDiscoveryStatus.ABSENT
 
 
-def test_normalization_reports_foreign_planning_marker_as_identity_conflict() -> None:
-    """Ownership metadata prevents a foreign plan from becoming a local plan."""
+def test_normalization_reads_the_newest_plan_across_authors() -> None:
+    """The newest comment is the plan even when an earlier one is foreign."""
     comments = normalize_issue_comments(
         [
             {"body": render_current_plan("foreign"), "user": {"login": "other"}},
@@ -258,8 +258,8 @@ def test_normalization_reports_foreign_planning_marker_as_identity_conflict() ->
 
     result = discover_plan_from_comments(comments)
 
-    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
-    assert result.error is not None
+    assert result.status is PlanDiscoveryStatus.FOUND
+    assert result.plan_text is not None and "owned" in result.plan_text
 
 
 def test_normalization_rejects_malformed_state_changing_comment() -> None:
@@ -271,16 +271,17 @@ def test_normalization_rejects_malformed_state_changing_comment() -> None:
         )
 
 
-def test_snapshot_rejects_foreign_marker_spoofing() -> None:
-    """A foreign planning marker is a conflict before journal reconstruction."""
+def test_snapshot_uses_the_newest_plan_marker_across_authors() -> None:
+    """A foreign plan comment is read and does not stop journal reconstruction."""
     comments = [
         IssueComment(body=render_current_plan("foreign"), author_login="attacker"),
         _owned(render_current_plan("owned", revision=2)),
         _owned(render_current_review("Looks good.\n\nstate:plan-go", revision=2)),
     ]
 
-    with pytest.raises(RuntimeError, match="foreign or unverifiable"):
-        journal_snapshot(comments)
+    snapshot = journal_snapshot(comments)
+
+    assert "owned" in snapshot.current_plan
 
 
 def test_snapshot_rejects_whitespace_prefixed_markers_but_accepts_blank_lines() -> None:

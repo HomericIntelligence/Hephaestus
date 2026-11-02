@@ -13,7 +13,7 @@ from tests.unit.automation.test_repo_intake import _make_repository, _manager, _
 @pytest.mark.precommit
 @pytest.mark.parametrize(
     "damage",
-    ["missing", "mode", "json", "size", "state", "identity", "ownership", "common", "symlink"],
+    ["missing", "json", "size", "state", "identity", "ownership", "common", "symlink"],
 )
 def test_invalid_intake_receipt_never_selects_a_local_worker_base(
     tmp_path: Path, damage: str
@@ -25,8 +25,6 @@ def test_invalid_intake_receipt_never_selects_a_local_worker_base(
     payload = json.loads(receipt_path.read_text())
     if damage == "missing":
         receipt_path.unlink()
-    elif damage == "mode":
-        receipt_path.chmod(0o644)
     elif damage == "json":
         receipt_path.write_text("invalid JSON")
     elif damage == "size":

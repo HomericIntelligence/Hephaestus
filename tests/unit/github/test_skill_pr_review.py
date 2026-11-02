@@ -7,8 +7,6 @@ import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from hephaestus.github.skill_pr_review import (
     _git_read_environment,
     collect_pr_evidence_main,
@@ -161,8 +159,7 @@ def test_resolve_pr_rejects_numeric_identifier_without_explicit_target(
     _mock_throttle: MagicMock, capsys
 ) -> None:
     """A numeric PR never inherits repository identity from the checkout."""
-    with pytest.raises(SystemExit, match="2"):
-        resolve_pr_main(["42"])
+    assert resolve_pr_main(["42"]) == 2
 
     assert "require --target-host and --target-repository" in capsys.readouterr().err
 

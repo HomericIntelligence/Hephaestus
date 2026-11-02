@@ -176,9 +176,12 @@ def test_prepare_worktree_rejects_nested_symlink_in_temporary_fallback(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     """Temporary fallback paths cannot escape through a predictable symlink."""
+    fallback_root = tmp_path / "fallback"
+    fallback_root.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(fallback_root))
     repository = tmp_path / f"repository-{tmp_path.name}"
     outside = tmp_path / "outside"
-    temporary_component = Path(tempfile.gettempdir()) / f"{repository.name}-topic"
+    temporary_component = fallback_root / f"{repository.name}-topic"
     escaped_worktree = outside / "review"
     _initialize_repository(repository)
     outside.mkdir()

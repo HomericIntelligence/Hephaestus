@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Sequence
 from typing import Final
@@ -13,9 +14,19 @@ from .protocol import (
     comment_marker_aliases,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class CommentAliasConflictError(RuntimeError):
-    """More than one comment or marker alias claims one automation role."""
+    """A planning marker cannot be written safely.
+
+    The host keeps no second record of who wrote a planning comment. A
+    duplicate therefore warns and patches in place; it does not raise. This
+    error keeps the two cases where a write would corrupt an artifact:
+
+    - a planning marker inside an immutable history artifact;
+    - one body that carries both the plan and the review marker.
+    """
 
 
 _IMMUTABLE_HISTORY_ARTIFACT_RE: Final[re.Pattern[str]] = re.compile(
@@ -57,18 +68,33 @@ def validate_planning_comment_identities[T](
     body_of: Callable[[T], str],
     owned_of: Callable[[T], bool],
 ) -> None:
-    """Reject unsafe plan and review identities before a planning operation.
+    """Reject a comment body that cannot carry a planning marker.
 
-    The shared planning protocol requires one verified actor-owned comment for
-    each role. A foreign, unverifiable, repeated, or cross-role marker is an
-    identity conflict. Other marker families remain outside this check.
+    The host keeps no second record of who wrote a planning comment. The
+    newest comment that carries the marker is the plan, and a repeat is
+    patched in place. Selection and ownership therefore do not raise here.
+
+    Two conditions stay a refusal, because each one would corrupt the write
+    that follows:
+
+    - A planning marker inside an immutable history artifact. The artifact is
+      append-only, so the host cannot patch it in place.
+    - One body that carries both the plan and the review marker. A later write
+      cannot tell which role it is updating.
+
+    Args:
+        comments: Candidate comments, or one outgoing body.
+        body_of: Read the body of one candidate.
+        owned_of: Report whether this actor wrote one candidate. Kept for
+            callers that still pass it; it no longer gates a decision.
+
+    Raises:
+        CommentAliasConflictError: If a body cannot carry a clean marker.
+
     """
-    plan_marker = PLAN_CANONICAL_MARKER
-    review_marker = PLAN_REVIEW_CANONICAL_MARKER
-    plan_aliases = comment_marker_aliases(plan_marker)
-    review_aliases = comment_marker_aliases(review_marker)
-    plan_candidates: list[T] = []
-    review_candidates: list[T] = []
+    del owned_of
+    plan_aliases = comment_marker_aliases(PLAN_CANONICAL_MARKER)
+    review_aliases = comment_marker_aliases(PLAN_REVIEW_CANONICAL_MARKER)
 
     for comment in comments:
         body = body_of(comment)
@@ -81,40 +107,11 @@ def validate_planning_comment_identities[T](
                 "planning marker embedded in immutable history artifact; "
                 "manual recovery is required"
             )
-        if not owned_of(comment):
-            raise CommentAliasConflictError(
-                "foreign or unverifiable planning marker identity; manual recovery is required"
-            )
         if plan_matches and review_matches:
             raise CommentAliasConflictError(
-                "one actor-owned comment claims both plan and review markers; "
+                "one comment appears to carry both plan and review markers; "
                 "manual recovery is required"
             )
-        if len(plan_matches) > 1:
-            raise CommentAliasConflictError(
-                f"ambiguous actor-owned comment aliases for {plan_marker!r}; "
-                "manual recovery is required"
-            )
-        if len(review_matches) > 1:
-            raise CommentAliasConflictError(
-                f"ambiguous actor-owned comment aliases for {review_marker!r}; "
-                "manual recovery is required"
-            )
-        if plan_matches:
-            plan_candidates.append(comment)
-        if review_matches:
-            review_candidates.append(comment)
-
-    if len(plan_candidates) > 1:
-        raise CommentAliasConflictError(
-            f"ambiguous actor-owned comment aliases for {plan_marker!r}; "
-            "manual recovery is required"
-        )
-    if len(review_candidates) > 1:
-        raise CommentAliasConflictError(
-            f"ambiguous actor-owned comment aliases for {review_marker!r}; "
-            "manual recovery is required"
-        )
 
 
 def validate_planning_body_for_write(marker: str, body: str) -> None:
@@ -151,23 +148,44 @@ def select_unambiguous_comment[T](
     body_of: Callable[[T], str],
     ownership: str = "actor-owned",
 ) -> T | None:
-    """Return one candidate or stop before a marker-identity mutation.
+    """Return the newest candidate that carries exactly one role marker.
 
-    A role has one durable identity. More than one actor-owned comment, or
-    more than one alias in a selected comment, requires manual recovery. This
-    rule prevents a migration from selecting a newest comment and deleting a
-    potentially independent artifact.
+    The newest comment is the pointer for its role, whatever author wrote it.
+    A duplicate marker in an older comment is not an identity conflict: the
+    newest one is patched, and no comment is deleted.
+
+    Args:
+        candidates: Comments that carried a marker, in GitHub order.
+        marker: The canonical marker for this role.
+        aliases: The canonical marker and its accepted legacy aliases.
+        body_of: Read the body of one candidate.
+        ownership: Word used in the warning text.
+
+    Returns:
+        The newest usable candidate, or None when no candidate carries one
+        clean marker.
+
     """
-    if len(candidates) > 1:
-        raise CommentAliasConflictError(
-            f"ambiguous {ownership} comment aliases for {marker!r}; manual recovery is required"
-        )
-    if not candidates:
+    usable = [
+        candidate
+        for candidate in candidates
+        if len(marker_aliases_in_body(body_of(candidate), aliases)) == 1
+    ]
+    if not usable:
+        if candidates:
+            logger.warning(
+                "comment_identity: no %s comment carries exactly one %r marker; "
+                "the next write creates a new one and patches it in place",
+                ownership,
+                marker,
+            )
         return None
-
-    candidate = candidates[0]
-    if len(marker_aliases_in_body(body_of(candidate), aliases)) != 1:
-        raise CommentAliasConflictError(
-            f"ambiguous {ownership} comment aliases for {marker!r}; manual recovery is required"
+    if len(candidates) > 1:
+        logger.warning(
+            "comment_identity: %d %s comments carry the %r marker; using the newest "
+            "and patching it in place",
+            len(candidates),
+            ownership,
+            marker,
         )
-    return candidate
+    return usable[-1]

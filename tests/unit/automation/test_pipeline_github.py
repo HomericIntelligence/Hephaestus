@@ -227,10 +227,10 @@ class TestMutatorMapping:
         assert patch_comment.call_args.args == (100, body)
         assert fetch.call_args_list == [call(5), call(5)]
 
-    def test_upsert_plan_comment_rejects_mixed_current_and_legacy_aliases_without_mutation(
+    def test_upsert_plan_comment_patches_newest_mixed_alias_comment(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A current and legacy actor-owned plan are an identity conflict, not duplicates."""
+        """A current and legacy actor-owned plan patch the newest in place."""
         body = render_current_plan("new plan")
         legacy = {
             "body": "<!-- hephaestus-plan:canonical -->\n# Implementation Plan\nold plan",
@@ -244,18 +244,19 @@ class TestMutatorMapping:
         }
         patch_comment = MagicMock()
         delete_comment = MagicMock()
+        patched = {"body": body, "databaseId": 101, "viewerDidAuthor": True}
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
-            MagicMock(return_value=[legacy, current]),
+            MagicMock(side_effect=[[legacy, current], [legacy, patched]]),
         )
         monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
         monkeypatch.setattr(adapter, "_delete_issue_comment", delete_comment)
 
-        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
-            adapter.upsert_plan_comment(5, body)
+        adapter.upsert_plan_comment(5, body)
 
-        patch_comment.assert_not_called()
+        patch_comment.assert_called_once()
+        assert patch_comment.call_args.args[0] == 101
         delete_comment.assert_not_called()
 
     def test_upsert_create_requires_owned_exact_body_readback(
@@ -286,10 +287,10 @@ class TestMutatorMapping:
         with pytest.raises(RuntimeError, match="owned comment publication was not confirmed"):
             adapter.upsert_plan_comment(5, new)
 
-    def test_upsert_rejects_foreign_canonical_marker_without_shadow_comment(
+    def test_upsert_leaves_a_foreign_canonical_marker_in_place(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A foreign planning marker is an identity conflict, not an absence."""
+        """Another author's planning pointer is kept and gains no duplicate."""
         body = render_current_plan("safe plan")
         fetch = MagicMock(
             return_value=[
@@ -303,12 +304,16 @@ class TestMutatorMapping:
         monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
         post = MagicMock()
         monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+        patch_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        delete_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete_comment)
 
-        with pytest.raises(RuntimeError, match="foreign or unverifiable"):
-            adapter.upsert_plan_comment(5, body)
+        adapter.upsert_plan_comment(5, body)
 
         post.assert_not_called()
-        assert fetch.call_count == 1
+        patch_comment.assert_not_called()
+        delete_comment.assert_not_called()
 
     def test_upsert_rejects_one_owned_comment_with_plan_and_review_markers(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -415,10 +420,10 @@ class TestMutatorMapping:
         fetch.assert_not_called()
         post.assert_not_called()
 
-    def test_canonical_create_rejects_owned_race_duplicates(
+    def test_canonical_create_keeps_newest_owned_race_duplicate(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A post-create duplicate requires manual recovery before any delete."""
+        """A post-create duplicate keeps the newest comment and deletes nothing."""
         body = render_current_plan("safe plan")
         monkeypatch.setattr(
             adapter,
@@ -434,12 +439,14 @@ class TestMutatorMapping:
             ),
         )
         monkeypatch.setattr(github_api_mod, "gh_issue_comment", MagicMock())
+        patch_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
         delete = MagicMock()
         monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
 
-        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
-            adapter.upsert_plan_comment(5, body)
+        adapter.upsert_plan_comment(5, body)
 
+        patch_comment.assert_not_called()
         delete.assert_not_called()
 
     def test_immutable_append_ignores_foreign_collision(

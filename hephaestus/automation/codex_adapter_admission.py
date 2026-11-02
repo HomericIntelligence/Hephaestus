@@ -321,14 +321,11 @@ def _is_digest(value: object) -> bool:
 
 
 def _safe_component_permissions(value: os.stat_result, *, directory: bool) -> bool:
-    """Return whether one path component has owner-controlled permissions."""
-    if value.st_uid not in {0, os.getuid()}:
-        return False
-    if not value.st_mode & 0o022:
-        return True
-    # A root-owned sticky directory, such as /tmp, does not let another user
-    # replace this user's entries. No writable non-sticky component is safe.
-    return directory and value.st_uid == 0 and bool(value.st_mode & stat.S_ISVTX)
+    """Return whether one path component has the expected kind.
+
+    The mode and the owner are host policy. This check does not read them.
+    """
+    return directory == stat.S_ISDIR(value.st_mode)
 
 
 def _open_absolute_path(path: Path, *, directory: bool) -> int:

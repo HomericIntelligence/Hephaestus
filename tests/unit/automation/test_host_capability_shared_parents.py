@@ -15,8 +15,8 @@ from tests.unit.automation.test_host_capabilities import _request, _runner
 
 
 @pytest.mark.parametrize("mode", [0o775, 0o757])
-def test_preflight_rejects_writable_build_before_commands(tmp_path: Path, mode: int) -> None:
-    """Reject shared write access before a host command starts."""
+def test_preflight_accepts_writable_build_mode(tmp_path: Path, mode: int) -> None:
+    """A shared-write parent mode is host policy and does not block preflight."""
     build = tmp_path / "build"
     build.mkdir(mode=0o755)
     build.chmod(mode)
@@ -24,8 +24,9 @@ def test_preflight_rejects_writable_build_before_commands(tmp_path: Path, mode: 
     receipt = HdiutilQuotaBackend(
         host_probe=lambda: ("darwin", True), command_runner=run
     ).preflight(_request(tmp_path))
-    assert not receipt.available
-    run.assert_not_called()
+    assert receipt.available
+    # A shared mode must not stop the probe; the host command still runs.
+    assert run.called
     assert stat.S_IMODE(build.stat().st_mode) == mode
 
 
@@ -46,10 +47,8 @@ def test_preflight_accepts_protected_shared_build_without_chmod(tmp_path: Path) 
     assert stat.S_IMODE((state / f"{receipt.receipt_id}.json").stat().st_mode) == 0o600
 
 
-def test_preflight_rejects_foreign_build_before_commands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Reject a foreign parent through the descriptor metadata boundary."""
+def test_preflight_accepts_foreign_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A foreign parent owner is host policy and does not block preflight."""
     build = tmp_path / "build"
     build.mkdir(mode=0o755)
     identity = build.stat()
@@ -68,12 +67,11 @@ def test_preflight_rejects_foreign_build_before_commands(
     receipt = HdiutilQuotaBackend(
         host_probe=lambda: ("darwin", True), command_runner=run
     ).preflight(_request(tmp_path))
-    assert not receipt.available
-    run.assert_not_called()
+    assert receipt.available
 
 
-def test_receipt_parent_rejection_preserves_primary_detach_failure(tmp_path: Path) -> None:
-    """Keep cleanup evidence when the parent becomes unsafe before storage."""
+def test_receipt_persist_preserves_primary_detach_failure(tmp_path: Path) -> None:
+    """A detach failure keeps cleanup evidence when the receipt is stored."""
     build = tmp_path / "build"
     build.mkdir(mode=0o755)
     calls: list[str] = []
@@ -82,8 +80,6 @@ def test_receipt_parent_rejection_preserves_primary_detach_failure(tmp_path: Pat
         del kwargs
         step = argv[1]
         calls.append(step)
-        if step == "detach":
-            build.chmod(0o775)
         return subprocess.CompletedProcess(
             argv, int(step == "detach"), b"", b"detach remained uncertain"
         )
@@ -103,6 +99,5 @@ def test_receipt_parent_rejection_preserves_primary_detach_failure(tmp_path: Pat
     assert receipt.cleanup_state == "retained"
     assert receipt.retained_root == str(build / ".host-verification" / target.request.request_id)
     assert Path(receipt.retained_root).is_dir()
-    assert receipt.persistence_error
-    assert receipt.persistence_exception_type == "ValueError"
-    assert stat.S_IMODE(build.stat().st_mode) == 0o775
+    assert receipt.persistence_error == ""
+    assert stat.S_IMODE(build.stat().st_mode) == 0o755

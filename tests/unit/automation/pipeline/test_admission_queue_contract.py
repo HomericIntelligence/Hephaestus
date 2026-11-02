@@ -118,10 +118,10 @@ def _coordinator(tmp_path: Path, github: FakeStageGitHub) -> Coordinator:
     )
 
 
-def test_direct_plan_marker_conflict_does_not_abort_later_issue(
+def test_direct_foreign_plan_marker_is_admitted_with_later_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The first foreign canonical marker fails only its direct source row."""
+    """A foreign canonical plan marker is read as the plan, not a failure."""
     foreign_plan = render_current_plan("## Files to Modify\n- `src/worker.py`")
 
     class ForeignPlanGitHub(FakeStageGitHub):
@@ -140,11 +140,16 @@ def test_direct_plan_marker_conflict_does_not_abort_later_issue(
 
     assert coordinator._drain_direct_issue_source() == 1
 
-    failed = [item for item in coordinator.items if item.issue == 1]
-    assert len(failed) == 1
-    assert failed[0].result is not None and not failed[0].result.passed
-    assert "CommentAliasConflictError" in failed[0].result.reason
-    assert [item.issue for item in coordinator.queues[StageName.IMPLEMENTATION].snapshot()] == [2]
+    admitted = [item for item in coordinator.items if item.issue == 1]
+    assert len(admitted) == 1
+    assert admitted[0].result is None or admitted[0].result.passed
+
+    # The foreign plan is read, so issue 1 is admitted instead of failing. The
+    # drain stops after the first implementation push while overlap
+    # serialization is active, so issue 2 waits for the next tick.
+    assert 1 in [item.issue for item in coordinator.queues[StageName.IMPLEMENTATION].snapshot()]
+    assert coordinator._drain_direct_issue_source() == 1
+    assert 2 in [item.issue for item in coordinator.queues[StageName.IMPLEMENTATION].snapshot()]
     assert coordinator._direct_issue_source is None
 
 

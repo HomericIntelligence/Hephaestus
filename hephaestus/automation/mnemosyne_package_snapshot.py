@@ -70,17 +70,15 @@ def _check_deadline(deadline: float) -> None:
 
 
 def verify_snapshot_base(binding: DirectoryBinding) -> None:
-    """Reject a temporary path that another user can replace."""
+    """Confirm each snapshot base descriptor names a directory.
+
+    The host umask and the owner are not policy for this path. The loop does
+    not change or reject the mode that the host sets.
+    """
     binding.verify()
     for descriptor in binding.descriptors:
         metadata = os.fstat(descriptor)
-        writable = bool(metadata.st_mode & 0o022)
-        root_sticky = metadata.st_uid == 0 and bool(metadata.st_mode & stat.S_ISVTX)
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid not in {0, os.geteuid()}
-            or (writable and not root_sticky)
-        ):
+        if not stat.S_ISDIR(metadata.st_mode):
             raise LearnDeliveryError(_UNAVAILABLE)
 
 
