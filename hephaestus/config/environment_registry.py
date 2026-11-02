@@ -23,7 +23,6 @@ class EnvVarSpec:
 _NESTED_READER = "hephaestus.config.child_environments.build_nested_host_verification_env"
 _PARENT_READER = "hephaestus.config.child_environments.read_approved_parent_env"
 _GH_READER = "hephaestus.config.child_environments.build_gh_child_env"
-_GH_CACHE_READER = "hephaestus.automation.github_api.cache._default_token_identity"
 _SIGNING_READER = "hephaestus.config.child_environments.build_git_signing_env"
 _CHECK_ONLY_GIT_READER = "hephaestus.config.child_environments.build_check_only_git_env"
 _COLOR_READER = "hephaestus.cli.colors._automatic_colors_enabled"
@@ -262,14 +261,14 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         "GitHub authentication bridge",
         sensitivity="secret",
         validation="non-empty-no-nul",
-        readers=(_GH_READER, _GH_CACHE_READER),
+        readers=(_GH_READER,),
     ),
     _parent(
         "GH_TOKEN",
         "GitHub CLI authentication bridge",
         sensitivity="secret",
         validation="non-empty-no-nul",
-        readers=(_GH_READER, _GH_CACHE_READER),
+        readers=(_GH_READER,),
     ),
     _parent(
         "SSH_AUTH_SOCK",

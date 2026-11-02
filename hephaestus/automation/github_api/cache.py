@@ -32,7 +32,6 @@ import copy
 import hashlib
 import json
 import logging
-import os
 import subprocess
 import sys
 import threading
@@ -114,8 +113,12 @@ class ReadKey:
 
 def _default_token_identity() -> str:
     """Return the token that ``gh`` uses, or an empty string when unknown."""
+    # Read the approved tokens from the child-environment boundary so the
+    # approval rules apply, and so this module never reads the ambient
+    # environment itself.
+    approved = build_gh_child_env()
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
-        value = os.environ.get(name)
+        value = approved.get(name)
         if value:
             return value
     try:
