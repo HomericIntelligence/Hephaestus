@@ -501,6 +501,22 @@ def _marker_comments(
     ]
 
 
+def _present_markers(
+    comments: list[dict[str, Any]], marker_aliases: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    """Return marker-bearing comments, whatever author and whatever id.
+
+    This answers "does a pointer exist". It does not read ``databaseId``,
+    because a comment without one would otherwise look absent and the caller
+    would post a duplicate.
+    """
+    return [
+        comment
+        for comment in comments
+        if has_marker_alias(str(comment.get("body", "")), marker_aliases)
+    ]
+
+
 def _select_pointer(
     issue_number: int,
     marker_prefix: str,
@@ -581,7 +597,7 @@ def gh_issue_upsert_owned_comment(
     )
     if target is None:
         if _only_foreign_pointer_exists(
-            _marker_comments(comments, marker_aliases), marker_prefix, issue_number
+            _present_markers(comments, marker_aliases), marker_prefix, issue_number
         ):
             return None
         _api.gh_issue_comment(issue_number, body, repo=repo)
