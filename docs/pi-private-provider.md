@@ -42,8 +42,10 @@ python3 scripts/pi_smoke.py \
   --pi-dir ~/.pi/agent
 ```
 
-The parser rejects symlinks, files owned by another user, group/other access,
-missing or unknown keys, and blank values. The aliases are not forwarded in
+The parser rejects symlinks, a non-regular file, a file above the shared
+configuration size cap, missing or unknown keys, and blank values. It does not
+read the file mode or the owner: a host permission layout is host policy (see
+ADR-0061). Keep the file private so that the provider aliases stay private. The aliases are not forwarded in
 subprocess arguments, environment variables, logs, or scheduler exports. A
 successful smoke validates only the bounded adapter path, not a requested
 provider/model selection. That seam is non-interactive and ephemeral: it disables sessions,

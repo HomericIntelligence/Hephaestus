@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import pytest
@@ -83,13 +84,57 @@ def test_load_pi_alias_config_rejects_a_directory(tmp_path: Path) -> None:
         agent_runtime.load_pi_alias_config(directory)
 
 
+def _config_at_size(size: int) -> str:
+    """Return a valid alias document padded to exactly ``size`` bytes."""
+    head = 'provider = "private-provider"\nmodel = "private-model"\n'
+    return head + "#" * (size - len(head) - 1) + "\n"
+
+
+def test_load_pi_alias_config_accepts_a_file_at_the_cap(tmp_path: Path) -> None:
+    """The cap is inclusive, so the boundary value loads."""
+    cap = agent_runtime.PI_CONFIG_MAX_BYTES
+    path = _write_alias_config(tmp_path / "aliases.toml", _config_at_size(cap))
+
+    assert path.stat().st_size == cap
+    assert agent_runtime.load_pi_alias_config(path).provider == "private-provider"
+
+
 def test_load_pi_alias_config_rejects_an_oversized_file(tmp_path: Path) -> None:
     """A file above the shared configuration cap refuses before it is parsed."""
-    padding = "#" * (agent_runtime.PI_CONFIG_MAX_BYTES + 1)
-    path = _write_alias_config(
-        tmp_path / "aliases.toml",
-        f'provider = "private-provider"\nmodel = "private-model"\n{padding}\n',
-    )
+    cap = agent_runtime.PI_CONFIG_MAX_BYTES
+    path = _write_alias_config(tmp_path / "aliases.toml", _config_at_size(cap + 1))
+
+    with pytest.raises(OSError, match="bounded regular file"):
+        agent_runtime.load_pi_alias_config(path)
+
+
+def test_load_pi_alias_config_bounds_a_file_that_grows_after_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A file that grows before the read cannot make the read unbounded."""
+    cap = agent_runtime.PI_CONFIG_MAX_BYTES
+    path = _write_alias_config(tmp_path / "aliases.toml")
+    real_fdopen = os.fdopen
+
+    class Growing:
+        """Wrap the descriptor and append past the cap before the real read."""
+
+        def __init__(self, descriptor: int) -> None:
+            self._file = real_fdopen(descriptor, "rb", closefd=False)
+
+        def __enter__(self) -> Growing:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            self._file.close()
+
+        def read(self, size: int) -> bytes:
+            with path.open("ab") as handle:
+                handle.write(b"#" * (cap + 1))
+            return self._file.read(size)
+
+    monkeypatch.setattr(os, "fdopen", lambda descriptor, mode, closefd: Growing(descriptor))
 
     with pytest.raises(OSError, match="bounded regular file"):
         agent_runtime.load_pi_alias_config(path)
