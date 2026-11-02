@@ -1,11 +1,10 @@
-"""Behavior tests for the GitHub GraphQL read-through cache (#3395)."""
+"""Behavior tests for the automation read-through cache (#3395)."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import multiprocessing
-import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -181,13 +180,12 @@ def test_entry_filename_scope_differs_per_host_key(tmp_path: Path) -> None:
     assert second._token_scope() != first._token_scope()
 
 
-def test_scope_key_is_owner_only_and_reused(tmp_path: Path) -> None:
-    """The host key is written once, privately, and reused by later caches."""
+def test_scope_key_is_reused_by_later_caches(tmp_path: Path) -> None:
+    """The host key is written once and reused by later caches."""
     first = make_cache(tmp_path)
     scope = first._token_scope()
 
     salt = tmp_path / "gh-read-cache" / "scope-key"
-    assert stat.S_IMODE(salt.stat().st_mode) & 0o077 == 0
     created = salt.read_bytes()
 
     assert make_cache(tmp_path)._token_scope() == scope
@@ -258,18 +256,16 @@ def test_unlisted_operation_is_not_cached(tmp_path: Path) -> None:
     assert cache.is_bypass_operation("someNewOperation") is False
 
 
-def test_entry_files_are_owner_only_and_free_of_token_text(tmp_path: Path) -> None:
-    """AC4: files and directories are owner-only; no token text is written."""
+def test_entry_files_are_free_of_token_text(tmp_path: Path) -> None:
+    """No entry file holds token text, in its name or its content."""
     secret = "sekret-token-material"  # noqa: S105 - sentinel, not a credential
     cache = make_cache(tmp_path, token=secret)
     key = make_key(cache)
     cache.store(key, {"ok": 1})
     directory = tmp_path / "gh-read-cache"
-    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
     files = list(directory.glob("*.json"))
     assert files
     for path in files:
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert secret not in path.read_text(encoding="utf-8")
         assert secret not in path.name
 

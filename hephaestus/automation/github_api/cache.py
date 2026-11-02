@@ -149,15 +149,32 @@ def _sanitize_component(value: str) -> str:
 
 
 def _write_new_file(path: Path, text: str) -> None:
-    """Create *path* with owner-only permissions unless it already exists.
+    """Publish *text* at *path* atomically, unless *path* already exists.
 
-    ``O_EXCL`` lets two processes race safely for one host key: exactly one
-    call creates the file and every other call sees ``FileExistsError``.
+    A peer may create ``path`` at any moment, so it must never observe a
+    partially written file. Write and flush a private temporary file, then
+    ``link`` it into place: ``link`` fails with ``FileExistsError`` when
+    another process won, and it publishes the complete file in one step.
     """
-    handle = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(handle, "wb") as stream:
-        os.fchmod(stream.fileno(), 0o600)
-        stream.write(text.encode("utf-8"))
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        handle = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(handle, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(text.encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link(temporary, path)
+        except FileExistsError:
+            raise
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(temporary)
+            raise
+    finally:
+        with suppress(OSError):
+            os.unlink(temporary)
 
 
 def _load_scope_salt(directory: Path) -> bytes:
@@ -169,18 +186,19 @@ def _load_scope_salt(directory: Path) -> bytes:
     """
     path = directory / _SALT_FILE_NAME
     create_private_directory(directory, parents=True)
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        text = ""
-    if len(text) == _SALT_TEXT_LENGTH:
-        return bytes.fromhex(text)
     with suppress(FileExistsError):
         _write_new_file(path, secrets.token_hex(_SALT_BYTES))
-    text = path.read_text(encoding="utf-8").strip()
-    if len(text) != _SALT_TEXT_LENGTH:
-        raise ValueError(f"scope key at {path} is malformed")
-    return bytes.fromhex(text)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"scope key at {path} is unreadable") from exc
+    # The file is published complete, so a short or unparsable key means it
+    # was damaged outside this code path.
+    try:
+        salt = bytes.fromhex(raw.decode("ascii").strip())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"scope key at {path} is malformed") from exc
+    return salt
 
 
 def _normalize_variables(variables: Mapping[str, GraphQLScalar]) -> str | None:
@@ -223,7 +241,7 @@ class GraphQLReadCache:
             max_entries: Bound on in-process entries and on entry-file count.
             directory: Owner-only base directory for entry files.
             token_identity: Zero-argument callable returning token material.
-                Called once when the cache is created; only an HMAC of it is
+                Called once on the first key build; only an HMAC of it is
                 retained.
             clock: Monotonic clock for the process layer.
             wall_clock: Wall clock for entry-file expiry across processes.
