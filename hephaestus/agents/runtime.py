@@ -166,17 +166,16 @@ class PiAliasConfig:
 
 
 def _validate_pi_alias_metadata(metadata: os.stat_result) -> None:
-    """Validate one snapshot of the private alias file's security metadata."""
+    """Validate one snapshot of the private alias file's security metadata.
+
+    The check keeps the bounded-regular-file guard. Ownership and permission
+    bits are host policy, the same as for the Pi settings reader. Hephaestus
+    does not read them, so an operator umask does not stop the reader.
+    """
     if stat.S_ISLNK(metadata.st_mode):
         raise OSError("Pi alias config must be a regular file, not a symlink")
     if not stat.S_ISREG(metadata.st_mode):
         raise OSError("Pi alias config must be a regular file")
-    if not hasattr(os, "getuid"):
-        raise OSError("Pi alias config ownership checks are unavailable on this platform")
-    if metadata.st_uid != os.getuid():
-        raise OSError("Pi alias config must be owned by the current user")
-    if stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise OSError("Pi alias config must have mode 0600")
 
 
 def load_pi_alias_config(path: Path) -> PiAliasConfig:

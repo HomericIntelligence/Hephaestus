@@ -63,8 +63,9 @@ another process's work, which is a question about the work, not about a mode.
 
 - A shared check-out, a team umask, and a group-writable parent directory no
   longer stop the loop.
-- The Pi settings reader no longer reads ownership or mode. A settings file
-  that another account can write is read. The host operator owns that risk.
+- Neither Pi reader reads ownership or mode. That covers the operator settings
+  file and the alias file that the smoke sentinel loads. A file that another
+  account can write is read. The host operator owns that risk.
 - The event-log and diagnostics probe asks Git instead of reading `.git`. When
   Git cannot answer, the probe logs a warning and treats the path as outside a
   worktree.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import pytest
@@ -63,27 +62,25 @@ def test_load_pi_alias_config_rejects_symlink(tmp_path: Path) -> None:
         agent_runtime.load_pi_alias_config(link)
 
 
-@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership is unavailable")
-def test_load_pi_alias_config_rejects_wrong_owner(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Only a file owned by the invoking user may provide private aliases."""
-    path = _write_alias_config(tmp_path / "aliases.toml")
-    monkeypatch.setattr(os, "getuid", lambda: path.stat().st_uid + 1)
-
-    with pytest.raises(OSError, match="owned by the current user"):
-        agent_runtime.load_pi_alias_config(path)
-
-
-@pytest.mark.parametrize("mode", [0o400, 0o640, 0o644, 0o660, 0o666])
-def test_load_pi_alias_config_requires_mode_0600(tmp_path: Path, mode: int) -> None:
-    """Readability by peers and weaker owner modes are both rejected."""
+@pytest.mark.parametrize("mode", [0o400, 0o644, 0o660, 0o666])
+def test_load_pi_alias_config_reads_any_host_mode(tmp_path: Path, mode: int) -> None:
+    """A host permission mode does not stop the reader (ADR-0061)."""
     path = _write_alias_config(tmp_path / "aliases.toml")
     path.chmod(mode)
 
-    with pytest.raises(OSError, match="mode 0600"):
-        agent_runtime.load_pi_alias_config(path)
+    assert agent_runtime.load_pi_alias_config(path) == agent_runtime.PiAliasConfig(
+        provider="private-provider",
+        model="private-model",
+    )
+
+
+def test_load_pi_alias_config_rejects_a_directory(tmp_path: Path) -> None:
+    """A directory is not a bounded private file, so the read refuses."""
+    directory = tmp_path / "aliases.toml"
+    directory.mkdir()
+
+    with pytest.raises(OSError, match="Pi alias config must be a regular file"):
+        agent_runtime.load_pi_alias_config(directory)
 
 
 def test_agent_parser_registers_explicit_pi_disable_switch() -> None:
