@@ -32,7 +32,6 @@ import copy
 import hashlib
 import json
 import logging
-import os
 import subprocess
 import sys
 import threading
@@ -114,8 +113,11 @@ class ReadKey:
 
 def _default_token_identity() -> str:
     """Return the token that ``gh`` uses, or an empty string when unknown."""
+    # Read the two approved credential names through the environment boundary.
+    # Automation must not consult the ambient process environment itself.
+    hosted = build_gh_child_env()
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
-        value = os.environ.get(name)
+        value = hosted.get(name, "")
         if value:
             return value
     try:
