@@ -110,6 +110,7 @@ def _kill(pgids: Iterable[int]) -> list[int]:
             os.killpg(pgid, signal.SIGKILL)
             killed.append(pgid)
         except ProcessLookupError:
+            # The group already exited, so this SIGKILL had no target.
             pass
         except OSError as exc:  # pragma: no cover - defensive logging
             logger.warning("failed to kill process group %s: %s", pgid, exc)
