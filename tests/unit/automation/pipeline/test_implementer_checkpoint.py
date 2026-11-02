@@ -86,11 +86,28 @@ def _lane(tmp_path: Path, *, files: tuple[str, ...] = ("a.py",)) -> LaneSnapshot
 
 
 def _write_test_checkpoint(
-    lane: LaneSnapshot, *, issue: int = 1, branch: str = "1-auto-impl", worktree: str, **kwargs: Any
+    lane: LaneSnapshot,
+    *,
+    issue: int = 1,
+    branch: str = "1-auto-impl",
+    worktree: str,
+    elapsed_s: float = 42.0,
+    attempt: int = 1,
+    step: str = "turn in progress",
+    last_test_result: str = "",
+    session_id: str | None = None,
 ) -> ImplementerCheckpoint:
-    defaults = {"elapsed_s": 42.0, "attempt": 1, "step": "turn in progress"}
-    defaults.update(kwargs)
-    return write_checkpoint(lane, issue=issue, branch=branch, worktree=worktree, **defaults)
+    return write_checkpoint(
+        lane,
+        issue=issue,
+        branch=branch,
+        worktree=worktree,
+        elapsed_s=elapsed_s,
+        attempt=attempt,
+        step=step,
+        last_test_result=last_test_result,
+        session_id=session_id,
+    )
 
 
 def _make_item(
