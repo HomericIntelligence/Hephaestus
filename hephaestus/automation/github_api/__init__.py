@@ -43,12 +43,20 @@ io_write_secure = write_secure
 _label_cache: ThreadSafeCache[str, set[str]] = ThreadSafeCache()
 # Issue-state cache identity includes the owner, repository, and issue number.
 _issue_state_cache: dict[tuple[str, str, int], IssueState] = {}
+# Process-wide GraphQL read cache (issue #3395). Bound by
+# ``configure_github_read_cache``; None keeps the cache disabled.
+_gh_read_cache: Any = None
 
 from hephaestus.github.client import (  # noqa: E402
     _GH_BREAKER as _GH_BREAKER,
     _GH_THROTTLE as _GH_THROTTLE,
 )
 
+from .cache import (  # noqa: E402
+    GraphQLReadCache as GraphQLReadCache,
+    configure_github_read_cache as configure_github_read_cache,
+    configure_github_read_cache_from_args as configure_github_read_cache_from_args,
+)
 from .checks import (  # noqa: E402
     _is_gh_pr_checks_no_checks_error as _is_gh_pr_checks_no_checks_error,
     _map_pr_check as _map_pr_check,
@@ -165,6 +173,7 @@ __all__ = [
     "GraphQLMutationOutcomeUnknownError",
     "GraphQLMutationSpec",
     "GraphQLQuerySpec",
+    "GraphQLReadCache",
     "GraphQLResponseError",
     "GraphQLRetryableError",
     "IssueInfo",
@@ -183,6 +192,7 @@ __all__ = [
     "_filter_comments_to_diff",
     "_find_open_prs_for_head",
     "_gh_call",
+    "_gh_read_cache",
     "_is_gh_pr_checks_no_checks_error",
     "_map_pr_check",
     "_normalize_review_comment_body",
@@ -200,6 +210,8 @@ __all__ = [
     "batch_issue_labels_query",
     "batch_issue_states_query",
     "batch_issue_titles_query",
+    "configure_github_read_cache",
+    "configure_github_read_cache_from_args",
     "create_pending_review_mutation",
     "fetch_issue_comments_metadata",
     "fetch_issue_info",

@@ -29,7 +29,7 @@ from hephaestus.automation.event_log_retention import (
     DEFAULT_EVENT_LOG_RETENTION_DAYS,
     event_log_lifecycle,
 )
-from hephaestus.automation.github_api import gh_call
+from hephaestus.automation.github_api import configure_github_read_cache_from_args, gh_call
 from hephaestus.automation.loop_repo_manager import _detect_cwd_repo, _iter_gh_repos
 from hephaestus.automation.models import DEFAULT_WORKER_COUNT
 from hephaestus.automation.pipeline.coordinator_types import (
@@ -49,6 +49,7 @@ from hephaestus.automation.role_selection import resolve_role_agents
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import (
     MODEL_REFERENCE_HELP,
+    add_github_read_cache_args,
     add_host_verification_pyxis_image_arg,
     add_role_agent_args,
     configure_cli_logging,
@@ -578,6 +579,7 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
         dry_run_prefix="Preview queue work without agent calls, GitHub writes, or Git pushes.",
     )
     parser.allow_abbrev = False
+    add_github_read_cache_args(parser)
     parser.set_defaults(profile=profile, stages=stages, force=False)
     parser.set_defaults(
         podman_machine=None,
@@ -965,6 +967,7 @@ def _prepare_host_runtime(args: argparse.Namespace) -> int | None:
 def _run(args: argparse.Namespace, *, profile: str) -> int:
     """Run one queue command after argument parsing."""
     configure_github_throttle_from_args(args)
+    configure_github_read_cache_from_args(args)
     _setup_logging(args.verbose, args.log_format, quiet=args.quiet, log_file=args.log_file)
     from hephaestus.automation.runtime_diagnostics import runtime_identity
 
