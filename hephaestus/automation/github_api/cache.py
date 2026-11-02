@@ -17,12 +17,13 @@ Operation allow-lists (final, verified against the current tree):
 - Every other operation, including ``githubSchemaContract``, is not cached.
   Merge-gate, check-run, and rate-limit reads use REST and stay outside.
 
-Key parts: token identity hash, repository (``owner/name`` from the call
+Key parts: token scope, repository (``owner/name`` from the call
 variables), operation name, and the digest of the normalized variables. The
 cross-process layer writes one owner-only JSON file per key under
 ``build/.issue_implementer/gh-read-cache/`` so loop processes on one host
 share entries. No file holds a token, an authorization value, or a query
-document.
+document. The token scope is an HMAC under a key stored in that same private
+directory, so a listing cannot be tested against a guessed token.
 """
 
 from __future__ import annotations
@@ -30,8 +31,11 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import hmac
 import json
 import logging
+import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -88,6 +92,9 @@ _ENTRY_SCHEMA = 1
 _ANONYMOUS_SCOPE = "hephaestus-anonymous"
 _LOCK_DIR_NAME = "locks"
 _WRITE_LOCK_NAME = "write.lock"
+_SALT_FILE_NAME = "scope-key"
+_SALT_BYTES = 32
+_SALT_TEXT_LENGTH = 2 * _SALT_BYTES
 
 
 class _CacheMissError(RuntimeError):
@@ -99,7 +106,7 @@ class ReadKey:
     """Identity of one cached read."""
 
     token: str
-    """Truncated SHA-256 of the token. The token itself is never saved."""
+    """Truncated HMAC of the token under this host's scope key."""
 
     repository: str
     """``owner/name`` from the call variables."""
@@ -128,7 +135,7 @@ def _default_token_identity() -> str:
             text=True,
             timeout=10,
             check=False,
-            env=build_gh_child_env(),
+            env=approved,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -139,6 +146,41 @@ def _default_token_identity() -> str:
 def _sanitize_component(value: str) -> str:
     """Make one filename component safe: keep alphanumerics, ``._-`` only."""
     return "".join(char if (char.isalnum() or char in "._-") else "_" for char in value)
+
+
+def _write_new_file(path: Path, text: str) -> None:
+    """Create *path* with owner-only permissions unless it already exists.
+
+    ``O_EXCL`` lets two processes race safely for one host key: exactly one
+    call creates the file and every other call sees ``FileExistsError``.
+    """
+    handle = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(handle, "wb") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(text.encode("utf-8"))
+
+
+def _load_scope_salt(directory: Path) -> bytes:
+    """Return this host's scope key, creating it once when absent.
+
+    Entry-file names carry the token scope. A plain hash of a token lets anyone
+    who can list the directory test a guessed token offline, so the scope is an
+    HMAC under a key that never leaves this host's private cache directory.
+    """
+    path = directory / _SALT_FILE_NAME
+    create_private_directory(directory, parents=True)
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        text = ""
+    if len(text) == _SALT_TEXT_LENGTH:
+        return bytes.fromhex(text)
+    with suppress(FileExistsError):
+        _write_new_file(path, secrets.token_hex(_SALT_BYTES))
+    text = path.read_text(encoding="utf-8").strip()
+    if len(text) != _SALT_TEXT_LENGTH:
+        raise ValueError(f"scope key at {path} is malformed")
+    return bytes.fromhex(text)
 
 
 def _normalize_variables(variables: Mapping[str, GraphQLScalar]) -> str | None:
@@ -181,7 +223,8 @@ class GraphQLReadCache:
             max_entries: Bound on in-process entries and on entry-file count.
             directory: Owner-only base directory for entry files.
             token_identity: Zero-argument callable returning token material.
-                Called once lazily; only its truncated hash is retained.
+                Called once when the cache is created; only an HMAC of it is
+                retained.
             clock: Monotonic clock for the process layer.
             wall_clock: Wall clock for entry-file expiry across processes.
 
@@ -319,7 +362,7 @@ class GraphQLReadCache:
     # ------------------------------------------------------------------
 
     def _token_scope(self) -> str:
-        """Return the truncated SHA-256 of the token, resolved once."""
+        """Return the truncated HMAC of the token, resolved once."""
         with self._lock:
             if self._token_hash is None:
                 try:
@@ -328,7 +371,23 @@ class GraphQLReadCache:
                     logger.exception("token identity resolution failed")
                     material = ""
                 digest_input = material if material else _ANONYMOUS_SCOPE
-                self._token_hash = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:32]
+                try:
+                    salt = _load_scope_salt(self._directory)
+                except (OSError, ValueError):
+                    # Without a private host key a stable scope would be a
+                    # plain token hash on disk. Use a per-process scope so
+                    # entries never collide; the cache still fails open.
+                    logger.warning(
+                        "read cache: scope key unavailable under %s; using a "
+                        "per-process scope and sharing no entries",
+                        self._directory,
+                    )
+                    salt = secrets.token_bytes(_SALT_BYTES)
+                self._token_hash = hmac.new(
+                    salt,
+                    digest_input.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest()[:32]
             return self._token_hash
 
     def _entry_path(self, key: ReadKey) -> Path:

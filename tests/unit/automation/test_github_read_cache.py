@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing
 import stat
@@ -153,6 +154,87 @@ def test_token_scope_invalidation_clears_everything(tmp_path: Path) -> None:
     cache.invalidate_token_scope()
     assert not cache.get(first)[0]
     assert not cache.get(second)[0]
+
+
+def test_entry_filename_is_not_a_plain_hash_of_the_token(tmp_path: Path) -> None:
+    """A directory listing cannot be tested against a guessed token."""
+    secret = "scope-test-" + "x" * 24
+    cache = make_cache(tmp_path, token=secret)
+    key = make_key(cache)
+
+    plain = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:32]
+
+    assert key.token != plain
+    assert plain not in cache._entry_path(key).name
+
+
+def test_entry_filename_scope_differs_per_host_key(tmp_path: Path) -> None:
+    """The same token scopes differently when the host key differs."""
+    first = make_cache(tmp_path, token="shared" + "-token")
+    make_key(first)
+
+    salt = tmp_path / "gh-read-cache" / "scope-key"
+    salt.parent.mkdir(parents=True, exist_ok=True)
+    salt.write_text("a" * (2 * 32), encoding="utf-8")
+    second = make_cache(tmp_path, token="shared" + "-token")
+
+    assert second._token_scope() != first._token_scope()
+
+
+def test_scope_key_is_owner_only_and_reused(tmp_path: Path) -> None:
+    """The host key is written once, privately, and reused by later caches."""
+    first = make_cache(tmp_path)
+    scope = first._token_scope()
+
+    salt = tmp_path / "gh-read-cache" / "scope-key"
+    assert stat.S_IMODE(salt.stat().st_mode) & 0o077 == 0
+    created = salt.read_bytes()
+
+    assert make_cache(tmp_path)._token_scope() == scope
+    assert salt.read_bytes() == created
+
+
+def test_scope_key_is_never_treated_as_an_entry(tmp_path: Path) -> None:
+    """Pruning deletes entry files only, so the host key survives."""
+    cache = make_cache(tmp_path, max_entries=1)
+    for n0 in range(3):
+        cache.store(make_key(cache, n0=n0), {"ok": n0})
+
+    assert (tmp_path / "gh-read-cache" / "scope-key").exists()
+
+
+def test_unusable_scope_key_disables_sharing_without_failing(tmp_path: Path) -> None:
+    """A corrupt host key degrades to a per-process scope, not a shared one."""
+    directory = tmp_path / "gh-read-cache"
+    directory.mkdir(parents=True)
+    (directory / "scope-key").write_text("not-a-valid-key", encoding="utf-8")
+
+    first = make_cache(tmp_path, token="shared" + "-token")
+    second = make_cache(tmp_path, token="shared" + "-token")
+
+    first_scope = first._token_scope()
+    assert first_scope != second._token_scope()
+    assert first._token_scope() == first_scope
+
+
+def test_token_identity_resolved_once_at_construction(tmp_path: Path) -> None:
+    """The identity callable runs once, not on every cacheable read."""
+    calls: list[int] = []
+
+    def identity() -> str:
+        calls.append(1)
+        return "token"
+
+    cache = GraphQLReadCache(
+        ttl_seconds=3600.0,
+        max_entries=10,
+        directory=tmp_path / "gh-read-cache",
+        token_identity=identity,
+    )
+    for n0 in range(5):
+        cache.build_key("batchIssueStates", {"owner": "o", "name": "r", "n0": n0})
+
+    assert len(calls) == 1
 
 
 def test_non_scalar_variable_fails_open(tmp_path: Path) -> None:
