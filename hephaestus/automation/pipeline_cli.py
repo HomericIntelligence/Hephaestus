@@ -322,7 +322,14 @@ def _has_git_worktree_ancestor(path: Path) -> bool:
             check=False,
             env=build_check_only_git_env(),
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        LOG.warning(
+            "git worktree probe failed for %s (%s); treating the path as outside a "
+            "worktree. Install git or set --state-dir to a path outside every checkout "
+            "when this host keeps its diagnostics elsewhere.",
+            probe,
+            error,
+        )
         return False
     return completed.returncode == 0 and bool(completed.stdout.strip())
 

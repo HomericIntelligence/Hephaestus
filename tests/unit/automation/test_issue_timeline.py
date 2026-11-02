@@ -221,9 +221,11 @@ def test_compaction_rejects_mixed_current_and_legacy_plan_aliases() -> None:
 
     result = plan_issue_timeline_compaction(comments)
 
-    # The newest alias carries the pointer. The legacy body is not a current
-    # marker, so it is not an obsolete target either.
+    # The newest alias carries the pointer. Each alias keeps its own newest
+    # bearer, so the older plan alias is not an obsolete delete target.
     assert result.plan_body is not None and "current" in result.plan_body
+    assert 1 not in result.delete_comment_ids
+    assert result.delete_comment_ids == (3,)
 
 
 def test_compaction_rejects_two_plan_aliases_in_one_owned_comment() -> None:

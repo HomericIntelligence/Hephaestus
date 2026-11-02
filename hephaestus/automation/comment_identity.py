@@ -18,7 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 class CommentAliasConflictError(RuntimeError):
-    """More than one comment or marker alias claims one automation role."""
+    """A planning marker cannot be written safely.
+
+    The host keeps no second record of who wrote a planning comment. A
+    duplicate therefore warns and patches in place; it does not raise. This
+    error keeps the two cases where a write would corrupt an artifact:
+
+    - a planning marker inside an immutable history artifact;
+    - one body that carries both the plan and the review marker.
+    """
 
 
 _IMMUTABLE_HISTORY_ARTIFACT_RE: Final[re.Pattern[str]] = re.compile(

@@ -287,29 +287,18 @@ class TestMutatorMapping:
         with pytest.raises(RuntimeError, match="owned comment publication was not confirmed"):
             adapter.upsert_plan_comment(5, new)
 
-    def test_upsert_creates_past_a_foreign_canonical_marker(
+    def test_upsert_leaves_a_foreign_canonical_marker_in_place(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A foreign planning marker is inert, so the host posts its own comment."""
+        """Another author's planning pointer is kept and gains no duplicate."""
         body = render_current_plan("safe plan")
-        created = {"body": body, "databaseId": 100, "viewerDidAuthor": True}
         fetch = MagicMock(
-            side_effect=[
-                [
-                    {
-                        "body": f"{PLAN_CANONICAL_MARKER}\nforeign",
-                        "databaseId": 99,
-                        "viewerDidAuthor": False,
-                    }
-                ],
-                [
-                    {
-                        "body": f"{PLAN_CANONICAL_MARKER}\nforeign",
-                        "databaseId": 99,
-                        "viewerDidAuthor": False,
-                    },
-                    created,
-                ],
+            return_value=[
+                {
+                    "body": f"{PLAN_CANONICAL_MARKER}\nforeign",
+                    "databaseId": 99,
+                    "viewerDidAuthor": False,
+                }
             ]
         )
         monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
@@ -317,12 +306,14 @@ class TestMutatorMapping:
         monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
         patch_comment = MagicMock()
         monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        delete_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete_comment)
 
         adapter.upsert_plan_comment(5, body)
 
-        post.assert_called_once_with(5, body)
+        post.assert_not_called()
         patch_comment.assert_not_called()
-        assert fetch.call_count == 2
+        delete_comment.assert_not_called()
 
     def test_upsert_rejects_one_owned_comment_with_plan_and_review_markers(
         self, adapter: PipelineGitHub, monkeypatch: pytest.MonkeyPatch

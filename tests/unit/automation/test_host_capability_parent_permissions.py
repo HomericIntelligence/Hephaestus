@@ -25,6 +25,8 @@ def test_preflight_accepts_writable_build_mode(tmp_path: Path, mode: int) -> Non
         host_probe=lambda: ("darwin", True), command_runner=run
     ).preflight(_request(tmp_path))
     assert receipt.available
+    # A shared mode must not stop the probe; the host command still runs.
+    assert run.called
     assert stat.S_IMODE(build.stat().st_mode) == mode
 
 
