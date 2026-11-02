@@ -22,7 +22,7 @@ def _write_alias_config(
 
 
 def test_load_pi_alias_config_accepts_exact_private_toml(tmp_path: Path) -> None:
-    """The two aliases load only from an owner-only regular TOML file."""
+    """The two aliases load from a regular TOML file, whatever its host mode."""
     path = _write_alias_config(tmp_path / "aliases.toml")
 
     assert agent_runtime.load_pi_alias_config(path) == agent_runtime.PiAliasConfig(
@@ -75,12 +75,34 @@ def test_load_pi_alias_config_reads_any_host_mode(tmp_path: Path, mode: int) -> 
 
 
 def test_load_pi_alias_config_rejects_a_directory(tmp_path: Path) -> None:
-    """A directory is not a bounded private file, so the read refuses."""
+    """A directory is not a regular file, so the read refuses."""
     directory = tmp_path / "aliases.toml"
     directory.mkdir()
 
     with pytest.raises(OSError, match="Pi alias config must be a regular file"):
         agent_runtime.load_pi_alias_config(directory)
+
+
+def test_load_pi_alias_config_rejects_an_oversized_file(tmp_path: Path) -> None:
+    """A file above the shared configuration cap refuses before it is parsed."""
+    padding = "#" * (agent_runtime.PI_CONFIG_MAX_BYTES + 1)
+    path = _write_alias_config(
+        tmp_path / "aliases.toml",
+        f'provider = "private-provider"\nmodel = "private-model"\n{padding}\n',
+    )
+
+    with pytest.raises(OSError, match="bounded regular file"):
+        agent_runtime.load_pi_alias_config(path)
+
+
+def test_load_pi_alias_config_rejects_invalid_utf8(tmp_path: Path) -> None:
+    """A binary file is not valid TOML and does not raise a decode error."""
+    path = tmp_path / "aliases.toml"
+    path.write_bytes(b'provider = "\xff\xfe"\nmodel = "m"\n')
+    path.chmod(0o600)
+
+    with pytest.raises(ValueError, match="not valid TOML"):
+        agent_runtime.load_pi_alias_config(path)
 
 
 def test_agent_parser_registers_explicit_pi_disable_switch() -> None:

@@ -176,6 +176,8 @@ def _validate_pi_alias_metadata(metadata: os.stat_result) -> None:
         raise OSError("Pi alias config must be a regular file, not a symlink")
     if not stat.S_ISREG(metadata.st_mode):
         raise OSError("Pi alias config must be a regular file")
+    if metadata.st_size > PI_CONFIG_MAX_BYTES:
+        raise OSError("Pi alias config must be a bounded regular file")
 
 
 def load_pi_alias_config(path: Path) -> PiAliasConfig:
@@ -197,10 +199,15 @@ def load_pi_alias_config(path: Path) -> PiAliasConfig:
         if (initial.st_dev, initial.st_ino) != (opened.st_dev, opened.st_ino):
             raise OSError("Pi alias config changed while being opened")
         with os.fdopen(descriptor, "rb", closefd=False) as config_file:
-            try:
-                payload: Any = tomllib.load(config_file)
-            except tomllib.TOMLDecodeError as exc:
-                raise ValueError("Pi alias config is not valid TOML") from exc
+            raw_config = config_file.read(PI_CONFIG_MAX_BYTES + 1)
+        if len(raw_config) > PI_CONFIG_MAX_BYTES:
+            # The size check above reads one snapshot. A file that grows after
+            # that snapshot must not be read to the end either.
+            raise OSError("Pi alias config must be a bounded regular file")
+        try:
+            payload: Any = tomllib.loads(raw_config.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ValueError("Pi alias config is not valid TOML") from exc
     finally:
         os.close(descriptor)
 
