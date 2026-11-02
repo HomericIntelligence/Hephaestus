@@ -6532,8 +6532,8 @@ def test_pi_default_model_rejects_a_non_regular_settings_file(tmp_path: Path) ->
         agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
 
 
-def test_pi_default_model_rejects_group_or_other_writable_settings(tmp_path: Path) -> None:
-    """Pi must not trust a default that another account can modify."""
+def test_pi_default_model_reads_settings_with_any_permission_bits(tmp_path: Path) -> None:
+    """Settings ownership and mode are host policy and do not stop the reader."""
     pi_dir = tmp_path / "pi-agent"
     pi_dir.mkdir()
     settings_path = pi_dir / "settings.json"
@@ -6541,26 +6541,9 @@ def test_pi_default_model_rejects_group_or_other_writable_settings(tmp_path: Pat
         '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B"}',
         encoding="utf-8",
     )
-    settings_path.chmod(0o622)
+    settings_path.chmod(0o666)
 
-    with pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"):
-        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
-
-
-def test_pi_default_model_rejects_settings_owned_by_another_user(tmp_path: Path) -> None:
-    """Pi must not trust settings that another account owns."""
-    pi_dir = tmp_path / "pi-agent"
-    pi_dir.mkdir()
-    (pi_dir / "settings.json").write_text(
-        '{"defaultProvider":"IFM","defaultModel":"K2-Horizon-0.9B"}',
-        encoding="utf-8",
-    )
-
-    with (
-        patch("hephaestus.agents.runtime.os.getuid", return_value=os.getuid() + 1),
-        pytest.raises(agent_runtime.AgentExecutionError, match="Pi default model configuration"),
-    ):
-        agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir)
+    assert agent_runtime.resolve_pi_model_reference("", pi_dir=pi_dir) == "IFM/K2-Horizon-0.9B"
 
 
 @pytest.mark.parametrize(

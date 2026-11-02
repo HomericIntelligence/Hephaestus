@@ -725,14 +725,15 @@ def _pi_models_configured(pi_dir: Path | None = None) -> bool:
 
 
 def _validate_pi_settings_metadata(metadata: os.stat_result) -> None:
-    """Validate one snapshot of the trusted global Pi settings file."""
+    """Validate one snapshot of the operator-global Pi settings file.
+
+    The check keeps the bounded-regular-file guard. Ownership and permission
+    bits are host policy. Hephaestus does not read them, so a shared check-out
+    keeps its own mode without stopping the reader.
+    """
     if not stat.S_ISREG(metadata.st_mode):
         raise OSError
     if metadata.st_size > PI_CONFIG_MAX_BYTES:
-        raise OSError
-    if not hasattr(os, "getuid") or metadata.st_uid != os.getuid():
-        raise OSError
-    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise OSError
 
 
