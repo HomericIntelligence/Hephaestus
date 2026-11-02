@@ -149,15 +149,13 @@ def test_apply_no_selection_removes_all_severity() -> None:
 
 
 def test_main_rejects_non_numeric_issue_number() -> None:
-    """A non-numeric (injection-shaped) issue number exits 1 without API calls."""
-    with pytest.raises(SystemExit):
-        sl.main(["--repo", "o/r", "--issue-number", "7; rm -rf /", "--body-file", "-"])
+    """A non-numeric (injection-shaped) issue number is a usage error without API calls."""
+    assert sl.main(["--repo", "o/r", "--issue-number", "7; rm -rf /", "--body-file", "-"]) == 2
 
 
 def test_main_rejects_missing_github_repository() -> None:
-    """Missing GITHUB_REPOSITORY exits 1 with a descriptive error."""
-    with pytest.raises(SystemExit):
-        sl.main(["--issue-number", "42", "--body-file", "-"])
+    """A missing --repo is a usage error that makes no API call."""
+    assert sl.main(["--issue-number", "42", "--body-file", "-"]) == 2
 
 
 def test_main_rejects_malformed_github_repository(
@@ -183,6 +181,4 @@ def test_main_reconciles_on_valid_input(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_main_help_does_not_touch_env() -> None:
     """``--help`` exits 0 without requiring the workflow env vars (entry-point test)."""
-    with pytest.raises(SystemExit) as exc:
-        sl.main(["--help"])
-    assert exc.value.code == 0
+    assert sl.main(["--help"]) == 0
