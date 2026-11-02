@@ -57,7 +57,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.config.paths import resolve_projects_dir
-from hephaestus.constants import AGENT_REVIEW_TIMEOUT
+from hephaestus.constants import AGENT_REVIEW_TIMEOUT, IMPLEMENTER_CHECKPOINT_INTERVAL_S
 from hephaestus.utils.git import _is_full_commit_sha, run_git
 from hephaestus.utils.helpers import get_repo_root
 
@@ -754,6 +754,16 @@ def build_parser(*, profile: str = "full") -> argparse.ArgumentParser:
             f"--{name}-timeout", type=_parse_positive_int, default=default, metavar="SECONDS"
         )
     parser.add_argument(
+        "--implementer-checkpoint-interval",
+        type=_parse_non_negative_int,
+        default=IMPLEMENTER_CHECKPOINT_INTERVAL_S,
+        metavar="SECONDS",
+        help=text(
+            "Periodic implementer progress and lane checkpoint interval in seconds "
+            "(default: 0, disabled); a positive value enables the checkpoint feature."
+        ),
+    )
+    parser.add_argument(
         "--phase-timeout",
         type=float,
         default=7800.0,
@@ -855,6 +865,7 @@ def build_config(
         "planner_timeout",
         "reviewer_timeout",
         "implementer_timeout",
+        "implementer_checkpoint_interval",
         "address_review_timeout",
         "git_message_timeout",
         "poll_max_wait",
