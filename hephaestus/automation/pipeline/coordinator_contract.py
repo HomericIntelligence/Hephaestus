@@ -222,9 +222,11 @@ if TYPE_CHECKING:
 
         def _record_event(self, event: str, *fields: ct.Any) -> None: ...
 
-        def _hold_fleet_item(self, item: WorkItem, hold: str, *, reason: str = "") -> None: ...
+        def _hold_fleet_item(self, item: WorkItem, hold: str, *, reason: str = "") -> None:
+            """End this run and keep the item's external admission and lease."""
 
-        def _bind_fleet_job(self, item: WorkItem, job: Any) -> Any: ...
+        def _bind_fleet_job(self, item: WorkItem, job: Any) -> Any:
+            """Return the job the Fleet executor may run, or None to hold it."""
 
         @staticmethod
         def _item_key(item: ct.WorkItem) -> str: ...

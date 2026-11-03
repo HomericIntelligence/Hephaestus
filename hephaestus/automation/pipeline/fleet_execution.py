@@ -205,13 +205,11 @@ class FleetController(Protocol):
 
     async def fleet_get(self, kind: str, resource_id: str) -> dict[str, Any]:
         """Read an existing controller resource."""
-        ...
 
     async def fleet_command(
         self, kind: str, resource_id: str, operation: str, body: dict[str, Any]
     ) -> dict[str, Any]:
         """Submit one control command through the canonical controller."""
-        ...
 
 
 class PrivateWorkerExchange(Protocol):
@@ -219,7 +217,6 @@ class PrivateWorkerExchange(Protocol):
 
     def __call__(self, message: dict[str, Any], timeout: float) -> dict[str, Any]:
         """Exchange one bounded private worker message."""
-        ...
 
 
 class FleetJobExecutor(Protocol):
@@ -228,7 +225,6 @@ class FleetJobExecutor(Protocol):
     @property
     def attempt(self) -> FleetAttempt:
         """Return the caller's existing admission references."""
-        ...
 
     def execute(
         self,
@@ -240,7 +236,6 @@ class FleetJobExecutor(Protocol):
         source_fence: FleetAttemptFence | None = None,
     ) -> JobResult:
         """Return one result while the worker retains its source lease."""
-        ...
 
 
 def is_initial_implementation(job: AgentJob) -> bool:
