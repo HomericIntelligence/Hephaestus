@@ -1,5 +1,6 @@
 """Tests for hephaestus.validation.audit."""
 
+import inspect
 import io
 import json
 import os
@@ -746,9 +747,9 @@ class TestFilterAuditResults:
 
     def test_no_advisory_id_bypass(self) -> None:
         """The public filter has no caller-controlled suppression input."""
-        data = self._make_data([{"id": "CVE-SKIP", "severity": [{"score": 9.5}]}])
-        with pytest.raises(TypeError):
-            filter_audit_results(data, ignore_ids=frozenset({"CVE-SKIP"}))  # type: ignore[call-arg]
+        parameters = inspect.signature(filter_audit_results).parameters
+        assert "ignore_ids" not in parameters
+        assert list(parameters) == ["data", "threshold"]
 
     def test_no_vulnerabilities(self) -> None:
         """No vulnerabilities returns empty lists."""
