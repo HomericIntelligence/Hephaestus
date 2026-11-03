@@ -72,10 +72,10 @@ precommit:
 # Run lint + format-check + typecheck
 check: lint format-check typecheck
 
-# Audit dependencies for known vulnerabilities via the configured policy
-# (hephaestus-filter-audit + .pip-audit-ignore.txt)
+# Audit dependencies through the canonical scanner and suppression ledger
+# (.pip-audit-ignore.txt); the wrapper owns the scanner exit code
 audit:
-    uv run pip-audit --format json | uv run hephaestus-filter-audit
+    uv run hephaestus-filter-audit --scan
 
 # Generate API reference documentation with pdoc (output: docs/api/)
 docs:

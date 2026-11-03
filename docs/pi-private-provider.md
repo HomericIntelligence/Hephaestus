@@ -61,6 +61,12 @@ GitHub/cloud credentials, or an operator's telemetry preference; it forces
 `PI_TELEMETRY=0` and `PI_SKIP_VERSION_CHECK=1`. A generated Pi session ID is
 discarded and never printed or written to the diagnostic artifact.
 
+The smoke path sends only the operator's bounded smoke prompt to the
+operator-selected provider. It adds no GitHub or repository context of its own.
+Normal `--agent pi` automation stays fail-closed until the host registers a
+reviewed isolation adapter. [PRIVACY.md](../PRIVACY.md) records the provider
+boundary and the local smoke artifacts.
+
 The smoke command writes each artifact below a fresh, owner-only
 `pi-smoke-*` run directory under `--log-dir`; it never reuses a caller-supplied
 directory for an artifact. Before Pi runs, the wrapper verifies the complete

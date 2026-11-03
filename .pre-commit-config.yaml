@@ -75,9 +75,9 @@ repos:
   - repo: local
     hooks:
       - id: pip-audit
-        name: pip-audit (CVE scan)
-        description: Scan dependencies for known CVEs
-        entry: uv run pip-audit
+        name: pip-audit (canonical CVE policy)
+        description: Run the canonical scanner and structured suppression ledger
+        entry: uv run hephaestus-filter-audit --scan
         language: system
         pass_filenames: false
         stages: [manual]
