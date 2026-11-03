@@ -34,7 +34,12 @@ class TestNATSSubscriberCircuitBreaker:
     def test_persistent_connection_failures_open_circuit_and_enter_error(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        # The breaker takes its recovery timeout from max_backoff_seconds. Keep
+        # that far above a scheduler pause: at 10 ms an oversubscribed runner can
+        # flip the circuit to HALF_OPEN between the fifth failure and the OPEN
+        # check, so the loop retries once, the wait callback sets the stop event,
+        # and the thread exits as STOPPED instead of ERROR.
+        thread = NATSSubscriberThread(config=_config(max_backoff_seconds=60.0), handler=MagicMock())
         loop = MagicMock()
         sensitive_text = "token=known-test-value"
         caplog.set_level("ERROR", logger="hephaestus.nats.subscriber")
