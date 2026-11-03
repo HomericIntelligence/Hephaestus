@@ -49,23 +49,29 @@ jobs:
       - name: Build CI image (podman)
         run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Run pip-audit (in container)
+      - name: Run canonical dependency audit policy
         id: pip-audit
-        run: podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 hephaestus-ci:local uv run pip-audit
+        run: |
+          set +e
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
+            hephaestus-ci:local uv run hephaestus-filter-audit --scan
+          audit_exit_code=$?
+          echo "exit_code=${audit_exit_code}" >> "$GITHUB_OUTPUT"
+          exit "${audit_exit_code}"
 
-      - name: Post pip-audit summary
+      - name: Post dependency audit summary
         if: always()
         env:
-          AUDIT_OUTCOME: ${{ steps.pip-audit.outcome }}
+          AUDIT_EXIT_CODE: ${{ steps.pip-audit.outputs.exit_code }}
         run: |
           {
-            echo "## pip-audit Security Scan"
+            echo "## Dependency Audit (canonical policy)"
             echo ""
-            if [ "$AUDIT_OUTCOME" = "success" ]; then
-              echo "No HIGH/CRITICAL vulnerabilities found."
-            else
-              echo "Vulnerabilities detected — see job logs for details."
-            fi
+            case "$AUDIT_EXIT_CODE" in
+              0) echo "No unsuppressed HIGH, CRITICAL, or unscored vulnerabilities found." ;;
+              1) echo "Blocking vulnerabilities found; see the job log." ;;
+              *) echo "The audit could not produce a verdict; see the job log." ;;
+            esac
           } >> "$GITHUB_STEP_SUMMARY"
 
   sast:

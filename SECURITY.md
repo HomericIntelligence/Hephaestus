@@ -203,9 +203,27 @@ data-subject request channel are published in [PRIVACY.md](PRIVACY.md).
 
 ### Dependency Suppression Ledger
 
-Known-but-accepted dependency vulnerabilities are tracked in the pip-audit
-suppression ledger (`pyproject.toml`, `[feature.lint.tasks]`). Every suppression
-must carry a re-review trigger; this is enforced at commit time by the
-`check-pip-audit-ledger-reminder` pre-commit hook
-(`scripts/check_pip_audit_ledger_reminder.py`). The weekly `Security`
-workflow (`.github/workflows/security.yml`) re-scans for new vulnerabilities.
+Known-but-accepted dependency vulnerabilities are tracked in the structured
+suppression ledger [`.pip-audit-ignore.txt`](.pip-audit-ignore.txt). Only the
+canonical scan path reads the ledger:
+
+```bash
+uv run hephaestus-filter-audit --scan
+```
+
+Each record names the advisory, the package, the exact version, the approving
+GitHub owner, the review reference, an expiry date, and a rationale. The scan
+rejects a malformed record, an expired record, a record that matches no current
+finding, and a record that matches more than one finding. A pull request
+approves a record.
+
+The required job `security/dependency-scan` in
+[`.github/workflows/_required.yml`](.github/workflows/_required.yml) is the
+enforcement authority. The weekly `Security` workflow
+([`.github/workflows/security.yml`](.github/workflows/security.yml)) runs the
+same command.
+
+The scan exits 0 when no unsuppressed blocking finding exists, 1 when an
+unsuppressed HIGH, CRITICAL, or unscored finding exists, and 2 when the scan
+cannot produce a verdict. An operational failure is not a vulnerability
+finding.

@@ -1,6 +1,24 @@
-# pip-audit suppression policy, consumed by `hephaestus-filter-audit`
-# (see hephaestus/validation/audit.py). One advisory ID per line;
-# `#` starts a comment.
+# Canonical pip-audit suppression ledger. Only
+# `uv run hephaestus-filter-audit --scan` reads this file.
 #
-# No vulnerability suppressions are currently approved. Any future entry must
-# be version-scoped, time-bounded, and documented in the security review.
+# One record per physical line, in this exact order:
+#   advisory=ID | package=canonical-name | version=PEP440 | owner=@login | review=issue:#N | expires=YYYY-MM-DD | rationale=TEXT
+#
+# `review=pr:#N` is also accepted.
+#
+# Rules:
+# - Use exactly seven fields in the order above, separated by " | ".
+# - Blank lines and full-line comments are allowed. Inline comments are not.
+# - Escaping is not supported. A value must not contain "|".
+# - `advisory` is an uppercase advisory identifier, such as GHSA-abcd-2345-6789.
+# - `package` is a PEP 503 normalized name.
+# - `version` is a canonical PEP 440 version.
+# - `owner` is the GitHub login that approved the record.
+# - `review` cites the issue or pull request that approved the record.
+# - `expires` is an ISO date that is not in the past.
+# - `rationale` is 1 to 200 characters and has no control characters.
+# - Two records cannot name the same advisory, package, and version.
+# - Each record must match exactly one current finding.
+#
+# A rejected record stops the scan with exit code 2. No vulnerability
+# suppressions are currently approved.

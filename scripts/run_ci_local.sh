@@ -13,7 +13,7 @@
 #   ./scripts/run_ci_local.sh integration  # full integration tests (nightly)
 #   ./scripts/run_ci_local.sh cli          # installed-CLI tests (nightly)
 #   ./scripts/run_ci_local.sh build        # artifact and package tests (nightly)
-#   ./scripts/run_ci_local.sh audit        # pip-audit dependency scan
+#   ./scripts/run_ci_local.sh audit        # dependency vulnerability scan
 #   ./scripts/run_ci_local.sh sast         # bandit static analysis
 #   ./scripts/run_ci_local.sh workflow-scan # zizmor workflow security scan
 #   ./scripts/run_ci_local.sh schema       # workflow YAML schema validation
@@ -613,8 +613,8 @@ run_build() {
 }
 
 run_audit() {
-    log_step "Dependency scan (pip-audit)"
-    run_in_container uv run pip-audit
+    log_step "Dependency vulnerability scan"
+    run_in_container uv run hephaestus-filter-audit --scan
 }
 
 run_sast() {
