@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         _RepoEntrySource,
     )
     from .events import StageEvent
+    from .fleet_execution import FleetExecutor
     from .jobs import JobHandle, JobResult
     from .queues import CompletionQueue, StageQueue, StageQueueLease
     from .routing import Route, StageName
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
         """State and cross-collaborator methods supplied by ``Coordinator``."""
 
         config: PipelineConfig
+        _fleet_executor: FleetExecutor | None
         github: StageGitHub
         _github_factory: Callable[[str, Path], StageGitHub] | None
         shutdown: Event
@@ -219,6 +221,12 @@ if TYPE_CHECKING:
         ) -> None: ...
 
         def _record_event(self, event: str, *fields: ct.Any) -> None: ...
+
+        def _hold_fleet_item(self, item: WorkItem, hold: str, *, reason: str = "") -> None:
+            """End this run and keep the item's external admission and lease."""
+
+        def _bind_fleet_job(self, item: WorkItem, job: Any) -> Any:
+            """Return the job the Fleet executor may run, or None to hold it."""
 
         @staticmethod
         def _item_key(item: ct.WorkItem) -> str: ...

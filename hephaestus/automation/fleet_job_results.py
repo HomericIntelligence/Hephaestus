@@ -118,7 +118,12 @@ class FleetJobResults:
                     "result": None,
                 }
             )
-        return {"schema": SCHEMA, "jobId": message["jobId"], "status": "associated"}
+        return {
+            "schema": SCHEMA,
+            "jobId": message["jobId"],
+            "status": "associated",
+            "lease": dict(lease),
+        }
 
     def before_input(self, command: dict[str, Any], session: dict[str, Any]) -> None:
         """Persist the effect boundary before a matching admitted turn starts."""

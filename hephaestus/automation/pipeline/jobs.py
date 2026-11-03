@@ -38,6 +38,8 @@ from .repository_validation_preparation import RepositoryValidationRuntimeReques
 if TYPE_CHECKING:
     from hephaestus.agents.codex_isolation import CodexIsolationRequestV1
 
+    from .fleet_execution import FleetAttempt
+
 
 __all__ = [
     "GIT_OPS",
@@ -127,6 +129,7 @@ class AgentJob:
     deadline_s: float | None = None
     dirty_plan: DirtyDirectPlanInput | None = None
     source_operation: DirtySourceOperation | None = None
+    fleet_attempt: FleetAttempt | None = None
 
     def __post_init__(self) -> None:
         """Validate an optional operation-wide monotonic deadline."""
