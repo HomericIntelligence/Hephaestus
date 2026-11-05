@@ -31,7 +31,7 @@ from hephaestus.cli.utils import (  # noqa: E402
     add_github_throttle_args,
     configure_github_throttle_from_args,
 )
-from hephaestus.github.client import gh_call  # noqa: E402
+from hephaestus.git.gh.client import gh_call  # noqa: E402
 
 STAGES = (
     "planning",

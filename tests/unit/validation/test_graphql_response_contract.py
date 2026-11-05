@@ -28,7 +28,7 @@ class _GraphQLBoundaryVisitor(ast.NodeVisitor):
     visit_AsyncFunctionDef = visit_FunctionDef  # type: ignore[assignment]  # noqa: N815
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
-        if node.module == "hephaestus.github.client" and any(
+        if node.module == "hephaestus.git.gh.client" and any(
             alias.name in {"gh_call", "_gh_call"} for alias in node.names
         ):
             self.violations.append("raw gh_call import")

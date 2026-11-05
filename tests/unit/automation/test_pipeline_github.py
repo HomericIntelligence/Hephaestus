@@ -51,7 +51,7 @@ from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
 )
-from hephaestus.github.client import GitHubRateLimitError
+from hephaestus.git.gh.client import GitHubRateLimitError
 
 
 def _assert_bounded_command_kwargs(kwargs: Mapping[str, Any], started_at: float) -> None:

@@ -23,7 +23,7 @@ from enum import StrEnum
 from threading import Event, Lock
 from typing import Any
 
-from hephaestus.github.client import gh_call
+from hephaestus.git.gh.client import gh_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 logger = logging.getLogger(__name__)

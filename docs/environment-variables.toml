@@ -271,7 +271,7 @@ validation = "path"
 direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
-  { path = "hephaestus/github/rate_limit.py", reader = "_runtime_base_dir", access = "read" },
+  { path = "hephaestus/git/gh/rate_limit.py", reader = "_runtime_base_dir", access = "read" },
   {path = "hephaestus/config/child_environments.py", reader = "build_nested_host_verification_env", access = "read"},
 ]
 

@@ -292,7 +292,7 @@ from hephaestus.config.child_environments import (
     build_host_verification_env,
     build_python_phase_env,
 )
-from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
+from hephaestus.git.gh.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
     CircuitBreakerOpenError,

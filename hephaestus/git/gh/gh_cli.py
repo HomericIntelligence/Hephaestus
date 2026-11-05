@@ -16,7 +16,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.errors import boundary_main
-from hephaestus.github.client import (
+from hephaestus.git.gh.client import (
     DEFAULT_GH_TIMEOUT,
     ClaudeUsageCapError,
     GitHubRateLimitError,
@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(argv: list[str] | None = None) -> int:
-    """Run ``gh`` via :func:`hephaestus.github.client.gh_call`."""
+    """Run ``gh`` via :func:`hephaestus.git.gh.client.gh_call`."""
     parser = build_parser()
     args = parser.parse_args(argv)
     gh_args = list(args.gh_args)

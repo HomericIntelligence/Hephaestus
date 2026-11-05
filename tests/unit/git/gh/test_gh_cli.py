@@ -6,7 +6,7 @@ import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
-from hephaestus.github.gh_cli import main
+from hephaestus.git.gh.gh_cli import main
 
 
 def _completed(
@@ -17,8 +17,8 @@ def _completed(
     return subprocess.CompletedProcess(["gh"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
-@patch("hephaestus.github.gh_cli.configure_github_throttle_from_args")
-@patch("hephaestus.github.gh_cli.gh_call")
+@patch("hephaestus.git.gh.gh_cli.configure_github_throttle_from_args")
+@patch("hephaestus.git.gh.gh_cli.gh_call")
 def test_json_success_emits_single_envelope(
     mock_gh_call: MagicMock,
     _mock_configure: MagicMock,
@@ -39,8 +39,8 @@ def test_json_success_emits_single_envelope(
     mock_gh_call.assert_called_once_with(["api", "rate_limit"], timeout=120)
 
 
-@patch("hephaestus.github.gh_cli.configure_github_throttle_from_args")
-@patch("hephaestus.github.gh_cli.gh_call")
+@patch("hephaestus.git.gh.gh_cli.configure_github_throttle_from_args")
+@patch("hephaestus.git.gh.gh_cli.gh_call")
 def test_explicit_gh_timeout_reaches_adapter(
     mock_gh_call: MagicMock,
     _mock_configure: MagicMock,
@@ -53,8 +53,8 @@ def test_explicit_gh_timeout_reaches_adapter(
     mock_gh_call.assert_called_once_with(["api", "rate_limit"], timeout=37)
 
 
-@patch("hephaestus.github.gh_cli.configure_github_throttle_from_args")
-@patch("hephaestus.github.gh_cli.gh_call")
+@patch("hephaestus.git.gh.gh_cli.configure_github_throttle_from_args")
+@patch("hephaestus.git.gh.gh_cli.gh_call")
 def test_json_called_process_error_emits_envelope(
     mock_gh_call: MagicMock, _mock_configure: MagicMock, capsys
 ) -> None:
@@ -75,8 +75,8 @@ def test_json_called_process_error_emits_envelope(
     assert payload["stderr"] == "denied"
 
 
-@patch("hephaestus.github.gh_cli.configure_github_throttle_from_args")
-@patch("hephaestus.github.gh_cli.gh_call")
+@patch("hephaestus.git.gh.gh_cli.configure_github_throttle_from_args")
+@patch("hephaestus.git.gh.gh_cli.gh_call")
 def test_runtime_error_returns_stable_nonzero(
     mock_gh_call: MagicMock, _mock_configure: MagicMock, capsys
 ) -> None:

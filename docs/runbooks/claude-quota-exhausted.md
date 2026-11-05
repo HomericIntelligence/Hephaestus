@@ -3,7 +3,7 @@
 Use this when a stage stops making progress because the Claude API session
 limit / quota was hit (HTTP 429). Grounded in
 `hephaestus/automation/claude_invoke.py` and
-`hephaestus/github/rate_limit.py`.
+`hephaestus/git/gh/rate_limit.py`.
 
 ## Symptom
 

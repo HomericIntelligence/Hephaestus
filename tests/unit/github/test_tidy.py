@@ -1986,12 +1986,12 @@ class TestTimeoutHandling:
         """_detect_default_branch passes a positive timeout through gh_call.
 
         _detect_default_branch now routes through
-        :func:`hephaestus.github.client.gh_call`, which invokes the subprocess
+        :func:`hephaestus.git.gh.client.gh_call`, which invokes the subprocess
         via ``run_subprocess`` with ``timeout=gh_cli_timeout()`` (#713). Assert
         at that seam that a positive timeout is still supplied, preserving the
         no-timeout-less-read invariant after the adapter move.
         """
-        with patch("hephaestus.github.client.run_subprocess") as mock_run:
+        with patch("hephaestus.git.gh.client.run_subprocess") as mock_run:
             mock_run.return_value = MagicMock(stdout="main\n")
             _detect_default_branch(None)
             # Verify the call included a positive timeout

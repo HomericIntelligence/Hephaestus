@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from hephaestus.github import client, rate_limit
+from hephaestus.git.gh import client, rate_limit
 
 _LIMIT_MESSAGE = "GraphQL: API rate limit exceeded for user ID 1"
 _RESET_EPOCH = 1_700_000_000

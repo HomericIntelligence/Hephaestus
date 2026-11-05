@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-import hephaestus.github.client as client
+import hephaestus.git.gh.client as client
 
 
 @pytest.fixture(autouse=True)

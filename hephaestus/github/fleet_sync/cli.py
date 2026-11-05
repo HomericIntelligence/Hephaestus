@@ -19,7 +19,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.errors import boundary_main
-from hephaestus.github.client import positive_timeout
+from hephaestus.git.gh.client import positive_timeout
 from hephaestus.github.fleet_sync.config import resolve_fleet_config
 from hephaestus.github.fleet_sync.models import (
     ASCII_SYMBOLS,

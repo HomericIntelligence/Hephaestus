@@ -3,7 +3,7 @@
 The contract lane exercises the real external command-line boundaries used by
 the automation layer:
 
-- `hephaestus.github.client.gh_call` for authenticated, read-only GitHub calls.
+- `hephaestus.git.gh.client.gh_call` for authenticated, read-only GitHub calls.
 - `hephaestus.automation.claude_invoke.invoke_claude_with_session` for a real
   Claude session create-and-resume flow.
 

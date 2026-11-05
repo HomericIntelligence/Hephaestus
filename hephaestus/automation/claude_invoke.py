@@ -43,8 +43,8 @@ from hephaestus.automation.agent_config import (
     session_uuid,
 )
 from hephaestus.config.child_environments import build_claude_child_env
-from hephaestus.github.client import ClaudeUsageCapError, PromptTooLongError
-from hephaestus.github.rate_limit import resolve_quota_reset_epoch
+from hephaestus.git.gh.client import ClaudeUsageCapError, PromptTooLongError
+from hephaestus.git.gh.rate_limit import resolve_quota_reset_epoch
 from hephaestus.utils.helpers import strip_null_bytes
 
 logger = logging.getLogger(__name__)
@@ -523,7 +523,7 @@ def scan_quota_reset(*texts: str) -> int | None:
     """Find a quota-reset epoch across one or more output streams.
 
     Thin wrapper over the single common resolver
-    :func:`hephaestus.github.rate_limit.resolve_quota_reset_epoch` (#1321), so
+    :func:`hephaestus.git.gh.rate_limit.resolve_quota_reset_epoch` (#1321), so
     the planner and plan-reviewer agent paths share one detection surface with
     the implementer — including the Claude session-limit 429 phrasing the older
     two-detector logic missed. ``is not None`` chaining preserves an epoch of

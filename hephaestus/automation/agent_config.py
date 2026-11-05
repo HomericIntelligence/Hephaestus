@@ -197,9 +197,9 @@ def git_message_agent_timeout() -> int:
     return DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 
 
-# Re-exported from hephaestus.github.client so the gh-adapter timeout lives
+# Re-exported from hephaestus.git.gh.client so the gh-adapter timeout lives
 # with the gh adapter; this alias preserves the legacy import path.
-from hephaestus.github.client import gh_cli_timeout  # noqa: E402
+from hephaestus.git.gh.client import gh_cli_timeout  # noqa: E402
 
 # ── Session naming ───────────────────────────────────────────────────────────
 

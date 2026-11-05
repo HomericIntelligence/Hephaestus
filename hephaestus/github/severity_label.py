@@ -35,7 +35,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.errors import boundary_main
-from hephaestus.github.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
+from hephaestus.git.gh.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
 
 # Allow-list: the only labels this tool may ever apply. Mirrors the provisioned
 # ``severity:*`` labels (verified via ``gh label list``).
