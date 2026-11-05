@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for hephaestus.github.client.gh_call public contract."""
+"""Tests for hephaestus.git.gh.client.gh_call public contract."""
 
 import subprocess
 import sys
@@ -9,8 +9,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-import hephaestus.github.client as client_module
-from hephaestus.github.client import (
+import hephaestus.git.gh.client as client_module
+from hephaestus.git.gh.client import (
     _GH_BREAKER,
     ClaudeUsageCapError,
     GitHubRateLimitError,
@@ -114,7 +114,7 @@ class TestBreakerPredicateWiring:
         job on every Python version.
         """
         proc = subprocess.run(
-            [sys.executable, "-c", "import hephaestus.github.client"],
+            [sys.executable, "-c", "import hephaestus.git.gh.client"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -140,9 +140,9 @@ class TestBreakerPredicateWiring:
 class TestThrottleOptOut:
     """GraphQL's one-attempt path can skip sleeps without bypassing the breaker."""
 
-    @patch("hephaestus.github.client._gh_throttle_wait")
-    @patch("hephaestus.github.client.gh_global_throttle_acquire")
-    @patch("hephaestus.github.client.run_subprocess")
+    @patch("hephaestus.git.gh.client._gh_throttle_wait")
+    @patch("hephaestus.git.gh.client.gh_global_throttle_acquire")
+    @patch("hephaestus.git.gh.client.run_subprocess")
     def test_throttle_false_skips_both_throttles(
         self,
         mock_run: Mock,
@@ -158,9 +158,9 @@ class TestThrottleOptOut:
         mock_global.assert_not_called()
         mock_thread.assert_not_called()
 
-    @patch("hephaestus.github.client._gh_throttle_wait")
-    @patch("hephaestus.github.client.gh_global_throttle_acquire")
-    @patch("hephaestus.github.client.run_subprocess")
+    @patch("hephaestus.git.gh.client._gh_throttle_wait")
+    @patch("hephaestus.git.gh.client.gh_global_throttle_acquire")
+    @patch("hephaestus.git.gh.client.run_subprocess")
     def test_throttle_defaults_to_enabled(
         self,
         mock_run: Mock,
@@ -174,9 +174,9 @@ class TestThrottleOptOut:
         mock_global.assert_called_once()
         mock_thread.assert_called_once()
 
-    @patch("hephaestus.github.client._gh_throttle_wait")
-    @patch("hephaestus.github.client.gh_global_throttle_acquire")
-    @patch("hephaestus.github.client.run_subprocess")
+    @patch("hephaestus.git.gh.client._gh_throttle_wait")
+    @patch("hephaestus.git.gh.client.gh_global_throttle_acquire")
+    @patch("hephaestus.git.gh.client.run_subprocess")
     def test_throttle_opt_out_preserves_process_group_tracking(
         self,
         mock_run: Mock,
@@ -344,7 +344,7 @@ class TestBreakerIgnoresPerTargetErrors:
     )
 
     @pytest.mark.parametrize("stderr", PER_TARGET)
-    @patch("hephaestus.github.client._gh_call_impl")
+    @patch("hephaestus.git.gh.client._gh_call_impl")
     def test_per_target_errors_never_open_breaker(self, mock_impl: Mock, stderr: str) -> None:
         """Well past failure_threshold=5, the breaker stays closed."""
         mock_impl.side_effect = _gh_error(stderr)
@@ -358,7 +358,7 @@ class TestBreakerIgnoresPerTargetErrors:
             gh_call(["api", "graphql"], log_on_error=False)
         assert mock_impl.call_count == 11
 
-    @patch("hephaestus.github.client._gh_call_impl")
+    @patch("hephaestus.git.gh.client._gh_call_impl")
     def test_swallowed_404s_do_not_poison_a_later_unrelated_call(self, mock_impl: Mock) -> None:
         """The exact #1795 shape: caller catches each 404; a later call still succeeds.
 
@@ -385,7 +385,7 @@ class TestBreakerIgnoresPerTargetErrors:
             "gh: HTTP 403: Forbidden",
         ],
     )
-    @patch("hephaestus.github.client._gh_call_impl")
+    @patch("hephaestus.git.gh.client._gh_call_impl")
     def test_auth_errors_still_open_breaker(self, mock_impl: Mock, stderr: str) -> None:
         """401/403 are per-credential, not per-target: every later call fails too."""
         mock_impl.side_effect = _gh_error(stderr)
@@ -397,7 +397,7 @@ class TestBreakerIgnoresPerTargetErrors:
         with pytest.raises(GitHubUnavailableError):
             gh_call(["api", "graphql"], log_on_error=False)
 
-    @patch("hephaestus.github.client._gh_call_impl")
+    @patch("hephaestus.git.gh.client._gh_call_impl")
     def test_transient_failures_still_open_breaker(self, mock_impl: Mock) -> None:
         """A genuinely unavailable service must still trip the breaker."""
         mock_impl.side_effect = ConnectionError("connection reset by peer")
@@ -413,7 +413,7 @@ class TestBreakerIgnoresPerTargetErrors:
 class TestGhCallCircuitBreaker:
     """Test CircuitBreaker wrapping of gh_call."""
 
-    @patch("hephaestus.github.client._gh_call_impl")
+    @patch("hephaestus.git.gh.client._gh_call_impl")
     def test_breaker_transitions_to_open_on_failures(self, mock_impl: Mock) -> None:
         """Circuit breaker transitions from CLOSED to OPEN after 5 consecutive failures."""
         # Simulate 5xx failures
@@ -436,7 +436,7 @@ class TestGhCallCircuitBreaker:
         # Circuit is open: mock should NOT be called again (fail-fast)
         assert mock_impl.call_count == 5
 
-    @patch("hephaestus.github.client._gh_call_impl")
+    @patch("hephaestus.git.gh.client._gh_call_impl")
     def test_circuit_breaker_open_error_is_runtime_error(self, mock_impl: Mock) -> None:
         """GitHubUnavailableError is a RuntimeError subclass."""
         mock_impl.side_effect = subprocess.CalledProcessError(
@@ -460,7 +460,7 @@ class TestGhCallCircuitBreaker:
 class TestGhCallRateLimit:
     """Test rate limit handling in gh_call."""
 
-    @patch("hephaestus.github.client._gh_call_impl")
+    @patch("hephaestus.git.gh.client._gh_call_impl")
     def test_propagates_rate_limit_error(self, mock_impl: Mock) -> None:
         """gh_call propagates GitHubRateLimitError with reset_epoch."""
         mock_impl.side_effect = GitHubRateLimitError("rate limited", reset_epoch=1234)
@@ -472,7 +472,7 @@ class TestGhCallRateLimit:
 class TestGhCallClaudeCap:
     """Test Claude usage cap handling in gh_call."""
 
-    @patch("hephaestus.github.client._gh_call_impl")
+    @patch("hephaestus.git.gh.client._gh_call_impl")
     def test_propagates_claude_cap(self, mock_impl: Mock) -> None:
         """gh_call propagates ClaudeUsageCapError with reset_epoch."""
         mock_impl.side_effect = ClaudeUsageCapError("cap exceeded", reset_epoch=5678)
@@ -496,8 +496,8 @@ class TestGhCliTimeout:
         assert gh_cli_timeout(60) == 60
 
 
-@patch("hephaestus.github.client.time.sleep")
-@patch("hephaestus.github.client.run_subprocess")
+@patch("hephaestus.git.gh.client.time.sleep")
+@patch("hephaestus.git.gh.client.run_subprocess")
 def test_removed_per_thread_rate_environment_has_no_effect(
     run_subprocess: Mock,
     sleep: Mock,
@@ -514,25 +514,25 @@ def test_removed_per_thread_rate_environment_has_no_effect(
 
 
 class TestGhCallPublicExports:
-    """Test that gh_call is properly exported from hephaestus.github."""
+    """Test that gh_call is properly exported from hephaestus.git.gh."""
 
     def test_gh_call_exported_from_package(self) -> None:
-        """gh_call is exported from hephaestus.github.__init__."""
-        import hephaestus.github as github_pkg
+        """gh_call is exported from hephaestus.git.gh.__init__."""
+        import hephaestus.git.gh as gh_pkg
 
-        assert hasattr(github_pkg, "gh_call")
-        assert github_pkg.gh_call is gh_call
+        assert hasattr(gh_pkg, "gh_call")
+        assert gh_pkg.gh_call is gh_call
 
     def test_error_classes_exported_from_package(self) -> None:
-        """Error classes are exported from hephaestus.github.__init__."""
-        import hephaestus.github as github_pkg
+        """Error classes are exported from hephaestus.git.gh.__init__."""
+        import hephaestus.git.gh as gh_pkg
 
-        assert hasattr(github_pkg, "GitHubRateLimitError")
-        assert hasattr(github_pkg, "GitHubUnavailableError")
-        assert hasattr(github_pkg, "ClaudeUsageCapError")
-        assert github_pkg.GitHubRateLimitError is GitHubRateLimitError
-        assert github_pkg.GitHubUnavailableError is GitHubUnavailableError
-        assert github_pkg.ClaudeUsageCapError is ClaudeUsageCapError
+        assert hasattr(gh_pkg, "GitHubRateLimitError")
+        assert hasattr(gh_pkg, "GitHubUnavailableError")
+        assert hasattr(gh_pkg, "ClaudeUsageCapError")
+        assert gh_pkg.GitHubRateLimitError is GitHubRateLimitError
+        assert gh_pkg.GitHubUnavailableError is GitHubUnavailableError
+        assert gh_pkg.ClaudeUsageCapError is ClaudeUsageCapError
 
 
 class TestNonTransientErrorClassification:
@@ -545,7 +545,7 @@ class TestNonTransientErrorClassification:
         rejection was retried ~6× per finding (66× in one observed run) before
         the caller could fall back to posting its own editable comment.
         """
-        from hephaestus.github.client import _is_non_transient_error
+        from hephaestus.git.gh.client import _is_non_transient_error
 
         assert _is_non_transient_error("gh: Body is not editable") is True
 
@@ -556,13 +556,13 @@ class TestNonTransientErrorClassification:
         non-transient makes gh_pr_checks fail fast and convert it to [] without
         burning exponential backoff or logging spurious ERRORs.
         """
-        from hephaestus.github.client import _is_non_transient_error
+        from hephaestus.git.gh.client import _is_non_transient_error
 
         assert _is_non_transient_error("no checks reported on the '45-foo' branch") is True
 
     def test_transient_5xx_is_not_non_transient(self) -> None:
         """A 500 is retryable, so it must NOT be flagged non-transient."""
-        from hephaestus.github.client import _is_non_transient_error
+        from hephaestus.git.gh.client import _is_non_transient_error
 
         assert _is_non_transient_error("Internal Server Error (HTTP 500)") is False
 
@@ -574,7 +574,7 @@ class TestNonTransientErrorClassification:
         ``Expected VALUE, actual: UNKNOWN_CHAR``. Such syntax errors can never
         succeed on retry, so they must fail fast instead of being retried ~6×.
         """
-        from hephaestus.github.client import _is_non_transient_error
+        from hephaestus.git.gh.client import _is_non_transient_error
 
         assert (
             _is_non_transient_error(

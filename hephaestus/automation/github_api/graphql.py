@@ -20,14 +20,14 @@ from dataclasses import dataclass
 from typing import Any, TypeVar, cast, overload
 
 from hephaestus.automation.dependency_parser import MAX_DEPENDENCY_FACTS
-from hephaestus.github.client import (
+from hephaestus.git.gh.client import (
     ClaudeUsageCapError,
     GitHubRateLimitError,
     GitHubUnavailableError,
     gh_call as _raw_gh_call,
     gh_cli_timeout,
 )
-from hephaestus.github.rate_limit import detect_rate_limit, detect_secondary_rate_limit
+from hephaestus.git.gh.rate_limit import detect_rate_limit, detect_secondary_rate_limit
 
 from . import cache as _read_cache_mod
 

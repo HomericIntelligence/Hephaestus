@@ -33,7 +33,7 @@ from hephaestus.config.child_environments import (
     build_pi_child_env,
     read_approved_parent_env,
 )
-from hephaestus.github.client import gh_call
+from hephaestus.git.gh.client import gh_call
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CATALOG_PATH = REPOSITORY_ROOT / "hephaestus" / "agents" / "pi_package_catalog.json"

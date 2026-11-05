@@ -14,7 +14,7 @@ import subprocess
 from collections.abc import Callable
 from typing import Any
 
-from hephaestus.github.rate_limit import (
+from hephaestus.git.gh.rate_limit import (
     gh_rate_limit_reset_epoch as gh_rate_limit_reset_epoch,
 )
 from hephaestus.io.utils import write_secure as write_secure
@@ -47,7 +47,7 @@ _issue_state_cache: dict[tuple[str, str, int], IssueState] = {}
 # ``configure_github_read_cache``; None keeps the cache disabled.
 _gh_read_cache: Any = None
 
-from hephaestus.github.client import (  # noqa: E402
+from hephaestus.git.gh.client import (  # noqa: E402
     _GH_BREAKER as _GH_BREAKER,
     _GH_THROTTLE as _GH_THROTTLE,
 )

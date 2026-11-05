@@ -5,7 +5,7 @@ with countdown display. Subprocess probes route through Hephaestus's
 shared helper for consistent timeout handling.
 
 Usage:
-    from hephaestus.github.rate_limit import detect_rate_limit, wait_until
+    from hephaestus.git.gh.rate_limit import detect_rate_limit, wait_until
 
     epoch = detect_rate_limit(gh_stderr_output)
     if epoch is not None:
@@ -32,7 +32,7 @@ from typing import TextIO
 from zoneinfo import ZoneInfo
 
 from hephaestus.cli.localization import text
-from hephaestus.github.environment import gh_child_environment
+from hephaestus.git.gh.environment import gh_child_environment
 from hephaestus.utils.helpers import run_subprocess
 
 logger = logging.getLogger(__name__)

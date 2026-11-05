@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import hephaestus.github.client as github_client
+import hephaestus.git.gh.client as github_client
 
 pytestmark = [pytest.mark.integration, pytest.mark.contract]
 

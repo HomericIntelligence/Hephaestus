@@ -16,7 +16,7 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
-from hephaestus.github.rate_limit import (
+from hephaestus.git.gh.rate_limit import (
     ALLOWED_TIMEZONES,
     GRAPHQL_RATE_LIMIT_RE,
     RATE_LIMIT_RE,
@@ -203,8 +203,8 @@ class TestWaitUntil:
         """Returns immediately when epoch is now."""
         wait_until(int(time.time()))
 
-    @patch("hephaestus.github.rate_limit.time.sleep")
-    @patch("hephaestus.github.rate_limit.time.time")
+    @patch("hephaestus.git.gh.rate_limit.time.sleep")
+    @patch("hephaestus.git.gh.rate_limit.time.time")
     def test_waits_and_returns(self, mock_time: object, mock_sleep: object) -> None:
         """Waits for the countdown to finish."""
         # Simulate time passing: first call returns now, second returns past epoch
@@ -469,14 +469,14 @@ class TestGraphQLRateLimit:
         """When the GraphQL phrase appears, fall back to gh_rate_limit_reset_epoch."""
         text = "GraphQL: API rate limit already exceeded for user ID 4211002"
         with patch(
-            "hephaestus.github.rate_limit.gh_rate_limit_reset_epoch",
+            "hephaestus.git.gh.rate_limit.gh_rate_limit_reset_epoch",
             return_value=1_700_000_000,
         ):
             assert detect_rate_limit(text) == 1_700_000_000
 
     def test_detect_rate_limit_returns_zero_sentinel_when_probe_fails(self) -> None:
         text = "GraphQL: API rate limit exceeded for user ID 1"
-        with patch("hephaestus.github.rate_limit.gh_rate_limit_reset_epoch", return_value=None):
+        with patch("hephaestus.git.gh.rate_limit.gh_rate_limit_reset_epoch", return_value=None):
             assert detect_rate_limit(text) == 0
 
     def test_detect_rate_limit_prefers_rest_message_over_graphql(self) -> None:
@@ -486,7 +486,7 @@ class TestGraphQLRateLimit:
             "GraphQL: API rate limit already exceeded."
         )
         # Should not call the probe — the REST regex matches first.
-        with patch("hephaestus.github.rate_limit.gh_rate_limit_reset_epoch") as mock_probe:
+        with patch("hephaestus.git.gh.rate_limit.gh_rate_limit_reset_epoch") as mock_probe:
             result = detect_rate_limit(text)
             mock_probe.assert_not_called()
         assert isinstance(result, int)
@@ -501,7 +501,7 @@ class TestGhRateLimitResetEpoch:
 
     def test_returns_reset_from_gh_api(self) -> None:
         payload = '{"resources": {"graphql": {"reset": 1700000000, "remaining": 0}}}'
-        with patch("hephaestus.github.rate_limit.run_subprocess") as mock_run:
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
             mock_run.return_value.stdout = payload
             mock_run.return_value.returncode = 0
             assert gh_rate_limit_reset_epoch() == 1700000000
@@ -518,7 +518,7 @@ class TestGhRateLimitResetEpoch:
     def test_caches_within_ttl(self) -> None:
         """Second call within TTL must not re-invoke gh."""
         payload = '{"resources": {"graphql": {"reset": 1700000000}}}'
-        with patch("hephaestus.github.rate_limit.run_subprocess") as mock_run:
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
             mock_run.return_value.stdout = payload
             mock_run.return_value.returncode = 0
             gh_rate_limit_reset_epoch()
@@ -529,19 +529,19 @@ class TestGhRateLimitResetEpoch:
         import subprocess as sp
 
         with patch(
-            "hephaestus.github.rate_limit.run_subprocess",
+            "hephaestus.git.gh.rate_limit.run_subprocess",
             side_effect=sp.CalledProcessError(1, "gh"),
         ):
             assert gh_rate_limit_reset_epoch() is None
 
     def test_returns_none_on_invalid_json(self) -> None:
-        with patch("hephaestus.github.rate_limit.run_subprocess") as mock_run:
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
             mock_run.return_value.stdout = "not json"
             mock_run.return_value.returncode = 0
             assert gh_rate_limit_reset_epoch() is None
 
     def test_returns_none_when_resource_missing(self) -> None:
-        with patch("hephaestus.github.rate_limit.run_subprocess") as mock_run:
+        with patch("hephaestus.git.gh.rate_limit.run_subprocess") as mock_run:
             mock_run.return_value.stdout = '{"resources": {}}'
             mock_run.return_value.returncode = 0
             assert gh_rate_limit_reset_epoch() is None
@@ -575,11 +575,11 @@ class TestGlobalThrottle:
 
         with (
             patch(
-                "hephaestus.github.rate_limit.time.monotonic",
+                "hephaestus.git.gh.rate_limit.time.monotonic",
                 side_effect=monotonic_values,
             ),
             patch(
-                "hephaestus.github.rate_limit.time.sleep",
+                "hephaestus.git.gh.rate_limit.time.sleep",
                 side_effect=lambda seconds: sleep_calls.append(seconds),
             ),
         ):
@@ -612,9 +612,9 @@ class TestGlobalThrottle:
         state_path = _global_throttle_state_path()
 
         with (
-            patch("hephaestus.github.rate_limit.time.monotonic") as mock_monotonic,
+            patch("hephaestus.git.gh.rate_limit.time.monotonic") as mock_monotonic,
             patch(
-                "hephaestus.github.rate_limit.time.sleep",
+                "hephaestus.git.gh.rate_limit.time.sleep",
                 side_effect=AssertionError("disabled throttle must not sleep"),
             ) as mock_sleep,
         ):
@@ -633,11 +633,11 @@ class TestGlobalThrottle:
 
         with (
             patch(
-                "hephaestus.github.rate_limit.time.monotonic",
+                "hephaestus.git.gh.rate_limit.time.monotonic",
                 return_value=now,
             ) as mock_monotonic,
             patch(
-                "hephaestus.github.rate_limit.time.sleep",
+                "hephaestus.git.gh.rate_limit.time.sleep",
                 side_effect=AssertionError("full token bucket must not sleep"),
             ) as mock_sleep,
         ):
@@ -911,11 +911,11 @@ class TestGlobalThrottle:
 
         with (
             unittest.mock.patch(
-                "hephaestus.github.rate_limit.time.sleep",
+                "hephaestus.git.gh.rate_limit.time.sleep",
                 side_effect=lambda s: sleep_calls.append(s),
             ),
             unittest.mock.patch(
-                "hephaestus.github.rate_limit.time.monotonic",
+                "hephaestus.git.gh.rate_limit.time.monotonic",
                 side_effect=mono_values,
             ),
         ):
@@ -935,12 +935,12 @@ class TestGlobalThrottle:
 class TestCountdownThrottle:
     """Tests for _countdown_loop TTY vs non-TTY emission throttling (#1330)."""
 
-    @patch("hephaestus.github.rate_limit.logger")
-    @patch("hephaestus.github.rate_limit.print")
-    @patch("hephaestus.github.rate_limit.sys.stdout")
-    @patch("hephaestus.github.rate_limit.time.monotonic")
-    @patch("hephaestus.github.rate_limit.time.sleep")
-    @patch("hephaestus.github.rate_limit.time.time")
+    @patch("hephaestus.git.gh.rate_limit.logger")
+    @patch("hephaestus.git.gh.rate_limit.print")
+    @patch("hephaestus.git.gh.rate_limit.sys.stdout")
+    @patch("hephaestus.git.gh.rate_limit.time.monotonic")
+    @patch("hephaestus.git.gh.rate_limit.time.sleep")
+    @patch("hephaestus.git.gh.rate_limit.time.time")
     def test_non_tty_throttles_to_ten_minute_emissions(
         self,
         mock_time: object,
@@ -975,11 +975,11 @@ class TestCountdownThrottle:
         info_calls = list(mock_logger.info.call_args_list)
         assert len(info_calls) == 3, f"expected 3 throttled emissions, got {len(info_calls)}"
 
-    @patch("hephaestus.github.rate_limit.logger")
-    @patch("hephaestus.github.rate_limit.print")
-    @patch("hephaestus.github.rate_limit.sys.stdout")
-    @patch("hephaestus.github.rate_limit.time.sleep")
-    @patch("hephaestus.github.rate_limit.time.time")
+    @patch("hephaestus.git.gh.rate_limit.logger")
+    @patch("hephaestus.git.gh.rate_limit.print")
+    @patch("hephaestus.git.gh.rate_limit.sys.stdout")
+    @patch("hephaestus.git.gh.rate_limit.time.sleep")
+    @patch("hephaestus.git.gh.rate_limit.time.time")
     def test_tty_uses_one_hz_spinner(
         self,
         mock_time: object,

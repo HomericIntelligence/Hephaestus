@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from hephaestus.config.child_environments import read_approved_parent_env
-from hephaestus.github.client import gh_call
+from hephaestus.git.gh.client import gh_call
 from hephaestus.logging.utils import correlation_id_scope, get_current_correlation_id
 from hephaestus.utils.helpers import run_subprocess
 

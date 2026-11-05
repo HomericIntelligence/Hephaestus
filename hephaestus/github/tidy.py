@@ -44,7 +44,7 @@ from hephaestus.cli.utils import (
 )
 from hephaestus.config.child_environments import build_gh_child_env
 from hephaestus.errors import boundary_main
-from hephaestus.github.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
+from hephaestus.git.gh.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
 from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
 from hephaestus.utils.git import (
     git_remote_url,
@@ -779,7 +779,7 @@ def _run_gh_tidy(trunk: str, dry_run: bool, *, rebase_all: bool = False) -> tupl
     child_env["GH_TIDY_REBASE_ALL"] = "true" if rebase_all else "false"
 
     # Use Popen so output can be tee'd to the terminal and retained for parsing.
-    # Intentionally NOT routed through hephaestus.github.client.gh_call: that
+    # Intentionally NOT routed through hephaestus.git.gh.client.gh_call: that
     # adapter captures stdout/stderr and would prevent live progress output.
     with subprocess.Popen(
         cmd,

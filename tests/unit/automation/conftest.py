@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.github import client as github_client
+from hephaestus.git.gh import client as github_client
 from hephaestus.resilience.circuit_breaker import reset_all_circuit_breakers
 
 

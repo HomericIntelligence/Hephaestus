@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from hephaestus.github import client, rate_limit
+from hephaestus.git.gh import client, rate_limit
 
 
 @pytest.fixture(autouse=True)
@@ -28,13 +28,13 @@ def test_throttle_wait_cannot_outlive_operation(
     state = tmp_path / "throttle.json"
     state.write_text(json.dumps({"tokens": 0.0, "updated": now[0]}))
     monkeypatch.setattr(rate_limit, "_global_throttle_state_path", lambda: state)
-    monkeypatch.setattr("hephaestus.github.rate_limit.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.monotonic", lambda: now[0])
 
     def sleep(seconds: float) -> None:
         waits.append(seconds)
         now[0] += seconds
 
-    monkeypatch.setattr("hephaestus.github.rate_limit.time.sleep", sleep)
+    monkeypatch.setattr("hephaestus.git.gh.rate_limit.time.sleep", sleep)
     run = Mock()
     monkeypatch.setattr(client, "run_subprocess", run)
     with pytest.raises(subprocess.TimeoutExpired):
@@ -47,7 +47,7 @@ def test_throttle_wait_cannot_outlive_operation(
 def test_child_timeout_uses_budget_left_after_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Deduct throttle time from the child process timeout."""
     now = [100.0]
-    monkeypatch.setattr("hephaestus.github.client.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("hephaestus.git.gh.client.time.monotonic", lambda: now[0])
 
     def acquire(**_kwargs: object) -> None:
         now[0] += 4.0

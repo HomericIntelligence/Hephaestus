@@ -482,7 +482,7 @@ class TestAddGithubThrottleArgs:
         parser = argparse.ArgumentParser()
         add_github_throttle_args(parser)
         args = parser.parse_args(["--gh-global-rate", "4", "--gh-global-burst", "9"])
-        with patch("hephaestus.github.rate_limit.configure_gh_global_throttle") as mock_configure:
+        with patch("hephaestus.git.gh.rate_limit.configure_gh_global_throttle") as mock_configure:
             configure_github_throttle_from_args(args)
         mock_configure.assert_called_once_with(rate=4.0, burst=9.0)
 

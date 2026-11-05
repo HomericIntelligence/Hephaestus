@@ -33,7 +33,7 @@ from pi_package_acceptance import (
     render_issue_comment,
 )
 
-from hephaestus.github.client import GitHubUnavailableError
+from hephaestus.git.gh.client import GitHubUnavailableError
 
 MARKER = "<!-- hephaestus-pi-package-acceptance:athena-v0.5.0 -->"
 ISSUE_COMMENTS = "/repos/HomericIntelligence/Hephaestus/issues/2515/comments"

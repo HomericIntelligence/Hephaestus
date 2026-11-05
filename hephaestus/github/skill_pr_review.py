@@ -22,7 +22,7 @@ from hephaestus.cli.utils import (
 )
 from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.errors import boundary_main
-from hephaestus.github.client import gh_call
+from hephaestus.git.gh.client import gh_call
 from hephaestus.utils.git import run_git
 
 _PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/[1-9][0-9]*")
