@@ -2284,3 +2284,67 @@ def test_planner_amendment_session_loss_is_not_a_reviewer_session_loss(
     assert item.payload.get("plan_fingerprint") == fingerprint_before
     assert item.payload["plan_review_cycle_id"] == cycle_id
     assert "review_session_error" not in item.payload
+
+
+def test_provider_failure_before_a_session_keeps_the_cycle_resumable(
+    make_ctx: Any, make_work_item: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A provider outage before any session exists is not a lost session (#3578).
+
+    The stage used to mark every failed review job without a bound session as
+    ``review-session-lost`` and make the cycle ``recovery-required``. A
+    transient provider outage therefore destroyed a healthy cycle, and the
+    operator saw a session failure instead of the provider cause.
+    """
+    github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+    github.comments[2766] = [render_current_plan("Plan v1")]
+    store = PlanReviewSessionStore(lambda: tmp_path)
+    ctx = make_ctx(github=github, plan_review_sessions=store)
+    item = make_work_item(issue=2766, state="ENTER")
+    stage = PlanReviewStage()
+    assert stage.on_enter(item, ctx) is None
+    cycle_id = item.payload["plan_review_cycle_id"]
+    item.state = "REVIEW_WAIT"
+    provider_error = (
+        "agent_error: opencode2_fatal_error_event: provider.no-route: Model unavailable"
+    )
+
+    with caplog.at_level("WARNING", logger=plan_review.__name__):
+        stage.on_job_done(item, JobResult(ok=False, error=provider_error), ctx)
+
+    # The provider cause survives, and nothing claims a session was lost.
+    assert item.payload.get("review_session_error") != "review-session-lost"
+    assert provider_error in caplog.text
+    # The cycle stays usable: the same cycle is retried, not replaced.
+    assert store.load(cycle_id).state != "recovery-required"
+    assert item.payload["plan_review_cycle_id"] == cycle_id
+
+
+def test_repeated_provider_failures_stay_bounded_and_resumable(
+    make_ctx: Any, make_work_item: Any, tmp_path: Path
+) -> None:
+    """Provider failures still consume the reviewer failure budget (#3578)."""
+    github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+    github.comments[2766] = [render_current_plan("Plan v1")]
+    store = PlanReviewSessionStore(lambda: tmp_path)
+    ctx = make_ctx(github=github, plan_review_sessions=store)
+    item = make_work_item(issue=2766, state="ENTER")
+    stage = PlanReviewStage()
+    assert stage.on_enter(item, ctx) is None
+    cycle_id = item.payload["plan_review_cycle_id"]
+    item.state = "REVIEW_WAIT"
+    outage = JobResult(ok=False, error="agent_error: provider.rate-limit: queue is full")
+
+    for _ in range(plan_review.REVIEW_ERROR_RETRY_CAP):
+        stage.on_job_done(item, outage, ctx)
+        item.state = "REVIEW_WAIT"
+
+    # The next failure exceeds the cap and is recorded as a bounded failure,
+    # without marking the cycle recovery-required as a lost session would.
+    stage.on_job_done(item, outage, ctx)
+
+    assert item.payload["review_error_retries"] == plan_review.REVIEW_ERROR_RETRY_CAP + 1
+    assert item.payload["review_session_error"] == "review-provider-unavailable"
+    # Exhaustion is still bounded, but the cycle was never made unrecoverable
+    # by an outage that happened before any provider session existed.
+    assert store.load(cycle_id).state != "recovery-required"
