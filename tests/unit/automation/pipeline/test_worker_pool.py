@@ -21088,7 +21088,7 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
     from types import SimpleNamespace
 
     from hephaestus.automation.issue_waves import WAVE_LEASE_PAYLOAD, IssueWaveStore
-    from hephaestus.automation.pipeline.stages.base import Continue
+    from hephaestus.automation.pipeline.stage_base import Continue
     from hephaestus.automation.pipeline.stages.finished import FinishedStage
     from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
     from hephaestus.automation.pipeline.stages.repo import (

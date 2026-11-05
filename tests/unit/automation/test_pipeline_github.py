@@ -32,7 +32,7 @@ import hephaestus.automation.pipeline_github_transport as transport_mod
 from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.github_api.graphql import GraphQLSpec
 from hephaestus.automation.models import DEFAULT_STATE_DIR
-from hephaestus.automation.pipeline.stages.base import StageGitHub
+from hephaestus.automation.pipeline.stage_github import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,

@@ -11,7 +11,7 @@ from .requirements_recovery import has_finalized_plan_candidate
 from .review_journal import PlanDiscoveryResult
 
 if TYPE_CHECKING:
-    from .pipeline.stages.base import StageGitHub
+    from .pipeline.stage_github import StageGitHub
 
 
 @dataclass(frozen=True)

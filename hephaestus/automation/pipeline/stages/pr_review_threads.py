@@ -31,8 +31,7 @@ from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..scope_retraction import scope_retraction_paths_for_threads
-from ..work_item import ItemKind
-from .base import (
+from ..stage_base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
     CompactJob,
@@ -52,6 +51,7 @@ from .base import (
     stage_timeout,
     write_skip_label,
 )
+from ..work_item import ItemKind
 from .pr_review_round_state import _ROUND_PAYLOAD_KEYS, _clear_round_review_state
 
 logger = logging.getLogger(__name__)

@@ -53,7 +53,7 @@ from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 
 from ..events import RepositoryBusyEvent
-from .base import (
+from ..stage_base import (
     GIT_JOB_TIMEOUT_S,
     Continue,
     Disposition,

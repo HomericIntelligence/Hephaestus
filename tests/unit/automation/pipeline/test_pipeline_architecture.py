@@ -259,7 +259,11 @@ def test_retired_pre_pipeline_coordinators_are_removed(module_name: str) -> None
 def test_pipeline_stages_have_no_auto_merge_mutation_capability() -> None:
     """The reviewed-head interlock leaves persistent auto-merge to operators."""
     callers: set[str] = set()
-    for path in _PIPELINE.glob("stages/*.py"):
+    for path in [
+        *sorted(_PIPELINE.glob("stages/*.py")),
+        _PIPELINE / "stage_base.py",
+        _PIPELINE / "stage_github.py",
+    ]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if (
@@ -301,8 +305,8 @@ def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) 
     - ``time.sleep(...)`` attribute access (any ``<Name time>.sleep``);
     - ``from time import sleep`` (aliased or not);
     - any other ``import time`` / ``from time import ...`` form, unless
-      ``allow_time_import`` (base.py legitimately uses ``time.time`` for its
-      injectable-clock default — it still may never sleep).
+      ``allow_time_import`` (stage_base.py legitimately uses ``time.time``
+      for its injectable-clock default — it still may never sleep).
     """
     violations: list[str] = []
     for node in ast.walk(tree):
@@ -333,14 +337,20 @@ def test_no_time_sleep_in_pipeline_stages() -> None:
 
     AST-based (matching this file's own guards), so conditional/lazy
     imports and aliased ``from time import sleep`` are caught too — not
-    just top-level text matches. base.py is NOT exempt: it may keep its
-    ``import time`` (the injectable clock's ``time.time`` default) but is
-    asserted to contain no ``time.sleep`` in any form.
+    just top-level text matches. stage_base.py is NOT exempt: it may keep
+    its ``import time`` (the injectable clock's ``time.time`` default) but
+    is asserted to contain no ``time.sleep`` in any form.
     """
     violations: list[str] = []
-    for py in sorted(_PIPELINE.glob("stages/*.py")):
+    for py in [
+        *sorted(_PIPELINE.glob("stages/*.py")),
+        _PIPELINE / "stage_base.py",
+        _PIPELINE / "stage_github.py",
+    ]:
         tree = ast.parse(py.read_text(), filename=str(py))
-        violations.extend(_sleep_violations(tree, py.name, allow_time_import=py.stem == "base"))
+        violations.extend(
+            _sleep_violations(tree, py.name, allow_time_import=py.stem == "stage_base")
+        )
     assert not violations, "stages must not sleep — timer heap owns waits:\n" + "\n".join(
         violations
     )
@@ -367,7 +377,7 @@ def test_sleep_guard_detects_synthetic_violations() -> None:
     assert sum("from time import sleep" in v for v in strict) == 2  # plain + aliased
     assert sum(": import time" in v for v in strict) == 2  # top-level + in-function
 
-    # base.py mode: the bare imports are allowed, sleep never is.
+    # stage_base.py mode: the bare imports are allowed, sleep never is.
     relaxed = _sleep_violations(tree, "base.py", allow_time_import=True)
     assert any("time.sleep reference" in v for v in relaxed)
     assert not any(": import time" in v for v in relaxed)

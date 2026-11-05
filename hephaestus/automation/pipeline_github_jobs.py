@@ -35,7 +35,7 @@ from hephaestus.automation.pipeline.github_jobs import (
 )
 from hephaestus.automation.pipeline.repository_validation import RepositoryValidationGap
 from hephaestus.automation.pipeline.scope_retraction import is_safe_scope_retraction_path
-from hephaestus.automation.pipeline.stages.base import StageGitHub
+from hephaestus.automation.pipeline.stage_github import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.automation.pipeline_github_transport import rate_limit_remaining
 from hephaestus.automation.review_anchors import place_findings

@@ -20,7 +20,7 @@ from hephaestus.automation.pipeline.jobs import (
 )
 from hephaestus.automation.pipeline.queues import StageQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
-from hephaestus.automation.pipeline.stages.base import JobRequest, Stage
+from hephaestus.automation.pipeline.stage_base import JobRequest, Stage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub

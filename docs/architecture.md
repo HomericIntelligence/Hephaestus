@@ -195,7 +195,7 @@ The main thread (coordinator) OWNS:
 - the in-flight registry ([`self.in_flight`](../hephaestus/automation/pipeline/coordinator.py))
 - all routing and disposition semantics ([`_route`](../hephaestus/automation/pipeline/coordinator.py))
 - coordinator-local GitHub reads and mutations, through
- [`StageGitHub`](../hephaestus/automation/pipeline/stages/base.py)
+ [`StageGitHub`](../hephaestus/automation/pipeline/stage_github.py)
  (label writes, comment upserts, and PR creation; the queue does not mutate
  auto-merge)
 It NEVER launches agents, builds/tests or git/network operations. It never
@@ -318,7 +318,7 @@ prove that a write failed. Recovery checks the exact request and live outcome
 before it can retry. Recovered evidence supplies a workflow candidate; it
 cannot restore process-local review authority.
 Implementation: coordinator-local writes use the single-owner
-[`ctx.github`](../hephaestus/automation/pipeline/stages/base.py) accessor. Reply
+[`ctx.github`](../hephaestus/automation/pipeline/stage_github.py) accessor. Reply
 journal recovery/append and delivery, PR-review reconciliation, and merge-wait
 admission and the policy-selected merge request instead submit a closed
 `GitHubJob`. Its receipt
@@ -417,9 +417,13 @@ into `item.payload["retry_delay_s"]` and returns
 [`_route_retry`](../hephaestus/automation/pipeline/coordinator.py) reads that
 key and parks the item on the heap
 ([`_timer_park`](../hephaestus/automation/pipeline/coordinator.py)).
-A missing key means "retry on the next drain tick" (no delay).
-[`BACKOFF_CAP_S = 60`](../hephaestus/automation/pipeline/stages/base.py) is
-shared by stages that use exponential poll delays.
+A missing key means "retry on the next drain tick" (no delay). There is no
+shared poll-delay cap.
+[`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)
+caps the merge-retry delay and the merge poll delay at 60 seconds each, and
+[`repo.py`](../hephaestus/automation/pipeline/stages/repo.py) caps the
+checkout-contention backoff at 60 seconds. The other RETRY delays are not
+capped.
 Timer parking releases the source-stage lease but retains the item's global
 work permit. On expiry, the timer heap remains the item's owner until its
 stage queue accepts it; an occupied stage queue leaves the expired entry at
@@ -488,7 +492,7 @@ When `--dry-run` is set, the coordinator:
 - asserts no job is EVER submitted
  ([`_submit`](../hephaestus/automation/pipeline/coordinator.py));
 - log-and-skip mutators in
- [`StageGitHub`](../hephaestus/automation/pipeline/stages/base.py);
+ [`StageGitHub`](../hephaestus/automation/pipeline/stage_github.py);
 - finishes items instead of parking on RETRY with `retry_delay_s` (the
  preview will never see real-world CI / merge progress)
  ([`_route_retry`](../hephaestus/automation/pipeline/coordinator.py));
