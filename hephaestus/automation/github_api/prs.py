@@ -243,7 +243,7 @@ def gh_pr_state(pr_number: int) -> dict[str, Any] | None:
     distinguish merged/closed/open without importing the stage-runtime
     ``PipelineGitHub.gh_pr_state``. Mirrors that method's read exactly so
     pipeline seeding's ``--prs`` mapping shares its terminal-state semantics
-    (see ``_terminal_pr_outcome``, ``pipeline/stages/base.py``).
+    (see ``_terminal_pr_outcome``, ``pipeline/stage_base.py``).
 
     Args:
         pr_number: GitHub PR number.

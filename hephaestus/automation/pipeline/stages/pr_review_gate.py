@@ -1,6 +1,6 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
-from .base import _terminal_pr_outcome
+from ..stage_base import _terminal_pr_outcome
 from .pr_review_threads import *
 
 

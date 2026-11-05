@@ -12,10 +12,10 @@ from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..job_results import JobResult
 from ..routing import Disposition, StageName, StageOutcome
+from ..stage_base import source_workspace_binding, stage_timeout
 from ..stage_results import Continue, JobRequest
 from ..summary import record_summary_action
 from ..work_item import LearningIntent, WorkItem
-from .base import source_workspace_binding, stage_timeout
 
 StepResult = Continue | JobRequest | StageOutcome
 

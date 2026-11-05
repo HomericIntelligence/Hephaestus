@@ -16,13 +16,13 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
 )
 from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.stage_base import Disposition
 from hephaestus.automation.pipeline.stages import (
     Continue,
     JobRequest,
     LearningStage,
     StageOutcome,
 )
-from hephaestus.automation.pipeline.stages.base import Disposition
 from hephaestus.automation.pipeline.work_item import (
     ItemResult,
     LearningIntent,

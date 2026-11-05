@@ -7,21 +7,21 @@ from typing import Any
 
 import pytest
 
+import hephaestus.automation.pipeline.stage_base as stage_base
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.pipeline import ROUTES
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
-from hephaestus.automation.pipeline.stages import (
-    PlanningStage,
-    PlanReviewStage,
-    Stage,
-    base as stage_base,
-)
-from hephaestus.automation.pipeline.stages.base import (
+from hephaestus.automation.pipeline.stage_base import (
     Continue,
     JobRequest,
     StageContext,
     agent_provider,
+)
+from hephaestus.automation.pipeline.stages import (
+    PlanningStage,
+    PlanReviewStage,
+    Stage,
 )
 
 KNOWN_ROUTE_BUDGETS: tuple[tuple[str, int], ...] = tuple(

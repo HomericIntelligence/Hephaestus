@@ -37,8 +37,7 @@ from ..github_jobs import (
     MergeWaitCycleCompleted,
     RunMergeWaitCycleRequest,
 )
-from ..work_item import LearningIntent
-from .base import (
+from ..stage_base import (
     Continue,
     Disposition,
     JobRequest,
@@ -51,6 +50,7 @@ from .base import (
     WorkItem,
     _repo_state_root,
 )
+from ..work_item import LearningIntent
 
 logger = logging.getLogger(__name__)
 

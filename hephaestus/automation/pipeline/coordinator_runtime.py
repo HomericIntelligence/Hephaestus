@@ -9,8 +9,8 @@ from pathlib import Path
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.implementer_checkpoint as _checkpoint
+import hephaestus.automation.pipeline.stage_base as stage_base_mod
 import hephaestus.automation.pipeline.stages as stages_mod
-import hephaestus.automation.pipeline.stages.base as stage_base_mod
 import hephaestus.automation.pipeline.stages.repo as repo_stage_mod
 import hephaestus.automation.pipeline.summary as summary_mod
 import hephaestus.automation.pipeline.work_item as work_item_mod

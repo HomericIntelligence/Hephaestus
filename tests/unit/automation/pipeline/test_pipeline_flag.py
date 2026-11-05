@@ -31,7 +31,7 @@ from hephaestus.automation.event_log_retention import (
     event_log_lifecycle,
 )
 from hephaestus.automation.pipeline.routing import StageName
-from hephaestus.automation.pipeline.stages.base import StageContext, stage_model
+from hephaestus.automation.pipeline.stage_base import StageContext, stage_model
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR
 

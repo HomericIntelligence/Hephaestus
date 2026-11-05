@@ -116,7 +116,7 @@ from hephaestus.prompts import PromptCatalog
 from ..admission import parse_publication_scope_files
 from ..coordinator_sessions import agent_session_lifecycle
 from ..plan_journal import publish_plan_revision, reconcile_plan_journal
-from .base import (
+from ..stage_base import (
     AgentJob,
     Continue,
     Disposition,

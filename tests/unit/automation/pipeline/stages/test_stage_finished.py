@@ -23,8 +23,8 @@ from hephaestus.automation.issue_waves import (
 )
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
+from hephaestus.automation.pipeline.stage_base import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages import finished as finished_module
-from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.finished import FinishedStage
 from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_RESERVATION_KEY
 from hephaestus.automation.pipeline.work_item import (
