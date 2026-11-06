@@ -98,6 +98,7 @@ Hephaestus/
 │   ├── datasets/               # Dataset downloading utilities
 │   ├── discovery/              # Discovery of agents, skills, and code blocks
 │   ├── forensics/              # Coredump capture + gdb post-mortem runner
+│   ├── git/                    # Git helpers (skeleton; epic #3504)
 │   ├── github/                 # GitHub automation (PR merging, fleet sync, tidy, stats)
 │   ├── io/                     # Input/output utilities
 │   ├── logging/                # Logging utilities
@@ -766,6 +767,7 @@ pre-commit run --all-files
 - `hephaestus/logging/` - Enhanced logging (ContextLogger, setup_logging)
 - `hephaestus/cli/` - CLI utilities (argument parsing, output formatting)
 - `hephaestus/system/` - System information collection
+- `hephaestus/git/` - Git helpers (skeleton; epic #3504)
 - `hephaestus/github/` - GitHub automation (PR merging)
 - `tests/unit/` - Unit test suite. It mirrors the hephaestus/ subpackages.
   `SANCTIONED_EXTRA_TEST_DIRS` in `hephaestus/validation/test_layout.py` names
