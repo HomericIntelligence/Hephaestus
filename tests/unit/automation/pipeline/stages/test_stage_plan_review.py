@@ -2348,3 +2348,47 @@ def test_repeated_provider_failures_stay_bounded_and_resumable(
     # Exhaustion is still bounded, but the cycle was never made unrecoverable
     # by an outage that happened before any provider session existed.
     assert store.load(cycle_id).state != "recovery-required"
+
+
+def test_resumed_enter_item_keeps_the_provider_cause(
+    make_ctx: Any, make_work_item: Any, tmp_path: Path
+) -> None:
+    """An item that resumes in ENTER keeps the recorded provider failure (#3578)."""
+    github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+    github.comments[2766] = [render_current_plan("Plan v1")]
+    store = PlanReviewSessionStore(lambda: tmp_path)
+    ctx = make_ctx(github=github, plan_review_sessions=store)
+    item = make_work_item(issue=2766, state="ENTER")
+    stage = PlanReviewStage()
+    assert stage.on_enter(item, ctx) is None
+    item.state = "ENTER"
+    item.payload["review_session_error"] = "review-provider-unavailable"
+    item.payload["review_provider_error"] = "provider.no-route"
+
+    outcome = stage.step(item, ctx)
+
+    assert outcome == Continue(next_state="REVIEW_WAIT")
+    # The cause survives for the submit path that follows.
+    assert item.payload["review_session_error"] == "review-provider-unavailable"
+    assert item.payload["review_provider_error"] == "provider.no-route"
+
+
+def test_provider_cause_is_redacted_before_it_is_recorded(
+    make_ctx: Any, make_work_item: Any, tmp_path: Path
+) -> None:
+    """A credential in a provider error is masked before storage (#3578)."""
+    github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+    github.comments[2766] = [render_current_plan("Plan v1")]
+    store = PlanReviewSessionStore(lambda: tmp_path)
+    ctx = make_ctx(github=github, plan_review_sessions=store)
+    item = make_work_item(issue=2766, state="ENTER")
+    stage = PlanReviewStage()
+    assert stage.on_enter(item, ctx) is None
+    item.state = "REVIEW_WAIT"
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"  # noqa: S105 - sentinel, not a credential
+
+    stage.on_job_done(item, JobResult(ok=False, error=f"agent_error: auth {secret}"), ctx)
+
+    recorded = item.payload["review_provider_error"]
+    assert secret not in recorded
+    assert "agent_error" in recorded

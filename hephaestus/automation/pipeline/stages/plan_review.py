@@ -112,6 +112,7 @@ from hephaestus.prompts import PromptCatalog
 
 from ..admission import parse_publication_scope_files
 from ..coordinator_sessions import agent_session_lifecycle
+from ..diagnostics import redact_diagnostic_text
 from ..plan_journal import publish_plan_revision, reconcile_plan_journal
 from .base import (
     AgentJob,
@@ -438,21 +439,20 @@ def _restore_review_conversation(
     return None
 
 
-def _retry_after_provider_unavailable(item: WorkItem) -> bool:
-    """Clear a recorded provider failure and report whether to retry in place.
+def _retry_after_provider_unavailable(item: WorkItem) -> None:
+    """Clear a recorded provider failure so the cycle is retried in place.
 
     A provider outage before any reviewer session was bound leaves nothing to
     recover, so the same cycle is retried instead of starting a new
     conversation that would fail the same way (#3578).
     """
     if item.payload.pop("review_session_error", None) != "review-provider-unavailable":
-        return False
+        return
     logger.warning(
         "plan_review:%s: retrying the bound review cycle after a provider failure: %s",
         item.issue,
         item.payload.pop("review_provider_error", "unknown provider error"),
     )
-    return True
 
 
 def _restart_review_conversation(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
@@ -535,7 +535,8 @@ def _checkpoint_review_identity(item: WorkItem, result: JobResult, ctx: StageCon
         # Keep the cycle resumable and report the cause the worker reported;
         # marking it recovery-required would destroy a healthy cycle for a
         # transient fault (#3578).
-        reason = (result.error or "reviewer-failed").strip() or "reviewer-failed"
+        reason = redact_diagnostic_text((result.error or "reviewer-failed").strip())
+        reason = reason or "reviewer-failed"
         logger.warning(
             "plan_review:%s: reviewer unavailable before a session was bound: %s",
             item.issue,
@@ -817,13 +818,14 @@ class PlanReviewStage(Stage):
             return Continue(next_state="REVIEW_WAIT")
 
         # A provider outage before any session was bound leaves nothing to
-        # recover, so the same cycle is retried in place (#3578).
-        _retry_after_provider_unavailable(item)
-
+        # recover, so the same cycle is retried in place (#3578). Clear the
+        # marker only on the submit path, so an item that resumes in ENTER
+        # keeps the recorded provider cause.
         if item.state == "ENTER":
             return Continue(next_state="REVIEW_WAIT")
 
         if item.state == "REVIEW_WAIT":
+            _retry_after_provider_unavailable(item)
             transition_outcome = _confirm_pending_amendment_transition(item, ctx)
             if transition_outcome is not None:
                 return transition_outcome
