@@ -115,6 +115,7 @@ from hephaestus.prompts import PromptCatalog
 
 from ..admission import parse_publication_scope_files
 from ..coordinator_sessions import agent_session_lifecycle
+from ..diagnostics import redact_diagnostic_text
 from ..plan_journal import publish_plan_revision, reconcile_plan_journal
 from .base import (
     AgentJob,
@@ -460,6 +461,22 @@ def _restore_review_conversation(
     return None
 
 
+def _retry_after_provider_unavailable(item: WorkItem) -> None:
+    """Clear a recorded provider failure so the cycle is retried in place.
+
+    A provider outage before any reviewer session was bound leaves nothing to
+    recover, so the same cycle is retried instead of starting a new
+    conversation that would fail the same way (#3578).
+    """
+    if item.payload.pop("review_session_error", None) != "review-provider-unavailable":
+        return
+    logger.warning(
+        "plan_review:%s: retrying the bound review cycle after a provider failure: %s",
+        item.issue,
+        item.payload.pop("review_provider_error", "unknown provider error"),
+    )
+
+
 def _restart_review_conversation(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
     """Replace a lost session within the current review failure budget."""
     if item.issue is None:
@@ -535,9 +552,22 @@ def _checkpoint_review_identity(item: WorkItem, result: JobResult, ctx: StageCon
         and item.state == "REVIEW_WAIT"
         and store.load(cycle_id).session_id is None
     ):
-        store.mark_recovery_required(cycle_id)
-        item.payload["review_session_error"] = "review-session-lost"
-        return True
+        # No provider session was ever bound, so there is no conversation to
+        # lose. The job failed for another reason, such as a provider outage.
+        # Keep the cycle resumable and report the cause the worker reported;
+        # marking it recovery-required would destroy a healthy cycle for a
+        # transient fault (#3578).
+        reason = redact_diagnostic_text((result.error or "reviewer-failed").strip())
+        reason = reason or "reviewer-failed"
+        logger.warning(
+            "plan_review:%s: reviewer unavailable before a session was bound: %s",
+            item.issue,
+            reason,
+        )
+        item.payload["review_session_error"] = "review-provider-unavailable"
+        item.payload["review_provider_error"] = reason[:500]
+        failure = _reviewer_failure(item, "review-provider-unavailable")
+        return failure.disposition is Disposition.FINISH_FAIL
     return False
 
 
@@ -811,10 +841,15 @@ class PlanReviewStage(Stage):
                 return recovery_outcome
             return Continue(next_state="REVIEW_WAIT")
 
+        # A provider outage before any session was bound leaves nothing to
+        # recover, so the same cycle is retried in place (#3578). Clear the
+        # marker only on the submit path, so an item that resumes in ENTER
+        # keeps the recorded provider cause.
         if item.state == "ENTER":
             return Continue(next_state="REVIEW_WAIT")
 
         if item.state == "REVIEW_WAIT":
+            _retry_after_provider_unavailable(item)
             transition_outcome = _confirm_pending_amendment_transition(item, ctx)
             if transition_outcome is not None:
                 return transition_outcome
