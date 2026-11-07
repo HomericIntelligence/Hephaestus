@@ -49,8 +49,43 @@ FROM python:3.13-slim@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5
 
 ARG DEBIAN_SNAPSHOT
 
-RUN . /etc/os-release \
+# The dated Debian snapshot is a single shared server with no CDN in front of
+# it, and it answers 503 TooManyRequests under load. It also drops connections
+# part way through a large download, which leaves apt with an incomplete
+# archive set. Both faults are transient, so every package install in this file
+# goes through one retry helper instead of failing the whole image build.
+#
+# Each attempt clears the package lists first, so a partial download from the
+# previous attempt cannot be reused. The last attempt is the one that reports
+# the error, so a genuine repository fault still fails the build.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      '# Install Debian packages with bounded retries against the dated snapshot.' \
+      'set -eu' \
+      'attempts=5' \
+      'delay=10' \
+      'attempt=1' \
+      'clean_lists() { rm -rf /var/lib/apt/lists/* 2>/dev/null || true; }' \
+      'while :; do' \
+      '  if apt-get update && apt-get install -y --no-install-recommends "$@"; then' \
+      '    clean_lists' \
+      '    exit 0' \
+      '  fi' \
+      '  if [ "$attempt" -ge "$attempts" ]; then' \
+      '    echo "apt install failed after ${attempts} attempts" >&2' \
+      '    exit 1' \
+      '  fi' \
+      '  echo "apt install attempt ${attempt}/${attempts} failed; retrying in ${delay}s" >&2' \
+      '  attempt=$((attempt + 1))' \
+      '  clean_lists' \
+      '  sleep "$delay"' \
+      'done' \
+      > /usr/local/bin/apt-retry \
+    && chmod 0755 /usr/local/bin/apt-retry \
+    && test -x /usr/local/bin/apt-retry \
+    && command -v apt-retry >/dev/null \
     && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* \
+    && . /etc/os-release \
     && printf '%s\n' \
         "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ ${VERSION_CODENAME} main" \
         "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ ${VERSION_CODENAME}-security main" \
@@ -60,8 +95,7 @@ FROM python-snapshot AS uv
 
 ARG TARGETARCH
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
+RUN apt-retry curl ca-certificates \
     && case "$TARGETARCH" in \
         amd64) uv_asset="uv-x86_64-unknown-linux-gnu"; uv_sha256="90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb" ;; \
         arm64) uv_asset="uv-aarch64-unknown-linux-gnu"; uv_sha256="769d373e146692c639b5fbaae33b331c297a32e03d30448772051902df52bbf4" ;; \
@@ -84,7 +118,7 @@ FROM python-snapshot AS git-source
 ARG GIT_VERSION
 ARG GIT_SHA256
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-retry \
     ca-certificates \
     curl \
     gcc \
@@ -98,7 +132,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     perl \
     xz-utils \
     zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 --connect-timeout 30 --max-time 600 "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /tmp/git.tar.xz \
     && echo "${GIT_SHA256}  /tmp/git.tar.xz" | sha256sum --check \
     && mkdir -p /tmp/git-src \
@@ -160,13 +193,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Install build dependencies from the immutable Debian snapshot configured by
 # python-snapshot. Git is not installed here: the git-source stage supplies the
 # pinned binary that the dependency sync and pre-commit hooks run.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-retry \
     curl \
     ca-certificates \
     gcc \
     g++ \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential
 
 # Install uv (pinned release — keep the version and sha256 in sync with
 # astral-sh/setup-uv in .github/workflows/*.yml when bumping).
@@ -232,7 +264,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # the pinned binary from the git-source stage is the only Git in the image, and
 # the final assertions prove it. The remaining packages are the shared
 # libraries and Perl runtime that the pinned binary and its helpers load.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-retry \
     bats="${BATS_VERSION}" \
     curl \
     ca-certificates \
@@ -247,7 +279,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     shellcheck="${SHELLCHECK_VERSION}" \
     util-linux \
     zlib1g \
-    && rm -rf /var/lib/apt/lists/* \
     && test -x /usr/bin/unshare && test -x /usr/bin/setpriv && test -x /usr/bin/prlimit \
     && test "$(bats --version)" = "Bats 1.11.1" \
     && shellcheck --version | grep -Fx "version: 0.10.0"
