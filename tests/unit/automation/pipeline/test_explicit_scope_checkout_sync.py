@@ -23,7 +23,7 @@ from hephaestus.automation.pipeline.routing import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.seeding import IssueFacts
-from hephaestus.automation.pipeline.stages.base import Stage
+from hephaestus.automation.pipeline.stage_base import Stage
 from hephaestus.automation.pipeline.stages.repo import RepoIssueSource
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool

@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from typing import cast
 
-from .base import (
+from ..stage_base import (
     Continue,
     Disposition,
     Stage,

@@ -115,7 +115,7 @@ from ..plan_journal import (
     publish_plan_revision,
     reconcile_plan_journal,
 )
-from .base import (
+from ..stage_base import (
     GIT_JOB_TIMEOUT_S,
     SOURCE_WORKSPACE_PREPARATION_TIMEOUT_S,
     AgentJob,

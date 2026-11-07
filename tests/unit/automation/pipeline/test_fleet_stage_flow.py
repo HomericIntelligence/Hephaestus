@@ -17,7 +17,7 @@ from hephaestus.automation.pipeline.github_jobs import GitHubJob, ReadCurrentPla
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, CompactJob, JobHandle
 from hephaestus.automation.pipeline.routing import StageName
-from hephaestus.automation.pipeline.stages.base import JobRequest
+from hephaestus.automation.pipeline.stage_base import JobRequest
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from tests.unit.automation.pipeline.test_fleet_execution import _git, _job
 from tests.unit.automation.pipeline.test_fleet_source_entry import _stage_case

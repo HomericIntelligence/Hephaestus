@@ -45,7 +45,7 @@ from hephaestus.automation.source_worktree import (
     normalize_source_workspace_creation_failure,
 )
 
-from .base import (
+from ..stage_base import (
     GIT_JOB_TIMEOUT_S,
     Continue,
     Disposition,

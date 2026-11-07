@@ -2,19 +2,12 @@
 
 Stages are pure-ish step functions that process work items through a
 stage-local state machine. The base protocol and step-result types live in
-:mod:`.base`; concrete stages (planning, plan_review, ...) follow.
+:mod:`..stage_base` and the GitHub seam in :mod:`..stage_github`; concrete
+stages (planning, plan_review, ...) follow.
 """
 
-from .base import (
-    AutoMergeEnableResult,
-    Continue,
-    JobRequest,
-    Stage,
-    StageContext,
-    StageGitHub,
-    StageOutcome,
-    StepResult,
-)
+from ..stage_base import Continue, JobRequest, Stage, StageContext, StageOutcome, StepResult
+from ..stage_github import AutoMergeEnableResult, StageGitHub
 from .finished import FinishedStage
 from .implementation import ImplementationStage
 from .learning import LearningStage

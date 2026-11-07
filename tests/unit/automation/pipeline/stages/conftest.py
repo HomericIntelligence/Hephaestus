@@ -29,13 +29,13 @@ from hephaestus.automation.pipeline.github_jobs import (
     RepositoryValidationCIRead,
 )
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
+from hephaestus.automation.pipeline.stage_base import (
+    BranchWorktreeOwnerStatus,
+)
 from hephaestus.automation.pipeline.stages import (
     AutoMergeEnableResult,
     StageContext,
     StageGitHub,
-)
-from hephaestus.automation.pipeline.stages.base import (
-    BranchWorktreeOwnerStatus,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import (

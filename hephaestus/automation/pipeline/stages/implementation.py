@@ -137,7 +137,7 @@ from ..scope_retraction import (
     scope_retraction_paths_for_threads,
     validated_scope_violation_paths,
 )
-from .base import (
+from ..stage_base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
     AthenaSkillJob,

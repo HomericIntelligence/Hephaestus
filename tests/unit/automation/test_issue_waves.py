@@ -26,7 +26,7 @@ from hephaestus.automation.issue_waves import (
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.seeding import SeedEntry
-from hephaestus.automation.pipeline.stages.base import Continue, StageOutcome
+from hephaestus.automation.pipeline.stage_base import Continue, StageOutcome
 from hephaestus.automation.pipeline.stages.repo import (
     SYNCED_MAIN_SHA_KEY,
     WAVE_ANCESTRY_VERIFIED_KEY,

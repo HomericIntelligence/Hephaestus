@@ -25,7 +25,7 @@ from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts, SeedEntry, classify_issue
-from hephaestus.automation.pipeline.stages.base import (
+from hephaestus.automation.pipeline.stage_base import (
     Continue,
     JobRequest,
     Stage,

@@ -57,7 +57,7 @@ from hephaestus.automation.pipeline.routing import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.seeding import SeedEntry
-from hephaestus.automation.pipeline.stages.base import JobRequest, Stage
+from hephaestus.automation.pipeline.stage_base import JobRequest, Stage
 from hephaestus.automation.pipeline.stages.implementation import DIRTY_RECOVERY_WAIT
 from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,

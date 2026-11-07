@@ -10,7 +10,7 @@ from hephaestus.automation.prompts.pr_review import build_bounded_review_validat
 
 from ..coordinator_sessions import agent_session_lifecycle
 from ..github_jobs import FrozenJson, GitHubJob, PrReviewReconciled, ReconcilePrReviewRequest
-from .base import source_workspace_binding
+from ..stage_base import source_workspace_binding
 from .pr_review_threads import *
 
 _PENDING_GITHUB_REQUEST = "_pending_github_request"

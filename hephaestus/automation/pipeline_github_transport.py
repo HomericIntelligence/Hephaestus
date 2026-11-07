@@ -32,9 +32,7 @@ from hephaestus.automation.pipeline.scope_retraction import (
     normalize_scope_retraction_paths,
     scope_retraction_marker,
 )
-from hephaestus.automation.pipeline.stages.base import (
-    AutoMergeEnableResult,
-)
+from hephaestus.automation.pipeline.stage_github import AutoMergeEnableResult
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_COMMENT_MARKER,

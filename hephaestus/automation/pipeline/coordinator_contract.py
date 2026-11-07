@@ -16,6 +16,7 @@ if TYPE_CHECKING:
         admission as _admission,
         coordinator_types as ct,
         seeding as _seeding,
+        stage_base as stage_base_mod,
         stages as stages_mod,
         work_item as work_item_mod,
     )
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
     from .jobs import JobHandle, JobResult
     from .queues import CompletionQueue, StageQueue, StageQueueLease
     from .routing import Route, StageName
-    from .stages import Stage, StageContext, StageGitHub, base as stage_base_mod
+    from .stages import Stage, StageContext, StageGitHub
     from .summary import TerminalSummary
     from .work_item import PreservedWorktree
     from .worker_protocol import AuxiliaryWorker, MainWorker
