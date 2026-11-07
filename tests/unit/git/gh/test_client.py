@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-import hephaestus.git.gh.client as client_module
+from hephaestus.git.gh import client as client_module
 from hephaestus.git.gh.client import (
     _GH_BREAKER,
     ClaudeUsageCapError,
