@@ -30,9 +30,13 @@ from tests.unit.automation.test_fleet_attachment import PipeEngine
 from tests.unit.automation.test_fleet_containment import Kernel
 from tests.unit.automation.test_fleet_worker import command
 
-pytestmark = pytest.mark.precommit
 FIXTURE = Path(__file__).parents[2] / "fixtures" / "fleet_provider.py"
 ATTACHMENT_PROGRAM = "attachment-python"
+# A loopback attachment handshake completes in milliseconds. A loaded CI host
+# can still delay the worker thread that answers it, so the budget is generous:
+# it only has to separate a working handshake from a hung one, and a hung one
+# fails at the assertion instead of at the socket.
+_ATTACHMENT_TIMEOUT_S = 30.0
 
 
 def private_attachment_program(root: Path) -> Path:
@@ -211,7 +215,7 @@ def contained_session(runtime_setup, monkeypatch: pytest.MonkeyPatch):
                 client = attachments.enter_context(
                     socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 )
-                client.settimeout(2)
+                client.settimeout(_ATTACHMENT_TIMEOUT_S)
                 client.connect(values["--socket"])
                 client.sendall(
                     json.dumps(
@@ -456,7 +460,7 @@ def test_cli_serves_two_fixed_attachments_with_one_provider(
             args = environment["args"]
             values = dict(zip(args[2::2], args[3::2], strict=True))
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.settimeout(2)
+                client.settimeout(_ATTACHMENT_TIMEOUT_S)
                 client.connect(values["--socket"])
                 client.sendall(
                     json.dumps(
