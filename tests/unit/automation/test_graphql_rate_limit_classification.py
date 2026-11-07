@@ -16,7 +16,7 @@ from hephaestus.automation.github_api.graphql import (
     update_review_comment_mutation,
 )
 from hephaestus.automation.pipeline_github import PipelineGitHub
-from hephaestus.github import rate_limit
+from hephaestus.git.gh import rate_limit
 
 _LIMIT_MESSAGE = "API rate limit exceeded"
 _RESET_EPOCH = 1_700_000_000

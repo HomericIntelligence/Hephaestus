@@ -466,7 +466,7 @@ def add_github_read_cache_args(parser: argparse.ArgumentParser) -> None:
 
 def configure_github_throttle_from_args(args: argparse.Namespace) -> None:
     """Apply GitHub global-throttle options parsed from CLI args."""
-    from hephaestus.github.rate_limit import configure_gh_global_throttle
+    from hephaestus.git.gh.rate_limit import configure_gh_global_throttle
 
     configure_gh_global_throttle(
         rate=float(args.gh_global_rate),

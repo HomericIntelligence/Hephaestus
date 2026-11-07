@@ -28,7 +28,7 @@ from hephaestus.automation.github_api.graphql import (
     submit_review_mutation,
     update_review_comment_mutation,
 )
-from hephaestus.github.client import (
+from hephaestus.git.gh.client import (
     GitHubUnavailableError,
 )
 

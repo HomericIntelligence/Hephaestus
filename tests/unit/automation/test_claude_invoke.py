@@ -71,7 +71,7 @@ class TestDetectModelUsageCap:
 
     def test_model_cap_has_no_reset_epoch(self) -> None:
         """Documents WHY fallback (not wait): the message yields no reset epoch."""
-        from hephaestus.github.rate_limit import resolve_quota_reset_epoch
+        from hephaestus.git.gh.rate_limit import resolve_quota_reset_epoch
 
         assert resolve_quota_reset_epoch(MODEL_CAP_MESSAGE) is None
 
@@ -129,7 +129,7 @@ class TestRaiseForErrorEnvelope:
         import json
 
         from hephaestus.automation.claude_invoke import raise_for_error_envelope
-        from hephaestus.github.client import ClaudeUsageCapError
+        from hephaestus.git.gh.client import ClaudeUsageCapError
 
         stdout = json.dumps(
             {
@@ -147,7 +147,7 @@ class TestRaiseForErrorEnvelope:
         import json
 
         from hephaestus.automation.claude_invoke import raise_for_error_envelope
-        from hephaestus.github.client import ClaudeUsageCapError
+        from hephaestus.git.gh.client import ClaudeUsageCapError
 
         stdout = json.dumps({"is_error": True, "result": "tool execution failed"})
         with pytest.raises(RuntimeError) as exc:
@@ -175,7 +175,7 @@ class TestRaiseForErrorEnvelope:
         import json
 
         from hephaestus.automation.claude_invoke import raise_for_error_envelope
-        from hephaestus.github.client import ClaudeUsageCapError, PromptTooLongError
+        from hephaestus.git.gh.client import ClaudeUsageCapError, PromptTooLongError
 
         stdout = json.dumps({"is_error": True, "result": "Prompt is too long"})
         with pytest.raises(PromptTooLongError):

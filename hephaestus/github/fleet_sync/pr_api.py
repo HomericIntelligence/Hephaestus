@@ -6,7 +6,7 @@ import json
 import subprocess
 from typing import Any
 
-from hephaestus.github.client import gh_call
+from hephaestus.git.gh.client import gh_call
 from hephaestus.github.fleet_sync.models import (
     DEFAULT_FLEET_TIMEOUTS,
     FleetTimeouts,

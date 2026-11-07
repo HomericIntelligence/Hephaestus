@@ -12,7 +12,7 @@ The lock is advisory (cooperating processes must all use it) and POSIX-only.
 If ``fcntl`` is unavailable, acquisition fails before the protected operation.
 
 Extracted from the previously-inline ``fcntl.flock`` patterns in
-``hephaestus.github.rate_limit`` and ``hephaestus.automation.advise_runner`` so
+``hephaestus.git.gh.rate_limit`` and ``hephaestus.automation.advise_runner`` so
 there is a single, tested primitive (DRY).
 """
 

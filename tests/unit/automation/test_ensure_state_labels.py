@@ -429,7 +429,7 @@ class TestCircuitBreakerBoundary:
 
     def test_circuit_breaker_error_propagates_from_gh_call(self, mock_gh_call: MagicMock) -> None:
         """A GitHubUnavailableError from the open breaker surfaces to the caller."""
-        from hephaestus.github.client import GitHubUnavailableError
+        from hephaestus.git.gh.client import GitHubUnavailableError
 
         mock_gh_call.side_effect = GitHubUnavailableError("breaker open")
         with pytest.raises(GitHubUnavailableError):

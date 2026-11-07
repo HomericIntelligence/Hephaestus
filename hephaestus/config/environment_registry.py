@@ -152,7 +152,7 @@ APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
         "Temporary and runtime directory",
         sensitivity="private",
         validation="path",
-        readers=(_PARENT_READER, "hephaestus.github.rate_limit._runtime_base_dir", _NESTED_READER),
+        readers=(_PARENT_READER, "hephaestus.git.gh.rate_limit._runtime_base_dir", _NESTED_READER),
         writers=(_CODEX_IMPLEMENTATION_WRITER, _HOST_VERIFICATION_WRITER, _PI_WRITER),
     ),
     _parent(

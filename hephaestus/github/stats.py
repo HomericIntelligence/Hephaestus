@@ -30,7 +30,7 @@ from hephaestus.cli.utils import (
     format_output,
 )
 from hephaestus.errors import boundary_main
-from hephaestus.github.client import gh_call
+from hephaestus.git.gh.client import gh_call
 
 # ---------------------------------------------------------------------------
 # Data helpers

@@ -135,7 +135,7 @@ behavior (you should not have), review these:
 | `hephaestus.__version__` | Resolved to `"unknown"` for installed users (wrong distribution-name lookup) | Resolves to the real installed version |
 | `hephaestus.io.safe_write` | Not atomic — an interrupted write could leave a partial file | Atomic: writes via a temp file + `os.replace` |
 | `hephaestus.io.write_secure` | Restrictive permissions but non-atomic write | Atomic **and** `0o600`-permissioned |
-| `hephaestus.github.wait_until` | Raised `ValueError` when called from a worker thread | Safe to call from any thread |
+| `hephaestus.git.gh.rate_limit.wait_until` | Raised `ValueError` when called from a worker thread | Safe to call from any thread |
 
 ### Removed deprecated symbols
 
