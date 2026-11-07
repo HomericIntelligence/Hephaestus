@@ -30,8 +30,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # The registry path is fixed so a pull request cannot redirect the push.
-  IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}/hephaestus-ci
+  # Repository names must be lowercase and the owner is not, so the path is
+  # normalised in the first step rather than interpolated here.
+  IMAGE_NAMESPACE: ghcr.io/${{ github.repository }}
 
 jobs:
   publish:
@@ -63,7 +64,10 @@ jobs:
               | xargs -0 sha256sum | sha256sum | cut -c1-64
           )"
           echo "tag=sha-${digest}" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag: sha-${digest}"
+          # Container repository names must be lowercase; the owner is not.
+          repository="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')/hephaestus-ci"
+          echo "repository=${repository}" >> "$GITHUB_OUTPUT"
+          echo "Resolved image: ${repository}:sha-${digest}"
 
       - name: Log in to GitHub Container Registry
         env:
@@ -77,9 +81,10 @@ jobs:
         id: reuse
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
         run: |
           set -euo pipefail
-          if podman pull "${IMAGE_REPOSITORY}:${TAG}" >/dev/null 2>&1; then
+          if podman pull "${REPOSITORY}:${TAG}" >/dev/null 2>&1; then
             echo "Reusing the published image for ${TAG}"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -91,33 +96,36 @@ jobs:
         if: steps.reuse.outputs.exists != 'true'
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
         run: |
           set -euo pipefail
-          podman build --jobs=2 -f ci/Containerfile -t "${IMAGE_REPOSITORY}:${TAG}" .
+          podman build --jobs=2 -f ci/Containerfile -t "${REPOSITORY}:${TAG}" .
 
       - name: Publish the CI image
         if: steps.reuse.outputs.exists != 'true'
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
         run: |
           set -euo pipefail
-          podman push "${IMAGE_REPOSITORY}:${TAG}"
+          podman push "${REPOSITORY}:${TAG}"
 
       - name: Resolve the pinned image reference
         id: reference
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
         run: |
           set -euo pipefail
           # Consumers pin by digest, so a retagged pointer cannot change what a
           # check runs.
-          digest="$(podman image inspect --format '{{.Digest}}' "${IMAGE_REPOSITORY}:${TAG}")"
+          digest="$(podman image inspect --format '{{.Digest}}' "${REPOSITORY}:${TAG}")"
           case "$digest" in
             sha256:*) ;;
             *) echo "Unexpected image digest: $digest" >&2; exit 1 ;;
           esac
-          echo "image=${IMAGE_REPOSITORY}@${digest}" >> "$GITHUB_OUTPUT"
-          echo "Pinned image: ${IMAGE_REPOSITORY}@${digest}"
+          echo "image=${REPOSITORY}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "Pinned image: ${REPOSITORY}@${digest}"
 
       - name: Report the published image
         env:
