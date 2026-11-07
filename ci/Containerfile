@@ -55,9 +55,10 @@ ARG DEBIAN_SNAPSHOT
 # archive set. Both faults are transient, so every package install in this file
 # goes through one retry helper instead of failing the whole image build.
 #
-# Each attempt clears the package lists first, so a partial download from the
-# previous attempt cannot be reused. The last attempt is the one that reports
-# the error, so a genuine repository fault still fails the build.
+# Each attempt clears the package lists first, so a stale index from a failed
+# attempt is never reused; apt still verifies every cached archive against the
+# index digest it just fetched. The last attempt reports the error, so a
+# genuine repository fault still fails the build.
 RUN printf '%s\n' \
       '#!/bin/sh' \
       '# Install Debian packages with bounded retries against the dated snapshot.' \
@@ -67,18 +68,23 @@ RUN printf '%s\n' \
       'attempt=1' \
       'clean_lists() { rm -rf /var/lib/apt/lists/* 2>/dev/null || true; }' \
       'while :; do' \
-      '  if apt-get update && apt-get install -y --no-install-recommends "$@"; then' \
-      '    clean_lists' \
-      '    exit 0' \
+      '  if apt-get update; then' \
+      '    if apt-get install -y --no-install-recommends "$@"; then' \
+      '      clean_lists' \
+      '      exit 0' \
+      '    fi' \
+      '    failed=install' \
+      '  else' \
+      '    failed=update' \
       '  fi' \
       '  if [ "$attempt" -ge "$attempts" ]; then' \
-      '    echo "apt install failed after ${attempts} attempts" >&2' \
+      '    echo "apt ${failed} failed after ${attempts} attempts" >&2' \
       '    exit 1' \
       '  fi' \
-      '  echo "apt install attempt ${attempt}/${attempts} failed; retrying in ${delay}s" >&2' \
+      '  echo "apt ${failed} attempt ${attempt}/${attempts} failed; retrying in ${delay}s" >&2' \
       '  attempt=$((attempt + 1))' \
-      '  clean_lists' \
       '  sleep "$delay"' \
+      '  clean_lists' \
       'done' \
       > /usr/local/bin/apt-retry \
     && chmod 0755 /usr/local/bin/apt-retry \
