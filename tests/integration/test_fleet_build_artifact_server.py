@@ -33,7 +33,6 @@ from tests.unit.automation.test_fleet_build_artifacts import private_file, retai
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.precommit,
     pytest.mark.requires_posix,
     pytest.mark.skipif(
         os.name != "posix", reason="Private inputs require POSIX descriptor operations."
@@ -42,6 +41,10 @@ pytestmark = [
 
 COMMAND = "hephaestus-fleet-build-artifacts"
 FIXTURE_BEARER = "artifact-fixture-read-only"
+# A console-script start costs a few hundred milliseconds on a warm cache. A
+# loaded CI host can stall a cold import well past that, so the budget is
+# generous: it only has to separate a working start from a hung one.
+_COMMAND_TIMEOUT_S = 60.0
 
 
 def installed_command() -> Path:
@@ -64,7 +67,7 @@ def test_installed_command_does_not_require_private_inputs(flag: str, tmp_path: 
         cwd=tmp_path,
         stdin=subprocess.DEVNULL,
         capture_output=True,
-        timeout=5,
+        timeout=_COMMAND_TIMEOUT_S,
         check=False,
     )
     assert result.returncode == 0, result.stderr.decode()
@@ -480,7 +483,7 @@ def test_installed_command_rejects_nonprivate_input_without_readiness(
         [str(installed_command()), "--config", str(config), *(["--json"] if use_json else [])],
         stdin=subprocess.DEVNULL,
         capture_output=True,
-        timeout=5,
+        timeout=_COMMAND_TIMEOUT_S,
         check=False,
     )
     assert result.returncode == 1
