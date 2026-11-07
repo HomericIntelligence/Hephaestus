@@ -518,14 +518,14 @@ class TestGhCallPublicExports:
 
     def test_gh_call_exported_from_package(self) -> None:
         """gh_call is exported from hephaestus.git.gh.__init__."""
-        import hephaestus.git.gh as gh_pkg
+        from hephaestus.git import gh as gh_pkg
 
         assert hasattr(gh_pkg, "gh_call")
         assert gh_pkg.gh_call is gh_call
 
     def test_error_classes_exported_from_package(self) -> None:
         """Error classes are exported from hephaestus.git.gh.__init__."""
-        import hephaestus.git.gh as gh_pkg
+        from hephaestus.git import gh as gh_pkg
 
         assert hasattr(gh_pkg, "GitHubRateLimitError")
         assert hasattr(gh_pkg, "GitHubUnavailableError")
