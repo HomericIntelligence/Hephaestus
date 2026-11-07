@@ -7,9 +7,8 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation.pipeline import stage_base
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.pipeline import ROUTES
+from hephaestus.automation.pipeline import ROUTES, stage_base
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stage_base import (
