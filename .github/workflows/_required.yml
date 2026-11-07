@@ -24,6 +24,7 @@ concurrency:
 
 permissions:
   contents: read
+  packages: read  # Pull the shared CI image
 
 jobs:
   # The retained governance check (issue #2853). The protected signed tag
@@ -180,6 +181,7 @@ jobs:
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache pre-commit environments
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -226,6 +228,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
+      packages: read  # Pull the shared CI image
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -235,6 +238,7 @@ jobs:
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check uv.lock is in sync with pyproject.toml (in container)
         run: >
           podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
@@ -284,6 +288,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
+      packages: read  # Pull the shared CI image
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -292,6 +297,7 @@ jobs:
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run ShellCheck through the local CI runner
         env:
           CONTAINER_ENGINE: podman
@@ -807,6 +813,7 @@ jobs:
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
 
       - name: Run canonical dependency audit policy
@@ -883,6 +890,7 @@ jobs:
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run bandit (SAST, in container)
         id: bandit
@@ -916,6 +924,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
+      packages: read  # Pull the shared CI image
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -926,6 +935,7 @@ jobs:
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run zizmor (GitHub Actions SAST)
         id: zizmor
@@ -974,6 +984,7 @@ jobs:
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate GitHub workflow schemas (in container)
         run: |
@@ -1015,6 +1026,7 @@ jobs:
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
 
       - name: Check version single-source-of-truth (in container)
@@ -1060,6 +1072,7 @@ jobs:
         uses: ./.github/actions/setup-ci-image
         with:
           image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Install the package + all runtime extras. ``[all]`` is required so
       # distributed_requirements() can read every runtime extra's Requires-Dist.

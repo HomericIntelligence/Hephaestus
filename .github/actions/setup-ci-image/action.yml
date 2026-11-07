@@ -14,10 +14,27 @@ inputs:
     description: Local tag the container steps use as their image reference.
     required: false
     default: hephaestus-ci:local
+  registry-token:
+    description: >-
+      Token used to pull the private image package. Pass secrets.GITHUB_TOKEN;
+      omit to pull anonymously.
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
+    - name: Log in to GitHub Container Registry
+      if: inputs.registry-token != ''
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.registry-token }}
+        ACTOR: ${{ github.actor }}
+        REGISTRY: ghcr.io
+      run: |
+        set -euo pipefail
+        printf '%s' "${TOKEN}" | podman login "${REGISTRY}" --username "${ACTOR}" --password-stdin
+
     - name: Pull the published CI image
       id: pull
       shell: bash
@@ -31,14 +48,19 @@ runs:
           echo "pulled=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        if podman pull "${IMAGE}" >/dev/null 2>&1; then
-          podman tag "${IMAGE}" "${LOCAL_TAG}"
-          echo "Using published image ${IMAGE}"
-          echo "pulled=true" >> "$GITHUB_OUTPUT"
-        else
+        # The package is private, so the pull needs the workflow token. Keep the
+        # failure reason: a silent fallback hides a broken pin.
+        if ! pull_log="$(podman pull "${IMAGE}" 2>&1)"; then
+          echo "::group::podman pull output"
+          printf '%s\n' "${pull_log}"
+          echo "::endgroup::"
           echo "::warning::Could not pull ${IMAGE}; building the CI image instead."
           echo "pulled=false" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
+        podman tag "${IMAGE}" "${LOCAL_TAG}"
+        echo "Using published image ${IMAGE}"
+        echo "pulled=true" >> "$GITHUB_OUTPUT"
 
     - name: Build the CI image
       if: steps.pull.outputs.pulled != 'true'
