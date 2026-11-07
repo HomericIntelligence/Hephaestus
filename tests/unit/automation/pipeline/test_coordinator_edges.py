@@ -20,13 +20,13 @@ from unittest.mock import MagicMock
 import pytest
 from jinja2 import TemplateSyntaxError
 
-import hephaestus.automation.pipeline as pipeline_pkg
+from hephaestus.automation import pipeline as pipeline_pkg
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
 import hephaestus.automation.pipeline.coordinator_types as coordinator_types_mod
 import hephaestus.automation.pipeline.jobs as jobs_mod
 import hephaestus.automation.pipeline.routing as routing_mod
 import hephaestus.automation.pipeline.seeding as seeding_mod
-import hephaestus.automation.pipeline.stage_base as stage_base_mod
+from hephaestus.automation.pipeline import stage_base as stage_base_mod
 import hephaestus.automation.pipeline.stages.pr_review as pr_review_mod
 import hephaestus.automation.pipeline.work_item as work_item_mod
 import hephaestus.prompts.catalog as prompt_catalog_mod
