@@ -1,0 +1,137 @@
+name: Publish CI Image
+
+# Build the shared CI image once and push it to GitHub Container Registry, so
+# the required checks pull a prebuilt image instead of each rebuilding it.
+#
+# Twelve jobs across three workflows run a cold `podman build` of the same
+# image, about four minutes each. Every one of those is a chance for the Debian
+# snapshot, kernel.org, or npm to fail the whole job. One build here removes the
+# repetition and leaves a single place to see an image fault.
+#
+# The image is built from ci/Containerfile, whose inputs are the Containerfile,
+# the lock file, the project metadata, and the package source. The tag is the
+# digest of those inputs, so an unchanged image is never rebuilt and a changed
+# one always produces a new tag. Consumers pin the tag through the workflow
+# output, which also carries the resolved image digest.
+
+on:
+  workflow_call:
+    outputs:
+      image:
+        description: Prebuilt image reference pinned by digest.
+        value: ${{ jobs.publish.outputs.image }}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-ci-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Repository names must be lowercase and the owner is not, so the path is
+  # normalised in the first step rather than interpolated here.
+  IMAGE_NAMESPACE: ghcr.io/${{ github.repository }}
+
+jobs:
+  publish:
+    name: Publish CI image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write  # Push the image to ghcr.io under this repository
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the image tag from the build inputs
+        id: inputs
+        run: |
+          set -euo pipefail
+          # Hash the content of every file the Containerfile reads, and the
+          # Containerfile itself. `git ls-files` supplies the tracked paths so
+          # an untracked scratch file cannot change the tag.
+          digest="$(
+            git ls-files -z \
+              uv.lock pyproject.toml .pre-commit-config.yaml README.md \
+              ci/Containerfile hephaestus \
+              | sort -z \
+              | xargs -0 sha256sum | sha256sum | cut -c1-64
+          )"
+          echo "tag=sha-${digest}" >> "$GITHUB_OUTPUT"
+          # Container repository names must be lowercase; the owner is not.
+          repository="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')/hephaestus-ci"
+          echo "repository=${repository}" >> "$GITHUB_OUTPUT"
+          echo "Resolved image: ${repository}:sha-${digest}"
+
+      - name: Log in to GitHub Container Registry
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${TOKEN}" | podman login ghcr.io --username "${ACTOR}" --password-stdin
+
+      - name: Reuse an existing image when the inputs are unchanged
+        id: reuse
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
+        run: |
+          set -euo pipefail
+          if podman pull "${REPOSITORY}:${TAG}" >/dev/null 2>&1; then
+            echo "Reusing the published image for ${TAG}"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No published image for ${TAG}; building it"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the CI image
+        if: steps.reuse.outputs.exists != 'true'
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
+        run: |
+          set -euo pipefail
+          podman build --jobs=2 -f ci/Containerfile -t "${REPOSITORY}:${TAG}" .
+
+      - name: Publish the CI image
+        if: steps.reuse.outputs.exists != 'true'
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
+        run: |
+          set -euo pipefail
+          podman push "${REPOSITORY}:${TAG}"
+
+      - name: Resolve the pinned image reference
+        id: reference
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
+        run: |
+          set -euo pipefail
+          # Consumers pin by digest, so a retagged pointer cannot change what a
+          # check runs.
+          digest="$(podman image inspect --format '{{.Digest}}' "${REPOSITORY}:${TAG}")"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "Unexpected image digest: $digest" >&2; exit 1 ;;
+          esac
+          echo "image=${REPOSITORY}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "Pinned image: ${REPOSITORY}@${digest}"
+
+      - name: Report the published image
+        env:
+          IMAGE: ${{ steps.reference.outputs.image }}
+        run: |
+          echo "### CI image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

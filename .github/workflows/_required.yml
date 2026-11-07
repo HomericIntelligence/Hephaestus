@@ -24,6 +24,7 @@ concurrency:
 
 permissions:
   contents: read
+  packages: read  # Pull the shared CI image
 
 jobs:
   # The retained governance check (issue #2853). The protected signed tag
@@ -53,6 +54,18 @@ jobs:
           set -euo pipefail
           echo "code_event=true" >> "$GITHUB_OUTPUT"
           echo "Code or merge-group event (${ACTION:-push}) — all validation jobs run."
+
+  # Build the shared CI image once per commit and hand every container job a
+  # pinned reference. Each container job used to run its own cold build of the
+  # same image, so one Debian snapshot fault could fail a dozen jobs.
+  ci-image:
+    name: ci-image
+    uses: ./.github/workflows/publish-ci-image.yml
+    permissions:
+      contents: read
+      packages: write  # Push the image the container jobs pull
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
   forbid-suppressions:
     name: forbid-suppressions
@@ -147,7 +160,7 @@ jobs:
     name: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: changes-gate
+    needs: [changes-gate, ci-image]
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
@@ -164,8 +177,11 @@ jobs:
       # check — previously pre-commit was advisory, which let an unformatted
       # file land on main via #959 and break pre-commit for every later PR.
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache pre-commit environments
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -208,17 +224,21 @@ jobs:
     name: uv-lock-check
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: [lint, changes-gate]
+    needs: [lint, changes-gate, ci-image]
     if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
+      packages: read  # Pull the shared CI image
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check uv.lock is in sync with pyproject.toml (in container)
         run: >
           podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
@@ -264,16 +284,20 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: [lint, changes-gate]
+    needs: [lint, changes-gate, ci-image]
     if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
+      packages: read  # Pull the shared CI image
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Build the shared CI image
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run ShellCheck through the local CI runner
         env:
           CONTAINER_ENGINE: podman
@@ -777,7 +801,7 @@ jobs:
     name: security/dependency-scan
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: changes-gate
+    needs: [changes-gate, ci-image]
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
@@ -785,8 +809,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
 
       - name: Run canonical dependency audit policy
@@ -851,7 +878,7 @@ jobs:
     name: security/sast-scan
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: changes-gate
+    needs: [changes-gate, ci-image]
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
@@ -859,8 +886,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run bandit (SAST, in container)
         id: bandit
@@ -890,18 +920,22 @@ jobs:
     # The job builds the CI image before starting zizmor. Five minutes can
     # expire while the scanner is still running on a cold runner.
     timeout-minutes: 15
-    needs: changes-gate
+    needs: [changes-gate, ci-image]
     if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
+      packages: read  # Pull the shared CI image
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run zizmor (GitHub Actions SAST)
         id: zizmor
@@ -933,7 +967,7 @@ jobs:
     name: schema-validation
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: changes-gate
+    needs: [changes-gate, ci-image]
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
@@ -946,8 +980,11 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate GitHub workflow schemas (in container)
         run: |
@@ -971,7 +1008,7 @@ jobs:
     name: deps/version-sync
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: changes-gate
+    needs: [changes-gate, ci-image]
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
@@ -985,8 +1022,11 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
 
       - name: Check version single-source-of-truth (in container)
@@ -1019,7 +1059,7 @@ jobs:
     name: license-scan
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: changes-gate
+    needs: [changes-gate, ci-image]
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
@@ -1028,8 +1068,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0  # hatch-vcs needs full history to compute the version
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Install the package + all runtime extras. ``[all]`` is required so
       # distributed_requirements() can read every runtime extra's Requires-Dist.
@@ -1076,6 +1119,7 @@ jobs:
     needs:
       - agent-contract
       - changes-gate
+      - ci-image
       - forbid-suppressions
       - lint
       - uv-lock-check
@@ -1098,8 +1142,8 @@ jobs:
           # is injection-safe.
           RESULTS: ${{ toJSON(needs) }}
           EXPECTED_JOBS: >-
-            ["agent-contract", "changes-gate", "forbid-suppressions", "lint",
-            "uv-lock-check", "justfile-check", "symlink-check", "shellcheck",
+            ["agent-contract", "changes-gate", "ci-image", "forbid-suppressions",
+            "lint", "uv-lock-check", "justfile-check", "symlink-check", "shellcheck",
             "pr-policy", "security-dependency-scan",
             "security-secrets-scan", "security-sast-scan",
             "security-workflow-scan", "schema-validation", "deps-version-sync",
