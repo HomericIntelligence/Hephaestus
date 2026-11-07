@@ -11,5 +11,6 @@
 | contract.yml | Opt-in authenticated GitHub and agent contract tests. | workflow_dispatch |
 | nightly-tests.yml | Runs the high-cost functional tests excluded from pull-request checks. | schedule, workflow_dispatch |
 | performance.yml | Runs bounded worker-pool capacity, latency, and sustained-concurrency tests and retains the JSON report. | schedule, workflow_dispatch |
+| publish-ci-image.yml | Builds the shared CI image once and publishes it to ghcr.io, pinned by digest, for the container jobs to pull. | workflow_call, workflow_dispatch |
 | release.yml | Builds, tests, publishes, and creates releases for tags. | push tags `v*`, workflow_dispatch |
 | security.yml | Runs scheduled/manual security scans and PR-time security checks for dependency-sensitive changes. | pull_request paths, schedule, workflow_dispatch |
