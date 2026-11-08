@@ -35,6 +35,7 @@ SETUP_PI_ACTION = REPO_ROOT / ".github/" / "actions" / "setup-pi-cli" / "action.
 CONTAINERFILE = REPO_ROOT / "ci" / "Containerfile"
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nightly-tests.yml"
+SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security.yml"
 
 
 class TestCollectYmlFiles:
@@ -208,6 +209,34 @@ class TestNightlyTestsWorkflow:
         config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
         assert "precommit" in addopts
+
+
+class TestScheduledSecurityWorkflow:
+    """Contracts for the scheduled Security lane's LOW-severity drift gate.
+
+    The LOW baseline check guards the weekly Security lane against Bandit count
+    drift. A silent removal of that step makes the lane pass without the gate,
+    so this test pins the step, its inputs, and its position.
+    """
+
+    def test_scheduled_security_job_runs_the_low_baseline_check(self) -> None:
+        """The `sast` job keeps the LOW baseline step before its summary step."""
+        workflow = yaml.safe_load(SECURITY_WORKFLOW.read_text(encoding="utf-8"))
+        job = workflow["jobs"]["sast"]
+        assert job["if"] == "github.event_name != 'pull_request'"
+
+        steps = job["steps"]
+        names = [step.get("name") for step in steps]
+        low_index = next(
+            index for index, step in enumerate(steps) if step.get("id") == "bandit-low"
+        )
+        low_step = steps[low_index]
+
+        run = low_step["run"]
+        assert "bandit_baseline_check.py" in run
+        assert "/workspace/hephaestus/ci/bandit_low_baseline.json" in run
+        assert "--severity-level low --exit-zero" in run
+        assert low_index < names.index("Post bandit summary")
 
 
 class TestIsCheckoutStep:
