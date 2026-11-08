@@ -378,7 +378,7 @@ def test_sleep_guard_detects_synthetic_violations() -> None:
     assert sum(": import time" in v for v in strict) == 2  # top-level + in-function
 
     # stage_base.py mode: the bare imports are allowed, sleep never is.
-    relaxed = _sleep_violations(tree, "base.py", allow_time_import=True)
+    relaxed = _sleep_violations(tree, "stage_base.py", allow_time_import=True)
     assert any("time.sleep reference" in v for v in relaxed)
     assert not any(": import time" in v for v in relaxed)
     assert sum("from time import sleep" in v for v in relaxed) == 2
