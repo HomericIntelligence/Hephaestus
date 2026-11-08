@@ -45,6 +45,11 @@ from hephaestus.automation.source_worktree import (
     normalize_source_workspace_creation_failure,
 )
 
+from ..direct_scope_keys import (
+    DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
+    DIRECT_SCOPE_RESERVATION_KEY,
+    is_full_commit_sha,
+)
 from ..stage_base import (
     GIT_JOB_TIMEOUT_S,
     Continue,
@@ -60,11 +65,6 @@ from ..stage_base import (
     WorkItem,
     _repo_state_root,
     stage_timeout,
-)
-from .repo import (
-    DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
-    DIRECT_SCOPE_RESERVATION_KEY,
-    is_full_commit_sha,
 )
 
 logger = logging.getLogger(__name__)

@@ -37,7 +37,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from itertools import chain
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any
 
 import hephaestus.automation.loop_repo_manager as _repo_manager
 import hephaestus.automation.pipeline.seeding as _seeding
@@ -47,11 +47,15 @@ from hephaestus.automation.issue_waves import (
     IssueWaveStore,
     WaveAdmissionPlan,
     WaveLease,
-    is_full_commit_sha as is_full_commit_sha,
 )
 from hephaestus.automation.learning_journal import LearningJournalStore
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeReceipt
 
+from ..direct_scope_keys import (
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_BOOTSTRAP_KEY,
+    is_full_commit_sha,
+)
 from ..events import RepositoryBusyEvent
 from ..stage_base import (
     GIT_JOB_TIMEOUT_S,
@@ -72,33 +76,6 @@ from ..stage_base import (
 
 logger = logging.getLogger(__name__)
 
-# Direct CLI scopes bootstrap one reusable checkout before any source reads.
-# The SHA travels only with that bootstrap's cursors; normal repository
-# discovery retains per-issue fresh-trunk semantics.
-DIRECT_SCOPE_BOOTSTRAP_KEY = "_direct_scope_bootstrap"
-DIRECT_SCOPE_BASE_SHA_KEY = "_direct_scope_base_sha"
-# The coordinator creates one UUID4 hex value per explicit issue cursor.  A
-# fresh direct run carries it through to its writer worktree so a preserved
-# failed checkout cannot block a later run for the same issue.
-DIRECT_SCOPE_WORKTREE_NONCE_KEY = "_direct_scope_worktree_nonce"
-# A direct-scope worker returns this receipt only after it has atomically
-# reserved the remote implementation branch.  It remains on the item until a
-# coordinator-owned push publishes a commit or the Finished stage releases the
-# still-unused reservation.
-DIRECT_SCOPE_RESERVATION_KEY = "_direct_scope_reservation"
-# Typed result retained only between the direct worktree reservation worker
-# and implementation's next step.  A confirmed remote collision is terminal
-# rather than a generic infrastructure retry: retrying cannot make a branch
-# owned by another run safe to overwrite.
-DIRECT_SCOPE_RESERVATION_COLLISION_KEY = "_direct_scope_reservation_collision"
-# Typed result retained only between the direct worktree worker and
-# implementation's next step. Deterministic stale local state fails on every
-# attempt, so it stops the item instead of spending the Git retry budget.
-DIRECT_SCOPE_STALE_STATE_KEY = "_direct_scope_stale_state"
-# The remote reservation is already released after a direct no-op.  Finished
-# uses this receipt to compare-and-delete the now-detached local branch only
-# after removing its worktree.
-DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY = "_direct_scope_local_branch_cleanup"
 SYNCED_MAIN_SHA_KEY = "_synced_default_branch_sha"
 INTAKE_RECEIPT_KEY = "_repo_intake_receipt"
 WAVE_PLAN_KEY = "_issue_wave_admission_plan"
@@ -174,15 +151,6 @@ def _repository_busy_outcome(
     )
     ctx.emit_event(event)
     return StageOutcome(Disposition.FINISH_FAIL, event.summary())
-
-
-def is_direct_scope_worktree_nonce(value: object) -> TypeGuard[str]:
-    """Return whether ``value`` is the coordinator's UUID4 hex token."""
-    return bool(
-        isinstance(value, str)
-        and len(value) == 32
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 @dataclass

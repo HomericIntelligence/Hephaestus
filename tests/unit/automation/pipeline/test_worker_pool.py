@@ -20921,8 +20921,8 @@ def test_writer_creation_category_crosses_worker_boundary(
     if boundary == "claim":
         source.claim_implementation_writer.assert_called_once()
     if boundary in {"transition_process", "transition_oserror"}:
+        from hephaestus.automation.pipeline.direct_scope_keys import DIRECT_SCOPE_BASE_SHA_KEY
         from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
-        from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_BASE_SHA_KEY
         from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 
         item = WorkItem(
@@ -21088,13 +21088,13 @@ def test_failed_writer_terminal_evidence_reaches_both_outcome_stores(
     from types import SimpleNamespace
 
     from hephaestus.automation.issue_waves import WAVE_LEASE_PAYLOAD, IssueWaveStore
-    from hephaestus.automation.pipeline.stage_base import Continue
-    from hephaestus.automation.pipeline.stages.finished import FinishedStage
-    from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
-    from hephaestus.automation.pipeline.stages.repo import (
+    from hephaestus.automation.pipeline.direct_scope_keys import (
         DIRECT_SCOPE_BASE_SHA_KEY,
         DIRECT_SCOPE_RESERVATION_KEY,
     )
+    from hephaestus.automation.pipeline.stage_base import Continue
+    from hephaestus.automation.pipeline.stages.finished import FinishedStage
+    from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
     from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 
     repo, predecessor_sha, target_sha = _worker_repository(tmp_path)

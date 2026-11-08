@@ -17,17 +17,17 @@ from hephaestus.automation.host_capabilities import ValidatedSigningProvider, se
 from hephaestus.automation.pipeline.athena_executor_scope import (
     pipeline_requires_athena_executor,
 )
+from hephaestus.automation.pipeline.direct_scope_keys import (
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
+    is_full_commit_sha,
+)
 from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.pipeline.jobs import JobHandle
 from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, ROUTES, StageName
 from hephaestus.automation.pipeline.stages import Stage, StageContext, StageGitHub
 from hephaestus.automation.pipeline.stages.implementation import _store_impl_source_metadata
-from hephaestus.automation.pipeline.stages.repo import (
-    DIRECT_SCOPE_BASE_SHA_KEY,
-    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
-    is_full_commit_sha,
-)
 from hephaestus.automation.pipeline.summary import TerminalSummary
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,

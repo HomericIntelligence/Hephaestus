@@ -21,12 +21,12 @@ from hephaestus.automation.issue_waves import (
     WAVE_NON_CODE_PAYLOAD,
     IssueWaveStore,
 )
+from hephaestus.automation.pipeline.direct_scope_keys import DIRECT_SCOPE_RESERVATION_KEY
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stage_base import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages import finished as finished_module
 from hephaestus.automation.pipeline.stages.finished import FinishedStage
-from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_RESERVATION_KEY
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,
     ItemResult,

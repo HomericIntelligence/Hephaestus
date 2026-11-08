@@ -2313,8 +2313,8 @@ def _assert_reserved_quota_restart(
 ) -> None:
     """Retry the actual reserved operation through fresh stage and worker owners."""
     from hephaestus.automation import git_utils
+    from hephaestus.automation.pipeline.direct_scope_keys import DIRECT_SCOPE_RESERVATION_KEY
     from hephaestus.automation.pipeline.stages import JobRequest
-    from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_RESERVATION_KEY
 
     case.pool.shutdown()
     del case.pool
@@ -2512,8 +2512,8 @@ def test_reserved_initial_and_continued_publication_complete_after_start_save(
 
 def _reserved_restart_job(case: Any, operation: str, pool: Any, *, completed: bool = False) -> Any:
     """Discover the actual retained source without prior callback or conflict state."""
+    from hephaestus.automation.pipeline.direct_scope_keys import DIRECT_SCOPE_RESERVATION_KEY
     from hephaestus.automation.pipeline.stages import JobRequest
-    from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_RESERVATION_KEY
 
     stage, item, ctx = _restart_publication_stage(case, operation, case.original)
     item.payload[DIRECT_SCOPE_RESERVATION_KEY] = dict(case.reservation)
@@ -3327,9 +3327,9 @@ def _normal_publication_job(case: Any, operation: str) -> Any:
     from types import SimpleNamespace
 
     from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+    from hephaestus.automation.pipeline.direct_scope_keys import DIRECT_SCOPE_RESERVATION_KEY
     from hephaestus.automation.pipeline.routing import StageName
     from hephaestus.automation.pipeline.stages import ImplementationStage, StageContext
-    from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_RESERVATION_KEY
     from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
     from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 

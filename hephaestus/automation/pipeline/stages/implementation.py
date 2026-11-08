@@ -120,12 +120,23 @@ from hephaestus.utils.git import _is_full_digest
 from ..admission import dependency_block_reason, parse_issue_dependencies
 from ..coordinator_sessions import agent_session_lifecycle
 from ..diagnostics import redact_diagnostic_text
+from ..direct_scope_keys import (
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
+    DIRECT_SCOPE_RESERVATION_COLLISION_KEY,
+    DIRECT_SCOPE_RESERVATION_KEY,
+    DIRECT_SCOPE_STALE_STATE_KEY,
+    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
+    is_direct_scope_worktree_nonce,
+    is_full_commit_sha,
+)
 from ..github_jobs import (
     CurrentPlanScopeRead,
     GitHubJob,
     ReadCurrentPlanScopeRequest,
 )
 from ..host_capabilities import CapabilityRequestTarget, HostCapabilityReceipt
+from ..host_verification_diagnostic import publish_host_verification_failure
 from ..jobs import (
     WORKTREE_MATERIALIZED_KEY,
     _writer_publication_matches_refresh,
@@ -164,9 +175,7 @@ from ..stage_base import (
     stage_network_deadline,
     stage_timeout,
 )
-from .durable_request import PENDING_GITHUB_REQUEST, pending_request
-from .pr_review_diagnostics import publish_host_verification_failure
-from .repo import (
+from .direct_scope_keys import (
     DIRECT_SCOPE_BASE_SHA_KEY,
     DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
     DIRECT_SCOPE_RESERVATION_COLLISION_KEY,
@@ -176,6 +185,8 @@ from .repo import (
     is_direct_scope_worktree_nonce,
     is_full_commit_sha,
 )
+from .durable_request import PENDING_GITHUB_REQUEST, pending_request
+from .host_verification_diagnostic import publish_host_verification_failure
 
 logger = logging.getLogger(__name__)
 
