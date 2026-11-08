@@ -143,6 +143,10 @@ ROUTES: dict[StageName, Route] = {
             # A merge GitHub reports blocked by an unresolved review thread
             # needs review and implementation work, not terminal abandonment.
             "merge_blocked_by_unresolved_threads": StageName.PR_REVIEW,
+            # A merge GitHub reports blocked by a failing required check needs
+            # a repaired tree, not another review. The implementation stage
+            # owns the pre-PR gate and the test-fix agent loop.
+            "merge_blocked_by_failing_checks": StageName.IMPLEMENTATION,
             "*": StageName.FINISHED,
         },
         budgets={"merge": DEFAULT_MERGE_ATTEMPTS},

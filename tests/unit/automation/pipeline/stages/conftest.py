@@ -578,6 +578,11 @@ class FakeStageGitHub(FakeGitHub):
         del pr_number
         return dict(self._pr_state) if isinstance(self._pr_state, dict) else self._pr_state
 
+    def gh_pr_failing_check_names(self, pr_number: int) -> list[str] | None:
+        """Mirror the failing-check read with a canned empty answer."""
+        del pr_number
+        return []
+
     @property
     def _repo_slug(self) -> str:
         """Return the stable repository identity used by GitHub queries."""

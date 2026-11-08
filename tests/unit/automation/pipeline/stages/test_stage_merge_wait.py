@@ -368,6 +368,8 @@ class _MergeBlockGitHub(_AutoMergeGitHub):
         readiness: list[dict[str, object] | None] | None = None,
         threads: list[dict[str, object]] | None = None,
         threads_raise: bool = False,
+        failing_checks: list[str] | None = None,
+        checks_raise: bool = False,
         **kwargs: Any,
     ) -> None:
         """Script the block-check reads for one merge cycle."""
@@ -375,6 +377,8 @@ class _MergeBlockGitHub(_AutoMergeGitHub):
         self._readiness = list(readiness if readiness is not None else [None])
         self._threads = list(threads or [])
         self._threads_raise = threads_raise
+        self._failing_checks = list(failing_checks or [])
+        self._checks_raise = checks_raise
         self.readiness_reads: list[int] = []
 
     def gh_pr_merge_readiness(self, pr_number: int) -> dict[str, Any] | None:
@@ -391,6 +395,13 @@ class _MergeBlockGitHub(_AutoMergeGitHub):
         if self._threads_raise:
             raise RuntimeError("thread read failed")
         return [dict(thread) for thread in self._threads]
+
+    def gh_pr_failing_check_names(self, pr_number: int) -> list[str] | None:
+        """Return the scripted failing check names, or fail the read."""
+        del pr_number
+        if self._checks_raise:
+            raise RuntimeError("check read failed")
+        return list(self._failing_checks)
 
 
 def _blocked_readiness() -> dict[str, object]:
@@ -440,6 +451,55 @@ def test_the_block_check_runs_only_after_the_arm() -> None:
     assert receipt.outcome == "auto_merge_enabled"
     assert receipt.attempted is True
     assert github.readiness_reads == []
+
+
+def test_an_armed_pr_blocked_by_failing_checks_names_the_checks() -> None:
+    """A blocked pull request names the failing checks as its reason."""
+    github = _MergeBlockGitHub(
+        readiness=[_blocked_readiness()],
+        failing_checks=["lint", "lint-typecheck-test"],
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "merge_blocked_by_failing_checks"
+    assert receipt.failing_check_names == ("lint", "lint-typecheck-test")
+    assert receipt.attempted is False
+    assert github.enable_calls == []
+
+
+def test_open_threads_take_precedence_over_failing_checks() -> None:
+    """A block with both open threads and failing checks reports the threads."""
+    github = _MergeBlockGitHub(
+        readiness=[_blocked_readiness()],
+        threads=[{"id": "T1"}],
+        failing_checks=["lint"],
+    )
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "merge_blocked_by_unresolved_threads"
+    assert receipt.failing_check_names == ()
+
+
+def test_a_blocked_pr_with_no_failing_checks_keeps_polling() -> None:
+    """A block that names no failing check is not reported as a check block."""
+    github = _MergeBlockGitHub(readiness=[_blocked_readiness()], failing_checks=[])
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "auto_merge_enabled"
+    assert receipt.failing_check_names == ()
+
+
+def test_an_unreadable_check_read_keeps_polling() -> None:
+    """An unreadable check record never becomes a reported check block."""
+    github = _MergeBlockGitHub(readiness=[_blocked_readiness()], checks_raise=True)
+
+    receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(_armed_request(), github)
+
+    assert receipt.outcome == "auto_merge_enabled"
+    assert receipt.failing_check_names == ()
 
 
 def test_a_blocked_pr_with_no_open_threads_keeps_polling() -> None:

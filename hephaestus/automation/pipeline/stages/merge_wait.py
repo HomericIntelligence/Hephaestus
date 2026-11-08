@@ -207,6 +207,20 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FAIL_BACK, outcome)
         if outcome == "merge_conflicting":
             return self._post_review_rebase(item, outcome)
+        if outcome == "merge_blocked_by_failing_checks":
+            # GitHub will not merge while a required check fails. Name the
+            # checks and send the item back to implementation, so the
+            # implementer agent repairs the tree and drives the checks green
+            # instead of this stage waiting for a merge that cannot happen.
+            logger.warning(
+                "merge_wait:%s: PR #%s is blocked by failing check(s) %s; "
+                "routing back to implementation",
+                item.issue,
+                item.pr,
+                ", ".join(receipt.failing_check_names),
+            )
+            item.payload.pop(_AUTO_MERGE_ARMED, None)
+            return StageOutcome(Disposition.FAIL_BACK, outcome)
         if (
             outcome
             in {
