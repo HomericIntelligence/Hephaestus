@@ -36,6 +36,7 @@ from packaging.version import InvalidVersion, Version
 
 from hephaestus.cli.localization import text
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, format_output
+from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.errors import boundary_main
 from hephaestus.utils.helpers import get_repo_root
 
@@ -569,6 +570,7 @@ def _run_pip_audit() -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
         timeout=_AUDIT_TIMEOUT_SECONDS,
+        env=build_python_phase_env(get_repo_root()),
     )
 
 
