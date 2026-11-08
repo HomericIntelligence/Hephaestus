@@ -64,6 +64,14 @@ class StageGitHub(Protocol):
     coordinator-neutral names the coordinator maps onto ``github_api``
     mutators (the pipeline architecture guard forbids ``github_api`` mutator
     names inside pipeline modules).
+
+    This protocol and its coordinator implementation expose no auto-merge
+    mutation. Stages must not call ``enable_auto_merge`` or
+    ``disable_auto_merge``. The closed ``merge_wait`` job owns enablement,
+    and the adapter owns the disarm. The test
+    ``tests/unit/automation/pipeline/
+    test_pipeline_architecture.py::test_pipeline_stages_have_no_auto_merge_mutation_capability``
+    enforces this rule.
     """
 
     def operation_deadline(

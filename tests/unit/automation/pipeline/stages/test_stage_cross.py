@@ -52,7 +52,6 @@ _LABEL_MUTATIONS = {
     "gh_issue_remove_labels",
     "mark_pr_implementation_go",
     "mark_pr_implementation_no_go",
-    "arm_auto_merge",
 }
 
 

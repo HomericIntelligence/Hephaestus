@@ -2341,9 +2341,9 @@ class TestRepoScoping:
 
 
 class TestRepoScopedAutoMerge:
-    """The pipeline adapter intentionally exposes no auto-merge mutators."""
+    """The pipeline adapter exposes only the live auto-merge mutations."""
 
-    def test_pipeline_adapter_has_no_auto_merge_mutation_surface(
+    def test_pipeline_adapter_exposes_only_the_live_auto_merge_mutations(
         self, tmp_path: Path, command_runner: MagicMock
     ) -> None:
         adapter = PipelineGitHub(
@@ -2352,6 +2352,8 @@ class TestRepoScopedAutoMerge:
 
         assert not hasattr(adapter, "arm_auto_merge")
         assert not hasattr(adapter, "defer_auto_merge")
+        assert callable(adapter.enable_auto_merge)
+        assert callable(adapter.disable_auto_merge)
 
     def test_pipeline_adapter_has_no_unanchored_pr_comment_surface(
         self, tmp_path: Path, command_runner: MagicMock
