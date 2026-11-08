@@ -96,7 +96,7 @@ def _stage_modules(root: Path = _PIPELINE) -> list[Path]:
     """
     modules = sorted(
         [*root.rglob("stages/**/*.py"), *root.glob("stage_*.py")],
-        key=lambda path: str(path),
+        key=str,
     )
     assert modules, f"stage scan matched no files under {root}"
     return modules
