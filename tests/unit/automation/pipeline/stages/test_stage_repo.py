@@ -28,7 +28,7 @@ from hephaestus.automation.pipeline.events import RepositoryBusyEvent
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts
-from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stage_base import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.repo import (
     CHECKOUT_CONTENTION_ATTEMPTS_KEY,
     CHECKOUT_CONTENTION_ELAPSED_KEY,

@@ -14,7 +14,7 @@ from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import IssueFacts
-from hephaestus.automation.pipeline.stages.base import Continue, Stage
+from hephaestus.automation.pipeline.stage_base import Continue, Stage
 from hephaestus.automation.pipeline.stages.repo import RepoStage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories

@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
-from hephaestus.automation.pipeline.stages.base import StageContext, agent_provider, stage_model
+from hephaestus.automation.pipeline.stage_base import StageContext, agent_provider, stage_model
 
 
 def test_role_tool_overrides_global_tool_without_changing_model() -> None:

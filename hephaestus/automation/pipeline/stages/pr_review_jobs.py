@@ -13,8 +13,8 @@ from hephaestus.automation.source_worktree import SourceWorkspaceError
 
 from ..coordinator_sessions import agent_session_lifecycle
 from ..diagnostics import redact_diagnostic_text
+from ..stage_base import _terminal_pr_outcome, source_workspace_binding
 from ..summary import record_review_run
-from .base import _terminal_pr_outcome, source_workspace_binding
 from .pr_review_threads import *
 
 
