@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  packages: read  # Pull the shared CI image
 
 # Read-only scans — safe to cancel. Collapse successive pushes to the same PR
 # branch (head_ref) so only the latest scan runs; schedule/dispatch fall back to
@@ -32,12 +33,19 @@ jobs:
     uses: HomericIntelligence/Athena/.github/workflows/_agent-contract.yml@agent-contract-v1.0.0  # zizmor: ignore[unpinned-uses]
     permissions:
       contents: read
+  ci-image:
+    name: ci-image
+    uses: ./.github/workflows/publish-ci-image.yml
+    permissions:
+      contents: read
+      packages: write  # Push the image the scan jobs pull
   pip-audit:
     name: Dependency vulnerability scan
     # PR-time pip-audit runs in _required.yml (security/dependency-scan). Skip
     # here on PRs to avoid the ~2x duplicate run; still runs on the weekly
     # schedule + manual dispatch. See issue #1182.
     if: github.event_name != 'pull_request'
+    needs: ci-image
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -46,8 +54,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run canonical dependency audit policy
         id: pip-audit
@@ -80,6 +91,7 @@ jobs:
     # to avoid the ~2x duplicate run; still runs on the weekly schedule +
     # manual dispatch. See issue #1182.
     if: github.event_name != 'pull_request'
+    needs: ci-image
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -88,8 +100,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run bandit (SAST, in container)
         id: bandit
@@ -128,6 +143,7 @@ jobs:
     # run additionally enables the online, API-backed audits (e.g.
     # known-vulnerable-actions) that the offline PR gate cannot perform.
     if: github.event_name != 'pull_request'
+    needs: ci-image
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -136,8 +152,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run zizmor (GitHub Actions SAST with online audits, in container)
         id: zizmor
@@ -166,6 +185,7 @@ jobs:
     # required-checks-gate). Skip here on PRs to avoid the ~2x duplicate run;
     # still runs on the weekly schedule + manual dispatch. See issue #1514.
     if: github.event_name != 'pull_request'
+    needs: ci-image
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -175,8 +195,11 @@ jobs:
           fetch-depth: 0  # hatch-vcs needs full history to compute the version
           persist-credentials: false
 
-      - name: Build CI image (podman)
-        run: podman build --jobs=2 -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Prepare the shared CI image
+        uses: ./.github/actions/setup-ci-image
+        with:
+          image: ${{ needs.ci-image.outputs.image }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run license scan (in container)
         id: license-scan
@@ -201,7 +224,7 @@ jobs:
 
   notify-failure:
     name: Open or update failure tracking issue
-    needs: [agent-contract, pip-audit, sast, workflow-scan, license-scan]
+    needs: [agent-contract, ci-image, pip-audit, sast, workflow-scan, license-scan]
     # Only scheduled runs open issues — PR-time jobs are attended by the PR
     # gate and manual dispatch runs are attended.
     if: ${{ failure() && github.event_name == 'schedule' }}
