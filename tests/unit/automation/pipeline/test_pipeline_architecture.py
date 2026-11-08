@@ -72,6 +72,76 @@ _WORKER_SIDE_MODULES = (
 )
 _FORBIDDEN_WORKER_MODULES = ("github_api", "pr_manager")
 
+# The clock-owner pin: exactly one stage module may ``import time``. The pin
+# names the path components of the owner file relative to the pipeline package:
+# ``stage_base.py``, the module split out of ``stages/base.py`` in #3579. A
+# module that merely shares the stem is not the owner.
+# Update this pin in the same change that moves the clock owner.
+_CLOCK_OWNER = ("stage_base.py",)
+
+
+def _stage_modules(root: Path = _PIPELINE) -> list[Path]:
+    """Sorted recursive scan of the pipeline stage modules under ``root``.
+
+    One shared pattern owns the glob both stage guards run. Every consumer
+    (``_stage_auto_merge_callers``, the sleep guard, the clock-owner pin test)
+    calls this helper and never re-globs or duplicates the non-empty assert
+    inline. The non-empty assert keeps the guards from passing vacuously if
+    the pattern ever stops matching the stage layout.
+
+    The pattern covers the ``stages/`` package and the ``stage_*.py`` modules
+    beside it, because stage code lives in both: a stage mixed into
+    ``pipeline/`` as ``stage_<name>.py`` is still stage code and must obey the
+    same bans.
+    """
+    modules = sorted(
+        [*root.rglob("stages/**/*.py"), *root.glob("stage_*.py")],
+        key=str,
+    )
+    assert modules, f"stage scan matched no files under {root}"
+    return modules
+
+
+def _stage_relative(py: Path, root: Path = _PIPELINE) -> str:
+    """Path of a stage module relative to the scan ``root``.
+
+    Nested modules can share a stem, so guard labels and detector members use
+    this unambiguous relative path (for example
+    ``stages/pr_review_details/synthetic_neg.py``) rather than ``py.stem``.
+    A module directly under ``root`` keeps its bare name.
+    """
+    return py.relative_to(root).as_posix()
+
+
+def _stage_auto_merge_callers(modules: list[Path], root: Path = _PIPELINE) -> set[str]:
+    """Stage modules that call a banned auto-merge mutator (AST walk).
+
+    Returns each offender's path relative to its ``stages/`` parent. The
+    banned set holds the retired accessor names ``arm_auto_merge`` /
+    ``defer_auto_merge``; moving it to the live mutation names is #3581.
+    """
+    callers: set[str] = set()
+    for path in modules:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"arm_auto_merge", "defer_auto_merge"}
+            ):
+                callers.add(_stage_relative(path, root))
+    return callers
+
+
+def _is_clock_owner(py: Path) -> bool:
+    """Return True only for the pinned clock-owner module ``stage_base.py``.
+
+    Exact-path rule: the trailing path components equal ``_CLOCK_OWNER``. A
+    module that shares the stem elsewhere is not the owner.
+    """
+    depth = len(_CLOCK_OWNER)
+    return tuple(py.parts[-depth:]) == _CLOCK_OWNER
+
 
 def _imported_mutators(path: Path) -> set[str]:
     """Find github_api mutators imported or called in a Python file (AST walk)."""
@@ -258,22 +328,7 @@ def test_retired_pre_pipeline_coordinators_are_removed(module_name: str) -> None
 
 def test_pipeline_stages_have_no_auto_merge_mutation_capability() -> None:
     """The reviewed-head interlock leaves persistent auto-merge to operators."""
-    callers: set[str] = set()
-    for path in [
-        *sorted(_PIPELINE.glob("stages/*.py")),
-        _PIPELINE / "stage_base.py",
-        _PIPELINE / "stage_github.py",
-    ]:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"arm_auto_merge", "defer_auto_merge"}
-            ):
-                callers.add(path.stem)
-
-    assert callers == set()
+    assert _stage_auto_merge_callers(_stage_modules()) == set()
 
 
 def test_auto_merge_has_one_production_call_site() -> None:
@@ -305,7 +360,8 @@ def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) 
     - ``time.sleep(...)`` attribute access (any ``<Name time>.sleep``);
     - ``from time import sleep`` (aliased or not);
     - any other ``import time`` / ``from time import ...`` form, unless
-      ``allow_time_import`` (stage_base.py legitimately uses ``time.time``
+      ``allow_time_import``. The exemption belongs to exactly the pinned
+      ``_CLOCK_OWNER`` module (stages/base.py legitimately uses ``time.time``
       for its injectable-clock default — it still may never sleep).
     """
     violations: list[str] = []
@@ -337,19 +393,17 @@ def test_no_time_sleep_in_pipeline_stages() -> None:
 
     AST-based (matching this file's own guards), so conditional/lazy
     imports and aliased ``from time import sleep`` are caught too — not
-    just top-level text matches. stage_base.py is NOT exempt: it may keep
-    its ``import time`` (the injectable clock's ``time.time`` default) but
-    is asserted to contain no ``time.sleep`` in any form.
+    just top-level text matches. The scan is recursive, so stages moved
+    into subdirectories stay covered. base.py is NOT exempt from the
+    sleep ban: it keeps its ``import time`` only through the pinned
+    ``_CLOCK_OWNER`` exemption (the exact-path pin moves with the clock
+    owner) and is asserted to contain no ``time.sleep`` in any form.
     """
     violations: list[str] = []
-    for py in [
-        *sorted(_PIPELINE.glob("stages/*.py")),
-        _PIPELINE / "stage_base.py",
-        _PIPELINE / "stage_github.py",
-    ]:
-        tree = ast.parse(py.read_text(), filename=str(py))
+    for py in _stage_modules():
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         violations.extend(
-            _sleep_violations(tree, py.name, allow_time_import=py.stem == "stage_base")
+            _sleep_violations(tree, _stage_relative(py), allow_time_import=_is_clock_owner(py))
         )
     assert not violations, "stages must not sleep — timer heap owns waits:\n" + "\n".join(
         violations
@@ -382,3 +436,80 @@ def test_sleep_guard_detects_synthetic_violations() -> None:
     assert any("time.sleep reference" in v for v in relaxed)
     assert not any(": import time" in v for v in relaxed)
     assert sum("from time import sleep" in v for v in relaxed) == 2
+
+
+def test_auto_merge_guard_detects_nested_violation(tmp_path: Path) -> None:
+    """Negative: the recursive stage scan must flag a nested auto-merge caller.
+
+    The benign top-level module keeps the scan non-empty, so the failure of
+    this test is a missed detector hit for the nested offender, not the
+    vacuity assert.
+    """
+    stages = tmp_path / "stages"
+    nested = stages / "pr_review_details"
+    nested.mkdir(parents=True)
+    (stages / "clean.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (nested / "synthetic_neg.py").write_text(
+        "def g(obj):\n    obj.arm_auto_merge(2)\n", encoding="utf-8"
+    )
+
+    assert "stages/pr_review_details/synthetic_neg.py" in _stage_auto_merge_callers(
+        _stage_modules(tmp_path), root=tmp_path
+    )
+
+
+def test_sleep_guard_detects_nested_violation(tmp_path: Path) -> None:
+    """Negative: the recursive stage scan must flag a nested ``time.sleep``.
+
+    Runs the guard's exact loop over the tmp stage tree; the benign top-level
+    module keeps the scan non-empty.
+    """
+    stages = tmp_path / "stages"
+    nested = stages / "pr_review_details"
+    nested.mkdir(parents=True)
+    (stages / "clean.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (nested / "synth_sleep.py").write_text("import time\ntime.sleep(0)\n", encoding="utf-8")
+
+    violations: list[str] = []
+    for py in _stage_modules(tmp_path):
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        violations.extend(
+            _sleep_violations(
+                tree, _stage_relative(py, tmp_path), allow_time_import=_is_clock_owner(py)
+            )
+        )
+    assert any("synth_sleep.py" in v for v in violations)
+
+
+def test_clock_owner_exemption_is_pinned() -> None:
+    """The time-import exemption resolves to exactly ``stages/base.py``.
+
+    (a) The real owner resolves inside the scan. (b) The pin is
+    load-bearing: ``import time`` is a violation off-pin, and the owner
+    itself is never exempt from the sleep ban. (c) A nested
+    ``stages/<sub>/base.py`` shares the stem but is not the owner, so its
+    ``import time`` is flagged under the guard's exemption rule.
+    """
+    # (a) the real clock owner resolves inside the scan
+    owners = [py for py in _stage_modules() if _is_clock_owner(py)]
+    assert len(owners) == 1, f"clock-owner pin resolved to: {owners}"
+
+    # (b) the pin is load-bearing: the same ``import time`` is a violation
+    # off-pin, and the owner's content holds no sleep in any form
+    owner = owners[0]
+    tree = ast.parse(owner.read_text(encoding="utf-8"), filename=str(owner))
+    label = _stage_relative(owner)
+    flagged = _sleep_violations(tree, label, allow_time_import=False)
+    assert any(": import time" in v for v in flagged)
+    allowed = _sleep_violations(tree, label, allow_time_import=True)
+    assert not any("sleep" in v for v in allowed)
+
+    # (c) nested-base exactness: a nested ``stages/<sub>/base.py`` is not the
+    # owner, so its ``import time`` must be flagged
+    nested = _PIPELINE / "stages" / "nested_neg" / "base.py"
+    assert not _is_clock_owner(nested)
+    nested_tree = ast.parse("import time\n", filename="<nested>")
+    nested_flagged = _sleep_violations(
+        nested_tree, _stage_relative(nested), allow_time_import=_is_clock_owner(nested)
+    )
+    assert any(": import time" in v for v in nested_flagged)
