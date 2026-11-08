@@ -305,6 +305,10 @@ class StageGitHub(Protocol):
         """Read operational normal-merge readiness without granting authorization."""
         pass
 
+    def gh_pr_failing_check_names(self, pr_number: int) -> list[str] | None:
+        """Read the names of failing checks, or ``None`` when the read fails."""
+        pass
+
     # -- repo-stage surface (#1817) -----------------------------------------
 
     def ensure_state_labels(self) -> None:

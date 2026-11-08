@@ -166,6 +166,28 @@ def test_a_thread_blocked_merge_names_the_count_and_fails_back(
     assert "merge_auto_merge_armed" not in item.payload
 
 
+def test_a_failing_check_block_names_the_checks_and_fails_back(
+    make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A merge GitHub blocks on failing checks returns to implementation, naming them."""
+    item = _item_with_receipt(
+        make_work_item,
+        "merge_blocked_by_failing_checks",
+        attempted=False,
+        failing_check_names=("lint", "lint-typecheck-test"),
+    )
+    item.payload["merge_auto_merge_armed"] = True
+
+    with caplog.at_level(logging.WARNING):
+        outcome = MergeWaitStage()._merge_apply(item, make_ctx())
+
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.disposition is Disposition.FAIL_BACK
+    assert outcome.note == "merge_blocked_by_failing_checks"
+    assert "blocked by failing check(s) lint, lint-typecheck-test" in caplog.text
+    assert "merge_auto_merge_armed" not in item.payload
+
+
 def test_a_fresh_visit_starts_a_new_readiness_window(make_ctx: Any, make_work_item: Any) -> None:
     """A poll window kept from an earlier visit cannot expire the new one at once."""
     item = make_work_item(kind="pr", pr=7, issue=1)

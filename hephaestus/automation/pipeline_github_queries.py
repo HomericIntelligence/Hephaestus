@@ -620,3 +620,34 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: merge readiness read failed: %s", pr_number, exc)
             return None
+
+    def gh_pr_failing_check_names(self, pr_number: int) -> list[str] | None:
+        """Read the names of required checks GitHub reports as failing.
+
+        This read classifies why an armed pull request cannot merge. It does not
+        grant merge authority. A ``SUCCESS``, ``NEUTRAL``, or ``SKIPPED``
+        conclusion is not failing. A check with no conclusion still runs and is
+        not failing. An unreadable response returns ``None`` so a failed read
+        never reports a failing check.
+        """
+        try:
+            result = self._gh(["pr", "view", str(pr_number), "--json", "statusCheckRollup"])
+            data = json.loads(result.stdout or "{}")
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+            logger.warning("PR #%s: check status read failed: %s", pr_number, exc)
+            return None
+        rollup = data.get("statusCheckRollup") if isinstance(data, dict) else None
+        if not isinstance(rollup, list):
+            return None
+        failing: set[str] = set()
+        for check in rollup:
+            if not isinstance(check, dict):
+                continue
+            conclusion = check.get("conclusion")
+            if conclusion is None:
+                continue
+            if str(conclusion).upper() in {"SUCCESS", "NEUTRAL", "SKIPPED"}:
+                continue
+            name = check.get("name") or check.get("context") or "unnamed check"
+            failing.add(str(name))
+        return sorted(failing)

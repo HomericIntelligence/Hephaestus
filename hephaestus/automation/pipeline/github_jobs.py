@@ -559,7 +559,8 @@ class MergeWaitCycleCompleted:
 
     ``unresolved_thread_count`` carries the open review-thread count GitHub
     lists when GitHub reports the pull request blocked, so the outcome names
-    the reason the merge cannot happen.
+    the reason the merge cannot happen. ``failing_check_names`` carries the
+    required checks GitHub reports as failing for the same reason.
     """
 
     request: RunMergeWaitCycleRequest
@@ -568,6 +569,7 @@ class MergeWaitCycleCompleted:
     retryable: bool = False
     merge_sha: str | None = None
     unresolved_thread_count: int = 0
+    failing_check_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate merge-cycle outcome metadata."""
@@ -583,6 +585,10 @@ class MergeWaitCycleCompleted:
             raise ValueError("merge_sha must be a full commit SHA or None")
         if type(self.unresolved_thread_count) is not int or self.unresolved_thread_count < 0:
             raise ValueError("unresolved_thread_count must be a non-negative integer")
+        if not isinstance(self.failing_check_names, tuple) or any(
+            not isinstance(name, str) or not name for name in self.failing_check_names
+        ):
+            raise ValueError("failing_check_names must be a tuple of non-empty strings")
 
 
 type GitHubReceipt = (

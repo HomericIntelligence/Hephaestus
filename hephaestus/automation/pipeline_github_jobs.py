@@ -255,6 +255,7 @@ class PipelineGitHubJobRunner:
             can_retry: bool = False,
             merge_sha: str | None = None,
             unresolved_thread_count: int = 0,
+            failing_check_names: tuple[str, ...] = (),
         ) -> MergeWaitCycleCompleted:
             return MergeWaitCycleCompleted(
                 request=request,
@@ -263,6 +264,7 @@ class PipelineGitHubJobRunner:
                 retryable=can_retry,
                 merge_sha=merge_sha,
                 unresolved_thread_count=unresolved_thread_count,
+                failing_check_names=failing_check_names,
             )
 
         def terminal(state: object) -> str | None:
@@ -342,6 +344,16 @@ class PipelineGitHubJobRunner:
                     "merge_blocked_by_unresolved_threads",
                     unresolved_thread_count=blocked_threads,
                 )
+            failing_checks = _blocked_failing_check_names(github, request.pr_number)
+            if failing_checks:
+                # GitHub reports the pull request blocked and names failing
+                # required checks. No merge can happen until a commit drives
+                # those checks green, so the item needs the implementation
+                # stage rather than a wait that can never end.
+                return complete(
+                    "merge_blocked_by_failing_checks",
+                    failing_check_names=failing_checks,
+                )
             return complete("auto_merge_enabled", attempted=False)
         # The implementation-GO label is the whole merge contract. GitHub owns
         # everything after this: branch protection, the required checks, any merge
@@ -392,6 +404,31 @@ def _blocked_unresolved_review_thread_count(github: Any, pr_number: int) -> int:
     if not isinstance(threads, list):
         return 0
     return len(threads)
+
+
+def _blocked_failing_check_names(github: Any, pr_number: int) -> tuple[str, ...]:
+    """Return failing required-check names when GitHub reports the PR blocked.
+
+    A failed read, a state other than ``BLOCKED``, or an empty list returns no
+    names. The merge cycle then keeps its observe-and-poll behavior: an
+    unreadable block is never reported as a failing required check.
+    """
+    try:
+        readiness = github.gh_pr_merge_readiness(pr_number)
+        if not isinstance(readiness, dict) or readiness.get("mergeStateStatus") != "BLOCKED":
+            return ()
+        names = github.gh_pr_failing_check_names(pr_number)
+    except Exception as error:
+        logger.warning(
+            "merge_wait: PR #%s: could not check the failing-check block (%s); "
+            "continuing to poll the merge",
+            pr_number,
+            type(error).__name__,
+        )
+        return ()
+    if not isinstance(names, list):
+        return ()
+    return tuple(name for name in names if isinstance(name, str) and name)
 
 
 def _read_dirty_direct_state(

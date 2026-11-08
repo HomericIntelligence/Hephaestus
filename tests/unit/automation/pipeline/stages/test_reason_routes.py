@@ -138,4 +138,8 @@ def test_named_reasons_route_where_the_doc_says() -> None:
         ROUTES[StageName.MERGE_WAIT].fail_routes["merge_blocked_by_unresolved_threads"]
         == StageName.PR_REVIEW
     )
+    assert (
+        ROUTES[StageName.MERGE_WAIT].fail_routes["merge_blocked_by_failing_checks"]
+        == StageName.IMPLEMENTATION
+    )
     assert ROUTES[StageName.MERGE_WAIT].fail_routes["closed"] == StageName.FINISHED

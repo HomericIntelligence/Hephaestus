@@ -695,7 +695,10 @@ merge reports a real conflict, the agent rebases and continues. While the
 auto-merge is armed, a cycle that GitHub reports `BLOCKED` with open review
 threads routes the item back to `pr_review` and names the thread count in the
 run event, so the implementation agent answers and resolves those threads
-instead of the stage waiting for a merge that cannot happen. When
+instead of the stage waiting for a merge that cannot happen. A cycle that
+GitHub reports `BLOCKED` with failing required checks routes the item back to
+`implementation` and names those checks, so the implementer agent repairs the
+tree and drives the checks green. When
 `state:implementation-no-go` is applied, Hephaestus runs
 `gh pr merge --disable-auto`
 ([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
@@ -704,7 +707,9 @@ The coordinator records the cycle outcome in the durable event journal:
 
 - `merge_admission.outcome` — the cycle outcome, normally `auto_merge_enabled`.
   `merge_blocked_by_unresolved_threads` names an armed pull request GitHub
-  reports blocked with open review threads.
+  reports blocked with open review threads. `merge_blocked_by_failing_checks`
+  names an armed pull request GitHub reports blocked with failing required
+  checks.
 - `merge_admission.attempted` — whether an auto-merge enablement was attempted.
 
 Plan-review labels remain durable routing state. Native review records remain
