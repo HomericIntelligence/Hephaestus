@@ -13,13 +13,14 @@ from unittest.mock import Mock
 
 import pytest
 
-from hephaestus.automation import git_runtime, git_utils
+from hephaestus.automation import git_utils
 from hephaestus.automation.pipeline import repository_lock
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.repository_lock import RepositoryOperationLock
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github import PipelineGitHub
+from hephaestus.git import runtime as git_runtime
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 
@@ -30,7 +31,7 @@ def test_git_runtime_refuses_commit_after_the_operation_deadline(
     """An expired operation must not start another Git child."""
     child = Mock()
     monkeypatch.setattr(git_runtime, "_shared_run_git", child)
-    monkeypatch.setattr("hephaestus.automation.git_runtime.time.monotonic", lambda: 11.0)
+    monkeypatch.setattr("hephaestus.git.runtime.time.monotonic", lambda: 11.0)
 
     with (
         git_runtime.operation_deadline(10.0),
@@ -265,7 +266,7 @@ def test_publication_starts_neither_push_nor_probe_after_deadline(
     """An expired publication must not start its push or uncertainty probe."""
     child = Mock()
     monkeypatch.setattr(git_runtime, "_shared_run_git", child)
-    monkeypatch.setattr("hephaestus.automation.git_runtime.time.monotonic", lambda: 11.0)
+    monkeypatch.setattr("hephaestus.git.runtime.time.monotonic", lambda: 11.0)
 
     with (
         git_runtime.operation_deadline(10.0),
@@ -291,7 +292,7 @@ def test_failed_push_does_not_probe_after_the_operation_deadline(
     child = Mock(side_effect=subprocess.CalledProcessError(1, ["git", "push"]))
     monkeypatch.setattr(git_runtime, "_shared_run_git", child)
     clock = iter((1.0, 3.0))
-    monkeypatch.setattr("hephaestus.automation.git_runtime.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("hephaestus.git.runtime.time.monotonic", lambda: next(clock))
 
     with (
         git_runtime.operation_deadline(2.0),

@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation import git_runtime
 from hephaestus.automation.pipeline import worker_pool
+from hephaestus.git import runtime as git_runtime
 
 
 @pytest.mark.parametrize("stop_kind", ["deadline", "cancel"])

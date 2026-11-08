@@ -27,9 +27,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from hephaestus.automation import fleet_build_artifact_server
-from hephaestus.automation.fleet_build_artifact_server import BuildArtifactServer
-from tests.unit.automation.test_fleet_build_artifacts import private_file, retained_bundle, sha
+from hephaestus.fleet import build_artifact_server
+from hephaestus.fleet.build_artifact_server import BuildArtifactServer
+from tests.unit.fleet.test_fleet_build_artifacts import private_file, retained_bundle, sha
 
 pytestmark = [
     pytest.mark.integration,
@@ -227,8 +227,8 @@ def test_ipv6_configuration_selects_ipv6_listener_without_binding(
 ) -> None:
     """Accept a `::1` configuration, select the IPv6 listener class, and bind no socket."""
     config, _ = service_config(tmp_path, "::1")
-    real_base = fleet_build_artifact_server._ArtifactHTTPServer
-    real_ipv6 = fleet_build_artifact_server._IPv6ArtifactHTTPServer
+    real_base = build_artifact_server._ArtifactHTTPServer
+    real_ipv6 = build_artifact_server._IPv6ArtifactHTTPServer
     recorded: list[tuple[str, tuple[str, int]]] = []
 
     class FakeRecordingServer:
@@ -256,8 +256,8 @@ def test_ipv6_configuration_selects_ipv6_listener_without_binding(
     class FakeIPv6Server(FakeRecordingServer):
         label = "ipv6"
 
-    monkeypatch.setattr(fleet_build_artifact_server, "_ArtifactHTTPServer", FakeIPv4Server)
-    monkeypatch.setattr(fleet_build_artifact_server, "_IPv6ArtifactHTTPServer", FakeIPv6Server)
+    monkeypatch.setattr(build_artifact_server, "_ArtifactHTTPServer", FakeIPv4Server)
+    monkeypatch.setattr(build_artifact_server, "_IPv6ArtifactHTTPServer", FakeIPv6Server)
     service = BuildArtifactServer(config)
     assert service.host == "::1"
     try:
@@ -516,9 +516,9 @@ def test_shutdown_failure_has_fixed_diagnostic(
         def stop(self) -> None:
             raise ValueError("private fixture detail must not be printed")
 
-    monkeypatch.setattr(fleet_build_artifact_server, "BuildArtifactServer", FailingStop)
+    monkeypatch.setattr(build_artifact_server, "BuildArtifactServer", FailingStop)
     arguments = ["--config", str(tmp_path / "unused"), *(["--json"] if use_json else [])]
-    assert fleet_build_artifact_server.main(arguments) == 1
+    assert build_artifact_server.main(arguments) == 1
     output = capsys.readouterr()
     assert output.err == "The private build-log service failed.\n"
     assert "private fixture detail" not in output.out

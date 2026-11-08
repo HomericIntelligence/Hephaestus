@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding, WorkspaceKind
-from hephaestus.automation.worktree_snapshot import (
+from hephaestus.git.snapshot import (
     DIRTY_SNAPSHOT_CHANGED_FILE_MAX as DIRTY_SNAPSHOT_CHANGED_FILE_MAX,
     DIRTY_SNAPSHOT_CONTENT_MAX_BYTES as DIRTY_SNAPSHOT_CONTENT_MAX_BYTES,
     DIRTY_SNAPSHOT_GIT_MAX_BYTES as DIRTY_SNAPSHOT_GIT_MAX_BYTES,

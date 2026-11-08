@@ -2,7 +2,7 @@
 
 ## Scope and ownership
 
-`hephaestus.automation.fleet_snapshot` supplies an optional Python API for
+`hephaestus.fleet.snapshot` supplies an optional Python API for
 local source export, verification, and checked restore. Use it through the
 `HomericIntelligence-Hephaestus[automation]` profile. It produces source for a
 later subordinate build. Agamemnon retains admission and the parent issue
@@ -17,7 +17,7 @@ These functions do not create a lease or a new ownership authority.
 
 The existing recovery API retains its `index_sha256`, `worktree_sha256`, and
 `untracked_sha256` contract. Transferable snapshots reuse supported capture
-bindings from `worktree_snapshot`; they do not replace recovery digests or
+bindings from `hephaestus.git.snapshot`; they do not replace recovery digests or
 change recovery behavior.
 
 ## Public API

@@ -11,8 +11,8 @@ import pytest
 from hephaestus.agents.workspace import DirtyPlanIdentity, SourceLane
 from hephaestus.automation.pipeline.host_capabilities import WorkerCapabilities
 from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
-from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.git.snapshot import _dirty_worktree_content_snapshot
 from tests.unit.agents.test_dirty_workspace import _claim
 from tests.unit.automation.pipeline.conftest import FakeSigningProvider
 from tests.unit.automation.test_rebase_recovery import (

@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from hephaestus.automation.fleet_provider import read_provider_version
+from hephaestus.fleet.provider import read_provider_version
 
 
 class ProbeConnection:

@@ -29,12 +29,6 @@ from hephaestus.agents.workspace import (
     validate_workspace_binding,
 )
 from hephaestus.automation.commit_paths import parse_porcelain_status
-from hephaestus.automation.git_runtime import (
-    current_operation_shutdown,
-    operation_deadline,
-    operation_file_lock,
-    remaining_operation_timeout,
-)
 from hephaestus.automation.implementation_writer import (
     ImplementationWriterHandoff,
     implementation_writer_handoff,
@@ -44,11 +38,17 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
     consume_implementation_writer_authority,
 )
-from hephaestus.automation.worktree_snapshot import (
+from hephaestus.config.child_environments import build_git_signing_env
+from hephaestus.git.runtime import (
+    current_operation_shutdown,
+    operation_deadline,
+    operation_file_lock,
+    remaining_operation_timeout,
+)
+from hephaestus.git.snapshot import (
     _dirty_worktree_content_snapshot,
     _dirty_worktree_snapshot_evidence,
 )
-from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.directory_mode import (
     create_private_directory,

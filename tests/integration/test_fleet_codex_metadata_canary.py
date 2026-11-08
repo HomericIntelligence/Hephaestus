@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation.fleet_provider import CodexAppServer, ProviderError
-from hephaestus.automation.fleet_worker import FleetWorker
+from hephaestus.fleet.provider import CodexAppServer, ProviderError
+from hephaestus.fleet.worker import FleetWorker
 
 pytestmark = pytest.mark.integration
 
@@ -35,7 +35,7 @@ def test_installed_codex_parses_remote_only_registry_without_starting_environmen
     native_probe_root,
 ):
     """Ask the actual provider to inspect configured, unstarted environments."""
-    from hephaestus.automation.fleet_environments import EnvironmentRegistry
+    from hephaestus.fleet.environments import EnvironmentRegistry
     from tests.fixtures.fleet_environment import environment_lease
 
     binary = os.environ.get("FLEET_CODEX_NATIVE_BIN") or shutil.which("codex")
@@ -174,7 +174,7 @@ def test_installed_codex_loads_workspace_profile_without_auth_or_turn(native_pro
 
 def test_native_process_boundary_uses_only_synthetic_markers(native_probe_root):
     """Observe process permissions without auth/model calls and retain native admission gate."""
-    from hephaestus.automation.fleet_isolation import (
+    from hephaestus.fleet.isolation import (
         require_execution_platform,
         shell_environment_policy,
         validate_worker_storage,

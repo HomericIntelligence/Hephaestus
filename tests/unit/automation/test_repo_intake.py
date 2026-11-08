@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from hephaestus.automation import git_runtime, pipeline_cli
+from hephaestus.automation import pipeline_cli
 from hephaestus.automation.event_log_retention import event_log_lifecycle
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.coordinator_observability import record_event
@@ -33,7 +33,8 @@ from hephaestus.automation.repo_intake import (
     RepoIntakeReceipt,
 )
 from hephaestus.automation.worktree_manager import WorktreeManager
-from hephaestus.automation.worktree_snapshot import _controlled_git_env
+from hephaestus.git import runtime as git_runtime
+from hephaestus.git.snapshot import _controlled_git_env
 from hephaestus.utils.file_lock import file_lock
 
 
@@ -1250,9 +1251,9 @@ import sys
 import time
 from pathlib import Path
 
-from hephaestus.automation.git_runtime import operation_deadline
+from hephaestus.git.runtime import operation_deadline
 from hephaestus.automation.repo_intake import RepoIntakeManager
-from hephaestus.automation.worktree_snapshot import _controlled_git_env
+from hephaestus.git.snapshot import _controlled_git_env
 
 caller = Path(sys.argv[1])
 remote = Path(sys.argv[2])
@@ -1433,9 +1434,9 @@ import threading
 import time
 from pathlib import Path
 
-from hephaestus.automation.git_runtime import operation_deadline
+from hephaestus.git.runtime import operation_deadline
 from hephaestus.automation.repo_intake import RepoIntakeManager
-from hephaestus.automation.worktree_snapshot import _controlled_git_env
+from hephaestus.git.snapshot import _controlled_git_env
 
 caller = Path(sys.argv[1])
 remote = Path(sys.argv[2])
@@ -1695,7 +1696,7 @@ import sys
 from pathlib import Path
 from hephaestus.automation import git_utils
 from hephaestus.automation.repo_intake import RepoIntakeManager
-from hephaestus.automation.worktree_snapshot import _controlled_git_env
+from hephaestus.git.snapshot import _controlled_git_env
 
 manager = RepoIntakeManager(
     Path(sys.argv[1]),

@@ -16,11 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.git_runtime import (
-    current_operation_shutdown,
-    operation_deadline,
-    operation_file_lock,
-)
 from hephaestus.automation.git_utils import (
     delete_local_branch_if_unchanged,
     delete_reserved_branch_if_unchanged,
@@ -33,6 +28,11 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspacePreparationError,
 )
 from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.git.runtime import (
+    current_operation_shutdown,
+    operation_deadline,
+    operation_file_lock,
+)
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.utils.worktree_identity import (
     SOURCE_WORKTREE_LANES,

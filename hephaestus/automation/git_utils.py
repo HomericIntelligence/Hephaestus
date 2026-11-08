@@ -16,7 +16,7 @@ from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
-import hephaestus.automation.git_runtime as _git_runtime
+import hephaestus.git.runtime as _git_runtime
 from hephaestus.automation.commit_runtime import (
     CommitIssueMetadata,
     CommitMessageAgent,

@@ -325,7 +325,7 @@ client, provision the worker, create admission, or discover another issue.
    ```python
    from functools import partial
 
-   from hephaestus.automation.fleet_worker_cli import exchange
+   from hephaestus.fleet.worker_cli import exchange
    from hephaestus.automation.pipeline.fleet_pipeline_runner import run_fleet_pipeline
 
    result = await run_fleet_pipeline(
@@ -660,7 +660,7 @@ of all lease fields on reconstruction. An existing configuration change requires
 reconciliation. A missing supervisor binding fails with
 `supervised_attachment_required`; the registry does not launch the engine.
 
-The program transport invokes `python -m hephaestus.automation.fleet_attachment`
+The program transport invokes `python -m hephaestus.fleet.attachment`
 with `--socket`, `--lease-id`, and `--binding-digest`. The endpoint validates the
 current assignment and completes supervisor engine and kernel checks before
 exposing streams. A connection cannot supply an engine command. Stream content

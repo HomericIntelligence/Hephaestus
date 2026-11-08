@@ -23,15 +23,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, Self, TypeGuard
 
-from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
-from hephaestus.automation.git_runtime import (
+from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.git.config_safety import unsafe_local_git_config_key
+from hephaestus.git.runtime import (
     current_operation_shutdown,
     git_metadata_lock_path,
     operation_deadline,
     operation_file_lock,
     remaining_operation_timeout,
 )
-from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import (
     ExclusiveLockUnavailableError,

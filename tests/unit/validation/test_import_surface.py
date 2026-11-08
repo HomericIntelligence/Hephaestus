@@ -1,8 +1,8 @@
 """Regression test for ADR-0001 import surface contract.
 
 Issue #711 acceptance criterion 3: `import hephaestus` MUST NOT pull
-`curses`, `pydantic`, or `hephaestus.automation.*` into
-sys.modules. Subprocess isolation is required because pytest itself
+`curses`, `pydantic`, `hephaestus.automation.*`, or
+`hephaestus.fleet.*` into sys.modules. Subprocess isolation is required because pytest itself
 loads pydantic — we need a clean interpreter to make the assertion
 meaningful.
 """
@@ -35,6 +35,7 @@ def test_base_import_does_not_load_automation_or_heavy_deps() -> None:
         "    if m == 'curses'\n"
         "    or m == 'pydantic' or m.startswith('pydantic.')\n"
         "    or m.startswith('hephaestus.automation')\n"
+        "    or m == 'hephaestus.fleet' or m.startswith('hephaestus.fleet.')\n"
         ")\n"
         "print('LEAKED:' + ','.join(leaked))\n"
     )

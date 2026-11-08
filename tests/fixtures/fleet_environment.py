@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hephaestus.automation.fleet_attachment import binding_digest
-from hephaestus.automation.fleet_containment import ContainerSpec
-from hephaestus.automation.fleet_environments import EnvironmentLease
+from hephaestus.fleet.attachment import binding_digest
+from hephaestus.fleet.containment import ContainerSpec
+from hephaestus.fleet.environments import EnvironmentLease
 
 
 def environment_lease(

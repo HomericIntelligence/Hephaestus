@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation.fleet_worker import FleetWorker
+from hephaestus.fleet.worker import FleetWorker
 
 pytestmark = pytest.mark.integration
 

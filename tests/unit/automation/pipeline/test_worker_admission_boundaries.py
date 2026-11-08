@@ -12,10 +12,11 @@ from unittest.mock import Mock
 import pytest
 
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
-from hephaestus.automation import claude_invoke, git_runtime, worktree_snapshot
+from hephaestus.automation import claude_invoke
 from hephaestus.automation.pipeline import worker_pool
 from hephaestus.automation.pipeline.jobs import AgentJob
 from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
+from hephaestus.git import runtime as git_runtime, snapshot as worktree_snapshot
 from tests.unit.automation.test_source_worktree import _repository
 
 

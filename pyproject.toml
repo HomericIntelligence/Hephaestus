@@ -116,8 +116,8 @@ automation = [
 default-groups = ["dev", "automation"]
 
 [project.scripts]
-hephaestus-fleet-build-artifacts = "hephaestus.automation.fleet_build_artifact_server:main"
-hephaestus-fleet-worker = "hephaestus.automation.fleet_worker_cli:main"
+hephaestus-fleet-build-artifacts = "hephaestus.fleet.build_artifact_server:main"
+hephaestus-fleet-worker = "hephaestus.fleet.worker_cli:main"
 # The six automation queue scripts go through the base-importable shims in
 # hephaestus.cli.automation_entry: on a base install (without the [automation]
 # extra) they report a ConfigurationError with a recovery instruction instead

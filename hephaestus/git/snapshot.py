@@ -1,0 +1,693 @@
+"""Bounded content identities for owned implementation worktrees."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import selectors
+import shutil
+import signal
+import stat
+import subprocess
+import threading
+import time
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TypeGuard, cast
+
+from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.diagnostics import bounded_git_diagnostic
+from hephaestus.git.runtime import remaining_operation_timeout
+
+_TAIL = 4000
+_GIT_STDERR_CAPTURE_MIN_BYTES = 64 * 1024
+DIRTY_SNAPSHOT_GIT_MAX_BYTES = 4 * 1024 * 1024
+DIRTY_SNAPSHOT_CONTENT_MAX_BYTES = 8 * 1024 * 1024
+DIRTY_SNAPSHOT_CHANGED_FILE_MAX = 512
+
+_DIRTY_CONTENT_SNAPSHOT_KEYS = frozenset({"index_sha256", "worktree_sha256", "untracked_sha256"})
+
+
+class _GitInspectionResourceLimitError(RuntimeError):
+    """Raised when untrusted writer data exceeds an inspection bound."""
+
+
+@dataclass(frozen=True)
+class _BoundedGitOutput:
+    """One bounded Git output and its exact full digest."""
+
+    text: str
+    sha256: str
+    byte_count: int
+
+
+@dataclass(frozen=True)
+class _DirtySnapshotEvidence:
+    """Bounded dirty-content identity and changed-file count."""
+
+    snapshot: dict[str, str]
+    changed_file_count: int
+    changed_paths: tuple[str, ...] = ()
+
+
+def _terminate_bounded_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    process_group: bool,
+) -> None:
+    """Stop a bounded-output child and descendants that hold its pipes."""
+    if process_group:
+        with suppress(PermissionError, ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    with suppress(OSError):
+        process.kill()
+    with suppress(OSError, subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+
+
+def _wait_for_capture_child(
+    process: subprocess.Popen[bytes],
+    argv: tuple[str, ...],
+    deadline: float,
+    timeout: int | float,
+    shutdown: threading.Event | None,
+) -> int:
+    """Wait for a capture child within the same cancellation and time limits."""
+    while True:
+        if shutdown is not None and shutdown.is_set():
+            raise InterruptedError("Git capture cancelled")
+        remaining = cast(float, remaining_operation_timeout(deadline - time.monotonic()))
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        try:
+            return process.wait(timeout=min(0.1, remaining) if shutdown is not None else remaining)
+        except subprocess.TimeoutExpired:
+            if shutdown is None:
+                raise
+
+
+def _run_bounded_git_output(  # noqa: C901
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    timeout: int | float,
+    max_bytes: int,
+    retain_text: bool,
+    env: dict[str, str] | None = None,
+    shutdown: threading.Event | None = None,
+) -> _BoundedGitOutput:
+    """Run Git with bounded memory and return an exact output digest."""
+    timeout = cast(float, remaining_operation_timeout(timeout))
+    if shutdown is not None and shutdown.is_set():
+        raise InterruptedError("Git capture cancelled before start")
+    process = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        env=env or _controlled_git_env(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    if process.stdout is None or process.stderr is None:  # pragma: no cover
+        _terminate_bounded_process_tree(process, process_group=True)
+        raise RuntimeError("Git output pipes are unavailable")
+    selector: selectors.BaseSelector | None = None
+    digest = hashlib.sha256()
+    output = bytearray()
+    stderr_output = bytearray()
+    stderr_max_bytes = max(max_bytes, _GIT_STDERR_CAPTURE_MIN_BYTES)
+    byte_count = 0
+    deadline = time.monotonic() + timeout
+    process_completed = False
+    try:
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        while selector.get_map():
+            if shutdown is not None and shutdown.is_set():
+                raise InterruptedError("Git capture cancelled")
+            remaining = cast(float, remaining_operation_timeout(deadline - time.monotonic()))
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            for key, _events in selector.select(timeout=min(remaining, 0.1)):
+                try:
+                    chunk = os.read(key.fd, 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.data == "stderr":
+                    stderr_output.extend(chunk)
+                    if len(stderr_output) > stderr_max_bytes:
+                        raise _GitInspectionResourceLimitError("Git stderr limit exceeded")
+                    continue
+                byte_count += len(chunk)
+                if byte_count > max_bytes:
+                    raise _GitInspectionResourceLimitError("Git output limit exceeded")
+                digest.update(chunk)
+                if retain_text:
+                    output.extend(chunk)
+        remaining = cast(float, remaining_operation_timeout(deadline - time.monotonic()))
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        returncode = _wait_for_capture_child(process, argv, deadline, timeout, shutdown)
+        process_completed = True
+    finally:
+        if not process_completed:
+            _terminate_bounded_process_tree(process, process_group=True)
+        if selector is not None:
+            selector.close()
+        with suppress(OSError):
+            process.stdout.close()
+        with suppress(OSError):
+            process.stderr.close()
+    text = output.decode("utf-8", errors="surrogateescape") if retain_text else ""
+    if returncode != 0:
+        raise subprocess.CalledProcessError(
+            returncode,
+            argv,
+            output=text,
+            stderr=bounded_git_diagnostic(stderr_output, limit=_TAIL),
+        )
+    return _BoundedGitOutput(text=text, sha256=digest.hexdigest(), byte_count=byte_count)
+
+
+def _path_content_identity(  # noqa: C901
+    root: Path,
+    paths_output: str,
+    *,
+    seed_digest: str = "",
+    remaining_content_bytes: list[int] | None = None,
+    include_file_content: bool = True,
+    timeout: int | float | None = None,
+    copy_root: Path | None = None,
+    shutdown: threading.Event | None = None,
+) -> str:
+    """Hash NUL-delimited paths and their current file-system state."""
+    if paths_output and (not paths_output.endswith("\0") or "\0\0" in paths_output):
+        raise RuntimeError("dirty snapshot contains an unsafe path")
+    if copy_root is not None and not include_file_content:
+        raise ValueError("a metadata-only snapshot cannot copy file content")
+    relative_values = tuple(paths_output[:-1].split("\0")) if paths_output else ()
+    if copy_root is not None:
+        relative_values = tuple(
+            sorted(
+                set(relative_values),
+                key=lambda value: (-len(Path(value).parts), os.fsencode(value)),
+            )
+        )
+    digest = hashlib.sha256()
+    digest.update(b"D")
+    digest.update(seed_digest.encode("ascii"))
+    if not include_file_content:
+        digest.update(b"M")
+    if not relative_values:
+        return digest.hexdigest()
+    if not _secure_dir_fd_supported():
+        raise RuntimeError("secure dirty snapshot path inspection is unavailable")
+
+    def identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+            stat.S_IMODE(metadata.st_mode),
+        )
+
+    timeout = remaining_operation_timeout(timeout)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def check_deadline() -> None:
+        if shutdown is not None and shutdown.is_set():
+            raise InterruptedError("dirty snapshot cancelled")
+        remaining_operation_timeout(timeout)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired("dirty snapshot content", cast(int, timeout))
+
+    def destination_path(parts: tuple[str, ...]) -> Path:
+        """Return one trusted snapshot path without following copied links."""
+        parent = cast(Path, copy_root)
+        for component in parts[:-1]:
+            candidate = parent / component
+            try:
+                candidate.mkdir()
+            except FileExistsError:
+                if candidate.is_symlink() or not candidate.is_dir():
+                    raise RuntimeError("candidate snapshot has an unsafe path prefix") from None
+            parent = candidate
+        return parent / parts[-1]
+
+    open_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    root_fd = os.open(root, open_flags | os.O_DIRECTORY)
+    root_identity = identity(os.fstat(root_fd))
+
+    def revalidate_root() -> None:
+        """Confirm that the root path still names the open root directory."""
+        try:
+            current_fd = os.open(root, open_flags | os.O_DIRECTORY)
+            try:
+                current_identity = identity(os.fstat(current_fd))
+            finally:
+                os.close(current_fd)
+        except OSError as exc:
+            raise RuntimeError("dirty snapshot content changed during inspection") from exc
+        if current_identity != root_identity:
+            raise RuntimeError("dirty snapshot content changed during inspection")
+
+    def revalidate_bindings(
+        bindings: list[tuple[int, str, int, tuple[int, int, int, int, int, int]]],
+    ) -> None:
+        """Confirm that each retained descriptor still has its trusted name."""
+        try:
+            for bound_parent, component, descriptor, expected in bindings:
+                named = os.stat(
+                    component,
+                    dir_fd=bound_parent,
+                    follow_symlinks=False,
+                )
+                opened = os.fstat(descriptor)
+                if identity(named) != expected or identity(opened) != expected:
+                    raise RuntimeError("dirty snapshot content changed during inspection")
+        except OSError as exc:
+            raise RuntimeError("dirty snapshot content changed during inspection") from exc
+        revalidate_root()
+
+    try:
+        for relative in relative_values:
+            check_deadline()
+            relative_path = Path(relative)
+            parts = relative_path.parts
+            if (
+                relative != relative_path.as_posix()
+                or relative_path.is_absolute()
+                or not parts
+                or any(part in {"", ".", ".."} for part in parts)
+            ):
+                raise RuntimeError("dirty snapshot contains an unsafe path")
+            encoded_path = os.fsencode(relative)
+            digest.update(len(encoded_path).to_bytes(8, "big"))
+            digest.update(encoded_path)
+            descriptors: list[int] = []
+            bindings: list[tuple[int, str, int, tuple[int, int, int, int, int, int]]] = []
+            parent_fd = root_fd
+
+            try:
+                try:
+                    missing_ancestor = False
+                    for component in parts[:-1]:
+                        check_deadline()
+                        component_metadata = os.stat(
+                            component,
+                            dir_fd=parent_fd,
+                            follow_symlinks=False,
+                        )
+                        if stat.S_ISLNK(component_metadata.st_mode):
+                            missing_ancestor = True
+                            break
+                        if not stat.S_ISDIR(component_metadata.st_mode):
+                            missing_ancestor = True
+                            break
+                        child_fd = os.open(
+                            component,
+                            open_flags | os.O_DIRECTORY,
+                            dir_fd=parent_fd,
+                        )
+                        opened_metadata = os.fstat(child_fd)
+                        if identity(component_metadata) != identity(opened_metadata):
+                            os.close(child_fd)
+                            raise RuntimeError("dirty snapshot content changed during inspection")
+                        bindings.append(
+                            (
+                                parent_fd,
+                                component,
+                                child_fd,
+                                identity(opened_metadata),
+                            )
+                        )
+                        parent_fd = child_fd
+                        descriptors.append(child_fd)
+                    if missing_ancestor:
+                        digest.update(b"M")
+                        revalidate_bindings(bindings)
+                        continue
+                    metadata = os.stat(
+                        parts[-1],
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    digest.update(b"M")
+                    revalidate_bindings(bindings)
+                    continue
+                except NotADirectoryError as exc:
+                    raise RuntimeError("dirty snapshot contains an unsafe path") from exc
+                digest.update(f"{stat.S_IFMT(metadata.st_mode):o}\0".encode())
+                if not include_file_content:
+                    digest.update(b":".join(str(value).encode() for value in identity(metadata)))
+                if stat.S_ISLNK(metadata.st_mode):
+                    digest.update(b"L")
+                    target = os.fsencode(os.readlink(parts[-1], dir_fd=parent_fd))
+                    after = os.stat(
+                        parts[-1],
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                    if identity(metadata) != identity(after):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
+                    if remaining_content_bytes is not None:
+                        remaining_content_bytes[0] -= len(target)
+                        if remaining_content_bytes[0] < 0:
+                            raise _GitInspectionResourceLimitError(
+                                "dirty snapshot content limit exceeded"
+                            )
+                    digest.update(len(target).to_bytes(8, "big"))
+                    digest.update(target)
+                    if copy_root is not None:
+                        os.symlink(os.fsdecode(target), destination_path(parts))
+                elif stat.S_ISREG(metadata.st_mode):
+                    file_fd = os.open(
+                        parts[-1],
+                        open_flags | os.O_NONBLOCK,
+                        dir_fd=parent_fd,
+                    )
+                    descriptors.append(file_fd)
+                    before = os.fstat(file_fd)
+                    if not stat.S_ISREG(before.st_mode) or (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                    ) != (before.st_dev, before.st_ino):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
+                    if not include_file_content and identity(metadata) != identity(before):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
+                    if (
+                        remaining_content_bytes is not None
+                        and before.st_size > remaining_content_bytes[0]
+                    ):
+                        raise _GitInspectionResourceLimitError(
+                            "dirty snapshot content limit exceeded"
+                        )
+                    digest.update(b"F")
+                    digest.update(b"X" if before.st_mode & 0o111 else b"N")
+                    digest.update(before.st_size.to_bytes(8, "big"))
+                    if include_file_content:
+                        os.set_blocking(file_fd, True)
+                        captured = bytearray()
+                        while True:
+                            check_deadline()
+                            read_limit = 1024 * 1024
+                            if remaining_content_bytes is not None:
+                                read_limit = min(read_limit, remaining_content_bytes[0] + 1)
+                            block = os.read(file_fd, max(1, read_limit))
+                            if not block:
+                                break
+                            if remaining_content_bytes is not None:
+                                remaining_content_bytes[0] -= len(block)
+                                if remaining_content_bytes[0] < 0:
+                                    raise _GitInspectionResourceLimitError(
+                                        "dirty snapshot content limit exceeded"
+                                    )
+                            digest.update(block)
+                            if copy_root is not None:
+                                captured.extend(block)
+                        if copy_root is not None:
+                            copy_path = destination_path(parts)
+                            copy_path.write_bytes(captured)
+                            copy_path.chmod(stat.S_IMODE(before.st_mode))
+                    if identity(before) != identity(os.fstat(file_fd)):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
+                else:
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        raise RuntimeError("dirty snapshot contains an unsupported path type")
+                    after = os.stat(
+                        parts[-1],
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                    if identity(metadata) != identity(after):
+                        raise RuntimeError("dirty snapshot content changed during inspection")
+                    digest.update(b"O")
+                    digest.update(f"{metadata.st_size}:{metadata.st_rdev}".encode())
+                    if copy_root is not None:
+                        destination_path(parts).mkdir(exist_ok=True)
+                revalidate_bindings(bindings)
+            finally:
+                for descriptor in reversed(descriptors):
+                    os.close(descriptor)
+    finally:
+        os.close(root_fd)
+    return digest.hexdigest()
+
+
+def _dirty_worktree_snapshot_evidence(
+    worktree: Path,
+    *,
+    timeout: int,
+    git_env: dict[str, str] | None = None,
+    shutdown: threading.Event | None = None,
+) -> _DirtySnapshotEvidence:
+    """Return bounded identities for index, tracked, and untracked content."""
+    command_prefix = ("git", "-c", "core.fsmonitor=false")
+    env = dict(git_env or _isolated_checkout_git_env())
+    index = _run_bounded_git_output(
+        (*command_prefix, "ls-files", "--stage", "-z"),
+        cwd=worktree,
+        timeout=timeout,
+        max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+        retain_text=False,
+        env=env,
+        shutdown=shutdown,
+    )
+    tracked_paths = _run_bounded_git_output(
+        (
+            *command_prefix,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            "HEAD",
+        ),
+        cwd=worktree,
+        timeout=timeout,
+        max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+        retain_text=True,
+        env=env,
+        shutdown=shutdown,
+    )
+    tracked_diff = _run_bounded_git_output(
+        (
+            *command_prefix,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--binary",
+            "--full-index",
+            "HEAD",
+        ),
+        cwd=worktree,
+        timeout=timeout,
+        max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+        retain_text=False,
+        env=env,
+        shutdown=shutdown,
+    )
+    untracked_paths = _run_bounded_git_output(
+        (*command_prefix, "ls-files", "--others", "--exclude-standard", "-z"),
+        cwd=worktree,
+        timeout=timeout,
+        max_bytes=DIRTY_SNAPSHOT_GIT_MAX_BYTES,
+        retain_text=True,
+        env=env,
+        shutdown=shutdown,
+    )
+    tracked = tuple(path for path in tracked_paths.text.split("\0") if path)
+    untracked = tuple(path for path in untracked_paths.text.split("\0") if path)
+    changed_file_count = len(set(tracked).union(untracked))
+    if changed_file_count > DIRTY_SNAPSHOT_CHANGED_FILE_MAX:
+        raise _GitInspectionResourceLimitError("dirty snapshot file limit exceeded")
+    remaining_content_bytes = [DIRTY_SNAPSHOT_CONTENT_MAX_BYTES]
+    snapshot = {
+        "index_sha256": index.sha256,
+        "worktree_sha256": _path_content_identity(
+            worktree,
+            tracked_paths.text,
+            seed_digest=tracked_diff.sha256,
+            remaining_content_bytes=remaining_content_bytes,
+            timeout=timeout,
+            shutdown=shutdown,
+        ),
+        "untracked_sha256": _path_content_identity(
+            worktree,
+            untracked_paths.text,
+            remaining_content_bytes=remaining_content_bytes,
+            timeout=timeout,
+            shutdown=shutdown,
+        ),
+    }
+    return _DirtySnapshotEvidence(
+        snapshot=snapshot,
+        changed_file_count=changed_file_count,
+        changed_paths=tuple(sorted(set(tracked).union(untracked))),
+    )
+
+
+def _dirty_worktree_content_snapshot(
+    worktree: Path,
+    *,
+    timeout: int,
+    git_env: dict[str, str] | None = None,
+    shutdown: threading.Event | None = None,
+) -> dict[str, str]:
+    """Return the bounded content identity for one dirty worktree."""
+    return _dirty_worktree_snapshot_evidence(
+        worktree,
+        timeout=timeout,
+        git_env=git_env,
+        shutdown=shutdown,
+    ).snapshot
+
+
+def _valid_dirty_content_snapshot(value: object) -> TypeGuard[dict[str, str]]:
+    """Return whether a dirty snapshot has the closed digest schema."""
+    return (
+        isinstance(value, dict)
+        and set(value) == _DIRTY_CONTENT_SNAPSHOT_KEYS
+        and all(
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            for digest in value.values()
+        )
+    )
+
+
+_TRUSTED_GIT_CANDIDATES = (
+    Path("/opt/homebrew/bin/git"),
+    Path("/usr/local/bin/git"),
+    Path("/usr/bin/git"),
+)
+
+_TRUSTED_GIT_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
+
+_TRUSTED_GIT_DISCOVERY_ROOTS = (
+    Path("/opt/homebrew/Cellar/git"),
+    Path("/usr/local/Cellar/git"),
+    Path("/usr/bin"),
+)
+
+_TRUSTED_APPLE_GIT_EXECUTABLES = frozenset(
+    {
+        Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+        Path("/Applications/Xcode.app/Contents/Developer/usr/bin/git"),
+    }
+)
+
+
+def _validated_apple_git_executable(candidate: Path) -> Path | None:
+    """Return an exact Apple Git leaf whose parent chain is safe."""
+    if candidate not in _TRUSTED_APPLE_GIT_EXECUTABLES:
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+        if resolved != candidate:
+            return None
+        current = Path(candidate.anchor)
+        for part in candidate.parent.parts[1:]:
+            current /= part
+            parent_mode = current.lstat().st_mode
+            if not stat.S_ISDIR(parent_mode):
+                return None
+    except OSError:
+        return None
+    return resolved
+
+
+def _controlled_git_env() -> dict[str, str]:
+    """Return an environment that cannot redirect or extend Git execution."""
+    env = build_git_child_env()
+    trusted_git = _trusted_git_executable()
+    path_entries = os.defpath.split(os.pathsep)
+    if trusted_git is not None:
+        trusted_parent = str(Path(trusted_git).parent)
+        path_entries = [
+            trusted_parent,
+            *(entry for entry in path_entries if entry != trusted_parent),
+        ]
+    env["PATH"] = os.pathsep.join(path_entries)
+    return env
+
+
+def _isolated_checkout_git_env() -> dict[str, str]:
+    """Return a legacy Git environment with host configuration disabled.
+
+    ``GIT_CONFIG`` controls ``git config``. A private ``GIT_DIR`` is also
+    necessary when another Git command must not load repository configuration.
+    """
+    env = _controlled_git_env()
+    env["GIT_CONFIG"] = os.devnull
+    return env
+
+
+def _trusted_git_executable() -> str | None:
+    """Return an allowlisted, non-writable ``git`` binary for host checks."""
+    discovered = shutil.which("git")
+    candidates: tuple[tuple[Path, bool], ...] = tuple(
+        (candidate, False) for candidate in _TRUSTED_GIT_CANDIDATES
+    )
+    if discovered is not None:
+        candidates = ((Path(discovered), True), *candidates)
+    for candidate, is_discovered in candidates:
+        try:
+            if is_discovered:
+                if not candidate.is_absolute() or candidate.is_symlink():
+                    continue
+                if candidate in _TRUSTED_APPLE_GIT_EXECUTABLES:
+                    apple_git = _validated_apple_git_executable(candidate)
+                    if apple_git is None:
+                        continue
+                    resolved = apple_git
+                    trusted_roots: tuple[Path, ...] = ()
+                else:
+                    resolved = candidate
+                    trusted_roots = _TRUSTED_GIT_DISCOVERY_ROOTS
+            else:
+                resolved = candidate.resolve(strict=True)
+                trusted_roots = _TRUSTED_GIT_ROOTS
+        except OSError:
+            continue
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            continue
+        if trusted_roots and not any(resolved.is_relative_to(root) for root in trusted_roots):
+            continue
+        return str(resolved)
+    return None
+
+
+def _secure_dir_fd_supported() -> bool:
+    """Return whether secure descriptor-relative path traversal is available."""
+    required = (os.open, os.stat, os.readlink, os.mkdir)
+    return bool(
+        os.name == "posix"
+        and getattr(os, "O_DIRECTORY", 0)
+        and getattr(os, "O_NOFOLLOW", 0)
+        and all(function in os.supports_dir_fd for function in required)
+        and os.stat in os.supports_follow_symlinks
+    )
+
+
+# Supported capture operations for automation consumers. Keep the private names
+# for existing recovery callers. These bindings use the same implementations
+# and retain their deadline, cancellation, environment, and identity contracts.
+isolated_checkout_git_env = _isolated_checkout_git_env
+path_content_identity = _path_content_identity
+run_bounded_git_output = _run_bounded_git_output
+secure_dir_fd_supported = _secure_dir_fd_supported
+trusted_git_executable = _trusted_git_executable

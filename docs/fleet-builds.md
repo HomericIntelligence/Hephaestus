@@ -1,12 +1,12 @@
 # Fleet build supervisor
 
-The [build supervisor](../hephaestus/automation/fleet_build_supervisor.py) owns
+The [build supervisor](../hephaestus/fleet/build_supervisor.py) owns
 one subordinate build attempt. Agamemnon owns admission and the run grant.
 The supervisor owns durable local order, verified source restoration, and the
 execution lease. It does not create a task queue or invoke a model.
 
 The first recipe id is hephaestus-test-unit-v1, which runs `just test-unit` with empty
-parameters, on Linux/aarch64 with zero GPUs. The [command validator](../hephaestus/automation/fleet_build_contract.py)
+parameters, on Linux/aarch64 with zero GPUs. The [command validator](../hephaestus/fleet/build_contract.py)
 checks the exact policy, allocation, parent claim, snapshot, and typed generation.
 It rejects caller shell, environment, workspace, and tool overrides. Policy
 digests use sorted compact UTF-8 JSON without a final newline. Snapshot manifests
@@ -21,7 +21,7 @@ workspace parent, and explicit operator-owned capabilities:
   controller. Each call receives an absolute monotonic deadline. Caller input
   cannot select a URL or credential.
 - `BuildSnapshot` binds an operator-selected artifact and `SnapshotPolicy` to
-  the [snapshot verifier](../hephaestus/automation/fleet_snapshot.py). Restoration
+  the [snapshot verifier](../hephaestus/fleet/snapshot.py). Restoration
   checks actual manifest, archive membership, file bytes, and modes. The service
   also checks actual restored `justfile` and `uv.lock` hashes against the policy.
 - `BuildExecutor` owns preparation, the fixed command attempt, and exact lease
@@ -54,7 +54,7 @@ The posture in [ADR-0011](adr/0011-mcp-integration-posture.md) stays unchanged.
 
 ## SDK transport
 
-[`BuildClientBridge`](../hephaestus/automation/fleet_build_client.py) implements
+[`BuildClientBridge`](../hephaestus/fleet/build_client.py) implements
 the synchronous claim/fact interface through one Agamemnon SDK client. Supply
 an asynchronous client factory with the operator's fixed endpoint,
 backend credential, and `trust_env=False`, plus the separate supervisor key.
@@ -76,7 +76,7 @@ ordinary package installation can supply this integration.
 
 ## Durable order
 
-The supervisor reuses [WorkerJournal](../hephaestus/automation/fleet_journal.py).
+The supervisor reuses [WorkerJournal](../hephaestus/fleet/journal.py).
 It flushes each state transition before the corresponding external effect.
 
 Both build owners use a shared private storage initializer. It requires an
@@ -170,7 +170,7 @@ the executor must enforce the separate child authority boundary.
 
 ## Scheduler-step ownership
 
-[`SlurmStepOwner`](../hephaestus/automation/fleet_build_executor.py) implements
+[`SlurmStepOwner`](../hephaestus/fleet/build_executor.py) implements
 local durable order for one existing allocation and one execution lease. It
 requires an explicit trusted `StepTransport`; no host or scheduler transport is
 selected by default. This owner is not yet a concrete `SlurmPyxisBuildExecutor`.
@@ -223,7 +223,7 @@ hard links. The supervisor reads its bytes and compares their digest with the
 retained reference. Changed or missing referenced output prevents publication.
 Early cancellation can publish a null log reference without an output file.
 
-[`PrivateBuildPublisher`](../hephaestus/automation/fleet_build_publication.py)
+[`PrivateBuildPublisher`](../hephaestus/fleet/build_publication.py)
 uses the actual step owner's evidence and the original verified snapshot. It
 checks the exact command, lease, policy, result and cleanup identities. It then
 creates a private bundle containing the canonical receipt, source manifest and
@@ -246,7 +246,7 @@ specified in [cancellation and recovery](#cancellation-and-recovery).
 
 `collectionVerified` remains false. Neither an executor reply, a signal request,
 an exit code, nor a generic Fleet acknowledgement verifies an artifact collection.
-[`collect_build_result`](../hephaestus/automation/fleet_build_collection.py)
+[`collect_build_result`](../hephaestus/fleet/build_collection.py)
 independently verifies a private `hi/hephaestus/build-result/v1` receipt and every
 referenced log, source-manifest and artifact file. A safe opaque reference selects
 one private directory; no URL or alternate transport is accepted. Closed identity
