@@ -51,6 +51,7 @@ from ..stage_base import (
     _repo_state_root,
 )
 from ..work_item import LearningIntent
+from .durable_request import PENDING_GITHUB_REQUEST, pending_request, pending_request_matches
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,6 @@ _POLL_INITIAL_S = 5.0
 _POLL_TIMEOUT_S = 30 * 60.0
 _POLL_DELAY_CAP_S = 60.0
 _MERGE_CYCLE_OPERATION_TIMEOUT_S = 120.0
-_PENDING_GITHUB_REQUEST = "_pending_github_request"
 _MERGE_CYCLE_DEADLINE_S = "_merge_cycle_deadline_s"
 _MERGE_CYCLE_RECEIPT = "_merge_wait_cycle_receipt"
 _MERGE_CYCLE_RECEIPT_ERROR = "_merge_wait_cycle_receipt_error"
@@ -125,9 +125,9 @@ class MergeWaitStage(Stage):
             cancellation=ctx.cancellation,
             auto_merge_armed=bool(item.payload.get(_AUTO_MERGE_ARMED)),
         )
-        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
+        pending = pending_request(item)
         if pending is None:
-            item.payload[_PENDING_GITHUB_REQUEST] = request
+            item.payload[PENDING_GITHUB_REQUEST] = request
         elif pending != request:
             return StageOutcome(Disposition.FINISH_FAIL, "merge_cycle_receipt_invalid")
         return JobRequest(
@@ -144,15 +144,15 @@ class MergeWaitStage(Stage):
         """Apply one correlated immutable merge-cycle receipt locally."""
         error = item.payload.pop(_MERGE_CYCLE_RECEIPT_ERROR, None)
         if error is not None:
-            item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+            item.payload.pop(PENDING_GITHUB_REQUEST, None)
             item.payload.pop(_MERGE_CYCLE_DEADLINE_S, None)
             return StageOutcome(Disposition.FINISH_FAIL, "merge_cycle_failed")
         receipt = item.payload.pop(_MERGE_CYCLE_RECEIPT, None)
-        if not isinstance(receipt, MergeWaitCycleCompleted) or receipt.request != item.payload.get(
-            _PENDING_GITHUB_REQUEST
+        if not isinstance(receipt, MergeWaitCycleCompleted) or not pending_request_matches(
+            item, receipt.request
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_cycle_receipt_invalid")
-        item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+        item.payload.pop(PENDING_GITHUB_REQUEST, None)
         item.payload.pop(_MERGE_CYCLE_DEADLINE_S, None)
         if receipt.attempted:
             item.attempts["merge"] += 1
@@ -299,9 +299,9 @@ class MergeWaitStage(Stage):
                 item.payload[_MERGE_CYCLE_RECEIPT_ERROR] = result.error or "merge cycle failed"
                 return
             receipt = result.value
-            if not isinstance(
-                receipt, MergeWaitCycleCompleted
-            ) or receipt.request != item.payload.get(_PENDING_GITHUB_REQUEST):
+            if not isinstance(receipt, MergeWaitCycleCompleted) or not pending_request_matches(
+                item, receipt.request
+            ):
                 item.payload[_MERGE_CYCLE_RECEIPT_ERROR] = "invalid"
                 return
             item.payload[_MERGE_CYCLE_RECEIPT] = receipt

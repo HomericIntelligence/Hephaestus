@@ -230,6 +230,27 @@ def test_a_receipt_for_a_different_request_is_refused(make_ctx: Any, make_work_i
     assert outcome.note == "merge_cycle_receipt_invalid"
 
 
+def test_a_mismatched_pending_request_keeps_the_cycle_receipt(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A mismatched pending fails closed without touching the stored receipt."""
+    item = _item_with_receipt(make_work_item, "auto_merge_enabled", attempted=True)
+    mismatched = RunMergeWaitCycleRequest(
+        issue_number=2,
+        pr_number=8,
+        deadline_s=60.0,
+        cancellation=threading.Event(),
+    )
+    item.payload["_pending_github_request"] = mismatched
+
+    outcome = MergeWaitStage()._merge_apply(item, make_ctx())
+
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.note == "merge_cycle_receipt_invalid"
+    assert item.payload["_pending_github_request"] is mismatched
+    assert "_merge_wait_cycle_receipt" not in item.payload
+
+
 def test_a_transport_failure_receipt_fails_the_cycle(make_ctx: Any, make_work_item: Any) -> None:
     """A job-level failure is reported, never applied."""
     item = make_work_item(kind="pr", pr=7, issue=1)

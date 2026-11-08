@@ -38,6 +38,7 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.requirements_recovery import (
     ATHENA_FINALIZED_PLAN_PREFIX,
+    OBSOLETE_EXPLANATION_MARKER,
     RECOVERED_REQUIREMENTS_MARKER,
     RecoveredRequirements,
     RecoveryDisposition,
@@ -1857,6 +1858,70 @@ class TestPlanningStageStep:
         comments = [str(comment) for comment in github.comments[121]]
         assert len(comments) == 1
         assert explanation in comments[0]
+
+    def test_obsolete_explanation_publication_failure_retries_the_intent(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A failed explanation write reaches the recovery route unchanged."""
+
+        class FailingExplanationGitHub(FakeStageGitHub):
+            def upsert_issue_comment(
+                self,
+                issue_number: int,
+                marker: str,
+                body: str,
+                *,
+                legacy_marker: str | None = None,
+            ) -> None:
+                if marker == OBSOLETE_EXPLANATION_MARKER:
+                    raise RuntimeError("explanation publication unavailable")
+                super().upsert_issue_comment(
+                    issue_number, marker, body, legacy_marker=legacy_marker
+                )
+
+        store = IssueWaveStore(tmp_path, "test-org", "test-repo")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [122])
+        explanation = "Merged replacement confirmed."
+        store.record_non_code_intent(
+            lease,
+            issue_number=122,
+            reason="independently confirmed obsolete",
+            repository_revision=_RECOVERY_REVISION,
+            explanation=explanation,
+        )
+        item = make_work_item(issue=122)
+        item.payload.update(
+            {
+                WAVE_LEASE_PAYLOAD: lease,
+                WAVE_NON_CODE_INTENT_PAYLOAD: {
+                    "reason": "independently confirmed obsolete",
+                    "extra_labels": [],
+                    "repository_revision": _RECOVERY_REVISION,
+                    "explanation": explanation,
+                },
+            }
+        )
+        github = FailingExplanationGitHub(labels=[STATE_NEEDS_PLAN], issue_body="Already resolved.")
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(
+                github=github,
+                paths=SimpleNamespace(
+                    repo_root=tmp_path,
+                    worktree=tmp_path / "worktree",
+                    source_workspaces=FakeSourceWorkspaceManager(tmp_path),
+                ),
+            ),
+        )
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.RETRY
+        assert "explanation publication unavailable" in outcome.note
+        assert STATE_SKIP not in github.labels[122]
 
     def test_tracker_skip_requires_epic_label_readback(
         self, make_ctx: Any, make_work_item: Any

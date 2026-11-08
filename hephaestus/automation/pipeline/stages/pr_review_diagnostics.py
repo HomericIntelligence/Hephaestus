@@ -137,4 +137,29 @@ def publish_host_verification_failure(
     return True
 
 
-__all__ = ["host_verification_failure_comment", "publish_host_verification_failure"]
+def publish_stage_diagnostic(
+    github: _CommentWriter,
+    issue_number: int,
+    marker: str,
+    body: str,
+) -> None:
+    """Publish one automation-owned marker comment for a stage diagnostic.
+
+    The helper does no logging and no retry. Every failure reaches the caller,
+    which keeps its own recovery route.
+
+    Args:
+        github: The GitHub mutator surface.
+        issue_number: Issue or pull-request number that owns the comment.
+        marker: The marker prefix that identifies the owned comment.
+        body: The rendered comment body.
+
+    """
+    github.upsert_issue_comment(issue_number, marker, body)
+
+
+__all__ = [
+    "host_verification_failure_comment",
+    "publish_host_verification_failure",
+    "publish_stage_diagnostic",
+]

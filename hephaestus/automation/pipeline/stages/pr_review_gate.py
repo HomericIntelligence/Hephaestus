@@ -1,6 +1,6 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
-from ..stage_base import _terminal_pr_outcome
+from ..stage_base import _terminal_pr_outcome, records_retry_exceeded_cap
 from .pr_review_threads import *
 
 
@@ -96,9 +96,11 @@ class PrReviewGate(_PrReviewHost):
         """Retry an unreadable review, without burning a round or changing a label."""
         payload = item.payload
         reason = "no review found" if audit is None else "review unreadable"
-        retries = payload.get("review_error_retries", 0) + 1
-        payload["review_error_retries"] = retries
-        if retries > REVIEW_ERROR_RETRY_CAP:
+        exceeded = records_retry_exceeded_cap(
+            payload, "review_error_retries", REVIEW_ERROR_RETRY_CAP
+        )
+        retries = payload["review_error_retries"]
+        if exceeded:
             logger.error(
                 "pr_review:%s: %s; %d consecutive reviewer failures — failing back to "
                 "implementation",

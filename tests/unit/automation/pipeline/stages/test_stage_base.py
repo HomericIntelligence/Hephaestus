@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -128,6 +128,87 @@ class TestAgentProvider:
     def test_prefers_explicit_agent(self) -> None:
         """Configured agent values are returned unchanged."""
         assert agent_provider(self._ctx(agent="pi")) == "pi"
+
+
+class TestStageNetworkDeadline:
+    """Stage network operations use the configured network phase timeout."""
+
+    def _ctx(self, network_timeout: int) -> StageContext:
+        """Build a stage context whose network phase timeout is explicit."""
+        config = PipelineConfig(
+            org="test-org",
+            repos=["test-repo"],
+            rate_guard_enabled=False,
+            network_timeout=network_timeout,
+        )
+        return TestStageContext()._bare_ctx(config=config)
+
+    def test_stage_network_deadline_uses_the_network_phase(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The helper derives one absolute deadline from the network phase."""
+        monkeypatch.setattr(stage_base, "operation_deadline_after", lambda timeout: 500.0 + timeout)
+
+        assert stage_base.stage_network_deadline(self._ctx(30)) == 530.0
+
+    def test_stage_network_deadline_falls_back_to_the_git_job_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing phase timeout uses the shared git job default."""
+        monkeypatch.setattr(stage_base, "operation_deadline_after", lambda timeout: 100.0 + timeout)
+        config = SimpleNamespace(org="test-org", repos=["test-repo"])
+        ctx = SimpleNamespace(config=config)
+
+        assert stage_base.stage_network_deadline(cast(StageContext, ctx)) == (
+            100.0 + stage_base.GIT_JOB_TIMEOUT_S
+        )
+
+    def test_stage_network_deadline_rejects_a_non_positive_timeout(self) -> None:
+        """A non-positive network timeout is a configuration error."""
+        with pytest.raises(ValueError, match="network_timeout must be positive"):
+            stage_base.stage_network_deadline(self._ctx(0))
+
+
+class TestRecordsRetryExceededCap:
+    """The shared retry counter persists the count and reports the cap."""
+
+    @pytest.mark.parametrize(
+        ("start", "expected_count", "expected_exceeded"),
+        [
+            (None, 1, False),
+            (0, 1, False),
+            (1, 2, False),
+            (2, 3, True),
+        ],
+    )
+    def test_records_retry_exceeded_cap_boundary_values(
+        self, start: int | None, expected_count: int, expected_exceeded: bool
+    ) -> None:
+        """Counts below and at the cap stay retryable; the next one exceeds it."""
+        payload: dict[str, Any] = {} if start is None else {"attempts": start}
+
+        exceeded = stage_base.records_retry_exceeded_cap(payload, "attempts", 2)
+
+        assert exceeded is expected_exceeded
+        assert payload["attempts"] == expected_count
+
+    def test_records_retry_exceeded_cap_counts_up_across_calls(self) -> None:
+        """The stored count persists between calls."""
+        payload: dict[str, Any] = {}
+
+        first = stage_base.records_retry_exceeded_cap(payload, "attempts", 1)
+        second = stage_base.records_retry_exceeded_cap(payload, "attempts", 1)
+
+        assert (first, second) == (False, True)
+        assert payload["attempts"] == 2
+
+    @pytest.mark.parametrize("stored", ["1", 1.5, True])
+    def test_records_retry_exceeded_cap_rejects_a_non_integer_counter(self, stored: object) -> None:
+        """A malformed counter raises instead of silently coercing."""
+        payload = {"attempts": stored}
+
+        with pytest.raises(TypeError, match="attempts"):
+            stage_base.records_retry_exceeded_cap(payload, "attempts", 2)
 
 
 class TestPlanningSourceWorkspaceBinding:

@@ -2744,7 +2744,8 @@ Each collaborator owns an explicit responsibility:
 |---|---|---|
 | [`pipeline/coordinator.py`](../hephaestus/automation/pipeline/coordinator.py) | `coordinator_contract.py`, `coordinator_types.py`, `coordinator_runtime.py`, `coordinator_sources.py`, `coordinator_dispatch.py` | static host contract; configuration/types; event-loop runtime; source cursors; implementation admission |
 | [`pipeline_github.py`](../hephaestus/automation/pipeline_github.py) | `pipeline_github_contract.py`, `pipeline_github_transport.py`, `pipeline_github_queries.py`, `pipeline_github_reviews.py`, `pipeline_github_mutations.py` | static host contract; adapter construction; transport; reads; review evidence; non-review mutations |
-| [`pipeline/stages/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py) | `pr_review_threads.py`, `pr_review_verification.py`, `pr_review_diagnostics.py`, `pr_review_jobs.py`, `pr_review_gate.py` | public stage surface; thread parsing; host verification and diagnostics; jobs/worktrees; GO/NO-GO gate |
+| [`pipeline/stages/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py) | `pr_review_threads.py`, `pr_review_verification.py`, `pr_review_diagnostics.py`, `pr_review_jobs.py`, `pr_review_gate.py` | public stage surface; thread parsing; host verification, diagnostics, and shared stage-diagnostic publication; jobs/worktrees; GO/NO-GO gate |
+| [`pipeline/stages/durable_request.py`](../hephaestus/automation/pipeline/stages/durable_request.py) | `work_item.py` | shared pending GitHub request payload key and its two read predicates; each stage keeps its own pop timing, receipt keys, and terminal reasons |
 
 The per-facade source budgets are no longer executable. The budget tests were
 removed with the non-core-library test re-scope. The `ruff-check-complexity`

@@ -54,7 +54,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
@@ -65,6 +65,7 @@ from hephaestus.agents.runtime import (
     agent_uses_configured_model_default,
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.automation.state_labels import STATE_SKIP
 
@@ -108,8 +109,10 @@ __all__ = [
     "athena_advise_failure_reason",
     "planning_source_revision",
     "planning_source_workspace_binding",
+    "records_retry_exceeded_cap",
     "source_workspace_binding",
     "stage_model",
+    "stage_network_deadline",
     "stage_timeout",
     "write_skip_label",
 ]
@@ -261,6 +264,39 @@ def stage_timeout(
     if timeout <= 0:
         raise ValueError(f"{phase}_timeout must be positive")
     return timeout
+
+
+def stage_network_deadline(ctx: StageContext) -> float:
+    """Return the absolute deadline for one bounded stage network operation."""
+    return operation_deadline_after(stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
+
+
+def records_retry_exceeded_cap(
+    payload: MutableMapping[str, object],
+    key: str,
+    cap: int,
+) -> bool:
+    """Increment a payload retry counter and return whether it passed the cap.
+
+    Args:
+        payload: The stage payload that holds the counter.
+        key: Counter key. A missing key starts at zero.
+        cap: Maximum retryable count.
+
+    Returns:
+        ``True`` when the new count is greater than ``cap``.
+
+    Raises:
+        TypeError: If the stored counter is not an integer. The helper does not
+            coerce a malformed value.
+
+    """
+    stored = payload.get(key, 0)
+    if type(stored) is not int:
+        raise TypeError(f"{key} retry counter must be an integer")
+    retries = stored + 1
+    payload[key] = retries
+    return retries > cap
 
 
 def source_workspace_binding(
