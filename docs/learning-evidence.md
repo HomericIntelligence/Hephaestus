@@ -31,6 +31,38 @@ without network access in the validation sandbox. A missing tool or failed
 check prevents publication. A raw `learn_delivery` payload cannot prove source
 evidence and returns `learning_deferred:source_evidence_required`.
 
+## Admission for sessions the queue did not create
+
+The queue is the only durable-learning admission lane. A session that the queue
+did not create cannot register itself as a learning source. ADR-0054 records
+this decision.
+
+The admission predicate is closed. The host requires a merged PR, a reference
+that closes the issue, and passing required checks
+(`hephaestus/automation/mnemosyne_learning_preparation.py:227-269` and
+`:181-197`). A bare session identifier supplies no repository, issue, or
+working-directory binding. Those values cannot satisfy the predicate, so
+delivery stays deferred with
+`learning_deferred:source_evidence_required`
+(`hephaestus/automation/mnemosyne_skill_host.py:262`).
+
+Session registration was the rejected alternative. No session record can
+satisfy the merged-PR predicate, and a record would let an operator assertion
+replace the verified merge and check evidence.
+
+One operator path does exist. A PR that a session creates is admitted when its
+linked issue is in the queue and the PR obtains `state:implementation-go`
+through review (`hephaestus/automation/pipeline/seeding.py:288-293`,
+`hephaestus/automation/pipeline/stages/merge_wait.py:274-276`). A PR with no
+linked issue is not admitted
+(`hephaestus/automation/pipeline/coordinator_sources.py:762-767`).
+
+This decision governs durable Mnemosyne delivery only. It does not govern the
+learning CLI, its `--session-id` and `--agent` surface, or its interactive learn
+turn.
+
+This section refines ADR-0026 and ADR-0032.
+
 ## Deferred records
 
 The journal supports the additional `deferred` status. This status is terminal
