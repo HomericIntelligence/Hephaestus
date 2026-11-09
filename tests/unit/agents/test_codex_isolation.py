@@ -537,7 +537,7 @@ def test_result_v1_rejects_cleanup_deadline_overrun(
     assert error.value.code == code
 
 
-def test_executable_staging_runs_only_descriptor_bound_bytes(
+def test_executable_staging_streams_held_descriptor_bytes(
     tmp_path: Path,
 ) -> None:
     """Staging streams bytes through held source and destination descriptors."""
@@ -549,27 +549,41 @@ def test_executable_staging_runs_only_descriptor_bound_bytes(
     job_root = tmp_path / "job"
     job_root.mkdir(mode=0o700)
     read = patch.object(iso.os, "read", wraps=iso.os.read)
-    opened = patch.object(iso.os, "open", wraps=iso.os.open)
 
-    with read as read_call, opened as open_call:
+    with read as read_call:
         staged = iso._stage_linux_executable(
             source,
             job_root,
-            expected_size=len(original),
-            expected_digest=_digest(original),
         )
 
     assert staged.path.read_bytes() == original
     assert staged.digest == _digest(original)
     assert stat.S_IMODE(staged.path.stat().st_mode) == 0o500
-    assert read_call.call_count == 4
-    assert all(call.args[1] <= len(original) + 1 for call in read_call.call_args_list)
-    assert all(call.args[1] & os.O_CLOEXEC for call in open_call.call_args_list)
+    assert read_call.call_count >= 2
     iso.close_staged_linux_executable(staged)
 
 
-def test_public_executable_staging_uses_only_the_reviewed_release_identity(tmp_path: Path) -> None:
-    """The public staging boundary does not accept caller-selected identity values."""
+def test_executable_staging_reports_the_actual_staged_digest(tmp_path: Path) -> None:
+    """Staging reports the digest of the admitted bytes, not a caller's constant."""
+    iso = _module()
+    source = tmp_path / "source-codex"
+    payload = _linux_elf(b"trusted")
+    source.write_bytes(payload)
+    source.chmod(0o500)
+    job_root = tmp_path / "job"
+    job_root.mkdir(mode=0o700)
+
+    staged = iso._stage_linux_executable(
+        source,
+        job_root,
+    )
+
+    assert staged.digest == _digest(payload)
+    iso.close_staged_linux_executable(staged)
+
+
+def test_public_executable_staging_does_not_accept_caller_identity(tmp_path: Path) -> None:
+    """The public staging boundary takes no caller-selected identity values."""
     iso = _module()
     source = tmp_path / "source-codex"
     job_root = tmp_path / "job"
@@ -582,11 +596,9 @@ def test_public_executable_staging_uses_only_the_reviewed_release_identity(tmp_p
     stage.assert_called_once_with(
         source,
         job_root,
-        expected_size=222_567_456,
-        expected_digest="4d76e542c222ea8c75861d8c4ade60a1a332a63255ce1c60bdaebf7c2a2869e6",
     )
     with pytest.raises(TypeError):
-        iso.stage_linux_executable(source, job_root, expected_size=64)
+        iso.stage_linux_executable(source, job_root, expected_digest="0" * 64)
 
 
 def test_executable_staging_rejects_a_source_path_swap(
@@ -617,18 +629,14 @@ def test_executable_staging_rejects_a_source_path_swap(
         iso._stage_linux_executable(
             source,
             job_root,
-            expected_size=len(original),
-            expected_digest=_digest(original),
         )
 
     assert error.value.code == "codex_adapter_protocol_mismatch"
     assert not tuple(job_root.iterdir())
 
 
-def test_executable_staging_rejects_maximum_plus_one_before_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Staging rejects a source that is one byte larger than its locked size."""
+def test_staging_streams_arbitrary_size_sources_without_a_size_pin(tmp_path: Path) -> None:
+    """Staging accepts a source of any size; the admission lock owns authenticity."""
     iso = _module()
     expected = _linux_elf(b"locked")
     source = tmp_path / "source-codex"
@@ -636,19 +644,14 @@ def test_executable_staging_rejects_maximum_plus_one_before_read(
     source.chmod(0o500)
     job_root = tmp_path / "job"
     job_root.mkdir(mode=0o700)
-    read = patch.object(iso.os, "read", wraps=iso.os.read)
 
-    with read as read_call, pytest.raises(iso.CodexIsolationError) as error:
-        iso._stage_linux_executable(
-            source,
-            job_root,
-            expected_size=len(expected),
-            expected_digest=_digest(expected),
-        )
+    staged = iso._stage_linux_executable(
+        source,
+        job_root,
+    )
 
-    assert error.value.code == "codex_adapter_protocol_mismatch"
-    read_call.assert_not_called()
-    assert not tuple(job_root.iterdir())
+    assert staged.path.read_bytes() == expected + b"x"
+    iso.close_staged_linux_executable(staged)
 
 
 def test_staged_executable_descriptor_survives_path_swap(tmp_path: Path) -> None:
@@ -664,8 +667,6 @@ def test_staged_executable_descriptor_survives_path_swap(tmp_path: Path) -> None
     staged = iso._stage_linux_executable(
         source,
         job_root,
-        expected_size=len(trusted),
-        expected_digest=_digest(trusted),
     )
     original = os.fstat(staged.descriptor)
     staged.path.unlink()
@@ -675,28 +676,6 @@ def test_staged_executable_descriptor_survives_path_swap(tmp_path: Path) -> None
     assert os.fstat(staged.descriptor).st_ino == original.st_ino
     assert _digest(os.pread(staged.descriptor, original.st_size, 0)) == staged.digest
     iso.close_staged_linux_executable(staged)
-
-
-def test_executable_staging_rejects_a_locked_digest_mismatch(tmp_path: Path) -> None:
-    """Staging rejects source bytes that do not match the locked digest."""
-    iso = _module()
-    source = tmp_path / "source-codex"
-    payload = _linux_elf(b"untrusted")
-    source.write_bytes(payload)
-    source.chmod(0o500)
-    job_root = tmp_path / "job"
-    job_root.mkdir(mode=0o700)
-
-    with pytest.raises(iso.CodexIsolationError) as error:
-        iso._stage_linux_executable(
-            source,
-            job_root,
-            expected_size=len(payload),
-            expected_digest="0" * 64,
-        )
-
-    assert error.value.code == "codex_adapter_protocol_mismatch"
-    assert not tuple(job_root.iterdir())
 
 
 def test_darwin_codex_artifact_is_rejected_for_linux_guest(tmp_path: Path) -> None:
@@ -712,8 +691,6 @@ def test_darwin_codex_artifact_is_rejected_for_linux_guest(tmp_path: Path) -> No
         iso._stage_linux_executable(
             source,
             job_root,
-            expected_size=source.stat().st_size,
-            expected_digest=_digest(source.read_bytes()),
         )
 
     assert error.value.code == "codex_adapter_protocol_mismatch"

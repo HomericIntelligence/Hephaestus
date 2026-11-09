@@ -407,8 +407,10 @@ def _isolation_request(
         command_digest=protocol.canonical_sha256(command),
         executable_platform="linux",
         executable_target=protocol.CODEX_LINUX_TARGET,
-        executable_release=protocol.CODEX_RELEASE,
-        executable_asset_name=protocol.CODEX_LINUX_ASSET,
+        executable_release=(
+            f"rust-v{'.'.join(str(part) for part in protocol.SUPPORTED_CODEX_VERSION_MIN)}"
+        ),
+        executable_asset_name=f"codex-{protocol.CODEX_LINUX_TARGET}.zst",
         executable_path=str((tmp_path / "codex").resolve()),
         executable_digest="e" * 64,
         executable_file_identity=(1, 2, 0o100500, 1000, 64, 10),
@@ -547,7 +549,7 @@ def test_public_admission_loads_verified_installed_bytes_in_a_fresh_process(
     tmp_path: Path,
 ) -> None:
     """A fresh process uses the public lock-to-import production path."""
-    lock, digest, payload = _deployment(tmp_path, build_installed_wheel=True)
+    lock, digest, _payload = _deployment(tmp_path, build_installed_wheel=True)
     repository = Path(__file__).resolve().parents[3]
     code = f"""
 from pathlib import Path
@@ -555,8 +557,6 @@ from hephaestus.automation import codex_adapter_admission as admission
 admission.sys.platform = "darwin"
 admission.platform.machine = lambda: "arm64"
 admission._virtualization_framework_available = lambda: True
-admission._ARCHIVE_SHA256 = {payload["codex_archive_sha256"]!r}
-admission._SIGSTORE_SHA256 = {payload["sigstore_bundle_sha256"]!r}
 admission._default_offline_verifier = lambda _lock: None
 result = admission.admit_codex_adapter(
     lock_path=Path({str(lock)!r}),
@@ -627,10 +627,8 @@ def test_production_admission_parses_the_version_1_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Production admission returns the accepted version-1 deployment lock."""
-    lock, digest, payload = _deployment(tmp_path)
+    lock, digest, _payload = _deployment(tmp_path)
     module = _module()
-    monkeypatch.setattr(module, "_ARCHIVE_SHA256", payload["codex_archive_sha256"])
-    monkeypatch.setattr(module, "_SIGSTORE_SHA256", payload["sigstore_bundle_sha256"])
 
     admitted = _admit(module, lock, digest)
 
@@ -661,10 +659,8 @@ def test_complete_offline_deployment_imports_only_the_locked_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Complete locked evidence admits the exact factory after verification."""
-    lock, digest, payload = _deployment(tmp_path)
+    lock, digest, _payload = _deployment(tmp_path)
     module = _module()
-    monkeypatch.setattr(module, "_ARCHIVE_SHA256", payload["codex_archive_sha256"])
-    monkeypatch.setattr(module, "_SIGSTORE_SHA256", payload["sigstore_bundle_sha256"])
     imported: list[tuple[str, str]] = []
     factory = object()
 
@@ -684,7 +680,7 @@ def test_default_importer_loads_only_from_verified_installed_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An ambient same-name module cannot replace the locked adapter module."""
-    lock, digest, payload = _deployment(tmp_path)
+    lock, digest, _payload = _deployment(tmp_path)
     shadow = tmp_path / "shadow"
     _regular(
         shadow / "example_adapter" / "__init__.py",
@@ -693,8 +689,6 @@ def test_default_importer_loads_only_from_verified_installed_tree(
     monkeypatch.syspath_prepend(str(shadow))
     sys.modules.pop("example_adapter", None)
     module = _module()
-    monkeypatch.setattr(module, "_ARCHIVE_SHA256", payload["codex_archive_sha256"])
-    monkeypatch.setattr(module, "_SIGSTORE_SHA256", payload["sigstore_bundle_sha256"])
 
     admitted = _admit(module, lock, digest, importer=module._default_importer)
 
@@ -1598,8 +1592,6 @@ def test_production_import_uses_held_verified_module_bytes(
     """A module-path replacement after verification cannot execute changed bytes."""
     lock, digest, payload = _deployment(tmp_path)
     module = _module()
-    monkeypatch.setattr(module, "_ARCHIVE_SHA256", payload["codex_archive_sha256"])
-    monkeypatch.setattr(module, "_SIGSTORE_SHA256", payload["sigstore_bundle_sha256"])
     package = Path(payload["installed_tree_root"], "example_adapter", "__init__.py")
     replacement = tmp_path / "replacement.py"
     marker = tmp_path / "replacement-executed"
@@ -1646,8 +1638,6 @@ def test_production_import_rejects_ambient_dependency(
     )
     monkeypatch.syspath_prepend(str(ambient))
     module = _module()
-    monkeypatch.setattr(module, "_ARCHIVE_SHA256", payload["codex_archive_sha256"])
-    monkeypatch.setattr(module, "_SIGSTORE_SHA256", payload["sigstore_bundle_sha256"])
     sys.modules.pop("example_adapter", None)
     sys.modules.pop("ambient_poison", None)
 

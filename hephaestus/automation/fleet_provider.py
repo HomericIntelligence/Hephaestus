@@ -16,7 +16,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, TypeGuard
 
-from hephaestus.agents.codex_isolation import CODEX_VERSION_OUTPUT
+from hephaestus.agents.codex_isolation import is_supported_codex_version_output
 from hephaestus.agents.pi_plugins import run_bounded_command
 from hephaestus.automation.fleet_isolation import provider_environment
 
@@ -93,7 +93,7 @@ class ProviderError(RuntimeError):
 
 
 def read_provider_version(command: tuple[str, ...], *, env: dict[str, str], timeout: float) -> str:
-    """Return the pinned provider version through a bounded process boundary."""
+    """Return the supported provider version through a bounded process boundary."""
     result = run_bounded_command((*command, "--version"), env=env, timeout=timeout)
     if result.timed_out:
         raise ProviderError("provider_version_timeout")
@@ -102,7 +102,7 @@ def read_provider_version(command: tuple[str, ...], *, env: dict[str, str], time
     if result.returncode != 0:
         raise ProviderError("provider_version_command_failed")
     version = result.stdout.strip()
-    if version != CODEX_VERSION_OUTPUT:
+    if not is_supported_codex_version_output(version):
         raise ProviderError("provider_version_mismatch")
     return version
 
