@@ -236,7 +236,7 @@ def test_exec_server_probe_stops_excess_version_output(
 
 def test_read_provider_version_accepts_supported_line(tmp_path: Path) -> None:
     """read_provider_version accepts any patch inside the supported line."""
-    from hephaestus.automation import fleet_provider
+    from hephaestus.fleet import provider as fleet_provider
 
     for tag in ("codex-cli 0.153.0", "codex-cli 0.153.4", "codex-cli 0.153.99"):
         executable = tmp_path / f"codex-{tag.replace(' ', '_')}"
@@ -250,7 +250,7 @@ def test_read_provider_version_accepts_supported_line(tmp_path: Path) -> None:
 
 def test_read_provider_version_rejects_unsupported_line(tmp_path: Path) -> None:
     """read_provider_version fails closed outside the supported line."""
-    from hephaestus.automation import fleet_provider
+    from hephaestus.fleet import provider as fleet_provider
 
     for tag in ("codex-cli 0.154.0", "codex-cli 0.152.9", "codex", ""):
         executable = tmp_path / f"codex-bad-{abs(hash(tag))}"

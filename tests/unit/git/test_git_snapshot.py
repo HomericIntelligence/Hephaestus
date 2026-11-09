@@ -8,12 +8,14 @@ package, and its timeout helper must be the same object as the helper in
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 
 def test_snapshot_imports_from_the_library_package() -> None:
     """Verify `hephaestus.git.snapshot` imports and exposes its public helpers."""
     import hephaestus.git.snapshot as snapshot
 
-    assert snapshot.__name__ == "hephaestus.git.snapshot"
     assert callable(snapshot.run_bounded_git_output)
     assert callable(snapshot.path_content_identity)
 
@@ -31,7 +33,31 @@ def test_timeout_helper_is_the_runtime_object() -> None:
 
 
 def test_snapshot_does_not_import_the_product_layer() -> None:
-    """Verify `hephaestus.git.snapshot` is a library module."""
-    import hephaestus.git.snapshot as snapshot
+    """Verify importing `hephaestus.git.snapshot` loads no product-layer module.
 
-    assert not snapshot.__name__.startswith("hephaestus.automation")
+    The assertion reads the import graph in `sys.modules`, not the module's
+    own name. Subprocess isolation keeps the check meaningful because a
+    pytest session can already hold product-layer modules from other tests.
+    """
+    code = (
+        "import sys\n"
+        "before = set(sys.modules)\n"
+        "import hephaestus.git.snapshot  # noqa: F401\n"
+        "loaded = sorted(\n"
+        "    name for name in set(sys.modules) - before\n"
+        "    if name == 'hephaestus.automation' or name.startswith('hephaestus.automation.')\n"
+        ")\n"
+        "print('AUTOMATION_LOADED:' + ','.join(loaded))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    loaded_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("AUTOMATION_LOADED:")
+    )
+    payload = loaded_line.removeprefix("AUTOMATION_LOADED:")
+    loaded = payload.split(",") if payload else []
+    assert loaded == [], f"`hephaestus.git.snapshot` loaded product-layer modules: {loaded}"
