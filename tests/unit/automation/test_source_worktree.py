@@ -906,6 +906,79 @@ def test_claim_implementation_writer_records_the_controlled_checkout(
     assert rebound == binding
 
 
+def test_writer_authority_remints_from_git_after_a_restart(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A lost in-memory authority cache re-mints instead of failing the item."""
+    worktree_manager_module = sys.modules[WorktreeManager.__module__]
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writers = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    with manager.implementation_writer_handoff(9) as handoff:
+        writer = writers.create_worktree(
+            9,
+            "9-auto-impl",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
+    first_authority = writers.implementation_writer_authority(writer)
+
+    # A restart drops the in-memory cache while the checkout stays on disk.
+    writers._implementation_writer_authorities.clear()
+
+    with caplog.at_level(logging.WARNING):
+        reminted = writers.implementation_writer_authority(writer)
+
+    assert reminted.token != first_authority.token
+    record = worktree_manager_module._IMPLEMENTATION_WRITER_AUTHORITIES[reminted.token]
+    assert record.issue_number == 9
+    assert record.branch == "9-auto-impl"
+    assert "not cached" in caplog.text
+
+
+def test_writer_authority_remint_reports_a_path_git_cannot_read(
+    tmp_path: Path,
+) -> None:
+    """A directory that is not a checkout fails with a controlled error."""
+    writers = WorktreeManager(repo_root=tmp_path, base_dir=tmp_path / "base")
+    detached = tmp_path / "base" / "auto-9-impl"
+    detached.mkdir(parents=True)
+
+    with pytest.raises(WorktreeCreationReceiptError, match="not an attached checkout"):
+        writers.implementation_writer_authority(detached)
+
+
+def test_writer_authority_remint_rejects_a_branch_that_names_no_issue(
+    tmp_path: Path,
+) -> None:
+    """An unowned branch is still refused: the issue number cannot be derived."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    worktree_manager = WorktreeManager(
+        repo_root=repo,
+        base_dir=manager.base_dir,
+        base_branch=second,
+    )
+    with manager.implementation_writer_handoff(9) as handoff:
+        writer = worktree_manager.create_worktree(
+            9,
+            "unowned-branch",
+            source_lane=SourceLane.IMPLEMENTATION.value,
+            implementation_writer_handoff=handoff,
+        )
+    worktree_manager._implementation_writer_authorities.clear()
+
+    with pytest.raises(
+        WorktreeCreationReceiptError,
+        match="does not name an issue",
+    ):
+        worktree_manager.implementation_writer_authority(writer)
+
+
 def test_direct_writer_replaces_owned_detached_source_before_rebinding(
     tmp_path: Path,
 ) -> None:

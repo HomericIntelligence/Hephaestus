@@ -908,7 +908,9 @@ class TestWorktreeManager:
             )
 
         assert path not in manager._pending_implementation_adoptions
-        with pytest.raises(WorktreeCreationReceiptError, match="authority is unavailable"):
+        # The revoked adoption must not yield a usable authority. The path holds
+        # no attached checkout, so a re-mint cannot derive an issue number.
+        with pytest.raises(WorktreeCreationReceiptError, match="not an attached checkout"):
             manager.implementation_writer_authority(writer)
 
     @pytest.mark.parametrize(
