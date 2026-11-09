@@ -983,7 +983,12 @@ def _stage_linux_executable(
 
 
 def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExecutable:
-    """Stage the admitted Linux ELF through held descriptors."""
+    """Stage the admitted Linux ELF through held descriptors.
+
+    The stage authenticates structure (Linux ELF, no-follow, owner-only staging
+    root) only. Authenticity of the bytes is the caller's responsibility: the
+    caller must compare the staged digest with the deployment lock before launch.
+    """
     return _stage_linux_executable(
         source_path,
         job_root,
