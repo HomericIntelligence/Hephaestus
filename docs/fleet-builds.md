@@ -60,6 +60,7 @@ an asynchronous client factory with the operator's fixed endpoint,
 backend credential, and `trust_env=False`, plus the separate supervisor key.
 Open, use, and close the bridge on one synchronous owner thread. It refuses
 calls inside an active asynchronous event loop and calls after closure.
+These two ported Fleet modules move to `hephaestus/fleet/` under #3519.
 
 The bridge applies each caller's absolute monotonic deadline to one SDK call.
 It does not retry a request or generate another claim or fact. The supervisor
@@ -230,7 +231,8 @@ captured standard output and error. The first fixed profile declares these files
 and an empty additional-artifact list; it does not infer artifacts from arbitrary
 workspace files. Every file and directory is synchronized before references are
 returned. The publisher uses the existing descriptor reader, snapshot manifest
-rules and collector receipt schema.
+rules and collector receipt schema. These two ported Fleet modules move to
+`hephaestus/fleet/` under #3519.
 
 The supervisor retains terminal output before it calls the publisher, then
 retains the returned references before it sends a controller fact. A failed

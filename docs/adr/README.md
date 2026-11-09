@@ -75,3 +75,6 @@ confirm all three.
 | [0059](0059-standalone-pr-merge-cli-stays-retired.md) | Standalone PR-merge CLI stays retired | Accepted |
 | [0060](0060-pi-capability-sourceinfo-provenance-binding-removed.md) | Pi capability admission drops the sourceInfo provenance binding | Accepted |
 | [0061](0061-filesystem-mode-and-ownership-are-host-policy.md) | Filesystem mode and ownership are host policy | Accepted |
+| [0062](0062-git-library-subpackage.md) | hephaestus.git is the Git-family library subpackage | Proposed |
+| [0063](0063-harness-model-transport-catalog.md) | Harness and model-transport catalog | Proposed |
+| [0064](0064-documentation-path-reference-maintenance.md) | Living documents follow the paths they name | Proposed |

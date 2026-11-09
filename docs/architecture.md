@@ -2746,6 +2746,11 @@ Each collaborator owns an explicit responsibility:
 | [`pipeline_github.py`](../hephaestus/automation/pipeline_github.py) | `pipeline_github_contract.py`, `pipeline_github_transport.py`, `pipeline_github_queries.py`, `pipeline_github_reviews.py`, `pipeline_github_mutations.py` | static host contract; adapter construction; transport; reads; review evidence; non-review mutations |
 | [`pipeline/stages/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py) | `pr_review_threads.py`, `pr_review_verification.py`, `pr_review_diagnostics.py`, `pr_review_jobs.py`, `pr_review_gate.py` | public stage surface; thread parsing; host verification and diagnostics; jobs/worktrees; GO/NO-GO gate |
 
+The automation entry modules own one-way dependencies. The Git-family
+collaborators move into the `hephaestus/git/` library subpackage under
+issues #3514 and #3517. The `pdoc` target list and this section follow the
+move in the same change.
+
 The per-facade source budgets are no longer executable. The budget tests were
 removed with the non-core-library test re-scope. The `ruff-check-complexity`
 pre-commit hook still enforces the McCabe limit on every `hephaestus/` module,
@@ -2918,7 +2923,8 @@ Agamemnon retains task admission, assignments, and orchestration decisions.
 Keystone transports admitted commands and worker facts. Odysseus owns the web
 interface. The Fleet adapter does not discover issues, create another task
 queue, or change implementation state labels. The existing pipeline keeps its
-label and publication authority.
+label and publication authority. The Fleet modules move to `hephaestus/fleet/`
+under #3519.
 
 [`FleetWorker`](../hephaestus/automation/fleet_worker.py) owns one pinned Codex
 0.153.4 app-server process through

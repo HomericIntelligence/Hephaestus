@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-06-05
 - Tracks: #711 (parent #708)
+- Amended: 2026-11-09 for #3525
 
 ## Context
 
@@ -21,7 +22,7 @@ this as the single biggest architectural smell.
 
 Adopt a **dual-layer package** with four guarantees:
 
-1. **Library layer** — `hephaestus.{utils, io, config, logging, cli, system,
+1. **Library layer** — `hephaestus.{utils, io, config, logging, cli, system, git,
    github, validation, resilience, markdown, ci, benchmarks, datasets,
    discovery, forensics, nats, version, agents, scripts_lib}`. Loaded via PEP 562 lazy
    imports (`hephaestus/__init__.py`). `import hephaestus` MUST NOT
