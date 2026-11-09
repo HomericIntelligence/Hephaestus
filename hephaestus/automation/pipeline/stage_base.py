@@ -46,10 +46,12 @@ Coordinator convention (binding for #1817, the coordinator slice):
   (#1817) maps onto the ``github_api`` mutators; ``upsert_plan_comment`` is
   the durable plan-comment channel (doc section 2: "plan comment = durable
   artifact") — the planning stage calls it in VERIFY so the plan the agent
-  produced is journaled BEFORE the verify/ADVANCE decision. The accessor
-  surface excludes native auto-merge.
+  produced is journaled BEFORE the verify/ADVANCE decision. Stage code must
+  not call the native auto-merge mutations (``enable_auto_merge`` /
+  ``disable_auto_merge``); the stage-module scan
   ``tests/unit/automation/pipeline/test_pipeline_architecture.py::test_pipeline_stages_have_no_auto_merge_mutation_capability``
-  enforces that exclusion.
+  enforces that ban, and the closed merge-wait job plus the adapter's own
+  no-go write own every auto-merge call site.
 """
 
 from __future__ import annotations

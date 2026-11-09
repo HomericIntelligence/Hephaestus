@@ -65,13 +65,16 @@ class StageGitHub(Protocol):
     mutators (the pipeline architecture guard forbids ``github_api`` mutator
     names inside pipeline modules).
 
-    This protocol and its coordinator implementation expose no auto-merge
-    mutation. Stages must not call ``enable_auto_merge`` or
-    ``disable_auto_merge``. The closed ``merge_wait`` job owns enablement,
-    and the adapter owns the disarm. The test
-    ``tests/unit/automation/pipeline/
+    The protocol declares no auto-merge mutator. Stage code must not call
+    ``enable_auto_merge`` or ``disable_auto_merge``: the closed ``merge_wait``
+    job owns enablement, and the adapter owns the disarm. The stage-module
+    scan ``tests/unit/automation/pipeline/
     test_pipeline_architecture.py::test_pipeline_stages_have_no_auto_merge_mutation_capability``
-    enforces this rule.
+    enforces that stage-side ban. The adapter itself exposes the two live
+    mutations for that job and no retired names;
+    ``tests/unit/automation/test_pipeline_github.py::
+    TestRepoScopedAutoMerge::test_pipeline_adapter_exposes_only_the_live_auto_merge_mutations``
+    pins that adapter surface.
     """
 
     def operation_deadline(
