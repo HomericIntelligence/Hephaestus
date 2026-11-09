@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+import hephaestus.automation.pipeline.stages.implementation.implementation as implementation_module
 from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
@@ -44,13 +45,14 @@ from hephaestus.automation.pipeline.stages import (
 from hephaestus.automation.pipeline.stages.implementation import (
     BRANCH_WORKTREE_OWNER_PENDING_DELAY_S,
     GIT_ERROR_RETRY_CAP,
-    HEPHAESTUS_REQUIRED_CHECK_ARGV,
     PRE_PR_TEST_ARGV,
     ImplementationStage,
     _git_failure_fallback,
     build_implementation_prompt,
     build_test_fix_prompt,
-    implementation as implementation_module,
+)
+from hephaestus.automation.pipeline.stages.implementation.implementation import (
+    HEPHAESTUS_REQUIRED_CHECK_ARGV,
 )
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,

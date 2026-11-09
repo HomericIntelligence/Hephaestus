@@ -2752,6 +2752,14 @@ collaborators move into the `hephaestus/git/` library subpackage under
 issues #3514 and #3517. The `pdoc` target list and this section follow the
 move in the same change.
 
+Each stage owns one package under `pipeline/stages/`. A stage module is
+`stages/<name>/<name>.py`, and the package `__init__` re-exports the stage
+names. The flat `stages/<name>.py` modules forward those names for the
+historical import paths. `stage_base.py` and `stage_github.py` stay flat beside
+the packages. A stage package may import one sibling package only: the plan
+review stage reads the planner's prompt builder. Architecture tests enforce the
+layout, the flat re-export identity, and the cross-stage edge set.
+
 The per-facade source budgets are no longer executable. The budget tests were
 removed with the non-core-library test re-scope. The `ruff-check-complexity`
 pre-commit hook still enforces the McCabe limit on every `hephaestus/` module,

@@ -15,7 +15,9 @@ def test_implementer_prepends_advise_context_for_all_agents() -> None:
     ``ctx.config.enable_advise`` and composes the findings block via
     ``build_implementation_prompt``.
     """
-    stage_src = (AUTOMATION_DIR / "pipeline" / "stages" / "implementation.py").read_text()
+    stage_src = (
+        AUTOMATION_DIR / "pipeline" / "stages" / "implementation" / "implementation.py"
+    ).read_text()
     assert "enable_advise" in stage_src, (
         "implementation stage must gate advise behind enable_advise"
     )
