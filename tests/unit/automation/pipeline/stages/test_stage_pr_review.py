@@ -11,9 +11,8 @@ from hephaestus.automation.pipeline.github_jobs import GitHubJob, ReconcilePrRev
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
-from hephaestus.automation.pipeline.stages.pr_review import pr_review_post
 from hephaestus.automation.pipeline.stages.plan_review import REVIEW_ERROR_RETRY_CAP
-from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
+from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage, pr_review_post
 from hephaestus.automation.pipeline.stages.pr_review.pr_review_threads import (
     _parse_review_response,
 )

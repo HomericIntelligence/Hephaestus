@@ -282,8 +282,16 @@ class FinishedStage(Stage):
             reason = f"{terminal.cause}: {terminal.action}"
             category = terminal.creation_failure
             item.worktree = str(terminal.path)
-        except (RuntimeError, OSError, ValueError):
-            pass
+        except (RuntimeError, OSError, ValueError) as error:
+            # Unreadable or invalid terminal evidence fails closed: keep the
+            # default receipt-invalid reason and the payload category. The
+            # exception text can carry credential material from manager
+            # diagnostics, so only its type is logged.
+            logger.warning(
+                "finished:%s: terminal evidence validation failed (%s)",
+                item.issue,
+                type(error).__name__,
+            )
         reason = f"{reason} creation_failure={category.value}"
         item.result = ItemResult(passed=False, reason=reason, final_stage=item.stage)
 

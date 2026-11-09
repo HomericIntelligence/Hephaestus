@@ -37,11 +37,6 @@ from ...github_jobs import (
     MergeWaitCycleCompleted,
     RunMergeWaitCycleRequest,
 )
-from ..durable_request import (
-    PENDING_GITHUB_REQUEST,
-    pending_request,
-    pending_request_matches,
-)
 from ...stage_base import (
     Continue,
     Disposition,
@@ -56,6 +51,11 @@ from ...stage_base import (
     _repo_state_root,
 )
 from ...work_item import LearningIntent
+from ..durable_request import (
+    PENDING_GITHUB_REQUEST,
+    pending_request,
+    pending_request_matches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -303,9 +303,9 @@ class MergeWaitStage(Stage):
                 item.payload[_MERGE_CYCLE_RECEIPT_ERROR] = result.error or "merge cycle failed"
                 return
             receipt = result.value
-            if not isinstance(
-                receipt, MergeWaitCycleCompleted
-            ) or not pending_request_matches(item, receipt.request):
+            if not isinstance(receipt, MergeWaitCycleCompleted) or not pending_request_matches(
+                item, receipt.request
+            ):
                 item.payload[_MERGE_CYCLE_RECEIPT_ERROR] = "invalid"
                 return
             item.payload[_MERGE_CYCLE_RECEIPT] = receipt

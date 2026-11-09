@@ -51,9 +51,6 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_implementation_prompt,
     build_test_fix_prompt,
 )
-from hephaestus.automation.pipeline.stages.implementation.implementation import (
-    HEPHAESTUS_REQUIRED_CHECK_ARGV,
-)
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
     _codex_implementation_grants,
@@ -4142,7 +4139,7 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.argv == implementation_module.HEPHAESTUS_REQUIRED_CHECK_ARGV
         assert result.job.verified_runner_source_revision == ""
         assert result.job.timeout_s == 7200
         assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
@@ -4190,7 +4187,7 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.argv == implementation_module.HEPHAESTUS_REQUIRED_CHECK_ARGV
         assert result.job.verified_runner_source_revision == ""
 
     @pytest.mark.parametrize("candidate_kind", ["modified", "symlink"])
@@ -5006,7 +5003,7 @@ class TestTestsAndFix:
         )
 
         assert item.payload["test_receipt"] == (
-            f"`{shlex.join(HEPHAESTUS_REQUIRED_CHECK_ARGV)}` — passed; "
+            f"`{shlex.join(implementation_module.HEPHAESTUS_REQUIRED_CHECK_ARGV)}` — passed; "
             "last pytest summary: 7 passed, 1 warning in 4.20s"
         )
 
@@ -6068,7 +6065,7 @@ class TestFullWalks:
             "pre_pr_tests_native_fallback",
             "commit_push",
         ]
-        assert pool.submitted[6].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert pool.submitted[6].job.argv == implementation_module.HEPHAESTUS_REQUIRED_CHECK_ARGV
         assert pool.submitted[6].job.verified_runner_source_revision == "a" * 40
         assert pool.submitted[7].job.argv == PRE_PR_TEST_ARGV
         assert item.pr == 1001

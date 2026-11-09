@@ -639,9 +639,7 @@ def test_stage_layout_is_one_package_per_stage() -> None:
     flat = sorted(py.name for py in stages.glob("*.py"))
     packages = sorted(p.name for p in stages.iterdir() if p.is_dir() and p.name != "__pycache__")
 
-    assert flat == sorted(
-        {*_STAGE_FLAT_ALLOWED, *{f"{name}.py" for name in _STAGE_PACKAGES}}
-    ), flat
+    assert flat == sorted({*_STAGE_FLAT_ALLOWED, *{f"{name}.py" for name in _STAGE_PACKAGES}}), flat
     assert packages == sorted(_STAGE_PACKAGES), packages
     for name in _STAGE_PACKAGES:
         assert (stages / name / "__init__.py").is_file(), name

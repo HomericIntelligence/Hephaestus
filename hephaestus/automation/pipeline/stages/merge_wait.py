@@ -12,12 +12,6 @@ from .merge_wait.merge_wait import (
     MergeWaitStage,
 )
 
-from ..durable_request import (
-    PENDING_GITHUB_REQUEST,
-    pending_request,
-    pending_request_matches,
-)
-
 __all__ = [
     "MW_FINISH",
     "MergeWaitStage",

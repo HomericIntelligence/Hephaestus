@@ -7,11 +7,11 @@ and tests. It has no behaviour of its own.
 
 from __future__ import annotations
 
+from ..host_verification_diagnostic import publish_stage_diagnostic
 from .planning.planning import (
     PlanningStage,
     build_plan_prompt,
 )
-from ..host_verification_diagnostic import publish_stage_diagnostic
 
 __all__ = [
     "PlanningStage",

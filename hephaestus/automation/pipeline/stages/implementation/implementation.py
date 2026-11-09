@@ -70,7 +70,6 @@ from hephaestus.automation.agent_config import (
     issue_auto_impl_branch_name,
 )
 from hephaestus.automation.commit_policy import normalize_strict_conventional_title
-from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.pipeline.git_jobs import (
     FIRST_PUBLICATION_CHECK_ARGV,
     _strict_recovery_workspace,
@@ -138,7 +137,6 @@ from ...github_jobs import (
 )
 from ...host_capabilities import CapabilityRequestTarget, HostCapabilityReceipt
 from ...host_verification_diagnostic import publish_host_verification_failure
-from ..durable_request import PENDING_GITHUB_REQUEST, pending_request
 from ...jobs import (
     WORKTREE_MATERIALIZED_KEY,
     _writer_publication_matches_refresh,
@@ -172,10 +170,11 @@ from ...stage_base import (
     _worktree_path,
     agent_provider,
     athena_advise_failure_reason,
-    stage_network_deadline,
     stage_model,
+    stage_network_deadline,
     stage_timeout,
 )
+from ..durable_request import PENDING_GITHUB_REQUEST
 
 logger = logging.getLogger(__name__)
 
