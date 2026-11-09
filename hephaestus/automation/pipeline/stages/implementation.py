@@ -70,7 +70,6 @@ from hephaestus.automation.agent_config import (
     issue_auto_impl_branch_name,
 )
 from hephaestus.automation.commit_policy import normalize_strict_conventional_title
-from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.pipeline.git_jobs import (
     FIRST_PUBLICATION_CHECK_ARGV,
     _strict_recovery_workspace,
@@ -160,9 +159,12 @@ from ..stage_base import (
     _worktree_path,
     agent_provider,
     athena_advise_failure_reason,
+    records_retry_exceeded_cap,
     stage_model,
+    stage_network_deadline,
     stage_timeout,
 )
+from .durable_request import PENDING_GITHUB_REQUEST, pending_request
 from .pr_review_diagnostics import publish_host_verification_failure
 from .repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
@@ -357,7 +359,6 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
 
 _DEPENDENCY_RETRY_DELAY_S = 1.0
 
-_PENDING_GITHUB_REQUEST = "_pending_github_request"
 _PLAN_SCOPE_RECEIPT = "_implementation_plan_scope_receipt"
 _PLAN_SCOPE_STATE = "_implementation_plan_scope_state"
 _PLAN_SCOPE_FAILURE = "_implementation_plan_scope_failure"
@@ -384,7 +385,7 @@ def _is_valid_dirty_content_snapshot(value: object) -> bool:
 def _live_dependency_block_reason(item: WorkItem, ctx: StageContext) -> str | None:
     """Read the current issue body and return a safe dependency hold reason."""
     issue = _issue_number(item)
-    deadline_s = operation_deadline_after(stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
+    deadline_s = stage_network_deadline(ctx)
     try:
         with ctx.github.operation_deadline(deadline_s, shutdown=ctx.cancellation):
             snapshot = ctx.github.gh_issue_json(issue)
@@ -768,15 +769,15 @@ def _require_plan_scope(item: WorkItem, ctx: StageContext) -> JobRequest | Stage
         return None
     except ValueError:
         _consume_plan_scope(item)
-    pending = item.payload.get(_PENDING_GITHUB_REQUEST)
+    pending = pending_request(item)
     if pending is not None:
         return StageOutcome(Disposition.FINISH_FAIL, "implementation_plan_scope_request_conflict")
     pending = ReadCurrentPlanScopeRequest(
         repository=f"{ctx.org}/{item.repo}".casefold(),
         issue_number=_issue_number(item),
-        deadline_s=operation_deadline_after(stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S)),
+        deadline_s=stage_network_deadline(ctx),
     )
-    item.payload[_PENDING_GITHUB_REQUEST] = pending
+    item.payload[PENDING_GITHUB_REQUEST] = pending
     return JobRequest(
         GitHubJob(
             repo=item.repo,
@@ -1107,8 +1108,8 @@ class ImplementationStage(Stage):
         if item.pr is None and not item.payload.get("dirty_direct_active"):
             _consume_plan_scope(item)
             item.payload.pop(_PLAN_SCOPE_FAILURE, None)
-            if isinstance(item.payload.get(_PENDING_GITHUB_REQUEST), ReadCurrentPlanScopeRequest):
-                item.payload.pop(_PENDING_GITHUB_REQUEST)
+            if isinstance(pending_request(item), ReadCurrentPlanScopeRequest):
+                item.payload.pop(PENDING_GITHUB_REQUEST)
         for key in (
             _PUBLICATION_DISCOVERY_PENDING,
             _PUBLICATION_DISCOVERY_CHECKED,
@@ -3081,9 +3082,9 @@ class ImplementationStage(Stage):
             return
         if self._receive_rebase_discovery(item, result):
             return
-        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
+        pending = pending_request(item)
         if isinstance(pending, ReadCurrentPlanScopeRequest):
-            item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+            item.payload.pop(PENDING_GITHUB_REQUEST, None)
             receipt = result.value
             if (
                 not result.ok
@@ -4370,9 +4371,11 @@ class ImplementationStage(Stage):
             RETRY below the cap; FINISH_FAIL(``git_error``) at the cap.
 
         """
-        retries = item.payload.get("git_error_retries", 0) + 1
-        item.payload["git_error_retries"] = retries
-        if retries > GIT_ERROR_RETRY_CAP:
+        exceeded = records_retry_exceeded_cap(
+            item.payload, "git_error_retries", GIT_ERROR_RETRY_CAP
+        )
+        retries = item.payload["git_error_retries"]
+        if exceeded:
             logger.error(
                 "implementation:%s: %s; %d consecutive git failures (cap %d) — "
                 "finishing failed (git_error): the remote/worktree is persistently "

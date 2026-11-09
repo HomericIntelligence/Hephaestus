@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, ReconcilePrReviewRequest
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome, pr_review_post
+from hephaestus.automation.pipeline.stages.plan_review import REVIEW_ERROR_RETRY_CAP
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
 from hephaestus.automation.pipeline.stages.pr_review_threads import _parse_review_response
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -179,3 +183,77 @@ def test_unreadable_review_retries_then_fails_back_without_a_label(
     assert [o.disposition for o in outcomes[:2]] == [Disposition.RETRY, Disposition.RETRY]
     assert outcomes[-1] == StageOutcome(Disposition.FAIL_BACK, "agent_error")
     assert not {"mark_pr_implementation_go", "mark_pr_implementation_no_go"} & set(_names(github))
+
+
+def test_a_retried_reconciliation_reuses_the_pending_deadline(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A retried post keeps the deadline of the live pending request."""
+    _, ctx, item = _setup(make_ctx, make_work_item, [(0, 0, 0)])
+    stage = PrReviewStage()
+    stage.on_enter(item, ctx)
+    item.state = "POST"
+    item.payload["review_audit"] = ReviewAudit(
+        grade=None, summary="ok", findings=(), raw_feedback="", valid=True, verdict="GO"
+    )
+
+    first = stage.step(item, ctx)
+
+    assert isinstance(first, JobRequest)
+    assert isinstance(first.job, GitHubJob)
+    pending = first.job.request
+    assert isinstance(pending, ReconcilePrReviewRequest)
+
+    # A later POST step must reuse the recorded deadline, not ask for a new one.
+    item.state = "POST"
+    retried = stage.step(item, ctx)
+
+    assert isinstance(retried, JobRequest)
+    assert isinstance(retried.job, GitHubJob)
+    assert isinstance(retried.job.request, ReconcilePrReviewRequest)
+    assert retried.job.request.deadline_s == pending.deadline_s
+
+
+def test_a_post_without_a_pending_request_uses_the_network_deadline(
+    make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A POST with no live pending request derives its deadline from the helper."""
+    _, ctx, item = _setup(make_ctx, make_work_item, [(0, 0, 0)])
+    item.state = "POST"
+    item.payload["review_audit"] = ReviewAudit(
+        grade=None, summary="ok", findings=(), raw_feedback="", valid=True, verdict="GO"
+    )
+    monkeypatch.setattr(pr_review_post, "stage_network_deadline", lambda _ctx: 4242.0)
+
+    requested = PrReviewStage().step(item, ctx)
+
+    assert isinstance(requested, JobRequest)
+    assert isinstance(requested.job, GitHubJob)
+    request = requested.job.request
+    assert isinstance(request, ReconcilePrReviewRequest)
+    assert request.deadline_s == 4242.0
+
+
+def test_a_reconciliation_failure_below_the_cap_retries(make_ctx: Any, make_work_item: Any) -> None:
+    """A failure at or below the cap asks for another reconciliation."""
+    _, _, item = _setup(make_ctx, make_work_item, [(0, 0, 0)])
+    item.state = "POST"
+
+    stage = PrReviewStage()
+    stage.on_job_done(item, JobResult(ok=False, error="boom"), make_ctx())
+
+    assert item.payload["_pr_review_reconciliation_error"] == "retry"
+
+
+def test_a_reconciliation_failure_at_the_cap_marks_failed(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A failure above the cap is terminal for this attempt."""
+    _, _, item = _setup(make_ctx, make_work_item, [(0, 0, 0)])
+    item.payload["pr_review_reconciliation_retries"] = REVIEW_ERROR_RETRY_CAP
+    item.state = "POST"
+
+    stage = PrReviewStage()
+    stage.on_job_done(item, JobResult(ok=False, error="boom"), make_ctx())
+
+    assert item.payload["_pr_review_reconciliation_error"] == "failed"

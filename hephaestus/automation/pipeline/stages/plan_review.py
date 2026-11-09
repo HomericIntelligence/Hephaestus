@@ -132,10 +132,12 @@ from ..stage_base import (
     _worktree_path,
     agent_provider,
     planning_source_workspace_binding,
+    records_retry_exceeded_cap,
     stage_model,
     stage_timeout,
 )
 from .planning import build_plan_prompt
+from .pr_review_diagnostics import publish_stage_diagnostic
 
 
 def _review_job_cwd(
@@ -249,14 +251,23 @@ class _AcceptedPlanReview:
 
 def _reviewer_failure(item: WorkItem, reason: str) -> StageOutcome:
     """Bound consecutive reviewer failures without charging a plan revision."""
-    retries = int(item.payload.get("review_error_retries", 0)) + 1
-    item.payload["review_error_retries"] = retries
-    if retries > REVIEW_ERROR_RETRY_CAP:
+    stored = item.payload.get("review_error_retries", 0)
+    if type(stored) is not int:
+        # A journal written before the shared retry helper can hold a
+        # stringified counter. The read before the extraction coerced it,
+        # so keep that coercion at this persistence boundary. The shared
+        # helper itself stays strict for counters written in-process.
+        item.payload["review_error_retries"] = int(stored)
+    exceeded = records_retry_exceeded_cap(
+        item.payload, "review_error_retries", REVIEW_ERROR_RETRY_CAP
+    )
+    if exceeded:
         logger.error("plan_review:%s: reviewer failures exhausted: %s", item.issue, reason)
         return StageOutcome(
             Disposition.FINISH_FAIL,
             f"reviewer error retries exhausted ({reason})",
         )
+    retries = item.payload["review_error_retries"]
     logger.warning(
         "plan_review:%s: %s; retry %d/%d",
         item.issue,
@@ -1108,7 +1119,8 @@ class PlanReviewStage(Stage):
         # GO/NOGO audit text is durable before its proposed label. Regardless
         # of prose, only the confirmed exclusive label below can route.
         if not review.comment_published:
-            ctx.github.upsert_issue_comment(
+            publish_stage_diagnostic(
+                ctx.github,
                 issue_number,
                 PLAN_REVIEW_CANONICAL_MARKER,
                 _normalize_review_comment(verdict.raw, revision=review.revision),

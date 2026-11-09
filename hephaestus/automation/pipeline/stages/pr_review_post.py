@@ -5,15 +5,18 @@ from pathlib import Path
 
 from hephaestus.agents.execution_policy import AgentOperation, AgentRole, ExecutionRequest
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.prompts.pr_review import build_bounded_review_validation_prompt
 
 from ..coordinator_sessions import agent_session_lifecycle
 from ..github_jobs import FrozenJson, GitHubJob, PrReviewReconciled, ReconcilePrReviewRequest
-from ..stage_base import source_workspace_binding
+from ..stage_base import (
+    records_retry_exceeded_cap,
+    source_workspace_binding,
+    stage_network_deadline,
+)
+from .durable_request import PENDING_GITHUB_REQUEST, pending_request
 from .pr_review_threads import *
 
-_PENDING_GITHUB_REQUEST = "_pending_github_request"
 _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
 
@@ -117,11 +120,11 @@ class PrReviewPost(_PrReviewHost):
             else ""
         )
         resolved_ids, feedback = _validation_decisions(item.payload.get("validation_result"))
-        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
+        pending = pending_request(item)
         deadline_s = (
             pending.deadline_s
             if isinstance(pending, ReconcilePrReviewRequest)
-            else operation_deadline_after(stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S))
+            else stage_network_deadline(ctx)
         )
         request = ReconcilePrReviewRequest(
             issue_number=item.issue,
@@ -133,7 +136,7 @@ class PrReviewPost(_PrReviewHost):
             feedback=FrozenJson.snapshot(feedback),
             summary=summary,
         )
-        item.payload[_PENDING_GITHUB_REQUEST] = request
+        item.payload[PENDING_GITHUB_REQUEST] = request
         return JobRequest(
             GitHubJob(
                 repo=item.repo,
@@ -148,12 +151,11 @@ class PrReviewPost(_PrReviewHost):
     def _on_reconciliation_done(item: WorkItem, result: JobResult) -> None:
         """Store the reconciliation receipt, or count the failure."""
         if not result.ok:
-            retries = item.payload.get("pr_review_reconciliation_retries", 0) + 1
-            item.payload["pr_review_reconciliation_retries"] = retries
-            logger.warning("pr_review:%s: posting the review failed: %s", item.issue, result.error)
-            item.payload[_PR_REVIEW_RECEIPT_ERROR] = (
-                "retry" if retries <= REVIEW_ERROR_RETRY_CAP else "failed"
+            exceeded = records_retry_exceeded_cap(
+                item.payload, "pr_review_reconciliation_retries", REVIEW_ERROR_RETRY_CAP
             )
+            logger.warning("pr_review:%s: posting the review failed: %s", item.issue, result.error)
+            item.payload[_PR_REVIEW_RECEIPT_ERROR] = "failed" if exceeded else "retry"
             return
         if isinstance(result.value, PrReviewReconciled):
             item.payload[_PR_REVIEW_RECEIPT] = result.value
@@ -163,7 +165,7 @@ class PrReviewPost(_PrReviewHost):
     def _post_apply(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Route on what GitHub lists after the review was posted."""
         error = item.payload.pop(_PR_REVIEW_RECEIPT_ERROR, None)
-        item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+        item.payload.pop(PENDING_GITHUB_REQUEST, None)
         if error == "retry":
             item.state = POST
             return StageOutcome(Disposition.RETRY, "pr_review_reconciliation_retry")

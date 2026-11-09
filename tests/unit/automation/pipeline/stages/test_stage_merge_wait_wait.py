@@ -18,6 +18,7 @@ from hephaestus.automation.pipeline.github_jobs import (
 )
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import StageOutcome
+from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB_REQUEST
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
 
 MERGE_APPLY = "MERGE_APPLY"
@@ -38,7 +39,7 @@ def _item_with_receipt(make_work_item: Any, outcome: str, **kwargs: Any) -> Any:
     item = make_work_item(kind="pr", pr=7, issue=1)
     item.state = MERGE_APPLY
     request = _request()
-    item.payload["_pending_github_request"] = request
+    item.payload[PENDING_GITHUB_REQUEST] = request
     item.payload["_merge_wait_cycle_receipt"] = MergeWaitCycleCompleted(
         request=request, outcome=outcome, **kwargs
     )
@@ -216,7 +217,7 @@ def test_a_thread_block_receipt_refuses_a_negative_count(
 def test_a_receipt_for_a_different_request_is_refused(make_ctx: Any, make_work_item: Any) -> None:
     """A receipt that does not match the pending request is invalid."""
     item = _item_with_receipt(make_work_item, "auto_merge_enabled", attempted=True)
-    item.payload["_pending_github_request"] = RunMergeWaitCycleRequest(
+    item.payload[PENDING_GITHUB_REQUEST] = RunMergeWaitCycleRequest(
         issue_number=2,
         pr_number=8,
         deadline_s=60.0,
@@ -228,6 +229,27 @@ def test_a_receipt_for_a_different_request_is_refused(make_ctx: Any, make_work_i
     assert isinstance(outcome, StageOutcome)
     assert outcome.disposition is Disposition.FINISH_FAIL
     assert outcome.note == "merge_cycle_receipt_invalid"
+
+
+def test_a_mismatched_pending_request_keeps_the_cycle_receipt(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A mismatched pending fails closed without touching the stored receipt."""
+    item = _item_with_receipt(make_work_item, "auto_merge_enabled", attempted=True)
+    mismatched = RunMergeWaitCycleRequest(
+        issue_number=2,
+        pr_number=8,
+        deadline_s=60.0,
+        cancellation=threading.Event(),
+    )
+    item.payload[PENDING_GITHUB_REQUEST] = mismatched
+
+    outcome = MergeWaitStage()._merge_apply(item, make_ctx())
+
+    assert isinstance(outcome, StageOutcome)
+    assert outcome.note == "merge_cycle_receipt_invalid"
+    assert item.payload[PENDING_GITHUB_REQUEST] is mismatched
+    assert "_merge_wait_cycle_receipt" not in item.payload
 
 
 def test_a_transport_failure_receipt_fails_the_cycle(make_ctx: Any, make_work_item: Any) -> None:

@@ -58,6 +58,7 @@ from hephaestus.automation.pipeline.routing import (
 )
 from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.stage_base import JobRequest, Stage
+from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB_REQUEST
 from hephaestus.automation.pipeline.stages.implementation import DIRTY_RECOVERY_WAIT
 from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
@@ -1471,7 +1472,7 @@ class TestFailBackRouting:
             deadline_s=60.0,
             cancellation=threading.Event(),
         )
-        item.payload["_pending_github_request"] = request
+        item.payload[PENDING_GITHUB_REQUEST] = request
         receipt = MergeWaitCycleCompleted(
             request=request,
             outcome="auto_merge_enabled",

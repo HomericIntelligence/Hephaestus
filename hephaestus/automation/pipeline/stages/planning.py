@@ -141,6 +141,7 @@ from ..stage_base import (
     stage_model,
     stage_timeout,
 )
+from .pr_review_diagnostics import publish_stage_diagnostic
 
 logger = logging.getLogger(__name__)
 
@@ -662,7 +663,8 @@ def _resume_wave_non_code_intent(
         )
     try:
         if intent.explanation:
-            ctx.github.upsert_issue_comment(
+            publish_stage_diagnostic(
+                ctx.github,
                 intent.issue_number,
                 OBSOLETE_EXPLANATION_MARKER,
                 render_obsolete_explanation(intent.explanation),
@@ -795,7 +797,8 @@ def _apply_confirmed_semantic_skip(
                 extra_labels=(),
                 explanation=review.reason,
             )
-            ctx.github.upsert_issue_comment(
+            publish_stage_diagnostic(
+                ctx.github,
                 item.issue,
                 OBSOLETE_EXPLANATION_MARKER,
                 render_obsolete_explanation(review.reason),
@@ -870,7 +873,9 @@ def _apply_confirmed_requirements(
         return _retry_requirements_recovery(item, ctx, "recovery plan-no-go was not confirmed")
     recovered_body = render_recovered_requirements(proposal.requirements)
     try:
-        ctx.github.upsert_issue_comment(item.issue, RECOVERED_REQUIREMENTS_MARKER, recovered_body)
+        publish_stage_diagnostic(
+            ctx.github, item.issue, RECOVERED_REQUIREMENTS_MARKER, recovered_body
+        )
     except RuntimeError as exc:
         return _retry_requirements_recovery(
             item,
