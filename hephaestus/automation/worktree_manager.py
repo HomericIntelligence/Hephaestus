@@ -21,6 +21,7 @@ recovery runbook for an old worker that is inside an intake checkout.
 """
 
 import logging
+import re
 import secrets
 import shutil
 import subprocess
@@ -346,17 +347,79 @@ class WorktreeManager:
         self._implementation_writer_authorities[worktree_path.resolve()] = authority
         return authority
 
+    def _issue_number_from_branch(self, branch: str) -> int | None:
+        """Return the issue number a writer branch names, or None.
+
+        Writer branches are ``<issue>-auto``, ``<issue>-auto-impl``, or, for a
+        direct writer, ``<issue>-auto-impl-direct-<hash>``. These mirror the
+        names ``_is_issue_automation_branch`` and ``_is_direct_writer_branch``
+        already treat as automation-owned.
+        """
+        match = re.fullmatch(r"(\d+)-auto(?:-impl(?:-direct-[0-9a-f]{32})?)?", branch)
+        return int(match.group(1)) if match else None
+
+    def mint_implementation_writer_authority_for_existing(
+        self, worktree_path: Path
+    ) -> ImplementationWriterAuthority:
+        """Mint writer authority for a worktree that already exists on disk.
+
+        Git proves the writer identity, so a cached mint is only an optimisation.
+        The branch names the issue (``auto-<issue>-impl``), and the branch check
+        in ``_mint_writer_authority`` keeps the mint tied to the attached worktree.
+        """
+        path = worktree_path.resolve()
+        try:
+            branch = run(
+                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                cwd=path,
+                capture_output=True,
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, OSError) as exc:
+            # A path that Git cannot read proves no writer identity.
+            raise WorktreeCreationReceiptError(
+                f"implementation writer path {path} is not an attached checkout"
+            ) from exc
+        issue_number = self._issue_number_from_branch(branch)
+        if issue_number is None:
+            raise WorktreeCreationReceiptError(
+                f"implementation writer branch {branch!r} does not name an issue"
+            )
+        return self._mint_writer_authority(
+            issue_number=issue_number,
+            branch_name=branch,
+            worktree_path=path,
+            timeout=None,
+        )
+
     def implementation_writer_authority(self, worktree_path: Path) -> ImplementationWriterAuthority:
-        """Return the fresh authority minted for a controlled writer path."""
+        """Return the fresh authority minted for a controlled writer path.
+
+        The minted authority is a cache. A process restart empties it, and the
+        cached token can also expire. Neither means the writer is untrustworthy:
+        Git still proves the identity. So a cache miss re-mints from the
+        worktree instead of failing the item (#3606 follow-up).
+
+        A cache miss is worth reporting, because it can also mean a caller lost
+        track of a writer it still holds. The warning keeps that visible without
+        blocking development.
+        """
         path = worktree_path.resolve()
         authority = self._implementation_writer_authorities.get(path)
-        if authority is None:
-            raise WorktreeCreationReceiptError("implementation writer authority is unavailable")
-        with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
-            if authority.token not in _IMPLEMENTATION_WRITER_AUTHORITIES:
-                self._implementation_writer_authorities.pop(path, None)
-                raise WorktreeCreationReceiptError("implementation writer authority is unavailable")
-        return authority
+        if authority is not None:
+            with _IMPLEMENTATION_WRITER_AUTHORITIES_LOCK:
+                if authority.token in _IMPLEMENTATION_WRITER_AUTHORITIES:
+                    return authority
+            self._implementation_writer_authorities.pop(path, None)
+            logger.warning(
+                "implementation writer authority expired for %s; re-minting from Git",
+                path,
+            )
+        else:
+            logger.warning(
+                "implementation writer authority is not cached for %s; minting from Git",
+                path,
+            )
+        return self.mint_implementation_writer_authority_for_existing(path)
 
     def mint_adopted_implementation_writer_authority(
         self,
