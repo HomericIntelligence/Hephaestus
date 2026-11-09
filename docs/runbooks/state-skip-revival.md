@@ -57,7 +57,7 @@ If the skip was intentional and should stick, no action is needed — leave
 `state:skip` in place. Automation will continue to exclude the issue and will
 log a `state:skip AND state:plan-go` (or `implementation-go`) warning on any
 stage that still encounters the contradictory label pair
-(`pipeline/stages/planning.py`, `pipeline/stages/implementation.py`) —
+(`pipeline/stages/planning/planning.py`, `pipeline/stages/implementation/implementation.py`) —
 this is informational only and requires no operator response unless the
 warning is unexpected.
 

@@ -842,14 +842,14 @@ states. Cover the real error cases a caller can reach.
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|
-| repo | `hephaestus.automation.pipeline.stages.repo` | Clone/discover, classify issues/PRs, and seed entry queues |
-| planning | `hephaestus.automation.pipeline.stages.planning` | Advise and produce an implementation plan |
-| plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
-| implementation | `hephaestus.automation.pipeline.stages.implementation` | PR-writer worktree, rebase, implementation, tests, commit/push, and PR creation |
-| pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Detached read-only review with an informational grade and per-comment severity, one batched inline review, and implementation labels from the open threads |
-| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Enables native auto-merge after GO approval, waits for the merge, and emits post-merge learning intent |
-| learning | `hephaestus.automation.pipeline.stages.learning` | Claims durable intents and submits host-owned learning work |
-| finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and auxiliary worktree cleanup/preservation |
+| repo | `hephaestus.automation.pipeline.stages.repo.repo` | Clone/discover, classify issues/PRs, and seed entry queues |
+| planning | `hephaestus.automation.pipeline.stages.planning.planning` | Advise and produce an implementation plan |
+| plan_review | `hephaestus.automation.pipeline.stages.plan_review.plan_review` | Strict plan review, amendment, and plan labels |
+| implementation | `hephaestus.automation.pipeline.stages.implementation.implementation` | PR-writer worktree, rebase, implementation, tests, commit/push, and PR creation |
+| pr_review | `hephaestus.automation.pipeline.stages.pr_review.pr_review` | Detached read-only review with an informational grade and per-comment severity, one batched inline review, and implementation labels from the open threads |
+| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait.merge_wait` | Enables native auto-merge after GO approval, waits for the merge, and emits post-merge learning intent |
+| learning | `hephaestus.automation.pipeline.stages.learning.learning` | Claims durable intents and submits host-owned learning work |
+| finished | `hephaestus.automation.pipeline.stages.finished.finished` | Terminal ledger and auxiliary worktree cleanup/preservation |
 
 `--learning-workers` and `--learning-queue-capacity` bound the auxiliary lane
 independently. Both default to `1`. `--no-learn` prevents new learning work and
@@ -995,8 +995,8 @@ through the shared Claude invocation path.
 | Call site | Tools | Scope / controls |
 | --- | --- | --- |
 | `pipeline/worker_pool.py:WorkerPool._invoke_agent` | Job scope, role scope, or `Read,Glob,Grep` | The worker applies the selected tool scope, `dontAsk`, the source lease, and the operation deadline. |
-| `pipeline/stages/pr_review_jobs.py:PrReviewJobs._submit_review_job` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | The queue submits a read-only review job for the exact source head. The host owns review publication, labels, and merge admission. |
-| `pipeline/stages/implementation.py` | `Read,Write,Edit,Glob,Grep,Bash` | The implementation job uses an isolated writer workspace. Host operations own Git publication and its policy checks. |
+| `pipeline/stages/pr_review/pr_review_jobs.py:PrReviewJobs._submit_review_job` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | The queue submits a read-only review job for the exact source head. The host owns review publication, labels, and merge admission. |
+| `pipeline/stages/implementation/implementation.py` | `Read,Write,Edit,Glob,Grep,Bash` | The implementation job uses an isolated writer workspace. Host operations own Git publication and its policy checks. |
 | `github/fleet_sync/conflict_resolver.py:_run_conflict_agent` | `none` | The conflict planner returns JSON edits from fenced input. The host validates paths and owns Git continuation, signing, and push. |
 
 Fleet-sync `--dry-run` is a preview contract: GitHub reads and writes, Git subprocesses, pushes,

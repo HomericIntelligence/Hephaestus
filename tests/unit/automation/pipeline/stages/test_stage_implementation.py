@@ -40,7 +40,6 @@ from hephaestus.automation.pipeline.stages import (
     Continue,
     JobRequest,
     StageOutcome,
-    implementation as implementation_module,
 )
 from hephaestus.automation.pipeline.stages.implementation import (
     BRANCH_WORKTREE_OWNER_PENDING_DELAY_S,
@@ -51,6 +50,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     _git_failure_fallback,
     build_implementation_prompt,
     build_test_fix_prompt,
+    implementation as implementation_module,
 )
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
@@ -80,7 +80,9 @@ _DIRTY_CONTENT_SNAPSHOT = {
     "worktree_sha256": "2" * 64,
     "untracked_sha256": "3" * 64,
 }
-_IMPLEMENTATION_PLATFORM = "hephaestus.automation.pipeline.stages.implementation.sys.platform"
+_IMPLEMENTATION_PLATFORM = (
+    "hephaestus.automation.pipeline.stages.implementation.implementation.sys.platform"
+)
 _WRITER_PLAN = "## Files to Modify\n- `a.py`\n"
 
 

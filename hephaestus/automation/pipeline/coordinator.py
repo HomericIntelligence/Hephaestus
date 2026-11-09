@@ -27,7 +27,9 @@ from hephaestus.automation.pipeline.jobs import JobHandle
 from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, ROUTES, StageName
 from hephaestus.automation.pipeline.stages import Stage, StageContext, StageGitHub
-from hephaestus.automation.pipeline.stages.implementation import _store_impl_source_metadata
+from hephaestus.automation.pipeline.stages.implementation.implementation import (
+    _store_impl_source_metadata,
+)
 from hephaestus.automation.pipeline.summary import TerminalSummary
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,

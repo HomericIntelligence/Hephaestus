@@ -100,10 +100,10 @@ from hephaestus.automation.pipeline.stages import (
     Continue as Continue,
     JobRequest as JobRequest,
 )
-from hephaestus.automation.pipeline.stages.implementation import (
+from hephaestus.automation.pipeline.stages.implementation.implementation import (
     PRE_PR_TEST_ARGV as PRE_PR_TEST_ARGV,
 )
-from hephaestus.automation.pipeline.stages.repo import (
+from hephaestus.automation.pipeline.stages.repo.repo import (
     RepoIssueSource as RepoIssueSource,
 )
 from hephaestus.automation.pipeline.work_item import (

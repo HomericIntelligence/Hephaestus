@@ -16,7 +16,8 @@ from hephaestus.automation.pipeline.github_jobs import (
 )
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import AgentJob
-from hephaestus.automation.pipeline.stages import JobRequest, StageOutcome, implementation
+from hephaestus.automation.pipeline.stages import JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages.implementation import implementation
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from tests.unit.automation.test_source_worktree import _repository
 

@@ -7,14 +7,14 @@ from hephaestus.agents.execution_policy import AgentOperation, AgentRole, Execut
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.prompts.pr_review import build_bounded_review_validation_prompt
 
-from ..coordinator_sessions import agent_session_lifecycle
-from ..github_jobs import FrozenJson, GitHubJob, PrReviewReconciled, ReconcilePrReviewRequest
-from ..stage_base import (
+from ...coordinator_sessions import agent_session_lifecycle
+from ...github_jobs import FrozenJson, GitHubJob, PrReviewReconciled, ReconcilePrReviewRequest
+from ...stage_base import (
     records_retry_exceeded_cap,
     source_workspace_binding,
     stage_network_deadline,
 )
-from .durable_request import PENDING_GITHUB_REQUEST, pending_request
+from ..durable_request import PENDING_GITHUB_REQUEST, pending_request
 from .pr_review_threads import *
 
 _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"

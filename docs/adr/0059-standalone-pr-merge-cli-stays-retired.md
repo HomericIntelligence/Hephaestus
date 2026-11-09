@@ -64,7 +64,7 @@ stage. The four current coverage points that supersede the overlay are:
    `hephaestus/automation/github_api/checks.py` (`gh_pr_checks`,
    `checks.py:44`), `hephaestus/automation/pipeline_github_check_run_inventory.py`;
    enforced by the `merge_wait` stage
-   (`hephaestus/automation/pipeline/stages/merge_wait.py:114`).
+   (`hephaestus/automation/pipeline/stages/merge_wait/merge_wait.py:114`).
 4. Merge-strategy selection (the overlay's `choose_merge_flag`) → policy
    `merge_method` in
    `hephaestus/automation/pipeline_github_merge_rules.py:54`.

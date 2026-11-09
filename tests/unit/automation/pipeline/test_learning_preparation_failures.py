@@ -9,7 +9,7 @@ from hephaestus.agents.workspace import WorkspaceBinding, WorkspaceBindingError
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
-from hephaestus.automation.pipeline.stages import learning
+from hephaestus.automation.pipeline.stages.learning import learning
 from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
 from hephaestus.automation.source_worktree import (
     SourceWorkspacePreparationCause,

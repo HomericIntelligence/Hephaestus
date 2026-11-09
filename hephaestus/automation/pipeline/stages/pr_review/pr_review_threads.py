@@ -6,8 +6,6 @@ implementation agent, which answers and resolves each one. No unresolved thread
 means the pull request is approved. The host keeps no record of its own.
 """
 
-# This module intentionally re-exports the stage's shared imported namespace.
-
 from __future__ import annotations
 
 import json
@@ -30,8 +28,8 @@ from hephaestus.automation.prompts.pr_review import (
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.state_labels import STATE_SKIP
 
-from ..scope_retraction import scope_retraction_paths_for_threads
-from ..stage_base import (
+from ...scope_retraction import scope_retraction_paths_for_threads
+from ...stage_base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
     CompactJob,
@@ -51,7 +49,7 @@ from ..stage_base import (
     stage_timeout,
     write_skip_label,
 )
-from ..work_item import ItemKind
+from ...work_item import ItemKind
 from .pr_review_round_state import _ROUND_PAYLOAD_KEYS, _clear_round_review_state
 
 logger = logging.getLogger(__name__)

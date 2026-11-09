@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from hephaestus.automation.pipeline.stages.pr_review_diagnostics import (
+from hephaestus.automation.pipeline.host_verification_diagnostic import (
     publish_stage_diagnostic,
 )
 

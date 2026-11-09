@@ -74,10 +74,124 @@ _FORBIDDEN_WORKER_MODULES = ("github_api", "pr_manager")
 
 # The clock-owner pin: exactly one stage module may ``import time``. The pin
 # names the path components of the owner file relative to the pipeline package:
-# ``stage_base.py``, the module split out of ``stages/base.py`` in #3579. A
-# module that merely shares the stem is not the owner.
+# ``stage_base.py``, the module split out of the old flat ``stages/base.py`` in
+# #3579. A module that merely shares the stem is not the owner.
 # Update this pin in the same change that moves the clock owner.
 _CLOCK_OWNER = ("stage_base.py",)
+
+# One package per stage (issue #3521). The stage lives in
+# ``stages/<name>/<name>.py``; ``stages/<name>.py`` is only a flat re-export
+# that keeps the historical import path working.
+_STAGE_PACKAGES = (
+    "finished",
+    "implementation",
+    "learning",
+    "merge_wait",
+    "plan_review",
+    "planning",
+    "pr_review",
+    "repo",
+)
+
+# The one intra-stage-package edge that the architecture keeps: the plan review
+# stage reads the planner's prompt builder.
+_ALLOWED_STAGE_PACKAGE_EDGES = frozenset({("plan_review", "planning")})
+
+# Shared modules (not stages) allowed to sit at the top of ``stages/``.
+# ``durable_request`` holds the pending-request key and its two read
+# predicates, which several stages import without owning a stage of their own.
+_STAGE_FLAT_ALLOWED = frozenset({"__init__.py", "durable_request.py"})
+
+
+def _stage_layout_offenders(root: Path) -> list[str]:
+    """Return every stage module that is not in a stage package.
+
+    The stage layout is ``stages/__init__.py`` plus the eight stage packages.
+    A top-level ``stages/<name>.py`` is allowed only when it is one of the eight
+    declared re-export modules. Any other flat module, and any module in a
+    subdirectory that is not a declared stage package, is an offender.
+    """
+    stages = root / "stages"
+    offenders: list[str] = []
+    for py in sorted(stages.glob("*.py")):
+        if py.name in _STAGE_FLAT_ALLOWED:
+            continue
+        if py.stem not in _STAGE_PACKAGES:
+            offenders.append(_stage_relative(py, root))
+    for py in sorted(stages.rglob("*.py")):
+        if py.parent == stages:
+            continue
+        if py.relative_to(stages).parts[0] not in _STAGE_PACKAGES:
+            offenders.append(_stage_relative(py, root))
+    return offenders
+
+
+def _stage_package_edges(root: Path) -> set[tuple[str, str]]:
+    """Return ``(package, sibling package)`` edges of relative imports.
+
+    A module at depth ``d`` below ``stages/`` reaches its own package root with
+    a relative level of ``d``. A level of ``d + 1`` climbs out of the package
+    and names a sibling package. An edge is counted only when the sibling is a
+    declared stage package.
+    """
+    stages = root / "stages"
+    edges: set[tuple[str, str]] = set()
+    for py in sorted(stages.rglob("*.py")):
+        parts = py.relative_to(stages).parts
+        depth = len(parts) - 1
+        if depth < 1:
+            continue
+        owner = parts[0]
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.level != depth + 1:
+                continue
+            sibling = (node.module or "").split(".")[0]
+            if sibling in _STAGE_PACKAGES:
+                edges.add((owner, sibling))
+    return edges
+
+
+def _flat_reexport_identity_offenders(stages: Path) -> list[str]:
+    """Return flat re-export modules that do not forward the package object.
+
+    A flat ``stages/<name>.py`` must import every public name from the package
+    module, so ``stages.<name>.X is stages.<name>.<name>.X``. A copy, a second
+    definition, or a missing name is an offender.
+    """
+    offenders: list[str] = []
+    for name in _STAGE_PACKAGES:
+        shim = stages / f"{name}.py"
+        if not shim.is_file():
+            offenders.append(f"{name}: missing flat re-export")
+            continue
+        tree = ast.parse(shim.read_text(encoding="utf-8"), filename=str(shim))
+        forwarded = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == f"{name}.{name}"
+            for alias in node.names
+        }
+        package_init = (
+            ast.parse((stages / name / "__init__.py").read_text(encoding="utf-8"))
+            if (stages / name / "__init__.py").is_file()
+            else None
+        )
+        exported: set[str] = set()
+        if package_init is not None:
+            for node in package_init.body:
+                if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets
+                ):
+                    exported = {
+                        elt.value
+                        for elt in getattr(node.value, "elts", [])
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                    }
+        missing = exported - forwarded
+        if missing:
+            offenders.append(f"{name}: flat re-export misses {sorted(missing)}")
+    return offenders
 
 
 def _stage_modules(root: Path = _PIPELINE) -> list[Path]:
@@ -361,7 +475,7 @@ def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) 
     - ``from time import sleep`` (aliased or not);
     - any other ``import time`` / ``from time import ...`` form, unless
       ``allow_time_import``. The exemption belongs to exactly the pinned
-      ``_CLOCK_OWNER`` module (stages/base.py legitimately uses ``time.time``
+      ``_CLOCK_OWNER`` module (stage_base.py legitimately uses ``time.time``
       for its injectable-clock default — it still may never sleep).
     """
     violations: list[str] = []
@@ -482,7 +596,7 @@ def test_sleep_guard_detects_nested_violation(tmp_path: Path) -> None:
 
 
 def test_clock_owner_exemption_is_pinned() -> None:
-    """The time-import exemption resolves to exactly ``stages/base.py``.
+    """The time-import exemption resolves to exactly ``stage_base.py``.
 
     (a) The real owner resolves inside the scan. (b) The pin is
     load-bearing: ``import time`` is a violation off-pin, and the owner
@@ -513,3 +627,103 @@ def test_clock_owner_exemption_is_pinned() -> None:
         nested_tree, _stage_relative(nested), allow_time_import=_is_clock_owner(nested)
     )
     assert any(": import time" in v for v in nested_flagged)
+
+
+def test_stage_layout_is_one_package_per_stage() -> None:
+    """AC1: every stage module lives in its own stage package.
+
+    ``stages/`` holds ``__init__.py``, the eight stage packages, and the eight
+    flat re-export modules. The base protocol modules stay beside ``stages/``.
+    """
+    stages = _PIPELINE / "stages"
+    flat = sorted(py.name for py in stages.glob("*.py"))
+    packages = sorted(p.name for p in stages.iterdir() if p.is_dir() and p.name != "__pycache__")
+
+    assert flat == sorted(
+        {*_STAGE_FLAT_ALLOWED, *{f"{name}.py" for name in _STAGE_PACKAGES}}
+    ), flat
+    assert packages == sorted(_STAGE_PACKAGES), packages
+    for name in _STAGE_PACKAGES:
+        assert (stages / name / "__init__.py").is_file(), name
+        assert (stages / name / f"{name}.py").is_file(), name
+    assert _stage_layout_offenders(_PIPELINE) == []
+    # The base protocol modules stay flat beside stages/.
+    assert (_PIPELINE / "stage_base.py").is_file()
+    assert not (stages / "base.py").exists()
+
+
+def test_stage_layout_guard_detects_a_flat_offender(tmp_path: Path) -> None:
+    """AC3: a stage module left at the top of ``stages/`` is an offender."""
+    stages = tmp_path / "stages"
+    stages.mkdir()
+    (stages / "__init__.py").write_text("", encoding="utf-8")
+    (stages / "repo.py").write_text("", encoding="utf-8")  # declared re-export
+    (stages / "stray.py").write_text("", encoding="utf-8")
+
+    assert _stage_layout_offenders(tmp_path) == ["stages/stray.py"]
+
+
+def test_stage_layout_guard_detects_a_nested_offender(tmp_path: Path) -> None:
+    """AC3: a module in an undeclared subdirectory is an offender."""
+    stages = tmp_path / "stages"
+    stray = stages / "not_a_stage"
+    stray.mkdir(parents=True)
+    (stages / "__init__.py").write_text("", encoding="utf-8")
+    (stray / "helper.py").write_text("", encoding="utf-8")
+
+    assert _stage_layout_offenders(tmp_path) == ["stages/not_a_stage/helper.py"]
+
+
+def test_no_stage_package_imports_a_sibling_helper() -> None:
+    """AC4: only ``plan_review`` may import the ``planning`` package.
+
+    The set is exact, so a new cross-stage edge fails here.
+    """
+    assert _stage_package_edges(_PIPELINE) == _ALLOWED_STAGE_PACKAGE_EDGES
+
+
+def test_stage_package_edge_guard_detects_a_new_edge(tmp_path: Path) -> None:
+    """AC4 negative: a sibling-package import from a stage is detected."""
+    stages = tmp_path / "stages"
+    for name in ("finished", "planning"):
+        (stages / name).mkdir(parents=True)
+        (stages / name / "__init__.py").write_text("", encoding="utf-8")
+        (stages / name / f"{name}.py").write_text("", encoding="utf-8")
+    (stages / "__init__.py").write_text("", encoding="utf-8")
+    (stages / "finished" / "finished.py").write_text(
+        "from ..planning import build_plan_prompt\nfrom . import helper\n",
+        encoding="utf-8",
+    )
+    (stages / "finished" / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert _stage_package_edges(tmp_path) == {("finished", "planning")}
+
+
+def test_flat_reexport_modules_forward_the_package_objects() -> None:
+    """AC5: a flat import path and the package path yield the same objects."""
+    import importlib
+
+    stages = _PIPELINE / "stages"
+    assert _flat_reexport_identity_offenders(stages) == []
+
+    for name in _STAGE_PACKAGES:
+        flat = importlib.import_module(f"hephaestus.automation.pipeline.stages.{name}")
+        package = importlib.import_module(f"hephaestus.automation.pipeline.stages.{name}.{name}")
+        assert flat.__all__, name
+        for public in flat.__all__:
+            assert getattr(flat, public) is getattr(package, public), (name, public)
+
+
+def test_flat_reexport_guard_detects_a_missing_name(tmp_path: Path) -> None:
+    """AC5 negative: a flat module that omits a package name is an offender."""
+    stages = tmp_path / "stages"
+    for name in _STAGE_PACKAGES:
+        (stages / name).mkdir(parents=True)
+        (stages / name / "__init__.py").write_text(
+            f'from .{name} import VALUE\n\n__all__ = ["VALUE"]\n', encoding="utf-8"
+        )
+        (stages / name / f"{name}.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (stages / f"{name}.py").write_text(f"from .{name}.{name} import VALUE\n", encoding="utf-8")
+    (stages / "repo.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert _flat_reexport_identity_offenders(stages) == ["repo: flat re-export misses ['VALUE']"]

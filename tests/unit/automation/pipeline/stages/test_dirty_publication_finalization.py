@@ -14,7 +14,8 @@ from hephaestus.agents.workspace import DirtyPlanIdentity, SourceLane
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.routing import Disposition
-from hephaestus.automation.pipeline.stages import JobRequest, StageOutcome, implementation
+from hephaestus.automation.pipeline.stages import JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages.implementation import implementation
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot

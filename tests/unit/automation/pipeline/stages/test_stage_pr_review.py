@@ -10,10 +10,13 @@ import pytest
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, ReconcilePrReviewRequest
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome, pr_review_post
+from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages.pr_review import pr_review_post
 from hephaestus.automation.pipeline.stages.plan_review import REVIEW_ERROR_RETRY_CAP
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
-from hephaestus.automation.pipeline.stages.pr_review_threads import _parse_review_response
+from hephaestus.automation.pipeline.stages.pr_review.pr_review_threads import (
+    _parse_review_response,
+)
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import STATE_PLAN_GO

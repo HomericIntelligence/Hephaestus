@@ -42,8 +42,8 @@ def test_stage_modules_import_direct_scope_names_from_the_neutral_owner() -> Non
     ``repo`` writes the bootstrap keys and ``finished`` reads the reservation
     key. Each object must be the same one that the neutral module defines.
     """
-    import hephaestus.automation.pipeline.stages.finished as finished
-    import hephaestus.automation.pipeline.stages.repo as repo_stage
+    import hephaestus.automation.pipeline.stages.finished.finished as finished
+    import hephaestus.automation.pipeline.stages.repo.repo as repo_stage
 
     consumers = (
         (repo_stage, "DIRECT_SCOPE_BASE_SHA_KEY"),

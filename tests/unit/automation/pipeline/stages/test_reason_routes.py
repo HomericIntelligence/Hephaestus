@@ -19,11 +19,13 @@ import pytest
 
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
-    implementation,
-    merge_wait,
-    plan_review,
-    planning,
     pr_review,
+)
+from hephaestus.automation.pipeline.stages.implementation import implementation
+from hephaestus.automation.pipeline.stages.merge_wait import merge_wait
+from hephaestus.automation.pipeline.stages.plan_review import plan_review
+from hephaestus.automation.pipeline.stages.planning import planning
+from hephaestus.automation.pipeline.stages.pr_review import (
     pr_review_gate,
     pr_review_jobs,
     pr_review_post,

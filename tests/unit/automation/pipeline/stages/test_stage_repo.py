@@ -29,7 +29,7 @@ from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stage_base import Continue, JobRequest, StageOutcome
-from hephaestus.automation.pipeline.stages.repo import (
+from hephaestus.automation.pipeline.stages.repo.repo import (
     CHECKOUT_CONTENTION_ATTEMPTS_KEY,
     CHECKOUT_CONTENTION_ELAPSED_KEY,
     CHECKOUT_CONTENTION_FIRST_WAIT_KEY,
@@ -39,6 +39,7 @@ from hephaestus.automation.pipeline.stages.repo import (
     SYNCED_MAIN_SHA_KEY,
     RepoIssueSource,
     RepoStage,
+    logger as repo_logger,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
@@ -267,7 +268,7 @@ class TestOnEnterAndCloneStates:
         (tmp_path / "repo-a").mkdir()
         ctx = make_ctx(dry_run=True, paths=_RepoPaths(tmp_path, repo_root=tmp_path / "repo-a"))
         repo_item.state = "CLONE_WAIT"
-        caplog.set_level(logging.INFO, logger="hephaestus.automation.pipeline.stages.repo")
+        caplog.set_level(logging.INFO, logger=repo_logger.name)
 
         result = RepoStage().step(repo_item, ctx)
 
