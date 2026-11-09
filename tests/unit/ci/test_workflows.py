@@ -35,6 +35,7 @@ SETUP_PI_ACTION = REPO_ROOT / ".github/" / "actions" / "setup-pi-cli" / "action.
 CONTAINERFILE = REPO_ROOT / "ci" / "Containerfile"
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nightly-tests.yml"
+SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security.yml"
 
 
 class TestCollectYmlFiles:
@@ -208,6 +209,51 @@ class TestNightlyTestsWorkflow:
         config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
         assert "precommit" in addopts
+
+
+class TestScheduledSecurityWorkflow:
+    """Contracts for the scheduled Security lane's LOW-severity drift gate.
+
+    The LOW baseline check guards the weekly Security lane against Bandit count
+    drift. A silent removal of that step makes the lane pass without the gate,
+    so this test pins the step, its inputs, and its position.
+    """
+
+    def test_scheduled_security_job_runs_the_low_baseline_check(self) -> None:
+        """The `sast` job keeps the LOW baseline step before its summary step."""
+        workflow = yaml.safe_load(SECURITY_WORKFLOW.read_text(encoding="utf-8"))
+        job = workflow["jobs"]["sast"]
+        assert " ".join(job["if"].split()) == "github.event_name != 'pull_request'"
+
+        steps = job["steps"]
+        names = [step.get("name") for step in steps]
+        low_index = next(
+            index for index, step in enumerate(steps) if step.get("id") == "bandit-low"
+        )
+        low_step = steps[low_index]
+
+        # Assert on executed command lines. A commented-out or echoed command
+        # in the run body must not satisfy this test.
+        command_lines: list[str] = []
+        for raw_line in low_step["run"].splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("#"):
+                command_lines.append(line)
+
+        expected_commands = (
+            "uv run bandit -c pyproject.toml -r hephaestus scripts "
+            "--severity-level low --exit-zero",
+            "uv run python /workspace/hephaestus/ci/bandit_baseline_check.py "
+            "/workspace/build/bandit_low.json "
+            "/workspace/hephaestus/ci/bandit_low_baseline.json",
+        )
+        for expected in expected_commands:
+            matches = [line for line in command_lines if expected in line]
+            assert matches, f"No executed command line runs {expected!r}"
+            for line in matches:
+                assert not line.startswith("echo"), line
+
+        assert low_index < names.index("Post bandit summary")
 
 
 class TestIsCheckoutStep:
