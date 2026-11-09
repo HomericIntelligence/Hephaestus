@@ -223,7 +223,7 @@ class TestScheduledSecurityWorkflow:
         """The `sast` job keeps the LOW baseline step before its summary step."""
         workflow = yaml.safe_load(SECURITY_WORKFLOW.read_text(encoding="utf-8"))
         job = workflow["jobs"]["sast"]
-        assert job["if"] == "github.event_name != 'pull_request'"
+        assert " ".join(job["if"].split()) == "github.event_name != 'pull_request'"
 
         steps = job["steps"]
         names = [step.get("name") for step in steps]
@@ -232,10 +232,27 @@ class TestScheduledSecurityWorkflow:
         )
         low_step = steps[low_index]
 
-        run = low_step["run"]
-        assert "bandit_baseline_check.py" in run
-        assert "/workspace/hephaestus/ci/bandit_low_baseline.json" in run
-        assert "--severity-level low --exit-zero" in run
+        # Assert on executed command lines. A commented-out or echoed command
+        # in the run body must not satisfy this test.
+        command_lines: list[str] = []
+        for raw_line in low_step["run"].splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("#"):
+                command_lines.append(line)
+
+        expected_commands = (
+            "uv run bandit -c pyproject.toml -r hephaestus scripts "
+            "--severity-level low --exit-zero",
+            "uv run python /workspace/hephaestus/ci/bandit_baseline_check.py "
+            "/workspace/build/bandit_low.json "
+            "/workspace/hephaestus/ci/bandit_low_baseline.json",
+        )
+        for expected in expected_commands:
+            matches = [line for line in command_lines if expected in line]
+            assert matches, f"No executed command line runs {expected!r}"
+            for line in matches:
+                assert not line.startswith("echo"), line
+
         assert low_index < names.index("Post bandit summary")
 
 
