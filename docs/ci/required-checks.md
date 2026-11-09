@@ -357,8 +357,7 @@ job is a member of the aggregate fan-in only. It is not a direct required
 context in the tables above.
 
 The local CI container cannot run an external reusable workflow. The focused
-tests in `tests/unit/docs/test_agent_contract.py`,
-`tests/unit/ci/test_agent_contract_inventory.py`, and
+tests in `tests/unit/docs/test_agent_contract.py` and
 `tests/unit/ci/test_merge_queue_required_checks.py` are wiring checks. The
 GitHub `agent-contract` jobs supply the authoritative provider result.
 
