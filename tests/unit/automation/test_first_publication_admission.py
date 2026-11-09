@@ -168,7 +168,6 @@ def test_recovery_checks_fresh_start_and_main_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, failure: str | None
 ) -> None:
     """Reject failed admission without changing source, intent, or the remote."""
-    mask = os.umask(0o022)
     pool = None
     try:
         job = _publication_job(tmp_path, monkeypatch)
@@ -236,4 +235,3 @@ def test_recovery_checks_fresh_start_and_main_evidence(
     finally:
         if pool is not None:
             pool.shutdown()
-        os.umask(mask)

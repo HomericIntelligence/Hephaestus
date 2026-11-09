@@ -73,7 +73,6 @@ def test_completed_publication_death_recovers_actual_stage_callback(
             assert issue_number == 9
             return PlanDiscoveryResult.found("## Files to Modify\n- `local.txt`\n")
 
-    mask = os.umask(0o022)
     pool = None
     try:
         with pytest.MonkeyPatch.context() as preparation:
@@ -175,4 +174,3 @@ def test_completed_publication_death_recovers_actual_stage_callback(
     finally:
         if pool is not None:
             pool.shutdown()
-        os.umask(mask)

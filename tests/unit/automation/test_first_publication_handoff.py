@@ -43,7 +43,6 @@ def test_discovery_does_not_replace_fresh_recovery_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, failure: str
 ) -> None:
     """Preserve retained source when the handoff or fresh authentication fails."""
-    mask = os.umask(0o022)
     pool = None
     try:
         job = _publication_job(tmp_path, monkeypatch)
@@ -119,7 +118,6 @@ def test_discovery_does_not_replace_fresh_recovery_admission(
     finally:
         if pool is not None:
             pool.shutdown()
-        os.umask(mask)
 
 
 def test_stale_retained_branch_reports_no_retainable_rebase(

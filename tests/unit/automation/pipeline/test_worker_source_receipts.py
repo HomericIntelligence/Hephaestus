@@ -1,6 +1,5 @@
 """Tests for source receipt publication from held worker leases."""
 
-import os
 import queue
 import threading
 from collections.abc import Iterator
@@ -29,11 +28,7 @@ def _controlled_source_host(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(
         worker_pool, "_trusted_gh_executable", lambda extra_path_root=None: "/usr/bin/gh"
     )
-    previous = os.umask(0o022)
-    try:
-        yield
-    finally:
-        os.umask(previous)
+    yield
 
 
 def test_classified_publication_requires_the_before_publish_callback(
