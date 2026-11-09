@@ -814,3 +814,88 @@ def test_result_evidence_accepts_provider_failure_but_keeps_isolation_checks(
     ):
         with pytest.raises(iso.CodexIsolationError):
             iso.validate_result_evidence(request, prepared, dataclasses.replace(result, **changes))
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "rust-v0.153.0",
+        "rust-v0.153.1",
+        "rust-v0.153.4",
+        "rust-v0.153.99",
+        "rust-v0.153.999999999",
+    ],
+)
+def test_parse_release_tag_accepts_supported_line(tag) -> None:
+    iso = _module()
+    assert iso.parse_release_tag(tag) == tuple(int(p) for p in tag[len("rust-v"):].split("."))
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "",
+        "rust-v0.152.9",
+        "rust-v0.154.0",
+        "rust-v1.0.0",
+        "rust-v0.153",
+        "rust-v0.153.4.5",
+        "rust-v00.153.4",
+        "Rust-v0.153.4",
+        "rust-v0.15٣.4",
+        "rust-v0.153.4\n",
+        "rust-v100000000000.0.0",
+        "rust-v9223372036854775807.153.4",
+    ],
+)
+def test_parse_release_tag_rejects_outside_supported_line(tag) -> None:
+    iso = _module()
+    assert iso.parse_release_tag(tag) is None
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "codex-cli 0.153.0",
+        "codex-cli 0.153.4",
+        "codex-cli 0.153.99",
+    ],
+)
+def test_parse_version_output_accepts_supported_line(output) -> None:
+    iso = _module()
+    assert iso.parse_version_output(output) == tuple(
+        int(p) for p in output[len("codex-cli "):].split(".")
+    )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "",
+        "codex-cli 0.152.9",
+        "codex-cli 0.154.0",
+        "codex-cli 0.153",
+        "codex-cli 0.153.4x",
+        "codex-cli 0.153.4\n",
+        "codex-cli 0.15٣.4",
+        "codex-cli 9999999999.153.4",
+        "codex-cli 0.153.9999999999",
+    ],
+)
+def test_parse_version_output_rejects_outside_supported_line(output) -> None:
+    iso = _module()
+    assert iso.parse_version_output(output) is None
+
+
+def test_fleet_version_output_accepts_patch_variants() -> None:
+    from hephaestus.agents import codex_isolation
+
+    for version in ("codex-cli 0.153.0", "codex-cli 0.153.1", "codex-cli 0.153.99"):
+        assert codex_isolation.is_supported_codex_version_output(version)
+
+
+def test_fleet_version_output_rejects_non_supported() -> None:
+    from hephaestus.agents import codex_isolation
+
+    for version in ("codex-cli 0.154.0", "codex-cli 0.152.0", "codex-cli", "", "codex-cli 0.153"):
+        assert not codex_isolation.is_supported_codex_version_output(version)

@@ -29,12 +29,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 
+from hephaestus.agents.codex_isolation import parse_release_tag
+
 _ENTRY_POINT_GROUP = "hephaestus.codex_isolation_adapters"
 _TARGET = "aarch64-unknown-linux-musl"
 _FULCIO_ISSUER = "O=sigstore.dev, CN=sigstore-intermediate"
-_RELEASE_TAG_RE = re.compile(r"rust-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
-_SUPPORTED_CODEX_VERSION_MIN = (0, 153, 0)
-_SUPPORTED_CODEX_VERSION_MAX_EXCLUSIVE = (0, 154, 0)
 _OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 
 
@@ -421,17 +420,6 @@ def _require_artifact(path: str, expected: str, *, label: str) -> bytes:
     return data
 
 
-def _supported_codex_version(version: tuple[int, int, int]) -> bool:
-    return _SUPPORTED_CODEX_VERSION_MIN <= version < _SUPPORTED_CODEX_VERSION_MAX_EXCLUSIVE
-
-
-def _parse_release_tag(tag: str) -> tuple[int, int, int] | None:
-    match = _RELEASE_TAG_RE.fullmatch(tag)
-    if match is None:
-        return None
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-
-
 def _workflow_identity(release_tag: str) -> str:
     return (
         "https://github.com/openai/codex/.github/workflows/rust-release.yml"
@@ -440,11 +428,10 @@ def _workflow_identity(release_tag: str) -> str:
 
 
 def _validate_fixed_identity(lock: CodexAdapterDeploymentLockV1) -> None:
-    release = _parse_release_tag(lock.codex_release_tag)
+    release = parse_release_tag(lock.codex_release_tag)
     if (
         lock.entry_point_group != _ENTRY_POINT_GROUP
         or release is None
-        or not _supported_codex_version(release)
         or lock.codex_archive_asset != _target_asset("zst")
         or lock.codex_sigstore_asset != _target_asset("sigstore")
         or lock.codex_target != _TARGET

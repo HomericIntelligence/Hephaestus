@@ -46,8 +46,8 @@ STABLE_ERROR_CODES = frozenset(
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ENTRY_POINT_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})?\Z")
-_RELEASE_TAG_RE = re.compile(r"rust-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
-_VERSION_OUTPUT_RE = re.compile(r"codex-cli (0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
+_RELEASE_TAG_RE = re.compile(r"rust-v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\Z")
+_VERSION_OUTPUT_RE = re.compile(r"codex-cli (0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\Z")
 _FILE_IDENTITY_LENGTH = 6
 FileIdentity = tuple[int, int, int, int, int, int]
 StringPairs = tuple[tuple[str, str], ...]
@@ -766,13 +766,18 @@ def _stream_descriptor(
     source_descriptor: int,
     *,
     destination_descriptor: int | None = None,
+    max_bytes: int | None = None,
 ) -> str:
     os.lseek(source_descriptor, 0, os.SEEK_SET)
     digest = hashlib.sha256()
+    size = 0
     while True:
         chunk = os.read(source_descriptor, _EXECUTABLE_COPY_CHUNK_SIZE)
         if not chunk:
             break
+        size += len(chunk)
+        if max_bytes is not None and size > max_bytes:
+            _fail("codex_adapter_protocol_mismatch")
         digest.update(chunk)
         if destination_descriptor is not None:
             view = memoryview(chunk)
@@ -893,6 +898,7 @@ def _stage_linux_executable(
     try:
         directory_descriptor = _open_staging_directory(root, root_status)
         source_descriptor, source_status = _open_locked_source(source)
+        expected_size = source_status.st_size
         _validate_linux_elf(os.pread(source_descriptor, 64, 0))
         destination_descriptor = os.open(
             destination.name,
@@ -904,6 +910,7 @@ def _stage_linux_executable(
         source_digest = _stream_descriptor(
             source_descriptor,
             destination_descriptor=destination_descriptor,
+            max_bytes=expected_size,
         )
         current_source_status = source.lstat()
         if _identity(current_source_status) != _identity(source_status):
@@ -918,8 +925,10 @@ def _stage_linux_executable(
             dir_fd=directory_descriptor,
         )
         verified_status = os.fstat(verify_descriptor)
+        written_size = os.fstat(destination_descriptor).st_size
         destination_digest = _stream_descriptor(
             verify_descriptor,
+            max_bytes=written_size,
         )
         current_destination_status = os.stat(
             destination.name,
