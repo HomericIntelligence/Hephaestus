@@ -827,8 +827,9 @@ def test_result_evidence_accepts_provider_failure_but_keeps_isolation_checks(
     ],
 )
 def test_parse_release_tag_accepts_supported_line(tag) -> None:
+    """Supported-line release tags are accepted and parsed into tuples."""
     iso = _module()
-    assert iso.parse_release_tag(tag) == tuple(int(p) for p in tag[len("rust-v"):].split("."))
+    assert iso.parse_release_tag(tag) == tuple(int(p) for p in tag[len("rust-v") :].split("."))
 
 
 @pytest.mark.parametrize(
@@ -849,6 +850,7 @@ def test_parse_release_tag_accepts_supported_line(tag) -> None:
     ],
 )
 def test_parse_release_tag_rejects_outside_supported_line(tag) -> None:
+    """Outside-line, malformed, or Unicode release tags are rejected."""
     iso = _module()
     assert iso.parse_release_tag(tag) is None
 
@@ -862,9 +864,10 @@ def test_parse_release_tag_rejects_outside_supported_line(tag) -> None:
     ],
 )
 def test_parse_version_output_accepts_supported_line(output) -> None:
+    """Supported-line --version output is accepted and parsed into tuples."""
     iso = _module()
     assert iso.parse_version_output(output) == tuple(
-        int(p) for p in output[len("codex-cli "):].split(".")
+        int(p) for p in output[len("codex-cli ") :].split(".")
     )
 
 
@@ -883,11 +886,13 @@ def test_parse_version_output_accepts_supported_line(output) -> None:
     ],
 )
 def test_parse_version_output_rejects_outside_supported_line(output) -> None:
+    """Outside-line or malformed --version output is rejected."""
     iso = _module()
     assert iso.parse_version_output(output) is None
 
 
 def test_fleet_version_output_accepts_patch_variants() -> None:
+    """Fleet provider accepts any patch inside the supported line."""
     from hephaestus.agents import codex_isolation
 
     for version in ("codex-cli 0.153.0", "codex-cli 0.153.1", "codex-cli 0.153.99"):
@@ -895,6 +900,7 @@ def test_fleet_version_output_accepts_patch_variants() -> None:
 
 
 def test_fleet_version_output_rejects_non_supported() -> None:
+    """Fleet provider fails closed outside the supported line."""
     from hephaestus.agents import codex_isolation
 
     for version in ("codex-cli 0.154.0", "codex-cli 0.152.0", "codex-cli", "", "codex-cli 0.153"):

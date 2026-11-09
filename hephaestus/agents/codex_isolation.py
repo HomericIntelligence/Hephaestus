@@ -46,8 +46,9 @@ STABLE_ERROR_CODES = frozenset(
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ENTRY_POINT_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})?\Z")
-_RELEASE_TAG_RE = re.compile(r"rust-v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\Z")
-_VERSION_OUTPUT_RE = re.compile(r"codex-cli (0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\Z")
+_NUM = r"(0|[1-9][0-9]{0,8})"
+_RELEASE_TAG_RE = re.compile(rf"rust-v{_NUM}\.{_NUM}\.{_NUM}\Z")
+_VERSION_OUTPUT_RE = re.compile(rf"codex-cli {_NUM}\.{_NUM}\.{_NUM}\Z")
 _FILE_IDENTITY_LENGTH = 6
 FileIdentity = tuple[int, int, int, int, int, int]
 StringPairs = tuple[tuple[str, str], ...]
