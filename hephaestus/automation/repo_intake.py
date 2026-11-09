@@ -31,7 +31,7 @@ from hephaestus.automation.git_runtime import (
     operation_file_lock,
     remaining_operation_timeout,
 )
-from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.git.constants import DEFAULT_STATE_DIR
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import (
     ExclusiveLockUnavailableError,

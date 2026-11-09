@@ -102,7 +102,6 @@ from hephaestus.automation.host_capabilities import (
     hdiutil_create_argv,
     quota_backed_volume,
 )
-from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
@@ -293,6 +292,7 @@ from hephaestus.config.child_environments import (
     build_python_phase_env,
 )
 from hephaestus.git.gh.client import GitHubRateLimitError, GitHubUnavailableError
+from hephaestus.git.writer import ImplementationWriterHandoff
 from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
     CircuitBreakerOpenError,

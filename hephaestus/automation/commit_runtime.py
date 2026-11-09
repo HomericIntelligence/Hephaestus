@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.prompts import PromptCatalog
+from hephaestus.prompts.fencing import fence_content
 from hephaestus.utils.git import git_config_get
 
 from .commit_paths import (
@@ -26,7 +27,6 @@ from .commit_paths import (
 )
 from .commit_policy import ALLOWED_CONVENTIONAL_TYPES, normalize_conventional_type
 from .git_runtime import issue_ref, run
-from .prompts._shared import fence_content
 
 logger = logging.getLogger(__name__)
 

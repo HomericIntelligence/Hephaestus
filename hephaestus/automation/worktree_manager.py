@@ -38,8 +38,8 @@ from hephaestus.automation.git_runtime import (
     operation_file_lock,
     remaining_operation_timeout,
 )
-from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.config.child_environments import read_approved_parent_env
+from hephaestus.git.writer import ImplementationWriterHandoff
 from hephaestus.utils.git import _is_full_commit_sha
 from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
