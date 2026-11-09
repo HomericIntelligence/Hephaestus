@@ -29,18 +29,18 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 
+from hephaestus.agents.codex_isolation import parse_release_tag
+
 _ENTRY_POINT_GROUP = "hephaestus.codex_isolation_adapters"
-_ARCHIVE_SHA256 = "7a148fb7e7ed8a4bfa3ac4ffe014336070398eff780893582afab9195c6652f7"
-_SIGSTORE_SHA256 = "847b47e73068f86635c23ab5501647a93fab9ad0c450d6661a88481dfcd6d759"
-_RELEASE_TAG = "rust-v0.153.4"
-_ARCHIVE_ASSET = "codex-aarch64-unknown-linux-musl.zst"
-_SIGSTORE_ASSET = "codex-aarch64-unknown-linux-musl.sigstore"
 _TARGET = "aarch64-unknown-linux-musl"
 _FULCIO_ISSUER = "O=sigstore.dev, CN=sigstore-intermediate"
-_WORKFLOW_IDENTITY = (
-    "https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v0.153.4"
-)
 _OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+
+
+def _target_asset(suffix: str) -> str:
+    return f"codex-{_TARGET}.{suffix}"
+
+
 _VIRTUALIZATION_FRAMEWORK = Path("/System/Library/Frameworks/Virtualization.framework")
 _ENTRY_POINT_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})?\Z")
 _PYTHON_NAME_RE = re.compile(r"[A-Za-z_]\w*\Z")
@@ -420,15 +420,23 @@ def _require_artifact(path: str, expected: str, *, label: str) -> bytes:
     return data
 
 
+def _workflow_identity(release_tag: str) -> str:
+    return (
+        "https://github.com/openai/codex/.github/workflows/rust-release.yml"
+        f"@refs/tags/{release_tag}"
+    )
+
+
 def _validate_fixed_identity(lock: CodexAdapterDeploymentLockV1) -> None:
+    release = parse_release_tag(lock.codex_release_tag)
     if (
         lock.entry_point_group != _ENTRY_POINT_GROUP
-        or lock.codex_release_tag != _RELEASE_TAG
-        or lock.codex_archive_asset != _ARCHIVE_ASSET
-        or lock.codex_sigstore_asset != _SIGSTORE_ASSET
+        or release is None
+        or lock.codex_archive_asset != _target_asset("zst")
+        or lock.codex_sigstore_asset != _target_asset("sigstore")
         or lock.codex_target != _TARGET
         or lock.fulcio_certificate_issuer != _FULCIO_ISSUER
-        or lock.workflow_certificate_identity != _WORKFLOW_IDENTITY
+        or lock.workflow_certificate_identity != _workflow_identity(lock.codex_release_tag)
         or lock.oidc_issuer != _OIDC_ISSUER
     ):
         raise CodexAdapterAdmissionError("certificate identity or release identity is invalid")
@@ -636,12 +644,6 @@ def _default_offline_verifier(lock: CodexAdapterDeploymentLockV1) -> None:
         from cryptography.x509.oid import NameOID
         from sigstore.hashes import Hashed
         from sigstore_models.common.v1 import HashAlgorithm
-
-        if (
-            lock.codex_archive_sha256 != _ARCHIVE_SHA256
-            or lock.sigstore_bundle_sha256 != _SIGSTORE_SHA256
-        ):
-            raise CodexAdapterAdmissionError("Codex release artifact identity is invalid")
 
         trusted_root_bytes = _require_artifact(
             lock.trusted_root_path,
@@ -2836,11 +2838,6 @@ def _admit_verified_lock(
             cast(str, getattr(lock, digest_name)),
             label="offline trust artifact",
         )
-    if (
-        lock.codex_archive_sha256 != _ARCHIVE_SHA256
-        or lock.sigstore_bundle_sha256 != _SIGSTORE_SHA256
-    ):
-        raise CodexAdapterAdmissionError("Codex release artifact identity is invalid")
     _require_artifact(
         lock.codex_archive_path,
         lock.codex_archive_sha256,

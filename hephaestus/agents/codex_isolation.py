@@ -18,12 +18,13 @@ from typing import Never, Protocol, cast
 
 CODEX_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.codex_isolation_adapters"
 CODEX_ISOLATION_API_VERSION = 1
-CODEX_RELEASE = "rust-v0.153.4"
-CODEX_VERSION_OUTPUT = "codex-cli 0.153.4"
 CODEX_LINUX_TARGET = "aarch64-unknown-linux-musl"
-CODEX_LINUX_ASSET = "codex-aarch64-unknown-linux-musl.zst"
-_CODEX_LINUX_EXECUTABLE_SIZE = 222_567_456
-_CODEX_LINUX_EXECUTABLE_SHA256 = "4d76e542c222ea8c75861d8c4ade60a1a332a63255ce1c60bdaebf7c2a2869e6"
+# Supported release line for the admitted Codex CLI. The admission accepts any
+# patch release inside the supported minor line; a new minor line is a reviewed
+# compatibility decision. This is a version/API-compatibility contract, not a
+# byte identity: upstream may change freely inside the range.
+SUPPORTED_CODEX_VERSION_MIN = (0, 153, 0)
+SUPPORTED_CODEX_VERSION_MAX_EXCLUSIVE = (0, 154, 0)
 _EXECUTABLE_COPY_CHUNK_SIZE = 1024 * 1024
 
 STABLE_ERROR_CODES = frozenset(
@@ -45,10 +46,46 @@ STABLE_ERROR_CODES = frozenset(
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ENTRY_POINT_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})?\Z")
+_NUM = r"(0|[1-9][0-9]{0,8})"
+_RELEASE_TAG_RE = re.compile(rf"rust-v{_NUM}\.{_NUM}\.{_NUM}\Z")
+_VERSION_OUTPUT_RE = re.compile(rf"codex-cli {_NUM}\.{_NUM}\.{_NUM}\Z")
 _FILE_IDENTITY_LENGTH = 6
 FileIdentity = tuple[int, int, int, int, int, int]
 StringPairs = tuple[tuple[str, str], ...]
 NamedFileIdentities = tuple[tuple[str, FileIdentity], ...]
+
+
+def _supported_codex_version(version: tuple[int, int, int]) -> bool:
+    """Return whether *version* is inside the admitted release line."""
+    return SUPPORTED_CODEX_VERSION_MIN <= version < SUPPORTED_CODEX_VERSION_MAX_EXCLUSIVE
+
+
+def _parse_version(text: str, pattern: re.Pattern[str]) -> tuple[int, int, int] | None:
+    match = pattern.fullmatch(text)
+    if match is None:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def parse_release_tag(tag: str) -> tuple[int, int, int] | None:
+    """Return the release tuple for one ``rust-vX.Y.Z`` tag, or None when unsupported."""
+    version = _parse_version(tag, _RELEASE_TAG_RE)
+    if version is None or not _supported_codex_version(version):
+        return None
+    return version
+
+
+def parse_version_output(output: str) -> tuple[int, int, int] | None:
+    """Return the release tuple for one ``codex-cli X.Y.Z`` --version line."""
+    version = _parse_version(output, _VERSION_OUTPUT_RE)
+    if version is None or not _supported_codex_version(version):
+        return None
+    return version
+
+
+def is_supported_codex_version_output(output: str) -> bool:
+    """Return whether *output* is the --version line of a supported Codex release."""
+    return parse_version_output(output) is not None
 
 
 class CodexIsolationError(RuntimeError):
@@ -382,9 +419,9 @@ class CodexIsolationRequestV1:
             raise ValueError("executable_platform must be linux")
         if self.executable_target != CODEX_LINUX_TARGET:
             raise ValueError("executable_target is not supported")
-        if self.executable_release != CODEX_RELEASE:
+        if parse_release_tag(self.executable_release) is None:
             raise ValueError("executable_release is not supported")
-        if self.executable_asset_name != CODEX_LINUX_ASSET:
+        if self.executable_asset_name != f"codex-{CODEX_LINUX_TARGET}.zst":
             raise ValueError("executable_asset_name is not supported")
         _require_absolute_path(self.executable_path, "executable_path")
         _require_file_identity(self.executable_file_identity, "executable_file_identity")
@@ -475,7 +512,7 @@ class CodexIsolationPreparedV1:
             _require_digest(getattr(self, name), name)
         if self.elf_platform != "linux" or self.elf_target != CODEX_LINUX_TARGET:
             raise ValueError("The prepared ELF identity is not supported")
-        if self.version_output != CODEX_VERSION_OUTPUT:
+        if parse_version_output(self.version_output) is None:
             raise ValueError("The prepared Codex version is not supported")
         _require_file_identity(self.guest_file_identity, "guest_file_identity")
         _require_nonce(self.invocation_token, "invocation_token")
@@ -729,22 +766,18 @@ class StagedLinuxExecutable:
 def _stream_descriptor(
     source_descriptor: int,
     *,
-    expected_size: int,
     destination_descriptor: int | None = None,
+    max_bytes: int | None = None,
 ) -> str:
     os.lseek(source_descriptor, 0, os.SEEK_SET)
     digest = hashlib.sha256()
     size = 0
     while True:
-        remaining = expected_size - size
-        chunk = os.read(
-            source_descriptor,
-            min(_EXECUTABLE_COPY_CHUNK_SIZE, remaining + 1),
-        )
+        chunk = os.read(source_descriptor, _EXECUTABLE_COPY_CHUNK_SIZE)
         if not chunk:
             break
         size += len(chunk)
-        if size > expected_size:
+        if max_bytes is not None and size > max_bytes:
             _fail("codex_adapter_protocol_mismatch")
         digest.update(chunk)
         if destination_descriptor is not None:
@@ -754,8 +787,6 @@ def _stream_descriptor(
                 if written <= 0:
                     _fail("codex_adapter_protocol_mismatch")
                 view = view[written:]
-    if size != expected_size:
-        _fail("codex_adapter_protocol_mismatch")
     return digest.hexdigest()
 
 
@@ -791,17 +822,15 @@ def _open_staging_directory(root: Path, root_status: os.stat_result) -> int:
     return descriptor
 
 
-def _open_locked_source(source: Path, expected_size: int) -> tuple[int, os.stat_result]:
+def _open_locked_source(source: Path) -> tuple[int, os.stat_result]:
     path_status = source.lstat()
     if not stat.S_ISREG(path_status.st_mode):
         _fail("codex_adapter_protocol_mismatch")
     descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         descriptor_status = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(descriptor_status.st_mode)
-            or _identity(descriptor_status) != _identity(path_status)
-            or descriptor_status.st_size != expected_size
+        if not stat.S_ISREG(descriptor_status.st_mode) or _identity(descriptor_status) != _identity(
+            path_status
         ):
             _fail("codex_adapter_protocol_mismatch")
     except BaseException:
@@ -818,8 +847,8 @@ def _remove_staged_destination(created: bool, directory_descriptor: int, name: s
 
 def _staged_copy_matches(
     *,
-    expected_digest: str,
-    actual_digest: str,
+    source_digest: str,
+    staged_digest: str,
     written_status: os.stat_result,
     verified_status: os.stat_result,
     path_status: os.stat_result,
@@ -828,7 +857,7 @@ def _staged_copy_matches(
     current_root_status: os.stat_result,
 ) -> bool:
     return (
-        actual_digest == expected_digest
+        staged_digest == source_digest
         and _identity(verified_status) == _identity(written_status)
         and _identity(path_status) == _identity(verified_status)
         and _identity(current_root_status) == _identity(held_root_status)
@@ -850,18 +879,8 @@ def _staged_copy_matches(
 def _stage_linux_executable(
     source_path: Path,
     job_root: Path,
-    *,
-    expected_size: int = _CODEX_LINUX_EXECUTABLE_SIZE,
-    expected_digest: str = _CODEX_LINUX_EXECUTABLE_SHA256,
 ) -> StagedLinuxExecutable:
-    """Copy the exact locked AArch64 Linux ELF through held descriptors."""
-    if (
-        not _is_exact_int(expected_size)
-        or expected_size < 64
-        or type(expected_digest) is not str
-        or _DIGEST_RE.fullmatch(expected_digest) is None
-    ):
-        _fail("codex_adapter_protocol_mismatch")
+    """Stage the admitted Linux ELF through held descriptors."""
     source = Path(source_path)
     root = Path(job_root)
     root_status = root.lstat()
@@ -879,7 +898,8 @@ def _stage_linux_executable(
     destination = root / "codex-aarch64-unknown-linux-musl"
     try:
         directory_descriptor = _open_staging_directory(root, root_status)
-        source_descriptor, source_status = _open_locked_source(source, expected_size)
+        source_descriptor, source_status = _open_locked_source(source)
+        expected_size = source_status.st_size
         _validate_linux_elf(os.pread(source_descriptor, 64, 0))
         destination_descriptor = os.open(
             destination.name,
@@ -890,11 +910,9 @@ def _stage_linux_executable(
         destination_created = True
         source_digest = _stream_descriptor(
             source_descriptor,
-            expected_size=expected_size,
             destination_descriptor=destination_descriptor,
+            max_bytes=expected_size,
         )
-        if source_digest != expected_digest:
-            _fail("codex_adapter_protocol_mismatch")
         current_source_status = source.lstat()
         if _identity(current_source_status) != _identity(source_status):
             _fail("codex_adapter_protocol_mismatch")
@@ -908,9 +926,10 @@ def _stage_linux_executable(
             dir_fd=directory_descriptor,
         )
         verified_status = os.fstat(verify_descriptor)
+        written_size = os.fstat(destination_descriptor).st_size
         destination_digest = _stream_descriptor(
             verify_descriptor,
-            expected_size=expected_size,
+            max_bytes=written_size,
         )
         current_destination_status = os.stat(
             destination.name,
@@ -920,8 +939,8 @@ def _stage_linux_executable(
         held_root_status = os.fstat(directory_descriptor)
         current_root_status = root.lstat()
         if not _staged_copy_matches(
-            expected_digest=expected_digest,
-            actual_digest=destination_digest,
+            source_digest=source_digest,
+            staged_digest=destination_digest,
             written_status=written_status,
             verified_status=verified_status,
             path_status=current_destination_status,
@@ -933,7 +952,7 @@ def _stage_linux_executable(
         staged = StagedLinuxExecutable(
             destination,
             verify_descriptor,
-            expected_digest,
+            destination_digest,
             _identity(verified_status),
         )
         verify_descriptor = -1
@@ -964,12 +983,15 @@ def _stage_linux_executable(
 
 
 def stage_linux_executable(source_path: Path, job_root: Path) -> StagedLinuxExecutable:
-    """Stage only the reviewed Codex release executable identity."""
+    """Stage the admitted Linux ELF through held descriptors.
+
+    The stage authenticates structure (Linux ELF, no-follow, owner-only staging
+    root) only. Authenticity of the bytes is the caller's responsibility: the
+    caller must compare the staged digest with the deployment lock before launch.
+    """
     return _stage_linux_executable(
         source_path,
         job_root,
-        expected_size=_CODEX_LINUX_EXECUTABLE_SIZE,
-        expected_digest=_CODEX_LINUX_EXECUTABLE_SHA256,
     )
 
 
@@ -997,7 +1019,10 @@ __all__ = [
     "canonical_bytes",
     "canonical_sha256",
     "close_staged_linux_executable",
+    "is_supported_codex_version_output",
     "new_run_nonce",
+    "parse_release_tag",
+    "parse_version_output",
     "stage_linux_executable",
     "validate_adapter",
     "validate_prepared",

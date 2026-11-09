@@ -232,3 +232,31 @@ def test_exec_server_probe_stops_excess_version_output(
     assert result["authorizesAdmission"] is False
     assert time.monotonic() - started < 2
     assert not sentinel.exists()
+
+
+def test_read_provider_version_accepts_supported_line(tmp_path: Path) -> None:
+    """read_provider_version accepts any patch inside the supported line."""
+    from hephaestus.automation import fleet_provider
+
+    for tag in ("codex-cli 0.153.0", "codex-cli 0.153.4", "codex-cli 0.153.99"):
+        executable = tmp_path / f"codex-{tag.replace(' ', '_')}"
+        executable.write_text(f"#!{sys.executable}\nprint({tag!r})\n")
+        executable.chmod(0o755)
+        result = fleet_provider.read_provider_version(
+            (str(executable),), env={"PATH": "/usr/bin:/bin"}, timeout=5.0
+        )
+        assert result == tag
+
+
+def test_read_provider_version_rejects_unsupported_line(tmp_path: Path) -> None:
+    """read_provider_version fails closed outside the supported line."""
+    from hephaestus.automation import fleet_provider
+
+    for tag in ("codex-cli 0.154.0", "codex-cli 0.152.9", "codex", ""):
+        executable = tmp_path / f"codex-bad-{abs(hash(tag))}"
+        executable.write_text(f"#!{sys.executable}\nprint({tag!r})\n")
+        executable.chmod(0o755)
+        with pytest.raises(ProviderError, match="provider_version_mismatch"):
+            fleet_provider.read_provider_version(
+                (str(executable),), env={"PATH": "/usr/bin:/bin"}, timeout=5.0
+            )
