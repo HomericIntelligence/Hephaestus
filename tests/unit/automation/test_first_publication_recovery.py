@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
 import queue
 import subprocess
 import threading
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -54,16 +52,6 @@ _ACCEPTED_PUSH_FAULTS = frozenset(
 )
 
 
-@pytest.fixture
-def protected_creation_mask() -> Iterator[None]:
-    """Create owned Git parents without ambient group-write permission."""
-    previous = os.umask(0o022)
-    try:
-        yield
-    finally:
-        os.umask(previous)
-
-
 @pytest.mark.parametrize(
     ("require_intent", "fault"),
     [
@@ -103,7 +91,6 @@ def test_first_publication_failure_distinguishes_confirmed_absence(
     monkeypatch: pytest.MonkeyPatch,
     require_intent: bool,
     fault: str,
-    protected_creation_mask: None,
 ) -> None:
     """Keep the exact local commit when the remote branch remains absent."""
     root, _, base = _worker_repository(tmp_path)
@@ -592,7 +579,7 @@ class _PublicationEvidence:
 
 
 def test_discovery_authentication_failure_retains_request_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protected_creation_mask: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failure before lock admission must still identify its discovery callback."""
     root, _, base = _worker_repository(tmp_path)

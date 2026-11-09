@@ -1,9 +1,7 @@
 """Tests for durable one-use dirty writer claims."""
 
-import os
 import threading
 import time
-from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -193,22 +191,11 @@ def test_fresh_plan_read_requires_owned_matching_approval(failure: str | None) -
             _dirty_plan_from_read(receipt)
 
 
-@pytest.fixture
-def protected_claim_creation_mask() -> Iterator[None]:
-    """Keep the fixture's owned Git state independent of the host creation mask."""
-    previous = os.umask(0o022)
-    try:
-        yield
-    finally:
-        os.umask(previous)
-
-
 @pytest.mark.parametrize("started", [False, True])
 def test_claim_git_operation_keeps_original_direct_branch(
     tmp_path: Path,
     started: bool,
     monkeypatch: pytest.MonkeyPatch,
-    protected_claim_creation_mask: None,
 ) -> None:
     """A dirty restart claims its owned branch without another reservation."""
     import queue
@@ -377,7 +364,6 @@ def _claim_predicate_scaffold(
 def test_claim_fails_closed_when_the_remote_lane_read_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    protected_claim_creation_mask: None,
 ) -> None:
     """A failed authenticated remote read stops the claim before any snapshot."""
     from unittest.mock import patch
@@ -406,7 +392,6 @@ def test_claim_fails_closed_when_the_remote_lane_read_fails(
 def test_claim_continues_local_only_when_the_remote_lane_is_absent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    protected_claim_creation_mask: None,
 ) -> None:
     """A confirmed-absent remote lane continues the claim from the local lane head."""
     from unittest.mock import patch
@@ -434,7 +419,6 @@ def test_claim_continues_local_only_when_the_remote_lane_is_absent(
 def test_claim_continues_from_the_local_lane_head_when_the_remote_lane_moved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    protected_claim_creation_mask: None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A moved remote lane head only warns; the claim keeps the local lane head."""
@@ -467,7 +451,6 @@ def test_claim_continues_from_the_local_lane_head_when_the_remote_lane_moved(
 def test_renamed_lane_fails_cleanly_without_poisoning_the_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    protected_claim_creation_mask: None,
 ) -> None:
     """A renamed lane branch stops the claim cleanly; the v1 receipt stays retryable."""
     from unittest.mock import patch
@@ -536,7 +519,6 @@ def _dirty_restart_claim_request(
 def test_post_timeout_probe_claim_adopts_the_published_lane(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    protected_claim_creation_mask: None,
 ) -> None:
     """A timed-out writer's own lane is adopted from its advanced receipt."""
     import queue
@@ -1102,7 +1084,6 @@ def test_probe_claim_marks_unusable_owned_lane_not_applicable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
-    protected_claim_creation_mask: None,
 ) -> None:
     """Probes of unusable owned lanes classify instead of claiming (#3080).
 
@@ -1171,7 +1152,6 @@ def test_probe_claim_marks_unusable_owned_lane_not_applicable(
 def test_probe_claim_classifies_a_foreign_registered_writer_path_not_applicable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    protected_claim_creation_mask: None,
 ) -> None:
     """A writer path bound to another repository classifies and never claims.
 
@@ -1246,7 +1226,6 @@ def test_probe_claim_classifies_a_foreign_registered_writer_path_not_applicable(
 def test_probe_claim_classifies_a_missing_receipt_without_claiming(
     tmp_path: Path,
     orphan_path: str,
-    protected_claim_creation_mask: None,
 ) -> None:
     """A probe without a receipt classifies the lane and starts no claim.
 

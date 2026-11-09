@@ -230,7 +230,6 @@ def _stop_before_publication_intent(job: GitJob) -> None:
 
 def _process(job: GitJob, boundary: str | None, channel: Any, role: str = "single") -> None:
     """Run a real publication owner, with checkpoints at external boundaries."""
-    mask = os.umask(0o022)
     root = Path(job.kwargs["repo_root"])
     pool: WorkerPool | None = None
     try:
@@ -294,7 +293,6 @@ def _process(job: GitJob, boundary: str | None, channel: Any, role: str = "singl
     finally:
         if pool is not None:
             pool.shutdown()
-        os.umask(mask)
         channel.close()
 
 
@@ -307,7 +305,6 @@ def test_process_death_recovers_exact_publication_once(
     context = multiprocessing.get_context("spawn")
     processes: list[Any] = []
     channels: list[Any] = []
-    mask = os.umask(0o022)
     try:
         with pytest.MonkeyPatch.context() as patch:
             job = _publication_job(tmp_path, patch)
@@ -385,4 +382,3 @@ def test_process_death_recovers_exact_publication_once(
                 process.close()
         for channel in channels:
             channel.close()
-        os.umask(mask)

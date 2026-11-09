@@ -49,7 +49,6 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
         def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
             return PlanDiscoveryResult.found("## Files to Modify\n- `local.txt`\n")
 
-    mask = os.umask(0o022)
     pool = None
     try:
         job = _publication_job(tmp_path, monkeypatch)
@@ -128,7 +127,6 @@ def test_pre_intent_commit_cannot_authorize_writer_restart(
     finally:
         if pool is not None:
             pool.shutdown()
-        os.umask(mask)
 
 
 @pytest.mark.parametrize(

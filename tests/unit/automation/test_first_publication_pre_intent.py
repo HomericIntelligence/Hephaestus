@@ -41,7 +41,6 @@ def test_discovery_requires_matching_start_without_publication_intent(
     ambiguous: bool | None,
 ) -> None:
     """An unchanged start permits routing; an advanced H needs recovery."""
-    mask = os.umask(0o022)
     pool = None
     try:
         job = _publication_job(tmp_path, monkeypatch)
@@ -110,4 +109,3 @@ def test_discovery_requires_matching_start_without_publication_intent(
     finally:
         if pool is not None:
             pool.shutdown()
-        os.umask(mask)
