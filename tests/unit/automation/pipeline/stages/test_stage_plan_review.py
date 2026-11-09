@@ -1976,6 +1976,30 @@ class TestStaleVerdictAndErrorAccounting:
         assert github.mutation_log == []  # labels stay untouched on ERROR path
         assert item.attempts["plan_review_iter"] == 0  # nothing ever burned
 
+    def test_legacy_string_retry_counter_is_coerced(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A counter restored as a string coerces instead of failing the item.
+
+        A journal written before the shared retry helper can hold a
+        stringified counter. The pre-extraction read coerced it, so a
+        restored value keeps retrying instead of poisoning the item
+        (#3522 review).
+        """
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = _review_item(make_work_item, github, issue=34, state="EVAL")
+        item.payload["review_error_retries"] = "1"
+
+        item.state = "EVAL"
+        item.payload["review_verdict"] = _verdict("ERROR")
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert item.payload["review_error_retries"] == 2
+
 
 class TestCycleRelativeBudget:
     """m1: cycle 2 gets a full review budget; attempts stay per-lifetime."""

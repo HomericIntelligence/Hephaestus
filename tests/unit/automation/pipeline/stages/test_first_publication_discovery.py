@@ -16,6 +16,7 @@ from hephaestus.automation.pipeline.github_jobs import GitHubJob, ReadCurrentPla
 from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB_REQUEST
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.review_journal import PlanDiscoveryResult
@@ -505,7 +506,7 @@ def test_restart_refreshes_failed_or_pending_scope_before_recovery(
     if stale == "failure":
         item.payload["_implementation_plan_scope_failure"] = True
     else:
-        item.payload["_pending_github_request"] = old_request
+        item.payload[PENDING_GITHUB_REQUEST] = old_request
     assert stage.on_enter(item, ctx) is None
     request = stage.step(item, ctx)
     assert isinstance(request, JobRequest)

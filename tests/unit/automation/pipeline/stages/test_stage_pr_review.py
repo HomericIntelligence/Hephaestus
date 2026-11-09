@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, ReconcilePrReviewRequest
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome, pr_review_post
 from hephaestus.automation.pipeline.stages.plan_review import REVIEW_ERROR_RETRY_CAP
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
 from hephaestus.automation.pipeline.stages.pr_review_threads import _parse_review_response
@@ -210,6 +212,26 @@ def test_a_retried_reconciliation_reuses_the_pending_deadline(
     assert isinstance(retried.job, GitHubJob)
     assert isinstance(retried.job.request, ReconcilePrReviewRequest)
     assert retried.job.request.deadline_s == pending.deadline_s
+
+
+def test_a_post_without_a_pending_request_uses_the_network_deadline(
+    make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A POST with no live pending request derives its deadline from the helper."""
+    _, ctx, item = _setup(make_ctx, make_work_item, [(0, 0, 0)])
+    item.state = "POST"
+    item.payload["review_audit"] = ReviewAudit(
+        grade=None, summary="ok", findings=(), raw_feedback="", valid=True, verdict="GO"
+    )
+    monkeypatch.setattr(pr_review_post, "stage_network_deadline", lambda _ctx: 4242.0)
+
+    requested = PrReviewStage().step(item, ctx)
+
+    assert isinstance(requested, JobRequest)
+    assert isinstance(requested.job, GitHubJob)
+    request = requested.job.request
+    assert isinstance(request, ReconcilePrReviewRequest)
+    assert request.deadline_s == 4242.0
 
 
 def test_a_reconciliation_failure_below_the_cap_retries(make_ctx: Any, make_work_item: Any) -> None:

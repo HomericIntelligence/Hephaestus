@@ -251,6 +251,13 @@ class _AcceptedPlanReview:
 
 def _reviewer_failure(item: WorkItem, reason: str) -> StageOutcome:
     """Bound consecutive reviewer failures without charging a plan revision."""
+    stored = item.payload.get("review_error_retries", 0)
+    if type(stored) is not int:
+        # A journal written before the shared retry helper can hold a
+        # stringified counter. The read before the extraction coerced it,
+        # so keep that coercion at this persistence boundary. The shared
+        # helper itself stays strict for counters written in-process.
+        item.payload["review_error_retries"] = int(stored)
     exceeded = records_retry_exceeded_cap(
         item.payload, "review_error_retries", REVIEW_ERROR_RETRY_CAP
     )

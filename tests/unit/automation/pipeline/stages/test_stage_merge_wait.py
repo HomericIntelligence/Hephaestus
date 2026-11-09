@@ -22,6 +22,7 @@ from hephaestus.automation.pipeline.stages import (
     JobRequest,
     StageOutcome,
 )
+from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB_REQUEST
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -263,7 +264,7 @@ def test_stage_parks_after_a_successful_enablement(make_ctx: Any, make_work_item
         deadline_s=60.0,
         cancellation=threading.Event(),
     )
-    item.payload["_pending_github_request"] = request
+    item.payload[PENDING_GITHUB_REQUEST] = request
     item.payload["_merge_wait_cycle_receipt"] = MergeWaitCycleCompleted(
         request=request, outcome="auto_merge_enabled", attempted=True
     )
@@ -288,7 +289,7 @@ def test_stage_finishes_once_github_reports_merged(make_ctx: Any, make_work_item
         deadline_s=60.0,
         cancellation=threading.Event(),
     )
-    item.payload["_pending_github_request"] = request
+    item.payload[PENDING_GITHUB_REQUEST] = request
     item.payload["_merge_wait_cycle_receipt"] = MergeWaitCycleCompleted(
         request=request, outcome="merged", attempted=True, merge_sha="c" * 40
     )
@@ -315,7 +316,7 @@ def test_an_armed_auto_merge_is_observed_and_not_enabled_again(
         deadline_s=60.0,
         cancellation=threading.Event(),
     )
-    item.payload["_pending_github_request"] = request
+    item.payload[PENDING_GITHUB_REQUEST] = request
     item.payload["_merge_wait_cycle_receipt"] = MergeWaitCycleCompleted(
         request=request, outcome="auto_merge_enabled", attempted=True
     )
