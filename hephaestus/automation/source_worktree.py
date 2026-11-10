@@ -1467,7 +1467,11 @@ class SourceWorkspaceManager:
                     ),
                 ),
             )
-        if physical_revision != old.revision:
+        if not self._has_legitimate_descent(
+            expected_path,
+            old.revision,
+            physical_revision,
+        ):
             raise SourceWorkspaceError(
                 "implementation writer predecessor is invalid because source workspace "
                 f"revision drifted and is preserved: {expected_path}",
@@ -2399,6 +2403,38 @@ class SourceWorkspaceManager:
             raise SourceWorkspaceError(f"cannot inspect source workspace branch: {path}")
         return branch
 
+    @staticmethod
+    def _has_legitimate_descent(
+        path: Path,
+        recorded_revision: str,
+        physical_revision: str,
+        *,
+        deadline: _PreparationDeadline | None = None,
+    ) -> bool:
+        """Return whether the physical HEAD legitimately descends from the receipt.
+
+        An implementation writer commits its work in this worktree, so the
+        physical HEAD advances past the revision a receipt recorded when the
+        lane was prepared. Git already proves that the work belongs to the lane:
+        the recorded revision is an ancestor of the physical HEAD. Ask Git, and
+        do not require the two revisions to be equal.
+        """
+        if physical_revision == recorded_revision:
+            return True
+        result = _git(
+            path,
+            "merge-base",
+            "--is-ancestor",
+            recorded_revision,
+            physical_revision,
+            check=False,
+            deadline=deadline,
+        )
+        # ``git merge-base --is-ancestor`` exits 0 for an ancestor, 1 for
+        # not-an-ancestor, and above 1 only when the question cannot be
+        # answered. Only exit 0 proves descent.
+        return result.returncode == 0
+
     def _binding(self, receipt: SourceWorkspaceReceipt) -> WorkspaceBinding:
         return receipt.to_binding(self.repo_root)
 
@@ -2542,7 +2578,16 @@ class SourceWorkspaceManager:
                     observed_branch = self._head_branch(path)
                     observed_revision = self._head_revision(path)
                     expected_branch = None if receipt.detached else f"refs/heads/{receipt.branch}"
-                    if observed_branch != expected_branch or observed_revision != receipt.revision:
+                    # An implementation writer commits in this worktree, so the
+                    # observed revision advances past the recorded one. Git
+                    # proves that work belongs to the lane when the recorded
+                    # revision is an ancestor. Only a branch change or a
+                    # revision that is not a descendant is unproven.
+                    branch_mismatch = observed_branch != expected_branch
+                    descent_unproven = not self._has_legitimate_descent(
+                        path, receipt.revision, observed_revision
+                    )
+                    if branch_mismatch or descent_unproven:
                         payload.update(
                             cause="source_workspace_legacy_unproven",
                             action=(
@@ -2551,8 +2596,9 @@ class SourceWorkspaceManager:
                                 f"{expected_branch!r}/{receipt.revision}; "
                                 f"the observed branch/revision is "
                                 f"{observed_branch!r}/{observed_revision}. "
-                                "The transition proof is missing. Obtain the ownership record or "
-                                "separately reviewed operator recovery."
+                                "The observed work is not a descendant of the recorded "
+                                "revision, or the branch changed. Obtain the ownership "
+                                "record or separately reviewed operator recovery."
                             ),
                         )
         except (OSError, ValueError, SourceWorkspaceError, subprocess.SubprocessError):
