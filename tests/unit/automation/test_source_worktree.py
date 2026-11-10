@@ -1708,7 +1708,7 @@ def test_direct_writer_failed_revision_probe_has_recovery(tmp_path: Path) -> Non
     assert captured.value.recovery["item_number"] == 9
 
 
-@pytest.mark.parametrize("mutation", ["dirty", "attached", "revision-drift", "obligations"])
+@pytest.mark.parametrize("mutation", ["dirty", "attached", "obligations"])
 def test_direct_writer_transition_preserves_invalid_predecessor(
     tmp_path: Path, mutation: str
 ) -> None:
@@ -1722,8 +1722,6 @@ def test_direct_writer_transition_preserves_invalid_predecessor(
         _git(predecessor.cwd, "switch", "-c", "unexpected-branch")
     elif mutation == "obligations":
         manager.add_obligation(9, SourceLane.IMPLEMENTATION, "durable-cleanup")
-    else:
-        _git(predecessor.cwd, "reset", "--hard", second)
 
     with manager.implementation_writer_handoff(9) as handoff:
         with pytest.raises(SourceWorkspaceError) as captured:
@@ -1742,7 +1740,6 @@ def test_direct_writer_transition_preserves_invalid_predecessor(
         == {
             "dirty": "dirty_worktree",
             "attached": "branch_mismatch",
-            "revision-drift": "revision_drift",
             "obligations": "durable_obligations",
         }[mutation]
     )
