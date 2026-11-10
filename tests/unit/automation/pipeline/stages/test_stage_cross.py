@@ -47,14 +47,6 @@ assert ROUTES[StageName.PR_REVIEW].fail_routes["agent_error"] == StageName.IMPLE
 assert ROUTES[StageName.IMPLEMENTATION].next == StageName.PR_REVIEW
 assert ROUTES[StageName.MERGE_WAIT].fail_routes["merge_conflicting"] == StageName.IMPLEMENTATION
 
-_LABEL_MUTATIONS = {
-    "gh_issue_add_labels",
-    "gh_issue_remove_labels",
-    "mark_pr_implementation_go",
-    "mark_pr_implementation_no_go",
-    "arm_auto_merge",
-}
-
 
 @pytest.mark.parametrize(
     ("replacement_plan", "replacement_revision"),
@@ -345,9 +337,11 @@ class TestAgentErrorPingPongTerminates:
         assert outcome.note == "agent_error_exhausted"
         assert item.attempts["implement"] == 2  # terminated AT the budget
 
-        # No label writes anywhere along the dead cycle.
-        label_writes = [name for name, _ in github.mutation_log if name in _LABEL_MUTATIONS]
-        assert label_writes == []
+        # No GitHub mutation at all along the dead cycle: the agent-error
+        # path writes no label (the error verdict never labels), and the
+        # exhausted re-adoption writes none either. The exact empty log is
+        # the guard: any stray mutation fails this assertion.
+        assert github.mutation_log == []
 
     def test_missing_pr_error_path_is_bounded_the_same_way(
         self, make_ctx: Any, make_work_item: Any
@@ -375,8 +369,7 @@ class TestAgentErrorPingPongTerminates:
         assert isinstance(final, StageOutcome)
         assert final.disposition == Disposition.FINISH_FAIL
         assert final.note == "agent_error_exhausted"
-        label_writes = [name for name, _ in github.mutation_log if name in _LABEL_MUTATIONS]
-        assert label_writes == []
+        assert github.mutation_log == []
 
 
 class TestEmptyDiffReroutesToSubstantiveImplementation:

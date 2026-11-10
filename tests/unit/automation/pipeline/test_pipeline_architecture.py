@@ -31,7 +31,13 @@ _AUTOMATION = _PIPELINE.parent
 # Public mutators from github_api.__all__ (avoids hardcoding drift).
 # Scope note: this guard only tracks direct github_api mutator names. The
 # coordinator-neutral ``ctx.github`` surface is intentionally covered by the
-# coordinator adapter tests instead.
+# coordinator adapter tests instead. The recursive
+# ``_stage_auto_merge_callers`` guard covers the live auto-merge mutation
+# names ``enable_auto_merge`` and ``disable_auto_merge``, and
+# ``_PUBLIC_MUTATORS`` stays limited to ``github_api.__all__``. The test
+# ``tests/unit/automation/pipeline/test_pipeline_architecture.py::
+# test_pipeline_stages_have_no_auto_merge_mutation_capability`` enforces the
+# auto-merge ban.
 _PUBLIC_MUTATORS = frozenset(
     n
     for n in github_api.__all__
@@ -117,8 +123,11 @@ def _stage_auto_merge_callers(modules: list[Path], root: Path = _PIPELINE) -> se
     """Stage modules that call a banned auto-merge mutator (AST walk).
 
     Returns each offender's path relative to its ``stages/`` parent. The
-    banned set holds the retired accessor names ``arm_auto_merge`` /
-    ``defer_auto_merge``; moving it to the live mutation names is #3581.
+    banned set holds the live mutation accessor names owned by
+    ``pipeline_github_merge_mutations.py``. A stage must not enable or disable
+    native auto-merge, and
+    ``test_pipeline_stages_have_no_auto_merge_mutation_capability`` enforces
+    that rule.
     """
     callers: set[str] = set()
     for path in modules:
@@ -127,7 +136,7 @@ def _stage_auto_merge_callers(modules: list[Path], root: Path = _PIPELINE) -> se
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"arm_auto_merge", "defer_auto_merge"}
+                and node.func.attr in {"enable_auto_merge", "disable_auto_merge"}
             ):
                 callers.add(_stage_relative(path, root))
     return callers
@@ -291,14 +300,16 @@ def test_guard_scope_excludes_coordinator_neutral_stage_github_calls(
 
     The coordinator-neutral ``ctx.github`` mutator surface is bound by the
     coordinator's ``StageGitHub`` adapter and covered by the mapping tests in
-    ``tests/unit/automation/test_pipeline_github.py``.
+    ``tests/unit/automation/test_pipeline_github.py``. Auto-merge mutations
+    are the exception: ``_stage_auto_merge_callers`` covers the live names
+    ``enable_auto_merge`` and ``disable_auto_merge``.
     """
     synthetic = (
         "from hephaestus.automation import github_api\n"
         "def f(ctx):\n"
         "    ctx.github.add_labels(1, ['state:x'])\n"
         "    ctx.github.create_pr(1, 'branch', 'title', 'body')\n"
-        "    ctx.github.arm_auto_merge(2)\n"
+        "    ctx.github.enable_auto_merge(2)\n"
         "    github_api.gh_issue_add_labels(3, ['state:y'])\n"
     )
     path = tmp_path / "synthetic_stage.py"
@@ -331,25 +342,32 @@ def test_pipeline_stages_have_no_auto_merge_mutation_capability() -> None:
     assert _stage_auto_merge_callers(_stage_modules()) == set()
 
 
-def test_auto_merge_has_one_production_call_site() -> None:
-    """Only the closed merge-wait job may enable native auto-merge.
+def test_auto_merge_mutations_have_one_production_call_site_each() -> None:
+    """Only the closed merge-wait job may enable or disable native auto-merge.
 
     The approval label is the whole merge contract, so the enablement must stay
-    inside one audited call site rather than being spread across stages.
+    inside one audited call site rather than being spread across stages. A lost
+    approval must be disarmed from the closed merge-wait job or the merge
+    mutation module, so the ban covers both live mutation names.
+
+    The scan pins the call sites, not their offsets: the assertions use a
+    relative file path and a count only. A line above a call site can move
+    without a change to the guarded contract.
     """
-    calls: list[tuple[str, int]] = []
+    enabled: list[str] = []
+    disabled: list[str] = []
     for path in sorted(_AUTOMATION.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "enable_auto_merge"
-            ):
-                calls.append((str(path.relative_to(_AUTOMATION)), node.lineno))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "enable_auto_merge":
+                    enabled.append(str(path.relative_to(_AUTOMATION)))
+                elif node.func.attr == "disable_auto_merge":
+                    disabled.append(str(path.relative_to(_AUTOMATION)))
 
-    assert len(calls) == 1, f"unexpected auto-merge call sites: {calls}"
-    assert calls[0][0] == "pipeline_github_jobs.py"
+    assert enabled == ["pipeline_github_jobs.py"], f"unexpected auto-merge enable sites: {enabled}"
+    assert len(disabled) == 2, f"unexpected auto-merge disarm sites: {disabled}"
+    assert sorted(disabled) == ["pipeline_github_jobs.py", "pipeline_github_mutations.py"]
 
 
 def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:
@@ -450,7 +468,7 @@ def test_auto_merge_guard_detects_nested_violation(tmp_path: Path) -> None:
     nested.mkdir(parents=True)
     (stages / "clean.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     (nested / "synthetic_neg.py").write_text(
-        "def g(obj):\n    obj.arm_auto_merge(2)\n", encoding="utf-8"
+        "def g(obj):\n    obj.disable_auto_merge(2)\n", encoding="utf-8"
     )
 
     assert "stages/pr_review_details/synthetic_neg.py" in _stage_auto_merge_callers(

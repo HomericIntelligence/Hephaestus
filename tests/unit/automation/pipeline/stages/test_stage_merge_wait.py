@@ -81,6 +81,13 @@ class _AutoMergeGitHub(FakeStageGitHub):
         self._result = result if result is not None else AutoMergeEnableResult(enabled=True)
         self._raises = raises
         self.enable_calls: list[int] = []
+        self.disarm_calls: list[int] = []
+        self.disarm_result = True
+
+    def disable_auto_merge(self, pr_number: int) -> bool:
+        """Record one disarm request and report the wanted end state."""
+        self.disarm_calls.append(pr_number)
+        return self.disarm_result
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Return each scripted state once, then repeat the last one."""
@@ -151,6 +158,43 @@ def test_no_go_label_is_not_admitted(tmp_path: Any) -> None:
     receipt = _run_cycle(github, _job(tmp_path))
 
     assert receipt.outcome == "not_implementation_go"
+    assert github.enable_calls == []
+
+
+def test_an_armed_pr_with_no_go_is_disarmed_before_the_refusal(tmp_path: Any) -> None:
+    """A lost approval disarms an armed pull request before the refusal.
+
+    The branch depends on the NO-GO label only. The GO label is present in the
+    first case and absent in the second, so the second case proves that the
+    GO label does not control the disarm. The recorded disarm request proves
+    the ordering: the stage disarms before it refuses.
+    """
+    armed = {"enabledBy": {"login": "someone"}}
+    for labels in ((True, True), (False, True)):
+        github = _AutoMergeGitHub(labels=labels, states=[_open_pr(auto_merge_request=armed)])
+        receipt = _run_cycle(github, _job(tmp_path))
+
+        assert receipt.outcome == "not_implementation_go"
+        assert github.disarm_calls == [7]
+        assert github.enable_calls == []
+
+
+def test_a_failed_disarm_still_refuses_admission(tmp_path: Any) -> None:
+    """A failed disarm does not block the refusal.
+
+    The stage records the disarm request and refuses with
+    ``not_implementation_go`` whether or not the disarm completed. The
+    adapter owns the failure surface: it logs the failed disable and keeps
+    the refusal in force, so an armed pull request can never merge through
+    a lost approval.
+    """
+    armed = {"enabledBy": {"login": "someone"}}
+    github = _AutoMergeGitHub(labels=(False, True), states=[_open_pr(auto_merge_request=armed)])
+    github.disarm_result = False
+    receipt = _run_cycle(github, _job(tmp_path))
+
+    assert receipt.outcome == "not_implementation_go"
+    assert github.disarm_calls == [7]
     assert github.enable_calls == []
 
 
