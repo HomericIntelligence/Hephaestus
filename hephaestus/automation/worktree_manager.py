@@ -1211,19 +1211,58 @@ class WorktreeManager:
             raise WorktreeCreationReceiptError(
                 "deterministic implementation writer is an existing path and preserved"
             )
-        if self._worktree_holding_branch(branch_name, timeout=timeout) is not None:
-            raise WorktreeCreationReceiptError(
-                "implementation writer branch is held by an unowned worktree"
+        holder = self._worktree_holding_branch(branch_name, timeout=timeout)
+        if holder is not None:
+            # An interrupted attempt leaves its branch checked out in a worktree
+            # that a later attempt cannot prove it minted. Refusing that forever
+            # blocks the issue: every retry creates the same leftover. Adopt it
+            # by discarding it, but only when it provably holds no work.
+            if not self._worktree_holds_no_work(holder, timeout=timeout):
+                raise WorktreeCreationReceiptError(
+                    "implementation writer branch is held by an unowned worktree"
+                )
+            logger.warning(
+                "discarding an interrupted writer checkout at %s; it holds no work",
+                holder,
             )
+            self._remove_worktree_path_forcefully(holder, timeout=timeout)
         if self._implementation_writer_branch_exists(
             branch_name,
             reserved_remote_branch_sha=reserved_remote_branch_sha,
             timeout=timeout,
         ):
-            raise WorktreeCreationReceiptError(
-                "implementation writer branch is an unowned existing branch"
+            # The same interrupted attempt can leave only a local branch. Adopt
+            # it only when it holds no commit the base does not already have.
+            if not self._branch_holds_no_work(branch_name, timeout=timeout):
+                raise WorktreeCreationReceiptError(
+                    "implementation writer branch is an unowned existing branch"
+                )
+            logger.warning(
+                "discarding an interrupted writer branch %s; it holds no work",
+                branch_name,
+            )
+            run(
+                ["git", "branch", "-D", branch_name],
+                cwd=self.repo_root,
+                capture_output=True,
+                **_timeout_kw(timeout),
             )
         return False
+
+    def _branch_holds_no_work(self, branch_name: str, *, timeout: int | None = None) -> bool:
+        """Return whether a leftover branch carries no commit beyond the base."""
+        try:
+            base = self._resolve_base_branch(timeout=timeout)
+            ahead = run(
+                ["git", "rev-list", "--count", f"refs/remotes/origin/{base}..{branch_name}"],
+                cwd=self.repo_root,
+                capture_output=True,
+                **_timeout_kw(timeout),
+            ).stdout.strip()
+        except Exception as exc:
+            logger.warning("cannot prove %s holds no work: %s", branch_name, exc)
+            return False
+        return ahead == "0"
 
     def _implementation_writer_recovery(
         self, *, issue_number: int, worktree_path: Path
@@ -2463,6 +2502,29 @@ class WorktreeManager:
             raise
         except Exception as e:
             logger.error("Failed to prune worktrees: %s", e)
+
+    def _worktree_holds_no_work(self, worktree_path: Path, *, timeout: int | None = None) -> bool:
+        """Return whether a leftover checkout provably holds nothing worth keeping.
+
+        An interrupted attempt leaves a worktree the next attempt did not mint.
+        Adopting it is only safe when it has no uncommitted changes and no
+        commits that the base branch does not already contain.
+        """
+        try:
+            if not is_clean_working_tree(worktree_path, timeout=timeout):
+                return False
+            base = self._resolve_base_branch(timeout=timeout)
+            ahead = run(
+                ["git", "rev-list", "--count", f"refs/remotes/origin/{base}..HEAD"],
+                cwd=worktree_path,
+                capture_output=True,
+                **_timeout_kw(timeout),
+            ).stdout.strip()
+        except Exception as exc:
+            # An unreadable leftover is not proven empty, so keep it.
+            logger.warning("cannot prove %s holds no work: %s", worktree_path, exc)
+            return False
+        return ahead == "0"
 
     def _worktree_holding_branch(
         self,

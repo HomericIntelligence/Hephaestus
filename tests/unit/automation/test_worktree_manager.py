@@ -642,6 +642,74 @@ class TestWorktreeManager:
         remove.assert_not_called()
         assert writer.exists()
 
+    def test_worktree_holds_no_work_accepts_a_clean_checkout_at_the_base(
+        self, tmp_path: Path
+    ) -> None:
+        """A clean checkout with no commits beyond the base holds nothing."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        for key, value in (("user.email", "t@e.invalid"), ("user.name", "T")):
+            subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
+        (repo / "f.txt").write_text("one\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "first"], check=True)
+        head = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", head],
+            check=True,
+        )
+        writer = tmp_path / "writer"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "9-auto-impl", str(writer)],
+            check=True,
+        )
+
+        manager = WorktreeManager(repo_root=repo, base_branch="main")
+        assert manager._worktree_holds_no_work(writer, timeout=None) is True
+
+        # One local commit is work, and it must never be discarded.
+        (writer / "f.txt").write_text("two\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(writer), "commit", "-qam", "work"], check=True)
+        assert manager._worktree_holds_no_work(writer, timeout=None) is False
+
+        # An uncommitted change is also work.
+        (writer / "f.txt").write_text("three\n", encoding="utf-8")
+        assert manager._worktree_holds_no_work(writer, timeout=None) is False
+
+    def test_impl_writer_keeps_an_interrupted_checkout_that_holds_work(
+        self, worktree_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A leftover checkout with work is preserved and still blocks."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager(
+            remote_git_env={"GIT_ASKPASS": "/trusted/askpass"},
+            remote_git_config=("-c", "credential.helper=/trusted/helper"),
+        )
+        leftover = tmp_path / "leftover"
+
+        with (
+            patch.object(manager, "_registered_worktree_at_path", return_value=None),
+            patch.object(manager, "_worktree_holding_branch", return_value=leftover),
+            patch.object(manager, "_worktree_holds_no_work", return_value=False),
+            patch.object(manager, "_remove_worktree_path_forcefully") as remove,
+            pytest.raises(RuntimeError, match="unowned worktree"),
+            _real_handoff(tmp_path, 32) as handoff,
+        ):
+            manager.create_worktree(
+                32,
+                "32-auto",
+                source_lane="impl",
+                implementation_writer_handoff=handoff,
+            )
+
+        remove.assert_not_called()
+
     @pytest.mark.parametrize("branch_location", ["local", "remote"])
     def test_impl_writer_rejects_unowned_branch_reuse(
         self,
