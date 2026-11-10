@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import re
 import subprocess
 import threading
@@ -413,6 +414,7 @@ def _gh_call_impl(
     throttle: bool = True,
     shutdown: threading.Event | None = None,
     probe_rate_limit: bool = True,
+    executable: str = "gh",
 ) -> subprocess.CompletedProcess[str]:
     """Implement gh CLI call with rate limit handling (circuit breaker will wrap this).
 
@@ -430,6 +432,11 @@ def _gh_call_impl(
         track_process_group: Make the child available to host shutdown.
         throttle: Whether to acquire the global and per-thread throttle gates.
         probe_rate_limit: Whether error classification can request a reset time.
+        executable: Exact first argument of the command vector. The default is
+            the literal ``gh`` resolved through ``PATH``. An override must be
+            an absolute path supplied by a host-owned resolver such as
+            ``trusted_gh_executable()``; ``gh_call`` does not authorize an
+            arbitrary executable.
 
     Returns:
         CompletedProcess instance
@@ -449,7 +456,7 @@ def _gh_call_impl(
             if shutdown is not None:
                 process_options["shutdown"] = shutdown
             result = run_subprocess(
-                ["gh", *args],
+                [executable, *args],
                 check=check,
                 timeout=timeout if timeout is not None else gh_cli_timeout(),
                 log_on_error=log_on_error,
@@ -562,6 +569,7 @@ def _gh_call(
     throttle: bool = True,
     deadline_s: float | None = None,
     shutdown: threading.Event | None = None,
+    executable: str = "gh",
 ) -> subprocess.CompletedProcess[str]:
     """Call gh CLI with rate limit handling and circuit breaker protection.
 
@@ -582,6 +590,12 @@ def _gh_call(
             :func:`gh_cli_timeout`.
         track_process_group: Make the child available to host shutdown.
         throttle: Whether to acquire the global and per-thread throttle gates.
+        executable: Exact first command argument. The default literal ``gh``
+            uses the standard ``PATH`` lookup. An explicit override must be an
+            absolute path obtained from a host-owned resolver such as
+            ``trusted_gh_executable()``; any other relative path is rejected
+            before throttle and circuit-breaker work. The caller owns that
+            validation — ``gh_call`` does not authorize an arbitrary executable.
 
     Returns:
         CompletedProcess instance
@@ -594,6 +608,11 @@ def _gh_call(
         RuntimeError: For other non-transient or exhausted-retry failures.
 
     """
+    if executable != "gh" and not os.path.isabs(executable):
+        raise ValueError(
+            "gh_call executable override must be the default 'gh' or an absolute path "
+            "from a host-owned resolver such as trusted_gh_executable()"
+        )
     timeout, throttle = _prepare_gh_operation(
         timeout=timeout, throttle=throttle, deadline_s=deadline_s, shutdown=shutdown
     )
@@ -617,6 +636,7 @@ def _gh_call(
             "log_on_error": log_on_error,
             "timeout": timeout,
             "throttle": throttle,
+            "executable": executable,
         }
         if env is not None:
             kwargs["env"] = env

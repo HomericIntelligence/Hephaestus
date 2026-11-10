@@ -1,62 +1,12 @@
-"""Classify repository-local Git configuration that can change trusted commands."""
+"""Classify repository-local Git configuration that can change trusted commands.
+
+The classifier moved to :mod:`hephaestus.utils.git` so the library layer and
+the automation product layer share one rule. This module keeps the automation
+import path for current callers and test seams.
+"""
 
 from __future__ import annotations
 
+from hephaestus.utils.git import unsafe_local_git_config_key
 
-def unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
-    """Return an unsafe repository or worktree config key, if one exists."""
-    for entry in config.split("\0"):
-        if not entry:
-            continue
-        key, _separator, _value = entry.partition("\n")
-        normalized = key.lower()
-        if normalized in {
-            "core.askpass",
-            "core.attributesfile",
-            "core.excludesfile",
-            "core.fsmonitor",
-            "core.gitproxy",
-            "core.hookspath",
-            "core.pager",
-            "core.sshcommand",
-            "core.worktree",
-        }:
-            return key
-        if normalized in {"diff.external", "interactive.difffilter"}:
-            return key
-        if normalized.startswith("diff.") and normalized.rsplit(".", 1)[-1] in {
-            "command",
-            "textconv",
-        }:
-            return key
-        if normalized == "credential.helper" or (
-            normalized.startswith("credential.") and normalized.endswith(".helper")
-        ):
-            return key
-        if normalized.startswith("remote.") and normalized.rsplit(".", 1)[-1] in {
-            "proxy",
-            "proxyauthmethod",
-            "pushurl",
-            "receivepack",
-            "uploadpack",
-            "vcs",
-        }:
-            return key
-        if normalized in {"fetch.recursesubmodules", "submodule.recurse"}:
-            return key
-        if normalized.startswith(("include.", "includeif.")):
-            return key
-        if normalized.startswith("filter.") and normalized.rsplit(".", 1)[-1] in {
-            "clean",
-            "process",
-            "smudge",
-        }:
-            return key
-        if normalized.startswith("merge.") and normalized.endswith(".driver"):
-            return key
-        # A checkout-specific URL rewrite can transform the validated literal
-        # GitHub origin when it is later passed to ``git fetch``. Any local HTTP
-        # configuration can proxy traffic or change TLS verification or certificate trust.
-        if normalized.startswith(("http.", "url.")):
-            return key
-    return None
+__all__ = ["unsafe_local_git_config_key"]

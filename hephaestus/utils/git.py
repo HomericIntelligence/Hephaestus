@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -191,8 +192,16 @@ def run_git(
     input_text: str | None = None,
     retries: int | None = None,
     shutdown: threading.Event | None = None,
+    pre_launch: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run git through the repository's standard subprocess helper."""
+    """Run git through the repository's standard subprocess helper.
+
+    The optional ``pre_launch`` validator runs once for each actual Git
+    attempt, immediately before process creation, and after dry-run handling.
+    Network retry classification does not change: a validator exception is
+    never retried as a network failure and propagates to the caller without
+    starting the child process. A dry run never calls the validator.
+    """
     if not capture_output or not text:
         raise ValueError("run_git always captures text output through run_subprocess")
 
@@ -213,6 +222,8 @@ def run_git(
         if shutdown is not None:
             kwargs["shutdown"] = shutdown
             kwargs["track_process_group"] = True
+        if pre_launch is not None:
+            kwargs["pre_launch"] = pre_launch
         return run_subprocess(
             ["git", *normalized_args],
             env=env if env is not None else build_git_signing_env(),
@@ -350,6 +361,73 @@ def git_rev_list_count(
     return int(result.stdout.strip())
 
 
+def unsafe_local_git_config_key(config: str) -> str | None:  # noqa: C901
+    """Return an unsafe repository or worktree config key, if one exists.
+
+    The classifier reads ``git config --file <path> --no-includes --null --list``
+    output and names the first key that can change trusted command behavior:
+    hooks, diff and filter drivers, credential helpers, remote transports or
+    push targets, recursion controls, includes, merge drivers, and URL or HTTP
+    rewrites. The library layer owns the classification so every subprocess
+    boundary shares one rule.
+    """
+    for entry in config.split("\0"):
+        if not entry:
+            continue
+        key, _separator, _value = entry.partition("\n")
+        normalized = key.lower()
+        if normalized in {
+            "core.askpass",
+            "core.attributesfile",
+            "core.excludesfile",
+            "core.fsmonitor",
+            "core.gitproxy",
+            "core.hookspath",
+            "core.pager",
+            "core.sshcommand",
+            "core.worktree",
+        }:
+            return key
+        if normalized in {"diff.external", "interactive.difffilter"}:
+            return key
+        if normalized.startswith("diff.") and normalized.rsplit(".", 1)[-1] in {
+            "command",
+            "textconv",
+        }:
+            return key
+        if normalized == "credential.helper" or (
+            normalized.startswith("credential.") and normalized.endswith(".helper")
+        ):
+            return key
+        if normalized.startswith("remote.") and normalized.rsplit(".", 1)[-1] in {
+            "proxy",
+            "proxyauthmethod",
+            "pushurl",
+            "receivepack",
+            "uploadpack",
+            "vcs",
+        }:
+            return key
+        if normalized in {"fetch.recursesubmodules", "submodule.recurse"}:
+            return key
+        if normalized.startswith(("include.", "includeif.")):
+            return key
+        if normalized.startswith("filter.") and normalized.rsplit(".", 1)[-1] in {
+            "clean",
+            "process",
+            "smudge",
+        }:
+            return key
+        if normalized.startswith("merge.") and normalized.endswith(".driver"):
+            return key
+        # A checkout-specific URL rewrite can transform the validated literal
+        # GitHub origin when it is later passed to ``git fetch``. Any local HTTP
+        # configuration can proxy traffic or change TLS verification or certificate trust.
+        if normalized.startswith(("http.", "url.")):
+            return key
+    return None
+
+
 def _remote_ref_candidates(ref: str) -> set[str]:
     """Return exact advertised refs that satisfy ``ref``."""
     candidates = {ref}
@@ -450,5 +528,6 @@ __all__ = [
     "in_git_repo",
     "repo_root",
     "run_git",
+    "unsafe_local_git_config_key",
     "working_tree_clean",
 ]

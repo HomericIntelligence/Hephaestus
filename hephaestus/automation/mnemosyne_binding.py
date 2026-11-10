@@ -14,7 +14,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
-from hephaestus.automation.remote_git import (
+from hephaestus.github.remote_git import (
     trusted_gh_authenticated,
     trusted_gh_executable,
     trusted_remote_git_config,

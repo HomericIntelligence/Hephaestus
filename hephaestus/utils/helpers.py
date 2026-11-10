@@ -622,6 +622,7 @@ def run_subprocess(
     input_text: str | None = None,
     remaining_timeout: Callable[[], int | float] | None = None,
     max_output_bytes: int | None = None,
+    pre_launch: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run subprocess command with proper error handling.
 
@@ -641,6 +642,10 @@ def run_subprocess(
         remaining_timeout: Optional operation budget callback. It is checked
             directly before and after tracked process creation.
         max_output_bytes: Optional combined standard-output byte limit.
+        pre_launch: Optional validator called once, after dry-run handling and
+            immediately before process creation. A dry run never calls it, and
+            an exception from the validator propagates without starting any
+            child process.
 
     Returns:
         Completed process object
@@ -665,6 +670,9 @@ def run_subprocess(
     cid = get_current_correlation_id()
     if cid:
         effective_env["GH_TRACE_ID"] = cid
+
+    if pre_launch is not None:
+        pre_launch()
 
     try:
         if (

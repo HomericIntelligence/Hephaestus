@@ -90,7 +90,7 @@ from hephaestus.agents.workspace import (
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.first_publication_recovery import FirstPublicationStore
-from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
+from hephaestus.utils.git import unsafe_local_git_config_key
 from hephaestus.automation.git_runtime import (
     current_operation_shutdown,
     operation_file_lock,
@@ -220,14 +220,14 @@ from hephaestus.automation.pyxis_artifact_io import (
     bind_cross_node_root,
 )
 from hephaestus.automation.rebase_recovery import PendingRebaseStore
-from hephaestus.automation.remote_git import (
-    trusted_gh_executable as _shared_trusted_gh_executable,
-    trusted_remote_git_config as _shared_trusted_remote_git_config,
-)
 from hephaestus.automation.repo_intake import (
     RepoIntakeError,
     RepoIntakeManager,
     repository_worker_path_is_valid,
+)
+from hephaestus.github.remote_git import (
+    trusted_gh_executable as _shared_trusted_gh_executable,
+    trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
 from hephaestus.automation.repository_validation_runtime import (
     AdmittedRuntime,
@@ -300,7 +300,10 @@ from hephaestus.resilience import (
 )
 from hephaestus.resilience.subprocess_resilience import is_transient_subprocess_error
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
-from hephaestus.utils.git import _is_full_commit_sha
+from hephaestus.utils.git import (
+    _is_full_commit_sha,
+    unsafe_local_git_config_key,
+)
 from hephaestus.utils.helpers import get_repo_root, run_subprocess
 from hephaestus.utils.worktree_identity import source_worktree_name
 
