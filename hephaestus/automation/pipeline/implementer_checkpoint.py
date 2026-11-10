@@ -39,7 +39,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation.agent_config import AGENT_IMPLEMENTER, implementer_checkpoint_interval_s
+from hephaestus.agents.invocation_config import AGENT_IMPLEMENTER
+from hephaestus.automation.agent_config import implementer_checkpoint_interval_s
 from hephaestus.io.utils import write_secure
 from hephaestus.prompts import PromptCatalog
 from hephaestus.utils.git import _is_full_commit_sha, run_git

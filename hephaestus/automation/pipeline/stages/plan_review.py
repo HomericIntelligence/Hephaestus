@@ -70,9 +70,11 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import WorkspaceBinding
-from hephaestus.automation.agent_config import (
+from hephaestus.agents.invocation_config import (
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,
+)
+from hephaestus.automation.agent_config import (
     plan_reviewer_claude_timeout,
     planner_claude_timeout,
     planner_model,

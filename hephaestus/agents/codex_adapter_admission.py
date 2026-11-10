@@ -2331,7 +2331,7 @@ class _IsolatedAdapterProcess:
         self._closed = False
         self._close_complete = False
         self._session_nonce = secrets.token_hex(32)
-        protocol_path = Path(__file__).parents[1] / "agents" / "codex_isolation.py"
+        protocol_path = Path(__file__).parent / "codex_isolation.py"
         try:
             protocol_source = protocol_path.read_bytes()
         except OSError as exc:

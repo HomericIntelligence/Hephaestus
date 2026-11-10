@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
-from hephaestus.automation.pyxis_artifact_io import (
+from hephaestus.agents.pyxis_artifact_io import (
     CrossNodePathBinding,
     PyxisArtifactIOError,
     stage_private_content_addressed_file,

@@ -39,9 +39,11 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 from hephaestus.agents.workspace import WorkspaceBinding
-from hephaestus.automation.agent_config import (
+from hephaestus.agents.invocation_config import (
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,
+)
+from hephaestus.automation.agent_config import (
     advise_claude_timeout,
     advise_model,
     plan_reviewer_claude_timeout,

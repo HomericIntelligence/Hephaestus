@@ -32,10 +32,10 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-import hephaestus.automation.subprocess_registry as subprocess_registry
+import hephaestus.utils.subprocess_registry as subprocess_registry
 from hephaestus.agents.model_selection import parse_model_selection
 from hephaestus.agents.session_errors import AgentSessionLostError
-from hephaestus.automation.agent_config import (
+from hephaestus.agents.invocation_config import (
     agent_default_timeout,
     fallback_model,
     resolve_session_jsonl_path,
@@ -202,9 +202,9 @@ def invoke_claude_with_session(
     Args:
         repo: Repository slug (e.g. ``"Scylla"``).
         issue: Issue number — leading ``#`` is stripped by
-            :func:`agent_config.session_name`.
+            :func:`invocation_config.session_name`.
         agent: One of the ``AGENT_*`` constants in
-            :mod:`hephaestus.automation.agent_config`.
+            :mod:`hephaestus.agents.invocation_config`.
         prompt: Prompt text. Passed as a positional argv unless
             ``input_via_stdin`` is True.
         model: ``MODEL[:EFFORT]`` value. Claude uses the base model and its
@@ -212,7 +212,7 @@ def invoke_claude_with_session(
             session never crosses models.
         cwd: Working directory for the subprocess.
         timeout: Subprocess timeout in seconds. When omitted, resolves to the
-            generic :func:`agent_config.agent_default_timeout` (7200s) — this
+            generic :func:`invocation_config.agent_default_timeout` (7200s) — this
             entry point is shared by every agent type, so no phase-specific
             budget is assumed (#1415).
         system_prompt_file: Optional ``--system-prompt`` file.
@@ -406,7 +406,7 @@ def _run_tracked(
 
     Spawns the child in its OWN session (``start_new_session=True``) so it leads
     its own process group, and registers that group with
-    :mod:`~hephaestus.automation.subprocess_registry` for the duration of the
+    :mod:`~hephaestus.utils.subprocess_registry` for the duration of the
     call. A pipeline teardown (``WorkerPool.shutdown``) can then ``SIGTERM`` the
     group and free the blocked worker thread instead of leaking a runaway
     ``claude`` child (#2059). On timeout the group is killed before re-raising so

@@ -29,7 +29,7 @@ from hephaestus.automation.pipeline.host_capabilities import (
     SigningConfigurationError,
 )
 from hephaestus.automation.pipeline.jobs import JobResult
-from hephaestus.automation.pyxis_artifact_io import CrossNodePathBinding
+from hephaestus.agents.pyxis_artifact_io import CrossNodePathBinding
 from hephaestus.automation.source_worktree import _PreparationDeadline
 from hephaestus.config.child_environments import read_approved_parent_env
 

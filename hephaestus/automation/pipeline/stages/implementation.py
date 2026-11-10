@@ -60,8 +60,8 @@ from hephaestus.agents.workspace import (
     WorkspaceBinding,
     WorkspaceKind,
 )
+from hephaestus.agents.invocation_config import AGENT_IMPLEMENTER
 from hephaestus.automation.agent_config import (
-    AGENT_IMPLEMENTER,
     advise_claude_timeout,
     advise_model,
     git_message_agent_timeout,

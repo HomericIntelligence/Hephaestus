@@ -40,8 +40,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, cast
 
 import hephaestus.agents.runtime as agent_runtime
-import hephaestus.automation.claude_invoke as claude_invoke
-import hephaestus.automation.codex_adapter_admission as codex_adapter_admission
+import hephaestus.agents.claude_invoke as claude_invoke
+import hephaestus.agents.codex_adapter_admission as codex_adapter_admission
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.pipeline.codex_worktree_boundary as codex_worktree_boundary
 import hephaestus.utils.subprocess_registry as subprocess_registry
@@ -87,7 +87,7 @@ from hephaestus.agents.workspace import (
     WorkspaceKind,
     validate_workspace_binding,
 )
-from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
+from hephaestus.agents.invocation_config import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.first_publication_recovery import FirstPublicationStore
 from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
@@ -215,7 +215,7 @@ from hephaestus.automation.pipeline.tool_scopes import (
 from hephaestus.automation.pipeline_github_review_validation import validation_plan_for_workspace
 from hephaestus.automation.podman_machine_supervisor import validate_podman_machine_name
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
-from hephaestus.automation.pyxis_artifact_io import (
+from hephaestus.agents.pyxis_artifact_io import (
     CrossNodePathBinding,
     bind_cross_node_root,
 )

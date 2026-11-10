@@ -17,8 +17,8 @@ import typing as _typing
 from dataclasses import dataclass
 from typing import Any, cast
 
+from hephaestus.agents.invocation_config import AGENT_PR_REVIEWER
 from hephaestus.automation.agent_config import (
-    AGENT_PR_REVIEWER,
     pr_reviewer_claude_timeout,
     reviewer_model,
 )
