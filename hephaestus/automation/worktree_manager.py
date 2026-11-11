@@ -1252,9 +1252,9 @@ class WorktreeManager:
     def _branch_holds_no_work(self, branch_name: str, *, timeout: int | None = None) -> bool:
         """Return whether a leftover branch carries no commit beyond the base."""
         try:
-            base = self._resolve_base_branch(timeout=timeout)
+            base = self._base_ref(timeout=timeout)
             ahead = run(
-                ["git", "rev-list", "--count", f"refs/remotes/origin/{base}..{branch_name}"],
+                ["git", "rev-list", "--count", f"{base}..{branch_name}"],
                 cwd=self.repo_root,
                 capture_output=True,
                 **_timeout_kw(timeout),
@@ -2503,6 +2503,18 @@ class WorktreeManager:
         except Exception as e:
             logger.error("Failed to prune worktrees: %s", e)
 
+    def _base_ref(self, *, timeout: int | None = None) -> str:
+        """Return the base as a full ref, whichever form detection produced.
+
+        ``_resolve_base_branch`` yields either ``main`` or ``origin/main``
+        depending on how it detected the trunk; both name the same remote ref.
+        """
+        base = self._resolve_base_branch(timeout=timeout)
+        if base.startswith("refs/remotes/"):
+            return base
+        name = base.removeprefix("refs/heads/").removeprefix("origin/")
+        return f"refs/remotes/origin/{name}"
+
     def _worktree_holds_no_work(self, worktree_path: Path, *, timeout: int | None = None) -> bool:
         """Return whether a leftover checkout provably holds nothing worth keeping.
 
@@ -2513,9 +2525,9 @@ class WorktreeManager:
         try:
             if not is_clean_working_tree(worktree_path, timeout=timeout):
                 return False
-            base = self._resolve_base_branch(timeout=timeout)
+            base = self._base_ref(timeout=timeout)
             ahead = run(
-                ["git", "rev-list", "--count", f"refs/remotes/origin/{base}..HEAD"],
+                ["git", "rev-list", "--count", f"{base}..HEAD"],
                 cwd=worktree_path,
                 capture_output=True,
                 **_timeout_kw(timeout),
