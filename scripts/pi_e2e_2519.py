@@ -32,7 +32,9 @@ from hephaestus.agents.runtime import pi_private_redaction_tokens, redact_pi_pri
 from hephaestus.automation.athena_contract import load_athena_contract_receipt
 from hephaestus.automation.mnemosyne_binding import default_mnemosyne_root
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
-from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
+from hephaestus.automation.pipeline.stages.implementation.implementation import (
+    PRE_PR_TEST_ARGV,
+)
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import slugify

@@ -95,9 +95,9 @@ Repository and direct intake use the same row boundary. Intake does not write
  requests and safe pre-dispatch retries, not readiness polling. A recovered
  proof from an earlier process cannot grant merge authority.
  No queue stage invokes `gh pr merge` or uses an administrator bypass
- ([`pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py),
+ ([`pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review/pr_review.py),
  [`worker_pool.py`](../hephaestus/automation/pipeline/worker_pool.py),
- [`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
+ [`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait/merge_wait.py)).
 - **Globally bounded budgets.** Stages count retries on `_on_job_done` so
  `agent_error` retries consume the same per-item budget as ordinary
  attempts; cross-stage regression cycles terminate in finite steps
@@ -411,7 +411,7 @@ The implementation is in
 [`Coordinator._drain_direct_issue_source`](../hephaestus/automation/pipeline/coordinator.py),
 [`Coordinator._drain_repo_entry_source`](../hephaestus/automation/pipeline/coordinator.py),
 [`Coordinator._drain_repo_issue_sources`](../hephaestus/automation/pipeline/coordinator.py),
-[`RepoIssueSource`](../hephaestus/automation/pipeline/stages/repo.py), and
+[`RepoIssueSource`](../hephaestus/automation/pipeline/stages/repo/repo.py), and
 [`loop_repo_manager`](../hephaestus/automation/loop_repo_manager.py).
 
 ### Non-blocking retry / timer-park contract
@@ -425,9 +425,9 @@ key and parks the item on the heap
 ([`_timer_park`](../hephaestus/automation/pipeline/coordinator.py)).
 A missing key means "retry on the next drain tick" (no delay). There is no
 shared poll-delay cap.
-[`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)
+[`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait/merge_wait.py)
 caps the merge-retry delay and the merge poll delay at 60 seconds each, and
-[`repo.py`](../hephaestus/automation/pipeline/stages/repo.py) caps the
+[`repo.py`](../hephaestus/automation/pipeline/stages/repo/repo.py) caps the
 checkout-contention backoff at 60 seconds. The other RETRY delays are not
 capped.
 Timer parking releases the source-stage lease but retains the item's global
@@ -591,7 +591,7 @@ Key fields:
 - `result` ([`ItemResult`](../hephaestus/automation/pipeline/work_item.py)) —
  final `passed / reason / final_stage` written by
  [`_finish`](../hephaestus/automation/pipeline/coordinator.py).
-- `worktree`, `branch` — populated by [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py).
+- `worktree`, `branch` — populated by [`implementation`](../hephaestus/automation/pipeline/stages/implementation/implementation.py).
 
 ### [§`StageName`](../hephaestus/automation/pipeline/routing.py)
 
@@ -642,20 +642,20 @@ independent blocked state, and one absolute operator state:
 
 | Label | Group | Authoritative stage |
 |--------------------------------|--------------|---------------------------------|
-| `state:needs-plan` | planner-scope| [`planning.on_enter`](../hephaestus/automation/pipeline/stages/planning.py) |
-| `state:plan-no-go` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
-| `state:plan-go` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
-| `state:implementation-no-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) |
-| `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) — automated implementation eligibility |
+| `state:needs-plan` | planner-scope| [`planning.on_enter`](../hephaestus/automation/pipeline/stages/planning/planning.py) |
+| `state:plan-no-go` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review/plan_review.py) |
+| `state:plan-go` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review/plan_review.py) |
+| `state:implementation-no-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review/pr_review.py) |
+| `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review/pr_review.py) — automated implementation eligibility |
 | `state:blocked` | independent latch | external dependency or operator action |
-| `state:skip` | absolute | operator / confirmed semantic disposition in [`planning`](../hephaestus/automation/pipeline/stages/planning.py) / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) |
+| `state:skip` | absolute | operator / confirmed semantic disposition in [`planning`](../hephaestus/automation/pipeline/stages/planning/planning.py) / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review/pr_review.py) |
 
 Every **stage-issued** `state:skip` write uses the label as its durable
 authority and emits the reason to structured run logs. It does not add an
 issue comment, except that a confirmed obsolete disposition retains one
 bounded actor-owned explanation comment as audit context. Both seeding paths
 are read-only for tracker and epic candidates. Only
-[`planning`](../hephaestus/automation/pipeline/stages/planning.py) may add the
+[`planning`](../hephaestus/automation/pipeline/stages/planning/planning.py) may add the
 skip and supplemental semantic labels after two independent model decisions
 and exact label readback.
 
@@ -666,7 +666,7 @@ Provisioning script
 #### Ordered rank (`_LABEL_RANK`)
 
 Used by [`seeding.py`](../hephaestus/automation/pipeline/seeding.py) and
-[`planning.on_enter`](../hephaestus/automation/pipeline/stages/planning.py).
+[`planning.on_enter`](../hephaestus/automation/pipeline/stages/planning/planning.py).
 **NEVER use equality.** The at-or-past comparison is the only read the
 gate trusts:
 
@@ -707,7 +707,7 @@ GitHub reports `BLOCKED` with failing required checks routes the item back to
 tree and drives the checks green. When
 `state:implementation-no-go` is applied, Hephaestus runs
 `gh pr merge --disable-auto`
-([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait.py)).
+([`merge_wait.py`](../hephaestus/automation/pipeline/stages/merge_wait/merge_wait.py)).
 
 The coordinator records the cycle outcome in the durable event journal:
 
@@ -2077,7 +2077,7 @@ exact intended remote head permits completion after durable intent is checked.
 A competing head or failed observation blocks. Completed records remain
 available for a fresh request-bound callback; they do not permit another push.
 The existing
-[`implementation stage`](../hephaestus/automation/pipeline/stages/implementation.py)
+[`implementation stage`](../hephaestus/automation/pipeline/stages/implementation/implementation.py)
 accepts that callback before it advances to PR creation. An ambiguous crash
 before valid intent requires operator recovery. No recovery record grants
 source-review approval or merge authority.
@@ -2437,7 +2437,7 @@ product runtime.
 
 Hephaestus implementation work always runs
 `bash scripts/run_ci_local.sh all --rebuild` through the
-[`implementation`](../hephaestus/automation/pipeline/stages/implementation.py)
+[`implementation`](../hephaestus/automation/pipeline/stages/implementation/implementation.py)
 test-fix gate before commit, push, and PR creation. The fixed command executes
 the repository's locally executable required source checks and cannot be
 replaced by issue content or a generic test override. It rebuilds the CI image
@@ -2750,13 +2750,21 @@ Each collaborator owns an explicit responsibility:
 |---|---|---|
 | [`pipeline/coordinator.py`](../hephaestus/automation/pipeline/coordinator.py) | `coordinator_contract.py`, `coordinator_types.py`, `coordinator_runtime.py`, `coordinator_sources.py`, `coordinator_dispatch.py` | static host contract; configuration/types; event-loop runtime; source cursors; implementation admission |
 | [`pipeline_github.py`](../hephaestus/automation/pipeline_github.py) | `pipeline_github_contract.py`, `pipeline_github_transport.py`, `pipeline_github_queries.py`, `pipeline_github_reviews.py`, `pipeline_github_mutations.py` | static host contract; adapter construction; transport; reads; review evidence; non-review mutations |
-| [`pipeline/stages/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py) | `pr_review_threads.py`, `pr_review_verification.py`, `pr_review_diagnostics.py`, `pr_review_jobs.py`, `pr_review_gate.py` | public stage surface; thread parsing; host verification, diagnostics, and shared stage-diagnostic publication; jobs/worktrees; GO/NO-GO gate |
+| [`pipeline/stages/pr_review/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review/pr_review.py) | `pr_review_threads.py`, `pr_review_round_state.py`, `pr_review_jobs.py`, `pr_review_post.py`, `pr_review_gate.py` | public stage surface; thread parsing; round state; jobs/worktrees; review publication; GO/NO-GO gate |
 | [`pipeline/stages/durable_request.py`](../hephaestus/automation/pipeline/stages/durable_request.py) | `work_item.py` | shared pending GitHub request payload key and its two read predicates; each stage keeps its own pop timing, receipt keys, and terminal reasons |
 
 The automation entry modules own one-way dependencies. The Git-family
 collaborators move into the `hephaestus/git/` library subpackage under
 issues #3514 and #3517. The `pdoc` target list and this section follow the
 move in the same change.
+
+Each stage owns one package under `pipeline/stages/`. A stage module is
+`stages/<name>/<name>.py`, and the package `__init__` re-exports the stage
+names. The flat `stages/<name>.py` modules forward those names for the
+historical import paths. `stage_base.py` and `stage_github.py` stay flat beside
+the packages. A stage package may import one sibling package only: the plan
+review stage reads the planner's prompt builder. Architecture tests enforce the
+layout, the flat re-export identity, and the cross-stage edge set.
 
 The per-facade source budgets are no longer executable. The budget tests were
 removed with the non-core-library test re-scope. The `ruff-check-complexity`

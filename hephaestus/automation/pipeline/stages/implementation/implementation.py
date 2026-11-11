@@ -1,0 +1,4582 @@
+"""Run implementation work through the queue-owned writer stage.
+
+The stage checks issue and PR authority, prepares the writer, runs source
+jobs, records test results, and asks the host to commit, publish, and create
+or recover the PR. See ``docs/architecture.md`` for the queue contract.
+
+Source jobs use the accepted workspace binding. Host results update the
+source receipt. Plan scope reads use typed jobs. The address-review agent
+replies to and resolves its own review threads on GitHub.
+
+Only three events permit a rebase: initial implementation, a conflict at an
+exact reviewed GO head, or an explicit rebase request. An adopted PR and a
+review correction do not independently permit a rebase. The host owns Git
+and publication. A conflict agent can edit only the recorded conflict paths.
+
+Review evidence survives a rebase only when the host supplies the required
+proof. A durable review record needs fresh host verification after restart.
+PR review owns implementation labels and merge eligibility. This stage
+does not create merge eligibility.
+
+Ordinary implementation attempts include agent failures. Test-fix and
+conflict-resolution attempts have separate budgets from ``ctx.budget``.
+Consecutive Git failures have a bounded retry policy. Worktree preparation
+failures do not consume implementation attempts.
+
+After each edit-only conflict turn, ``REBASE_CONFLICT_VALIDATE_WAIT`` asks the
+host to classify the result before the host continues the rebase.
+
+PR creation is a durable publication step before the stage advances. A
+no-commit result reports incomplete work. It does not apply ``state:skip``
+or prove that the issue is complete. Failed or uncertain publication keeps
+its recovery evidence.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import secrets
+import shlex
+import sys
+import uuid
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, TypedDict, cast
+
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+from hephaestus.agents.runtime import requires_codex_implementation_isolation
+from hephaestus.agents.workspace import (
+    DirtySourceOperation,
+    SourceLane,
+    WorkspaceBinding,
+    WorkspaceKind,
+)
+from hephaestus.automation.agent_config import (
+    AGENT_IMPLEMENTER,
+    advise_claude_timeout,
+    advise_model,
+    git_message_agent_timeout,
+    implementer_claude_timeout,
+    implementer_model,
+    issue_auto_impl_branch_name,
+)
+from hephaestus.automation.commit_policy import normalize_strict_conventional_title
+from hephaestus.automation.pipeline.git_jobs import (
+    FIRST_PUBLICATION_CHECK_ARGV,
+    _strict_recovery_workspace,
+)
+from hephaestus.automation.pipeline.implementer_checkpoint import (
+    interval_from_config,
+    resume_context_for,
+    stamp_turn,
+)
+from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
+from hephaestus.automation.pr_body import replace_testing_section
+from hephaestus.automation.prompts.address_review import (
+    get_address_review_prompt,
+)
+from hephaestus.automation.prompts.implementation import (
+    get_dirty_direct_continuation_prompt,
+    get_dirty_reused_worktree_decision_prompt,
+    get_impl_resume_feedback_prompt,
+    get_implementation_prompt,
+    get_rebase_conflict_prompt,
+    get_scope_correction_directive,
+)
+from hephaestus.automation.prompts.pr_review import get_pr_description
+from hephaestus.automation.source_worktree import (
+    SourceWorkspaceError,
+    SourceWorkspaceManager,
+    SourceWorkspaceReceipt,
+    SourceWorkspaceRecoveryKind,
+    SourceWorkspaceTerminalReference,
+    normalize_source_workspace_creation_failure,
+)
+from hephaestus.automation.state_labels import (
+    STATE_BLOCKED,
+    STATE_IMPLEMENTATION_GO,
+    STATE_PLAN_GO,
+    is_implementation_go,
+    is_plan_go,
+    is_skipped,
+)
+from hephaestus.automation.test_summary import (
+    last_pytest_summary_line,
+    summary_reports_no_executed_test,
+)
+from hephaestus.automation.worktree_manager import ADOPTED_HEAD_FAILURES, BRANCH_WORKTREE_OWNED
+from hephaestus.prompts import PromptCatalog
+from hephaestus.utils.git import _is_full_digest
+
+from ...admission import dependency_block_reason, parse_issue_dependencies
+from ...coordinator_sessions import agent_session_lifecycle
+from ...diagnostics import redact_diagnostic_text
+from ...direct_scope_keys import (
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
+    DIRECT_SCOPE_RESERVATION_COLLISION_KEY,
+    DIRECT_SCOPE_RESERVATION_KEY,
+    DIRECT_SCOPE_STALE_STATE_KEY,
+    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
+    is_direct_scope_worktree_nonce,
+    is_full_commit_sha,
+)
+from ...github_jobs import (
+    CurrentPlanScopeRead,
+    GitHubJob,
+    ReadCurrentPlanScopeRequest,
+)
+from ...host_capabilities import CapabilityRequestTarget, HostCapabilityReceipt
+from ...host_verification_diagnostic import publish_host_verification_failure
+from ...jobs import (
+    WORKTREE_MATERIALIZED_KEY,
+    _writer_publication_matches_refresh,
+)
+from ...scope_retraction import (
+    SCOPE_VIOLATION_PATHS_KEY,
+    is_safe_scope_retraction_path,
+    scope_retraction_paths_for_threads,
+    validated_scope_violation_paths,
+)
+from ...stage_base import (
+    GIT_JOB_TIMEOUT_S,
+    AgentJob,
+    AthenaSkillJob,
+    AthenaSkillRequest,
+    AthenaSkillResult,
+    BuildTestJob,
+    Continue,
+    Disposition,
+    GitJob,
+    JobRequest,
+    JobResult,
+    Stage,
+    StageContext,
+    StageOutcome,
+    StepResult,
+    WorkItem,
+    _is_confirmed_open_unarmed,
+    _require_issue_labels,
+    _terminal_pr_outcome,
+    _worktree_path,
+    agent_provider,
+    athena_advise_failure_reason,
+    stage_model,
+    stage_network_deadline,
+    stage_timeout,
+)
+from ..durable_request import PENDING_GITHUB_REQUEST
+
+logger = logging.getLogger(__name__)
+
+
+class _CodexIsolationJobKwargs(TypedDict):
+    """Type the trusted Codex isolation values on implementation jobs."""
+
+    codex_isolation_adapter: str | None
+    codex_isolation_deployment_lock: Path | None
+    codex_isolation_deployment_lock_sha256: str | None
+
+
+def _codex_isolation_job_kwargs(ctx: StageContext) -> _CodexIsolationJobKwargs:
+    """Return explicit Codex inputs only for the selected Codex provider."""
+    if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
+        return {
+            "codex_isolation_adapter": None,
+            "codex_isolation_deployment_lock": None,
+            "codex_isolation_deployment_lock_sha256": None,
+        }
+    return {
+        "codex_isolation_adapter": ctx.config.codex_isolation_adapter,
+        "codex_isolation_deployment_lock": ctx.config.codex_isolation_deployment_lock,
+        "codex_isolation_deployment_lock_sha256": (
+            ctx.config.codex_isolation_deployment_lock_sha256
+        ),
+    }
+
+
+_CODEX_PUBLICATION_SCOPE_KEY = "_codex_publication_scope"
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexPublicationScope:
+    """Bind publication paths to one issue and one captured plan body."""
+
+    repository: tuple[str, str]
+    issue: int
+    plan_sha256: str
+    paths: tuple[str, ...]
+
+
+def _capture_codex_publication_scope(
+    item: WorkItem,
+    ctx: StageContext,
+) -> JobRequest | StageOutcome | None:
+    """Freeze one accepted plan scope before Codex implementation starts."""
+    if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
+        return None
+    if item.issue is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_plan_unavailable")
+    captured = item.payload.get(_CODEX_PUBLICATION_SCOPE_KEY)
+    if captured is not None:
+        if (
+            type(captured) is not _CodexPublicationScope
+            or captured.repository != (ctx.org, item.repo)
+            or captured.issue != item.issue
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_claims_invalid")
+        return None
+    if pending := _require_plan_scope(item, ctx):
+        return pending
+    paths, scope_digest = _pretest_scope(item, ctx)
+    item.payload[_CODEX_PUBLICATION_SCOPE_KEY] = _CodexPublicationScope(
+        repository=(ctx.org, item.repo),
+        issue=item.issue,
+        plan_sha256=scope_digest,
+        paths=paths,
+    )
+    _consume_plan_scope(item)
+    return None
+
+
+def _codex_publication_kwargs(
+    item: WorkItem,
+    ctx: StageContext,
+    publish_base_sha: object,
+) -> dict[str, object] | StageOutcome:
+    """Return the frozen Codex publication scope or one closed failure."""
+    if not requires_codex_implementation_isolation(agent_provider(ctx, "implementer")):
+        return {}
+    if not is_full_commit_sha(publish_base_sha):
+        return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_base_invalid")
+    captured = item.payload.get(_CODEX_PUBLICATION_SCOPE_KEY)
+    if (
+        type(captured) is not _CodexPublicationScope
+        or captured.repository != (ctx.org, item.repo)
+        or captured.issue != item.issue
+        or not captured.paths
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "codex_publication_scope_claims_invalid")
+    return {
+        "allowed_paths": captured.paths,
+        "scope_history_base_sha": publish_base_sha,
+    }
+
+
+RUNNER_FAILURE_MARKER = "_".join(("HEPHAESTUS", "CI", "RUNNER", "FAILURE")) + ":"
+RUNNER_FALLBACK_REASONS = frozenset(
+    {
+        "container-engine-absent",
+        "container-engine-unavailable",
+        "container-start-failed",
+    }
+)
+_REBASE_CONFLICT_RESOLUTION_KEY = "rebase_conflict_resolution"
+_REBASE_CONFLICT_DIAGNOSIS_KEY = "rebase_conflict_resolution_diagnostic"
+_REBASE_CONFLICT_AGENT_SUMMARY_KEY = "rebase_conflict_agent_summary"
+_REBASE_CONFLICT_VALIDATION_KEY = "rebase_conflict_validation_result"
+_REBASE_CONFLICT_CONTEXT_VERSION = 1
+_REBASE_CONFLICT_RETRYABLE = frozenset({"no_edit", "residual_markers"})
+_REBASE_CONFLICT_OUTCOMES = frozenset(
+    {"no_edit", "residual_markers", "out_of_scope_edit", "resolved_content"}
+)
+
+# In-memory mini-states (stage-local strings, never GitHub labels).
+ENTER = "ENTER"
+GATE = "GATE"
+WORKTREE_WAIT = "WORKTREE_WAIT"
+DIRTY_DIRECT_CLAIM_WAIT = "DIRTY_DIRECT_CLAIM_WAIT"
+DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
+DIRTY_RECOVERY_WAIT = "DIRTY_RECOVERY_WAIT"
+REBASE_WAIT = "REBASE_WAIT"
+REBASE_AGENT_WAIT = "REBASE_AGENT_WAIT"
+REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
+REBASE_CONFLICT_REFRESH_WAIT = "REBASE_CONFLICT_REFRESH_WAIT"
+REBASE_CONFLICT_VALIDATE_WAIT = "REBASE_CONFLICT_VALIDATE_WAIT"
+REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
+_REBASE_RESUME_STATES = frozenset(
+    {
+        REBASE_WAIT,
+        REBASE_AGENT_WAIT,
+        REBASE_CONFLICT_WAIT,
+        REBASE_CONFLICT_REFRESH_WAIT,
+        REBASE_CONFLICT_VALIDATE_WAIT,
+        REBASE_CONTINUE_WAIT,
+    }
+)
+_REBASE_AGENT_INFLIGHT = "rebase_agent_inflight"
+_REBASE_DISCOVERY_PENDING = "rebase_discovery_pending"
+_REBASE_DISCOVERY_CHECKED = "rebase_discovery_checked"
+_REBASE_DISCOVERY_FAILED = "rebase_discovery_failed"
+#: Upper bound for the retained rebase discovery cause.
+_REBASE_DIAGNOSTIC_MAX = 500
+_PUBLICATION_DISCOVERY_PENDING = "first_publication_discovery_pending"
+_PUBLICATION_DISCOVERY_CHECKED = "first_publication_discovery_checked"
+_PUBLICATION_DISCOVERY_FAILED = "first_publication_discovery_failed"
+_PUBLICATION_REBASE_RESUME = "first_publication_rebase_resume"
+_PUBLICATION_RECOVERY_PENDING = "first_publication_recovery_pending"
+_PUBLICATION_RECOVERY_FAILED = "first_publication_recovery_failed"
+_PUBLICATION_RECOVERY_COMPLETE = "first_publication_recovery_complete"
+ADOPTED = "ADOPTED"
+ADVISE_WAIT = "ADVISE_WAIT"
+IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
+TEST_WAIT = "TEST_WAIT"
+TESTFIX_WAIT = "TESTFIX_WAIT"
+COMMIT_PUSH_WAIT = "COMMIT_PUSH_WAIT"
+PR_CREATE = "PR_CREATE"
+
+_STEP_HANDLER_NAMES: dict[str, str] = {
+    ENTER: "_enter",
+    GATE: "_gate",
+    WORKTREE_WAIT: "_worktree_wait",
+    DIRTY_DIRECT_CLAIM_WAIT: "_dirty_direct_claim_wait",
+    DIRTY_DECISION_WAIT: "_dirty_decision_wait",
+    DIRTY_RECOVERY_WAIT: "_dirty_recovery_wait",
+    REBASE_WAIT: "_rebase_wait",
+    REBASE_AGENT_WAIT: "_rebase_agent_wait",
+    REBASE_CONFLICT_WAIT: "_rebase_conflict_wait",
+    REBASE_CONFLICT_REFRESH_WAIT: "_rebase_conflict_refresh_wait",
+    REBASE_CONFLICT_VALIDATE_WAIT: "_rebase_conflict_validate_wait",
+    REBASE_CONTINUE_WAIT: "_rebase_continue_wait",
+    ADOPTED: "_adopted",
+    ADVISE_WAIT: "_advise_wait",
+    IMPLEMENT_WAIT: "_implement_wait",
+    TEST_WAIT: "_test_wait",
+    TESTFIX_WAIT: "_testfix_wait",
+    COMMIT_PUSH_WAIT: "_commit_push_wait",
+    PR_CREATE: "_create_pr",
+}
+
+_DEPENDENCY_RETRY_DELAY_S = 1.0
+
+_PLAN_SCOPE_RECEIPT = "_implementation_plan_scope_receipt"
+_PLAN_SCOPE_STATE = "_implementation_plan_scope_state"
+_PLAN_SCOPE_FAILURE = "_implementation_plan_scope_failure"
+_DIRTY_FINALIZATION_INFLIGHT = "_dirty_direct_finalization_inflight"
+_DIRTY_FINALIZATION_RESULT = "_dirty_direct_finalization_result"
+_SYNC_RESTORED_WRITER_BEFORE_REBASE = "sync_restored_writer_before_rebase"
+_REBASE_HEAD_DRIFT = "rebase_head_drift"
+_DIRTY_CONTENT_SNAPSHOT_KEYS = {
+    "index_sha256",
+    "worktree_sha256",
+    "untracked_sha256",
+}
+
+
+def _is_valid_dirty_content_snapshot(value: object) -> bool:
+    """Return whether a dirty content snapshot has the closed digest schema."""
+    return (
+        isinstance(value, dict)
+        and set(value) == _DIRTY_CONTENT_SNAPSHOT_KEYS
+        and all(_is_full_digest(digest) for digest in value.values())
+    )
+
+
+def _live_dependency_block_reason(item: WorkItem, ctx: StageContext) -> str | None:
+    """Read the current issue body and return a safe dependency hold reason."""
+    issue = _issue_number(item)
+    deadline_s = stage_network_deadline(ctx)
+    try:
+        with ctx.github.operation_deadline(deadline_s, shutdown=ctx.cancellation):
+            snapshot = ctx.github.gh_issue_json(issue)
+        if not isinstance(snapshot, dict) or snapshot.get("number") != issue:
+            raise ValueError("issue identity is invalid")
+        state = snapshot.get("state")
+        if not isinstance(state, str) or state.upper() not in {"OPEN", "CLOSED"}:
+            raise ValueError("issue state is invalid")
+        body = snapshot.get("body")
+        if not isinstance(body, str):
+            raise ValueError("issue body is invalid")
+        dependencies = parse_issue_dependencies(body)
+        if not isinstance(dependencies, list) or any(
+            type(dependency) is not int or dependency <= 0 for dependency in dependencies
+        ):
+            raise ValueError("dependency declarations are invalid")
+        canonical_dependencies = tuple(sorted(set(dependencies)))
+        return dependency_block_reason(
+            canonical_dependencies,
+            ctx.github,
+            deadline_s=deadline_s,
+            shutdown=ctx.cancellation,
+        )
+    except Exception as error:
+        logger.warning(
+            "implementation:%d: dependency admission could not be verified: %s",
+            issue,
+            type(error).__name__,
+        )
+        return f"dependency #{issue} state could not be verified"
+
+
+def _dependency_retry(item: WorkItem, reason: str) -> StageOutcome:
+    """Park the same item without changing its implementation mini-state."""
+    item.payload["dependency_blocked_reason"] = reason
+    item.payload["retry_delay_s"] = _DEPENDENCY_RETRY_DELAY_S
+    return StageOutcome(Disposition.RETRY, reason)
+
+
+def _clear_dependency_retry(item: WorkItem) -> None:
+    """Remove an obsolete dependency retry marker after a successful read."""
+    if item.payload.pop("dependency_blocked_reason", None) is not None:
+        item.payload.pop("retry_delay_s", None)
+
+
+def _restore_work_item(item: WorkItem, snapshot: WorkItem) -> None:
+    """Restore item data that a deferred agent request prepared locally."""
+    item.__dict__.clear()
+    item.__dict__.update(snapshot.__dict__)
+
+
+def _issue_number(item: WorkItem) -> int:
+    """Return the issue number after the stage-level guard has run."""
+    if item.issue is None:
+        raise RuntimeError("implementation stage reached without an issue number")
+    return item.issue
+
+
+_SOURCE_WORKSPACE_RECOVERY_KEYS = frozenset(
+    {"kind", "item_number", "path", "receipt_path", "manual_action"}
+)
+_SOURCE_WORKSPACE_RECOVERY_KINDS = frozenset(kind.value for kind in SourceWorkspaceRecoveryKind)
+
+
+def _validated_source_workspace_recovery(
+    value: object, *, item_number: int
+) -> dict[str, object] | None:
+    """Return a complete, bounded source-workspace recovery record."""
+    if not isinstance(value, dict) or set(value) != _SOURCE_WORKSPACE_RECOVERY_KEYS:
+        return None
+    kind = value.get("kind")
+    recovery_item = value.get("item_number")
+    path = value.get("path")
+    receipt_path = value.get("receipt_path")
+    manual_action = value.get("manual_action")
+    if (
+        not isinstance(kind, str)
+        or kind not in _SOURCE_WORKSPACE_RECOVERY_KINDS
+        or isinstance(recovery_item, bool)
+        or not isinstance(recovery_item, int)
+        or recovery_item != item_number
+        or not isinstance(path, str)
+        or not path
+        or not isinstance(receipt_path, str)
+        or not isinstance(manual_action, str)
+        or not manual_action
+        or len(path) > 500
+        or len(receipt_path) > 500
+        or len(manual_action) > 2000
+    ):
+        return None
+    return {
+        "kind": kind,
+        "item_number": recovery_item,
+        "path": redact_diagnostic_text(path),
+        "receipt_path": redact_diagnostic_text(receipt_path),
+        "manual_action": redact_diagnostic_text(manual_action),
+    }
+
+
+def _commit_issue_metadata(item: WorkItem) -> tuple[str, str] | None:
+    """Return the closed issue snapshot for a Git commit job."""
+    title = item.payload.get("issue_title")
+    body = item.payload.get("issue_body")
+    if not isinstance(title, str) or not title.strip() or not isinstance(body, str):
+        return None
+    return title, body
+
+
+#: Max CONSECUTIVE transient git failures (worktree creation / commit+push)
+#: tolerated before the stage finishes failed (``git_error``) instead of
+#: RETRYing forever. Mirrors pr_review.REVIEW_ERROR_RETRY_CAP: transient
+#: failures never burn the implement budget, but a persistently broken
+#: remote must still terminate. Reset on any successful git job.
+GIT_ERROR_RETRY_CAP = 2
+_TERMINAL_GIT_LOCK_FAILURES = frozenset({"lock_timeout", "lock_metadata_error"})
+
+#: A pending shared-branch holder waits for the in-flight creator's completion
+#: instead of re-entering the implementation drain in a tight loop.
+BRANCH_WORKTREE_OWNER_PENDING_DELAY_S = 0.1
+
+#: Timeout for the optional pre-PR test run (mirrors the legacy
+#: ``_pr_create_phase`` bound; the budget that matters — ``test_fix`` —
+#: lives in ROUTES).
+PRE_PR_TEST_TIMEOUT_S = 1800
+
+#: Vetted pre-PR test command (BuildTestJob argv must never carry
+#: issue-derived strings).
+PRE_PR_TEST_ARGV: tuple[str, ...] = ("uv", "run", "pytest", "tests", "-q", "--tb=short")
+
+#: Hephaestus owns a canonical local entry point for every source check that
+#: can run before a PR exists.  Keep this fixed in trusted queue code: issue
+#: content and programmatic generic-test overrides must not weaken the gate.
+HEPHAESTUS_REQUIRED_CHECK_ARGV: tuple[str, ...] = (
+    "bash",
+    "scripts/run_ci_local.sh",
+    "all",
+    "--rebuild",
+)
+
+
+#: The required suite runs CI's formerly parallel jobs serially on a local
+#: host, so it needs a wider bound than one generic pytest invocation.
+HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S = 7200
+
+
+def _pre_pr_runner_handoff_reason(result: JobResult) -> str | None:
+    """Return the reason from one exact terminal runner protocol record."""
+    if result.ok or result.error != "rc=75":
+        return None
+    if RUNNER_FAILURE_MARKER in result.stdout_tail:
+        return None
+    diagnostic = result.stderr_tail
+    if not diagnostic.endswith("\n") or diagnostic.count(RUNNER_FAILURE_MARKER) != 1:
+        return None
+    terminal_record = diagnostic.splitlines()[-1]
+    prefix = f"{RUNNER_FAILURE_MARKER} "
+    if not terminal_record.startswith(prefix):
+        return None
+    reason = terminal_record.removeprefix(prefix)
+    if reason not in RUNNER_FALLBACK_REASONS:
+        return None
+    if terminal_record != f"{prefix}{reason}":
+        return None
+    return reason
+
+
+#: Bound on the quoted summary inside one receipt line. The test job keeps a
+#: 4000-character tail, so a summary can arrive with a long parameter list.
+_RECEIPT_SUMMARY_MAX = 200
+
+
+def _receipt_with_test_summary(receipt: str, result: JobResult) -> str:
+    """Append the last pytest summary line that the retained tails hold.
+
+    A green run reports what ran. When the tails hold no recognized summary,
+    the receipt keeps its command-only text and makes no claim.
+
+    Args:
+        receipt: The command and outcome text for the PR body.
+        result: The pre-PR test job result.
+
+    Returns:
+        The receipt, with the quoted summary and the no-execution marker when
+        the summary proves it.
+
+    """
+    summary = last_pytest_summary_line(result.stdout_tail, result.stderr_tail)
+    if summary is None:
+        return receipt
+    detail = summary
+    if len(detail) > _RECEIPT_SUMMARY_MAX:
+        detail = f"{detail[: _RECEIPT_SUMMARY_MAX - 1]}…"
+    text = f"{receipt}; last pytest summary: {detail}"
+    if summary_reports_no_executed_test(summary):
+        text += " (no test executed)"
+    return text
+
+
+def _refresh_pr_body_testing(item: WorkItem, ctx: StageContext) -> None:
+    """Refresh the open PR's ``## Testing`` text with the current receipt.
+
+    A remediation cycle runs the pre-PR tests again, so the reviewed pull
+    request must state the receipt that belongs to its head. The edit keeps
+    every other section. The receipt is evidence, not a gate: a failed read or
+    write warns and the stage continues.
+
+    Args:
+        item: The work item whose remediation cycle just completed.
+        ctx: The stage context that owns the GitHub accessor.
+
+    """
+    receipt = item.payload.get("test_receipt")
+    if item.pr is None or not isinstance(receipt, str) or not receipt.strip():
+        return
+    try:
+        body = ctx.github.get_pr_body(item.pr)
+        updated = replace_testing_section(body, receipt)
+        if updated == body:
+            return
+        ctx.github.update_pr_body(item.pr, updated)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "implementation:%s: PR #%s Testing refresh failed: %s; the receipt stays "
+            "in the run log and the next remediation cycle retries it",
+            item.issue,
+            item.pr,
+            exc,
+        )
+        return
+    logger.info("implementation:%s: refreshed PR #%s Testing section", item.issue, item.pr)
+
+
+def _native_pre_pr_fallback_is_authorized(item: WorkItem) -> bool:
+    """Return whether the current host can run the stored native fallback."""
+    return (
+        item.payload.get("pre_pr_runner_mode") == "native"
+        and item.payload.get("pre_pr_fallback_reason") in RUNNER_FALLBACK_REASONS
+        and sys.platform == "darwin"
+    )
+
+
+def _scope_retraction_kwargs(item: WorkItem) -> dict[str, object] | StageOutcome:
+    """Bind a requested scope restoration to its reviewed base."""
+    paths = item.payload.get("scope_retraction_paths")
+    if paths is None:
+        return {}
+    if (
+        not isinstance(paths, tuple)
+        or not paths
+        or not all(is_safe_scope_retraction_path(path) for path in paths)
+    ):
+        return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+    base_sha = item.payload.get("reviewed_pr_base_sha")
+    if not is_full_commit_sha(base_sha):
+        return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
+    return {"scope_retraction_paths": paths, "scope_retraction_base_sha": base_sha}
+
+
+#: The bounded unexpected paths that one implementation correction restores.
+_SCOPE_CORRECTION_PATHS = "scope_correction_paths"
+
+_COMMIT_PUSH_REFRESH = "_commit_push_refresh"
+_COMMIT_PUSH_TERMINAL = "_commit_push_terminal"
+
+
+def _valid_writer_refresh(value: object) -> bool:
+    """Accept only one exact host publication retry request."""
+    return (
+        isinstance(value, dict)
+        and set(value) == {"phase", "source_sha", "expected_remote_sha"}
+        and isinstance(value["phase"], str)
+        and value["phase"] in {"rebase", "publish"}
+        and is_full_commit_sha(value["source_sha"])
+        and is_full_commit_sha(value["expected_remote_sha"])
+    )
+
+
+def _valid_writer_publication_receipt(
+    item: WorkItem, receipt: dict[str, Any], refresh: Any
+) -> bool:
+    """Require closed facts and exact agreement with the pending retry."""
+    if not _writer_publication_matches_refresh(receipt, refresh):
+        return False
+    return DIRECT_SCOPE_RESERVATION_KEY not in item.payload and not (
+        item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY) is not None
+        and not item.payload.get("existing_pr")
+    )
+
+
+def _consume_writer_publication(item: WorkItem, result: JobResult) -> JobResult:
+    """Validate ordinary publication facts before selecting a retry."""
+    receipt = result.value if isinstance(result.value, dict) else {}
+    refresh = item.payload.get(_COMMIT_PUSH_REFRESH)
+    failure = receipt.get("writer_refresh_failure")
+    if failure is not None:
+        cause = (
+            {
+                "conflict": "commit_push_refresh_conflict",
+                "remote_changed_again": "commit_push_remote_changed_again",
+            }.get(failure, "commit_push_refresh_invalid")
+            if isinstance(failure, str)
+            else "commit_push_refresh_invalid"
+        )
+        item.payload[_COMMIT_PUSH_TERMINAL] = cause
+        return result
+    if "publication_state" not in receipt:
+        if refresh is not None or (result.error or "").startswith(
+            "source_workspace_ownership_unavailable:"
+        ):
+            item.payload[_COMMIT_PUSH_TERMINAL] = "commit_push_refresh_invalid"
+        return result
+    state = receipt.get("publication_state")
+    head = receipt.get("head_sha")
+    observed = receipt.get("observed_remote_sha")
+    success = isinstance(state, str) and state in {"published", "remote_at_source"}
+    valid = _valid_writer_publication_receipt(item, receipt, refresh) and result.ok is success
+    if not valid:
+        item.payload[_COMMIT_PUSH_TERMINAL] = "commit_push_refresh_invalid"
+        return replace(result, ok=False)
+    if success:
+        item.payload.pop(_COMMIT_PUSH_REFRESH, None)
+        item.payload.pop("git_error", None)
+        return replace(result, ok=True)
+    if state == "remote_changed":
+        if refresh is not None:
+            item.payload[_COMMIT_PUSH_TERMINAL] = "commit_push_remote_changed_again"
+        else:
+            item.payload[_COMMIT_PUSH_REFRESH] = {
+                "phase": "rebase",
+                "source_sha": head,
+                "expected_remote_sha": observed,
+            }
+    elif refresh is not None:
+        item.payload[_COMMIT_PUSH_REFRESH] = {
+            "phase": "publish",
+            "source_sha": head,
+            "expected_remote_sha": refresh["expected_remote_sha"],
+        }
+    return replace(result, ok=False)
+
+
+def _add_writer_refresh(
+    item: WorkItem, kwargs: dict[str, object], recovery: dict[str, Any]
+) -> StageOutcome | None:
+    """Copy only a valid ordinary refresh into the next Git job."""
+    if _COMMIT_PUSH_REFRESH not in item.payload:
+        return None
+    refresh = item.payload[_COMMIT_PUSH_REFRESH]
+    if not _valid_writer_refresh(refresh) or recovery or "expected_remote_sha" in kwargs:
+        return StageOutcome(Disposition.FINISH_FAIL, "commit_push_refresh_invalid")
+    kwargs["writer_refresh"] = dict(refresh)
+    return None
+
+
+def _pretest_scope(item: WorkItem, ctx: StageContext) -> tuple[tuple[str, ...], str]:
+    """Read the correlated plan scope returned for this stage operation."""
+    receipt = item.payload.get(_PLAN_SCOPE_RECEIPT)
+    if (
+        not isinstance(receipt, CurrentPlanScopeRead)
+        or receipt.request.repository != f"{ctx.org}/{item.repo}".casefold()
+        or receipt.request.issue_number != item.issue
+        or item.payload.get(_PLAN_SCOPE_STATE) != item.state
+    ):
+        raise ValueError("current implementation plan scope is unavailable")
+    return receipt.paths, receipt.plan_sha256
+
+
+def _consume_plan_scope(item: WorkItem) -> None:
+    """Retire current scope facts when their bounded operation is dispatched."""
+    item.payload.pop(_PLAN_SCOPE_RECEIPT, None)
+    item.payload.pop(_PLAN_SCOPE_STATE, None)
+
+
+def _require_plan_scope(item: WorkItem, ctx: StageContext) -> JobRequest | StageOutcome | None:
+    """Queue a current scope read before the stage can submit source work."""
+    if item.payload.get(_PLAN_SCOPE_FAILURE):
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_plan_scope_unavailable")
+    try:
+        _pretest_scope(item, ctx)
+        return None
+    except ValueError:
+        _consume_plan_scope(item)
+    pending = item.payload.get(PENDING_GITHUB_REQUEST)
+    if pending is not None:
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_plan_scope_request_conflict")
+    pending = ReadCurrentPlanScopeRequest(
+        repository=f"{ctx.org}/{item.repo}".casefold(),
+        issue_number=_issue_number(item),
+        deadline_s=stage_network_deadline(ctx),
+    )
+    item.payload[PENDING_GITHUB_REQUEST] = pending
+    return JobRequest(
+        GitHubJob(
+            repo=item.repo,
+            repo_root=Path(str(ctx.paths.repo_root)),
+            request=pending,
+            descr="read_current_plan_scope",
+        ),
+        on_done_state=item.state,
+    )
+
+
+def _validate_impl_workspace(item: WorkItem, binding: WorkspaceBinding) -> None:
+    """Check the source identity without changing the current item pin."""
+    if (
+        binding.kind is not WorkspaceKind.SOURCE
+        or binding.lane is not SourceLane.IMPLEMENTATION
+        or binding.item_number != item.issue
+        or binding.cwd != Path(item.worktree)
+        or binding.schema_version != 1
+        or binding.repository is None
+        or (binding.repository != item.repo and binding.repository.rsplit("/", 1)[-1] != item.repo)
+    ):
+        raise ValueError("implementation source binding changed")
+
+
+def _existing_impl_workspace(item: WorkItem) -> WorkspaceBinding:
+    """Read the current source binding without preparing a dirty writer again."""
+    binding = WorkspaceBinding.from_dict(item.payload["_impl_source_workspace"])
+    _validate_impl_workspace(item, binding)
+    if binding.revision != item.payload.get("_impl_source_revision"):
+        raise ValueError("implementation source revision changed")
+    return binding
+
+
+def _store_impl_source_metadata(item: WorkItem, value: dict[str, Any]) -> None:
+    """Accept one worker's matching source binding and immutable receipt."""
+    binding = WorkspaceBinding.from_dict(value["source_workspace"])
+    _validate_impl_workspace(item, binding)
+    try:
+        receipt = SourceWorkspaceReceipt.from_dict(value["source_receipt"])
+    except SourceWorkspaceError as exc:
+        raise ValueError("implementation source receipt is invalid") from exc
+    if (
+        binding.reusable_root is None
+        or receipt.to_binding(binding.reusable_root) != binding
+        or receipt.branch != item.branch
+    ):
+        raise ValueError("implementation source receipt does not match its binding")
+    item.payload["_impl_source_workspace"] = binding.to_dict()
+    item.payload["_impl_source_revision"] = binding.revision
+    item.payload["_impl_source_receipt"] = receipt
+
+
+def _existing_impl_receipt(item: WorkItem) -> SourceWorkspaceReceipt:
+    """Read the immutable receipt for the stage's current source binding."""
+    binding = _existing_impl_workspace(item)
+    receipt = item.payload.get("_impl_source_receipt")
+    if (
+        not isinstance(receipt, SourceWorkspaceReceipt)
+        or binding.reusable_root is None
+        or receipt.to_binding(binding.reusable_root) != binding
+        or receipt.branch != item.branch
+    ):
+        raise ValueError("implementation source receipt does not match its binding")
+    return receipt
+
+
+def _commit_push_request(item: WorkItem, ctx: StageContext) -> StepResult:
+    """Build one commit-and-push job from validated stage-owned data."""
+    issue = _issue_number(item)
+    agent = agent_provider(ctx, "implementer")
+    issue_metadata = _commit_issue_metadata(item)
+    if issue_metadata is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "implementation_issue_metadata_invalid")
+    issue_title, issue_body = issue_metadata
+    kwargs: dict[str, object] = {
+        "issue_number": issue,
+        "issue_title": issue_title,
+        "issue_body": issue_body,
+        "worktree_path": item.worktree,
+        "repo_root": str(ctx.paths.repo_root),
+        "branch": item.branch,
+        "agent": agent,
+        "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
+        "git_message_timeout": stage_timeout(ctx, "git_message", git_message_agent_timeout()),
+    }
+    kwargs["source_lane"] = SourceLane.IMPLEMENTATION.value
+    if item.payload.get("implementation_remediation"):
+        kwargs["implementation_remediation"] = True
+    if ctx.config.pi_dir is not None:
+        kwargs["pi_dir"] = ctx.config.pi_dir
+    publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
+        "_synced_default_branch_sha"
+    )
+    if is_full_commit_sha(publish_base_sha):
+        kwargs["publish_base_sha"] = publish_base_sha
+    publication_scope = _codex_publication_kwargs(item, ctx, publish_base_sha)
+    if isinstance(publication_scope, StageOutcome):
+        return publication_scope
+    kwargs.update(publication_scope)
+    if direct_error := _add_direct_publication_base(item, kwargs):
+        return direct_error
+    retraction_scope = _scope_retraction_kwargs(item)
+    if isinstance(retraction_scope, StageOutcome):
+        return retraction_scope
+    kwargs.update(retraction_scope)
+    if refresh_error := _add_writer_refresh(item, kwargs, {}):
+        return refresh_error
+    try:
+        workspace = _existing_impl_workspace(item)
+    except (KeyError, TypeError, ValueError):
+        return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
+    push_job = GitJob(
+        repo=item.repo,
+        op="commit_push",
+        workspace=workspace,
+        timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+        expected_repository=f"{ctx.org}/{item.repo}",
+        kwargs=kwargs,
+        descr="commit_push",
+    )
+    return JobRequest(push_job, on_done_state=PR_CREATE)
+
+
+def _add_direct_publication_base(item: WorkItem, kwargs: dict[str, object]) -> StageOutcome | None:
+    """Add the exact direct-writer reservation before publication."""
+    direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+    requires_fresh_direct_reservation = (
+        not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+    )
+    if requires_fresh_direct_reservation:
+        if not is_full_commit_sha(direct_base_sha):
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
+        kwargs["expected_remote_sha"] = direct_base_sha
+    return None
+
+
+def _scope_correction_is_valid(item: WorkItem, ctx: StageContext) -> bool:
+    """Return whether one bounded implementation correction can run.
+
+    The refused publication turn already counted its implement attempt on
+    completion, so this check only reads the budget: the correction's own
+    completion counts the next attempt. A missing or drifted worktree
+    binding leaves nothing to correct, so the terminal scope result stands.
+
+    Args:
+        item: The work item that holds the refused publication evidence.
+        ctx: The stage context that supplies the implement budget.
+
+    Returns:
+        True when a correction turn may run.
+
+    """
+    if item.attempts.get("implement", 0) >= ctx.budget("implement"):
+        return False
+    try:
+        _existing_impl_workspace(item)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _clear_remediation_cycle(item: WorkItem) -> None:
+    """Remove state that is valid only for the completed remediation cycle."""
+    item.payload.pop("implementation_remediation", None)
+    item.payload.pop("remediation_threads", None)
+
+
+def _consume_initial_rebase_reservation(item: WorkItem, result: JobResult) -> JobResult:
+    """Retain the exact remote reservation returned by initial preparation.
+
+    The recorded direct base also advances to the base the writer itself
+    published during the implementation-start rebase. The later
+    commit+push lease then pins the current remote state instead of the
+    superseded original reservation base.
+    """
+    if (
+        not result.ok
+        or item.payload.get("rebase_reason") != "implementation_start"
+        or DIRECT_SCOPE_RESERVATION_KEY not in item.payload
+    ):
+        return result
+    value = result.value if isinstance(result.value, dict) else {}
+    reservation = value.get("direct_scope_reservation")
+    if (
+        item.pr is not None
+        or not isinstance(reservation, dict)
+        or reservation.get("branch") != item.branch
+        or not is_full_commit_sha(reservation.get("base_sha"))
+        or reservation.get("base_sha") != value.get("head_sha")
+    ):
+        return JobResult(ok=False, error="initial rebase reservation receipt is invalid")
+    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = dict(reservation)
+    item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = reservation["base_sha"]
+    return result
+
+
+def _reset_dirty_direct_probe_for_retry(item: WorkItem) -> None:
+    """Re-arm the adoption probe for one hard-failed direct writer.
+
+    The lane's own implementation-start publish makes a fresh absent-only
+    reservation deterministic-fail, so a direct writer that hard-failed
+    must re-attempt lane adoption before the create-worktree path runs
+    again. An adopted lane never re-runs the probe.
+    """
+    if (
+        DIRECT_SCOPE_BASE_SHA_KEY in item.payload
+        and item.payload.get("dirty_direct_active") is not True
+    ):
+        item.payload["dirty_direct_checked"] = False
+
+
+def build_rebase_preparation_prompt() -> str:
+    """Return the read-only preparation task for the rebase agent."""
+    return PromptCatalog.current().apply_writing_standard(
+        "Inspect this worktree before the host rebases it onto origin/main. "
+        "Read source files to identify changes that can affect conflict resolution. "
+        "Do not edit files or run Git commands. The host will fetch main and begin "
+        "the rebase after you return. If the rebase has conflicts, the host will "
+        "give you the allowed conflict paths in a later turn. The host owns Git, "
+        "commit signing, and publication."
+    )
+
+
+def build_implementation_prompt(
+    issue_number: int,
+    issue_title: str = "",
+    issue_body: str = "",
+    branch_name: str = "",
+    worktree_path: str = "",
+    advise_findings: str = "",
+    scope_correction_paths: tuple[str, ...] = (),
+    resume_context: str = "",
+) -> str:
+    """Compose the implementation prompt with the advise-findings block.
+
+    Module-level composed builder (NOT a closure): :class:`AgentJob` is
+    frozen and prompt builders run in-worker, so the builder must be a
+    top-level function receiving everything via ``prompt_kwargs``. The base
+    prompt is reused verbatim via :func:`get_implementation_prompt`; the
+    findings block mirrors :func:`..planning.build_plan_prompt`.
+
+    Args:
+        issue_number: GitHub issue number to implement.
+        issue_title: Issue title.
+        issue_body: Issue body (fenced as untrusted by the base builder).
+        branch_name: Feature branch the worktree is on.
+        worktree_path: Worktree the implementer works in.
+        advise_findings: Advise-step findings; empty string means no block.
+        scope_correction_paths: Host-validated paths from a refused
+            publication. An empty tuple means no correction directive.
+        resume_context: Advisory checkpoint block for a retry after a
+            timeout. An empty string means no block.
+
+    Returns:
+        The full implementer prompt, with the findings block, the scope
+        correction directive, and the resume-context block appended when
+        each is present.
+
+    """
+    prompt = get_implementation_prompt(
+        issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        branch_name=branch_name,
+        worktree_path=worktree_path,
+    )
+    if advise_findings:
+        prompt += PromptCatalog.current().render(
+            "implementation/advise_append.j2",
+            advise_findings=advise_findings,
+        )
+    if scope_correction_paths:
+        prompt += get_scope_correction_directive(scope_correction_paths)
+    if resume_context:
+        prompt += resume_context
+    return prompt
+
+
+def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: str) -> str:
+    """Compose the resume prompt that feeds failing pre-PR test output back.
+
+    Reuses :func:`get_impl_resume_feedback_prompt` verbatim (doc section 4
+    step 7: "resume with test-failure feedback"), with the test failure
+    framed as supplemental implementation feedback.
+
+    Args:
+        issue_number: GitHub issue number being implemented.
+        prev_iteration: 0-based index of the failed test round.
+        test_output: Captured pytest output tail from the failing run.
+
+    Returns:
+        The resume prompt carrying the test-failure feedback block.
+
+    """
+    review_feedback = PromptCatalog.current().render(
+        "implementation/test_failure_review.j2", test_output=test_output
+    )
+    return get_impl_resume_feedback_prompt(
+        issue_number=issue_number,
+        prev_iteration=prev_iteration,
+        review_feedback=review_feedback,
+    )
+
+
+class ImplementationStage(Stage):
+    """Stage: gate plan GO, worktree, advise, implement, test, commit, PR."""
+
+    def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+        """Proceed with no durable writes; all entry checks live in GATE.
+
+        The doc's entry step (verify plan GO at-or-past + existing-PR fast
+        path) is the GATE mini-state, an [M] step of this stage — so a
+        restart re-runs it idempotently via step(). Nothing is written here.
+
+        Args:
+            item: The work item being processed.
+            ctx: The stage context.
+
+        Returns:
+            None (always proceed to step()), or FINISH_FAIL when the item
+            has no issue number.
+
+        """
+        if not item.issue:
+            logger.warning("implementation: work item has no issue number")
+            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if item.pr is None and not item.payload.get("dirty_direct_active"):
+            _consume_plan_scope(item)
+            item.payload.pop(_PLAN_SCOPE_FAILURE, None)
+            if isinstance(item.payload.get(PENDING_GITHUB_REQUEST), ReadCurrentPlanScopeRequest):
+                item.payload.pop(PENDING_GITHUB_REQUEST)
+        for key in (
+            _PUBLICATION_DISCOVERY_PENDING,
+            _PUBLICATION_DISCOVERY_CHECKED,
+            _PUBLICATION_DISCOVERY_FAILED,
+            _PUBLICATION_REBASE_RESUME,
+            _PUBLICATION_RECOVERY_PENDING,
+            _PUBLICATION_RECOVERY_FAILED,
+            _PUBLICATION_RECOVERY_COMPLETE,
+            "first_publication_candidate",
+            "first_publication_rebase_candidate",
+            _REBASE_DISCOVERY_PENDING,
+            _REBASE_DISCOVERY_CHECKED,
+            _REBASE_DISCOVERY_FAILED,
+            "rebase_recovery_candidate",
+        ):
+            item.payload.pop(key, None)
+        if (
+            item.pr is None
+            and not item.payload.get("dirty_direct_active")
+            and item.state in _STEP_HANDLER_NAMES
+            and item.state not in {ENTER, GATE}
+        ):
+            item.payload["first_publication_resume_state"] = item.state
+            item.state = GATE
+        return None
+
+    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Execute the next implementation action for the item's current state.
+
+        Args:
+            item: The work item with current state.
+            ctx: Stage context.
+
+        Returns:
+            Continue, JobRequest, or StageOutcome.
+
+        """
+        if not item.issue:
+            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if item.payload.get("dirty_direct_active") and (
+            item.state == TESTFIX_WAIT
+            or (item.state == TEST_WAIT and item.payload.get("implement_error"))
+            or (item.state == COMMIT_PUSH_WAIT and item.payload.get("tests_failed"))
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_turn_failed")
+        handler_name = _STEP_HANDLER_NAMES.get(item.state)
+        if handler_name is not None:
+            item_snapshot = deepcopy(item)
+            handler = cast(
+                Callable[[WorkItem, StageContext], StepResult],
+                getattr(self, handler_name),
+            )
+            result = handler(item, ctx)
+            if isinstance(result, JobRequest) and isinstance(result.job, AgentJob):
+                dependency_reason = _live_dependency_block_reason(item, ctx)
+                if dependency_reason is not None:
+                    _restore_work_item(item, item_snapshot)
+                    return _dependency_retry(item, dependency_reason)
+                _clear_dependency_retry(item)
+            return result
+
+        logger.warning("implementation:%d: unknown state %r", item.issue, item.state)
+        return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
+
+    def _enter(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """ENTER advances to GATE."""
+        return Continue(next_state=GATE)
+
+    def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
+        """WORKTREE_WAIT submits the create-worktree git job."""
+        issue = _issue_number(item)
+        if item.payload.get("_fleet_attempt_digest"):
+            try:
+                _existing_impl_receipt(item)
+                if not item.payload.get(_PUBLICATION_DISCOVERY_CHECKED):
+                    raise ValueError("Fleet source discovery is not confirmed.")
+            except (KeyError, TypeError, ValueError):
+                return StageOutcome(Disposition.BLOCKED, "fleet_source_unconfirmed")
+            return Continue(next_state=ADVISE_WAIT)
+        if (
+            item.pr is None
+            and not item.payload.get("existing_pr")
+            and not item.payload.get("manual_rebase_required")
+            and not item.payload.get("dirty_direct_checked")
+            and getattr(ctx.paths, "source_workspaces", None) is not None
+        ):
+            item.payload["dirty_direct_claim_inflight"] = True
+            item.payload["dirty_direct_preserve"] = True
+            return JobRequest(
+                GitJob(
+                    repo=item.repo,
+                    op="claim_dirty_direct_continuation",
+                    timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                    expected_repository=f"{ctx.org}/{item.repo}",
+                    kwargs={
+                        "repo_root": str(ctx.paths.repo_root),
+                        "issue_number": issue,
+                        "probe": True,
+                    },
+                    descr="claim_dirty_direct_continuation",
+                ),
+                on_done_state=DIRTY_DIRECT_CLAIM_WAIT,
+            )
+        restored_rebase = self._restored_post_review_rebase_outcome(item)
+        if restored_rebase is not None:
+            return restored_rebase
+        logger.info("implementation:%d: requesting worktree job", issue)
+        adopted = bool(item.payload.get("existing_pr"))
+        direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+        if not adopted and direct_base_sha is not None and not is_full_commit_sha(direct_base_sha):
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
+        kwargs: dict[str, object] = {
+            "issue_number": issue,
+            "branch_name": item.branch,
+            # Fresh branch: cut from a freshly refreshed trunk (doc step
+            # 2: worktree_manager.create_worktree(refresh_base=True)).
+            # ADOPTED branch: never reset to trunk — sync to the PR's
+            # remote head instead (the anti-clobber reset of
+            # _prepare_worktree_for_existing_pr :649/:693, so re-running
+            # never discards pushed commits). Values coordinator-vetted.
+            "refresh_base": not adopted and direct_base_sha is None,
+            "repo_root": str(ctx.paths.repo_root),
+            "source_lane": "impl",
+        }
+        if (
+            item.pr is None
+            and not adopted
+            and not item.payload.get("manual_rebase_required")
+            and not item.payload.get("implementation_started")
+        ):
+            kwargs["record_initial_creation"] = True
+        direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
+        direct_branch_prefix = f"{issue}-auto-impl-direct-"
+        direct_branch_nonce = (
+            item.branch.removeprefix(direct_branch_prefix)
+            if item.branch.startswith(direct_branch_prefix)
+            else None
+        )
+        if direct_branch_nonce is not None and not is_direct_scope_worktree_nonce(
+            direct_branch_nonce
+        ):
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "direct_scope_worktree_nonce_invalid",
+            )
+        if adopted and direct_branch_nonce is not None:
+            # A direct source receives a new cursor nonce on every invocation,
+            # but an already-open PR retains the nonce that identifies its
+            # original managed writer. Recover that writer by the immutable
+            # branch identity, not by the new source cursor.
+            kwargs["direct_worktree_nonce"] = direct_branch_nonce
+        elif not adopted and direct_base_sha is not None:
+            kwargs["base_sha"] = direct_base_sha
+            if direct_branch_nonce is not None:
+                if direct_worktree_nonce != direct_branch_nonce:
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        "direct_scope_worktree_nonce_invalid",
+                    )
+                kwargs["direct_worktree_nonce"] = direct_branch_nonce
+            elif direct_worktree_nonce is not None:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "direct_scope_worktree_nonce_invalid",
+                )
+        if adopted:
+            adopted_head = self._fresh_adopted_pr_head(item, ctx)
+            if adopted_head is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "pr_head_revision_unavailable")
+            item.payload["adopted_pr_head_sha"] = adopted_head
+            kwargs["sync_to_remote"] = True
+            kwargs["pr_number"] = item.pr
+            kwargs["implementation_adoption_head"] = adopted_head
+        worktree_job = GitJob(
+            repo=item.repo,
+            op="create_worktree",
+            timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
+            kwargs=kwargs,
+            descr="create_worktree",
+        )
+        _consume_plan_scope(item)
+        return JobRequest(worktree_job, on_done_state=DIRTY_DECISION_WAIT)
+
+    def _dirty_direct_claim_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Route a fresh claim to exactly one implementation turn."""
+        result = item.payload.pop("dirty_direct_claim_result", None)
+        manager = getattr(ctx.paths, "source_workspaces", None)
+        if callable(manager):
+            manager = manager()
+            ctx.paths.source_workspaces = manager
+        if isinstance(result, dict) and isinstance(manager, SourceWorkspaceManager):
+            value = result.get("value")
+            if isinstance(value, dict) and item.issue is not None:
+                path = manager.path_for(item.issue, SourceLane.IMPLEMENTATION)
+                if (
+                    value.get("preserved_worktree") == str(path)
+                    and manager.repository == item.repo
+                    and (path.exists() or path.is_symlink())
+                ):
+                    item.worktree = str(path)
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_failed")
+        value = result.get("value")
+        if not isinstance(value, dict):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_invalid")
+        item.payload["dirty_direct_checked"] = True
+        if value.get("dirty_direct_not_applicable") is True:
+            item.payload.pop("dirty_direct_preserve", None)
+            return Continue(next_state=WORKTREE_WAIT)
+        if (
+            not item.payload.get("implementation_started")
+            and value.get("implementation_started") is not True
+        ):
+            return StageOutcome(Disposition.BLOCKED, "initial_rebase_requires_clean_worktree")
+        try:
+            binding = WorkspaceBinding.from_dict(value["source_workspace"])
+            if (
+                binding.item_number != item.issue
+                or binding.repository != item.repo
+                or binding.dirty_claim is None
+            ):
+                raise ValueError("dirty claim owner changed")
+            plan = value["dirty_plan"]
+            if not isinstance(plan, dict):
+                raise ValueError("dirty plan is unavailable")
+            DirtyDirectPlanInput(**{**plan, "allowed_paths": tuple(plan["allowed_paths"])})
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_invalid")
+        item.worktree = str(binding.cwd)
+        item.branch = binding.dirty_claim.branch
+        item.payload.update(
+            {
+                "dirty_direct_active": True,
+                "implementation_started": True,
+                "dirty_direct_binding": binding.to_dict(),
+                "dirty_direct_plan": plan,
+                "dirty_status": value.get("dirty_status", ""),
+                "dirty_diff": value.get("dirty_diff", ""),
+                DIRECT_SCOPE_RESERVATION_KEY: value["direct_scope_reservation"],
+                DIRECT_SCOPE_BASE_SHA_KEY: binding.revision,
+                "_impl_source_revision": binding.revision,
+            }
+        )
+        return Continue(next_state=IMPLEMENT_WAIT)
+
+    def _dirty_direct_implement(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit the single edit-and-test turn with its independent plan inputs."""
+        if item.payload.get("dirty_direct_turn_submitted"):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_turn_already_submitted")
+        try:
+            binding = WorkspaceBinding.from_dict(item.payload["dirty_direct_binding"])
+            raw = item.payload["dirty_direct_plan"]
+            plan = DirtyDirectPlanInput(**{**raw, "allowed_paths": tuple(raw["allowed_paths"])})
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_claim_invalid")
+        item.payload["dirty_direct_turn_submitted"] = True
+        return JobRequest(
+            AgentJob(
+                repo=item.repo,
+                issue=_issue_number(item),
+                agent=agent_provider(ctx, "implementer"),
+                model=stage_model(ctx, "implementer", implementer_model),
+                prompt_builder=get_dirty_direct_continuation_prompt,
+                cwd=binding.cwd,
+                workspace=binding,
+                dirty_plan=plan,
+                timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout),
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+                session_agent=AGENT_IMPLEMENTER,
+                execution_request=ExecutionRequest(
+                    AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW
+                ),
+                prompt_kwargs={
+                    "plan": plan.plan,
+                    "review": plan.review,
+                    "allowed_paths": plan.allowed_paths,
+                    "status": item.payload.get("dirty_status", ""),
+                    "diff": item.payload.get("dirty_diff", ""),
+                },
+                **_codex_isolation_job_kwargs(ctx),
+                descr="dirty_direct_continuation",
+            ),
+            on_done_state=TEST_WAIT,
+        )
+
+    @staticmethod
+    def _restored_post_review_rebase_outcome(item: WorkItem) -> Continue | None:
+        """Reuse a restored writer when merge wait requests a rebase."""
+        if not (
+            item.payload.get("post_review_rebase_required")
+            and item.payload.pop("implementation_writer_restored", False)
+            and item.worktree
+        ):
+            return None
+        item.payload[_SYNC_RESTORED_WRITER_BEFORE_REBASE] = True
+        item.payload["worktree_dirty"] = False
+        return Continue(next_state=DIRTY_DECISION_WAIT)
+
+    def _dirty_decision_wait(  # noqa: C901
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult:
+        """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
+        if item.payload.get("source_workspace_preserve") is True:
+            return StageOutcome(
+                Disposition.FINISH_FAIL, "source_workspace_terminal: Preserve the writer."
+            )
+        adopted_head_failure = item.payload.pop("adopted_head_failure", None)
+        if isinstance(adopted_head_failure, str) and adopted_head_failure in ADOPTED_HEAD_FAILURES:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                f"{adopted_head_failure}: Check authenticated access "
+                "and refresh the PR head before retry.",
+            )
+        issue = _issue_number(item)
+        if item.payload.pop("source_workspace_ownership_unavailable", None):
+            recovery = _validated_source_workspace_recovery(
+                item.payload.pop("source_workspace_recovery", None),
+                item_number=issue,
+            )
+            if recovery is not None:
+                item.payload["source_workspace_recovery"] = recovery
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    f"source_workspace_ownership:{recovery['kind']}: {recovery['manual_action']}",
+                )
+            return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
+        if (ownership := item.payload.get("branch_worktree_owner")) is not None:
+            branch = ownership.get("branch") if isinstance(ownership, dict) else None
+            owner_path = ownership.get("owner_path") if isinstance(ownership, dict) else None
+            owner_status = "unverified"
+            if (
+                isinstance(branch, str)
+                and branch == item.branch
+                and isinstance(owner_path, str)
+                and bool(owner_path)
+                and ctx.branch_worktree_owner_status is not None
+            ):
+                owner_status = ctx.branch_worktree_owner_status(item, branch, owner_path)
+            if owner_status == "pending":
+                # A same-branch pipeline allocation already observed the
+                # holder but its success/failure completion has not reached
+                # the coordinator. Keep the collision receipt intact and
+                # timer-park until that completion; no Git/agent budget is
+                # spent and the queue cannot busy-spin while it is pending.
+                item.payload["retry_delay_s"] = BRANCH_WORKTREE_OWNER_PENDING_DELAY_S
+                return StageOutcome(Disposition.RETRY, "branch_worktree_owner_pending")
+            item.payload.pop("branch_worktree_owner", None)
+            if owner_status != "verified":
+                logger.warning(
+                    "implementation:%d: branch-worktree holder for %r at %r is not a "
+                    "verified pipeline sibling; refusing to supersede",
+                    issue,
+                    branch,
+                    owner_path,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "branch_worktree_owner_unverified")
+            return StageOutcome(
+                Disposition.FINISH_PASS,
+                f"branch {branch!r} already owned at {owner_path}; "
+                "redundant implementation superseded",
+            )
+        if item.payload.pop(DIRECT_SCOPE_RESERVATION_COLLISION_KEY, None):
+            # A worker-side remote probe proved this direct branch already
+            # exists.  Retrying an absent-only reservation would only rerun
+            # pre-agent work and must never be interpreted as permission to
+            # overwrite the other owner.
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_reservation_collision")
+        stale_state = item.payload.pop(DIRECT_SCOPE_STALE_STATE_KEY, None)
+        if isinstance(stale_state, dict):
+            # Deterministic local state fails on every attempt. Stop with the
+            # failed predicate instead of spending the Git retry budget (#2905).
+            item.payload.pop("git_error", None)
+            item.payload.pop("git_error_retries", None)
+            predicate = str(stale_state.get("predicate") or "unknown")
+            logger.error(
+                "implementation:%d: direct scope stale state at %s for branch %s (%s)",
+                issue,
+                predicate,
+                stale_state.get("branch"),
+                stale_state.get("detail"),
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, f"direct_scope_stale_state: {predicate}")
+        lock_failure = item.payload.pop("git_lock_failure", None)
+        if lock_failure in _TERMINAL_GIT_LOCK_FAILURES:
+            item.payload.pop("git_error_retries", None)
+            return StageOutcome(Disposition.FINISH_FAIL, lock_failure)
+        if item.payload.pop("git_error", None):
+            # Worktree creation failed: transient infrastructure, not an
+            # implement outcome. If the retry budget remains, retry the
+            # worktree job itself; do not let adopted-PR state fall through
+            # to ADOPTED without a valid synced worktree.
+            outcome = self._git_retry(item, "worktree creation failed")
+            if outcome.disposition is Disposition.RETRY:
+                item.state = WORKTREE_WAIT
+            return outcome
+        if item.payload.get("manual_rebase_required"):
+            item.payload["rebase_reason"] = "manual"
+            adopted_next = REBASE_WAIT
+        elif item.payload.get("post_review_rebase_required"):
+            adopted_next = REBASE_WAIT
+        elif item.payload.get("implementation_remediation"):
+            adopted_next = IMPLEMENT_WAIT
+        elif item.payload.get("existing_pr"):
+            adopted_next = ADOPTED
+        elif not item.payload.get("implementation_started"):
+            item.payload["rebase_reason"] = "implementation_start"
+            adopted_next = REBASE_WAIT
+        else:
+            adopted_next = ADVISE_WAIT
+        if not item.payload.get("worktree_dirty"):
+            return Continue(next_state=adopted_next)
+        if item.payload.pop("dirty_decision_invalid", False):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_worktree_decision_invalid")
+        decision = item.payload.get("dirty_decision")
+        if decision is not None:
+            if decision not in {"COMMIT", "STASH"}:
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_worktree_decision_invalid")
+            if item.pr is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_unavailable")
+            pr_state = ctx.github.gh_pr_state(item.pr)
+            if not _is_confirmed_open_unarmed(pr_state):
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_unverified")
+            pr_branch = ctx.github.get_pr_head_branch(item.pr)
+            if pr_branch != item.branch or not ctx.github.pr_head_is_writable(item.pr):
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_not_writable")
+            expected_remote_head = (
+                pr_state.get("headRefOid") if isinstance(pr_state, dict) else None
+            )
+            captured_branch = item.payload.get("worktree_branch")
+            captured_head = item.payload.get("worktree_head_sha")
+            captured_content = item.payload.get("worktree_content_snapshot")
+            if (
+                captured_branch != item.branch
+                or not is_full_commit_sha(captured_head)
+                or not _is_valid_dirty_content_snapshot(captured_content)
+                or expected_remote_head != captured_head
+                or not item.worktree
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_snapshot_invalid")
+            item.payload["dirty_recovery_next_state"] = adopted_next
+            item.payload["dirty_recovery_inflight"] = True
+            try:
+                workspace = _existing_impl_workspace(item)
+            except (KeyError, TypeError, ValueError):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable"
+                )
+            return JobRequest(
+                GitJob(
+                    repo=item.repo,
+                    op="recover_dirty_worktree",
+                    workspace=workspace,
+                    timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                    expected_repository=f"{ctx.org}/{item.repo}",
+                    kwargs={
+                        "repo_root": str(ctx.paths.repo_root),
+                        "worktree_path": item.worktree,
+                        "branch": item.branch,
+                        "issue_number": issue,
+                        "pr_number": item.pr,
+                        "action": decision,
+                        "pre_action_head": captured_head,
+                        "expected_remote_head": expected_remote_head,
+                        "status": item.payload.get("worktree_status", ""),
+                        "diff": item.payload.get("worktree_diff", ""),
+                        "content_snapshot": captured_content,
+                        "agent": agent_provider(ctx, "implementer"),
+                        "agent_model": stage_model(ctx, "implementer", implementer_model),
+                        "git_message_timeout": stage_timeout(
+                            ctx, "git_message", git_message_agent_timeout()
+                        ),
+                        **({"pi_dir": ctx.config.pi_dir} if ctx.config.pi_dir is not None else {}),
+                    },
+                    descr="recover_dirty_worktree",
+                ),
+                on_done_state=DIRTY_RECOVERY_WAIT,
+            )
+        try:
+            workspace = _existing_impl_workspace(item)
+            source_operation = DirtySourceOperation(
+                "inspect",
+                content_snapshot=tuple(sorted(item.payload["worktree_content_snapshot"].items())),
+            )
+        except (KeyError, TypeError, ValueError):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_source_authority_unavailable")
+        logger.info("implementation:%d: requesting dirty-worktree decision", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx, "implementer"),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=get_dirty_reused_worktree_decision_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_IMPLEMENTER,
+            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.IMPLEMENT_INSPECT,
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+            prompt_kwargs={
+                "branch_name": item.branch,
+                "status_text": item.payload.get("worktree_status", ""),
+                "diff_text": item.payload.get("worktree_diff", ""),
+            },
+            **_codex_isolation_job_kwargs(ctx),
+            workspace=workspace,
+            source_operation=source_operation,
+            descr="dirty_decision",
+        )
+        return JobRequest(job, on_done_state=DIRTY_DECISION_WAIT)
+
+    def _dirty_recovery_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Validate host recovery and route only its exact durable result."""
+        receipt = item.payload.get("dirty_recovery_receipt")
+        if not isinstance(receipt, dict) or receipt.get("outcome") != "recovered":
+            kind = receipt.get("failure_kind") if isinstance(receipt, dict) else "result_invalid"
+            return StageOutcome(Disposition.FINISH_FAIL, f"dirty_recovery_{kind}")
+        action = receipt.get("action")
+        pre_action_head = receipt.get("pre_action_head")
+        current_head = receipt.get("current_head")
+        expected_remote_head = receipt.get("expected_remote_head")
+        remote_head = receipt.get("remote_head")
+        common_receipt_valid = (
+            action in {"COMMIT", "STASH"}
+            and action == item.payload.get("dirty_decision")
+            and receipt.get("failure_kind") is None
+            and receipt.get("branch") == item.branch
+            and receipt.get("worktree_path") == item.worktree
+            and is_full_commit_sha(pre_action_head)
+            and pre_action_head == item.payload.get("worktree_head_sha")
+            and is_full_commit_sha(current_head)
+            and is_full_commit_sha(expected_remote_head)
+            and expected_remote_head == pre_action_head
+            and is_full_commit_sha(remote_head)
+            and receipt.get("action_applied") is True
+            and receipt.get("final_clean") is True
+        )
+        commit_receipt_valid = (
+            action == "COMMIT"
+            and current_head != pre_action_head
+            and remote_head == current_head
+            and receipt.get("published") is True
+            and receipt.get("stash_object") is None
+        )
+        stash_receipt_valid = (
+            action == "STASH"
+            and current_head == pre_action_head
+            and remote_head == expected_remote_head
+            and receipt.get("published") is False
+            and is_full_commit_sha(receipt.get("stash_object"))
+        )
+        if not common_receipt_valid or not (commit_receipt_valid or stash_receipt_valid):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_receipt_invalid")
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_unavailable")
+        pr_state = ctx.github.gh_pr_state(item.pr)
+        if (
+            not isinstance(pr_state, dict)
+            or not _is_confirmed_open_unarmed(pr_state)
+            or pr_state.get("headRefOid") != current_head
+            or ctx.github.get_pr_head_branch(item.pr) != item.branch
+            or not ctx.github.pr_head_is_writable(item.pr)
+            or receipt.get("final_clean") is not True
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_postflight_invalid")
+        item.payload["_impl_source_revision"] = current_head
+        item.payload["rebase_expected_remote_sha"] = current_head
+        item.payload["worktree_dirty"] = False
+        item.payload.pop("worktree_content_snapshot", None)
+        next_state = item.payload.pop("dirty_recovery_next_state", None)
+        if not isinstance(next_state, str) or next_state not in _STEP_HANDLER_NAMES:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_continuation_invalid")
+        return Continue(next_state=next_state)
+
+    @staticmethod
+    def _finish_rebase(item: WorkItem, ctx: StageContext) -> StepResult:
+        """Resume normal work after one authorized rebase."""
+        reason = item.payload.get("rebase_reason")
+        if item.payload.pop("rebase_unchanged_review", False) or item.payload.pop(
+            "rebase_published_review", False
+        ):
+            for key in (
+                "rebase_reason",
+                "post_review_rebase_required",
+                "rebase_conflict",
+                "rebase_agent_started",
+            ):
+                item.payload.pop(key, None)
+            return StageOutcome(Disposition.FAIL_BACK, "review_retained_after_rebase")
+        item.payload.pop("rebase_reason", None)
+        for key in (
+            "post_review_rebase_required",
+            "rebase_conflict",
+            "rebase_restart_base_sha",
+            "rebase_restart_head_sha",
+            "rebase_agent_started",
+            _SYNC_RESTORED_WRITER_BEFORE_REBASE,
+            "reviewed_pr_head_sha",
+            "reviewed_pr_node_id",
+        ):
+            item.payload.pop(key, None)
+        if reason == "manual":
+            item.payload.pop("manual_rebase_required", None)
+            resume = item.payload.pop(
+                "manual_rebase_resume_stage", "pr_review" if item.pr else "implementation"
+            )
+            if resume in {"planning", "plan_review"}:
+                return StageOutcome(Disposition.FAIL_BACK, f"manual_rebase_complete_{resume}")
+            if item.pr is None:
+                return Continue(next_state=GATE)
+        if item.pr is None:
+            item.payload["implementation_started"] = True
+            return Continue(next_state=ADVISE_WAIT)
+        return Continue(next_state=ADOPTED)
+
+    @staticmethod
+    def _review_conflict_admission(
+        item: WorkItem, ctx: StageContext, head: str
+    ) -> StepResult | None:
+        """Require GO and a live conflict for the exact reviewed head."""
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_unavailable")
+        if item.payload.get("reviewed_pr_head_sha") != head:
+            return ImplementationStage._finish_rebase(item, ctx)
+        if ctx.github.pr_has_implementation_state_label(item.pr) != (True, False):
+            return ImplementationStage._finish_rebase(item, ctx)
+        readiness = ctx.github.gh_pr_merge_readiness(item.pr)
+        if (
+            not isinstance(readiness, dict)
+            or not _is_confirmed_open_unarmed(readiness)
+            or readiness.get("headRefOid") != head
+            or readiness.get("baseRefName") != "main"
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_state_unverified")
+        if readiness.get("mergeable") != "CONFLICTING" and readiness.get(
+            "mergeStateStatus"
+        ) not in {"DIRTY", "CONFLICTING"}:
+            item.payload.pop("rebase_reason", None)
+            item.payload.pop("post_review_rebase_required", None)
+            return StageOutcome(Disposition.FAIL_BACK, "review_retained_after_rebase")
+        return None
+
+    def _rebase_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Rebase only for initial implementation, a reviewed conflict, or a manual request."""
+        if item.payload.pop("rebase_error", None):
+            if item.payload.pop("rebase_runner_blocked", False):
+                return self._block_rebase_runner(item, ctx)
+            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
+        reason = item.payload.get("rebase_reason")
+        if reason not in {"implementation_start", "review_conflict", "manual"}:
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_reason_unavailable")
+        if item.payload.get("rebase_conflict"):
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        if item.payload.pop(_REBASE_HEAD_DRIFT, None):
+            return self._finish_rebase(item, ctx)
+        if item.payload.pop("rebase_complete", None):
+            return self._finish_rebase(item, ctx)
+        discovery = self._rebase_discovery(item, ctx)
+        if discovery is not None:
+            return discovery
+        if reason == "implementation_start" and (
+            item.pr is not None or item.payload.get("implementation_started")
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "initial_rebase_already_started")
+        return self._rebase_request(item, ctx, str(reason))
+
+    @staticmethod
+    def _publication_resume_context(item: WorkItem) -> dict[str, Any]:
+        """Bind a discovery result to one exact host-selected restart route."""
+        return {
+            "publication_resume_state": item.payload.get("first_publication_resume_state"),
+            "publication_manual_rebase": item.payload.get("manual_rebase_required") is True,
+        }
+
+    @staticmethod
+    def _first_publication_discovery(item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Find retained publication before a new branch or source can replace it."""
+        if failure := item.payload.get(_PUBLICATION_DISCOVERY_FAILED):
+            return StageOutcome(
+                Disposition.BLOCKED,
+                failure if isinstance(failure, str) else "first_publication_discovery_failed",
+            )
+        if item.payload.get("first_publication_candidate"):
+            return ImplementationStage._first_publication_recovery_request(item, ctx)
+        if item.payload.get(_PUBLICATION_DISCOVERY_CHECKED):
+            retained = item.payload.get(_PUBLICATION_REBASE_RESUME)
+            if retained is not None and retained != ImplementationStage._publication_resume_context(
+                item
+            ):
+                return StageOutcome(Disposition.BLOCKED, "first_publication_rebase_route_changed")
+            return None
+        pending = item.payload.get(_PUBLICATION_DISCOVERY_PENDING)
+        if not isinstance(pending, GitJob):
+            pending = GitJob(
+                repo=item.repo,
+                expected_repository=f"{ctx.org}/{item.repo}",
+                op="discover_first_publication",
+                workspace=(
+                    _existing_impl_workspace(item)
+                    if item.payload.get("_fleet_attempt_digest")
+                    else None
+                ),
+                timeout_s=GIT_JOB_TIMEOUT_S,
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "issue_number": item.issue,
+                    "branch": item.branch,
+                    "publication_discovery_request_id": uuid.uuid4().hex,
+                    **ImplementationStage._publication_resume_context(item),
+                },
+                descr="discover_first_publication",
+            )
+            item.payload[_PUBLICATION_DISCOVERY_PENDING] = pending
+        return JobRequest(pending, on_done_state=item.state)
+
+    @staticmethod
+    def _retain_pre_intent_route(item: WorkItem, value: dict[str, Any], candidate: object) -> bool:
+        """Permit ambiguity only to reach its separately admitted rebase owner."""
+        pre_intent = value.get("first_publication_pre_intent", False)
+        rebase_candidate = value.get("first_publication_rebase_candidate")
+        if (
+            type(pre_intent) is not bool
+            or (pre_intent and candidate is not None)
+            or (rebase_candidate is not None and not pre_intent)
+        ):
+            raise ValueError("The first-publication source classification is invalid.")
+        if not pre_intent:
+            return True
+        if rebase_candidate is not None:
+            if (
+                type(rebase_candidate) is not str
+                or re.fullmatch(r"[0-9a-f]{32}", rebase_candidate) is None
+                or item.payload.get("first_publication_resume_state") is not None
+                or item.payload.get("manual_rebase_required")
+            ):
+                raise ValueError("The pending rebase handoff is invalid.")
+            return True
+        context = ImplementationStage._publication_resume_context(item)
+        if (
+            not context["publication_manual_rebase"]
+            and context["publication_resume_state"] not in _REBASE_RESUME_STATES
+        ):
+            item.payload[_PUBLICATION_DISCOVERY_FAILED] = (
+                "first_publication_pre_intent_recovery_required"
+            )
+            return False
+        item.payload[_PUBLICATION_REBASE_RESUME] = context
+        return True
+
+    @staticmethod
+    def _receive_first_publication_discovery(item: WorkItem, result: JobResult) -> bool:
+        """Consume a matching discovery result before generic source metadata."""
+        value = result.value if isinstance(result.value, dict) else {}
+        pending = item.payload.get(_PUBLICATION_DISCOVERY_PENDING)
+        key = "publication_discovery_request_id"
+        if key not in value and not isinstance(pending, GitJob):
+            return False
+        if (
+            not isinstance(pending, GitJob)
+            or pending.op != "discover_first_publication"
+            or pending.kwargs.get(key) != value.get(key)
+            or pending.repo != item.repo
+            or pending.kwargs.get("issue_number") != item.issue
+            or pending.kwargs.get("branch") != item.branch
+            or item.state != GATE
+            or item.pr is not None
+            or any(
+                pending.kwargs.get(key) != entry
+                for key, entry in ImplementationStage._publication_resume_context(item).items()
+            )
+        ):
+            return True
+        item.payload.pop(_PUBLICATION_DISCOVERY_PENDING)
+        try:
+            if not result.ok or result.interrupted:
+                logger.warning(
+                    "implementation:%d: first-publication discovery failed: %s",
+                    item.issue,
+                    result.error or "no diagnostic available",
+                )
+                raise ValueError("First-publication discovery did not complete.")
+            if (
+                value.get("repository") != pending.transport_repository
+                or value.get("issue_number") != item.issue
+            ):
+                raise ValueError("First-publication discovery identity changed.")
+            candidate = value["first_publication_candidate"]
+            rebase_candidate = value.get("first_publication_rebase_candidate")
+            if not ImplementationStage._retain_pre_intent_route(item, value, candidate):
+                return True
+            if candidate is not None or rebase_candidate is not None:
+                operation_id = candidate if candidate is not None else rebase_candidate
+                if (
+                    type(operation_id) is not str
+                    or re.fullmatch(r"[0-9a-f]{32}", operation_id) is None
+                ):
+                    raise ValueError("The first-publication candidate is invalid.")
+                binding = _strict_recovery_workspace(value["source_workspace"])
+                receipt = SourceWorkspaceReceipt.from_dict(value["source_receipt"])
+                if (
+                    binding.reusable_root != Path(pending.kwargs["repo_root"])
+                    or binding.item_number != item.issue
+                    or binding.schema_version != 1
+                    or binding.detached
+                    or not isinstance(receipt.branch, str)
+                    or receipt.to_binding(binding.reusable_root) != binding
+                    or (item.branch and receipt.branch != item.branch)
+                ):
+                    raise ValueError("The first-publication source identity changed.")
+                recovered = replace(
+                    item,
+                    branch=receipt.branch,
+                    worktree=str(binding.cwd),
+                    payload=dict(item.payload),
+                )
+                _store_impl_source_metadata(recovered, value)
+                for stale in (
+                    "test_receipt",
+                    "test_command",
+                    "test_output",
+                    "tests_failed",
+                    "git_error",
+                    "git_failure_summary",
+                    "git_error_retries",
+                    "no_commits",
+                    "pre_pr_runner_mode",
+                    "pre_pr_fallback_reason",
+                    "pre_pr_runner_unavailable",
+                    "publication_failure_diagnostic",
+                    _COMMIT_PUSH_TERMINAL,
+                    _COMMIT_PUSH_REFRESH,
+                    _PLAN_SCOPE_RECEIPT,
+                    _PLAN_SCOPE_STATE,
+                    _PLAN_SCOPE_FAILURE,
+                    _CODEX_PUBLICATION_SCOPE_KEY,
+                ):
+                    recovered.payload.pop(stale, None)
+                item.branch, item.worktree, item.payload = (
+                    recovered.branch,
+                    recovered.worktree,
+                    recovered.payload,
+                )
+                if rebase_candidate is not None:
+                    item.payload["first_publication_rebase_candidate"] = rebase_candidate
+                    item.payload["first_publication_resume_state"] = REBASE_WAIT
+                    item.payload["rebase_reason"] = "implementation_start"
+                else:
+                    item.payload["first_publication_candidate"] = candidate
+            item.payload[_PUBLICATION_DISCOVERY_CHECKED] = True
+        except (KeyError, TypeError, ValueError, SourceWorkspaceError):
+            item.payload[_PUBLICATION_DISCOVERY_FAILED] = True
+        return True
+
+    @staticmethod
+    def _first_publication_recovery_request(item: WorkItem, ctx: StageContext) -> StepResult:
+        """Refresh scope before one source-owned validation and publication attempt."""
+        if item.payload.get(_PUBLICATION_RECOVERY_FAILED):
+            return StageOutcome(Disposition.BLOCKED, "first_publication_recovery_failed")
+        completed = item.payload.get(_PUBLICATION_RECOVERY_COMPLETE)
+        if completed is not None:
+            if ImplementationStage._first_publication_request_matches(item, completed, ctx):
+                return Continue(next_state=PR_CREATE)
+            return StageOutcome(Disposition.BLOCKED, "first_publication_source_unavailable")
+        pending = item.payload.get(_PUBLICATION_RECOVERY_PENDING)
+        if isinstance(pending, GitJob):
+            return JobRequest(pending, on_done_state=GATE)
+        if scope := _require_plan_scope(item, ctx):
+            return scope
+        try:
+            workspace = _existing_impl_workspace(item)
+            _existing_impl_receipt(item)
+            paths, _ = _pretest_scope(item, ctx)
+        except (KeyError, TypeError, ValueError):
+            return StageOutcome(Disposition.BLOCKED, "first_publication_source_unavailable")
+        hephaestus = (ctx.org.casefold(), item.repo.casefold()) == (
+            "homericintelligence",
+            "hephaestus",
+        )
+        command = (
+            tuple(ctx.config.pre_pr_test_argv)
+            if not hephaestus and ctx.config.run_pre_pr_tests
+            else None
+        )
+        pending = GitJob(
+            repo=item.repo,
+            expected_repository=f"{ctx.org}/{item.repo}",
+            op="commit_push",
+            workspace=workspace,
+            timeout_s=stage_timeout(
+                ctx,
+                "pre_pr_test",
+                HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S if hephaestus else PRE_PR_TEST_TIMEOUT_S,
+            ),
+            kwargs={
+                "repo_root": str(ctx.paths.repo_root),
+                "issue_number": item.issue,
+                "worktree_path": item.worktree,
+                "branch": item.branch,
+                "source_lane": SourceLane.IMPLEMENTATION.value,
+                "allowed_paths": paths,
+                "publication_test_argv": command,
+                "first_publication_candidate": item.payload["first_publication_candidate"],
+                "publication_recovery_request_id": uuid.uuid4().hex,
+            },
+            descr="first_publication_recovery",
+        )
+        item.payload[_PUBLICATION_RECOVERY_PENDING] = pending
+        _consume_plan_scope(item)
+        return JobRequest(pending, on_done_state=GATE)
+
+    @staticmethod
+    def _first_publication_request_matches(
+        item: WorkItem, pending: object, ctx: StageContext
+    ) -> bool:
+        """Require the current stage and source to own the submitted recovery."""
+        if not isinstance(pending, GitJob):
+            return False
+        try:
+            return (
+                pending.op == "commit_push"
+                and pending.repo == item.repo
+                and pending.transport_repository == f"{ctx.org}/{item.repo}"
+                and pending.kwargs.get("issue_number") == item.issue
+                and pending.kwargs.get("branch") == item.branch
+                and pending.kwargs.get("first_publication_candidate")
+                == item.payload.get("first_publication_candidate")
+                and item.state == GATE
+                and item.pr is None
+                and pending.workspace == _existing_impl_workspace(item)
+                and _existing_impl_receipt(item).branch == item.branch
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _receive_first_publication_recovery(
+        item: WorkItem, result: JobResult, ctx: StageContext
+    ) -> bool:
+        """Consume only the owned recovery result before generic callback handling."""
+        value = result.value if isinstance(result.value, dict) else {}
+        key = "publication_recovery_request_id"
+        pending = item.payload.get(_PUBLICATION_RECOVERY_PENDING)
+        if key not in value and pending is None:
+            return False
+        if (
+            not isinstance(pending, GitJob)
+            or not ImplementationStage._first_publication_request_matches(item, pending, ctx)
+            or value.get(key) != pending.kwargs.get(key)
+            or value.get("first_publication_candidate")
+            != pending.kwargs.get("first_publication_candidate")
+        ):
+            return True
+        item.payload.pop(_PUBLICATION_RECOVERY_PENDING)
+        try:
+            publication = ImplementationStage._validate_first_publication_result(
+                item, pending, result
+            )
+            _store_impl_source_metadata(item, value)
+            ImplementationStage._on_commit_push_done(item, replace(result, value=publication))
+            if _COMMIT_PUSH_TERMINAL in item.payload:
+                raise ValueError("The first-publication result conflicts with current state.")
+            command = value["first_publication_validation"]["argv"]
+            if command is not None:
+                item.payload["test_receipt"] = (
+                    f"`{shlex.join(command)}` — passed at `{value['head_sha']}`"
+                )
+            item.payload[_PUBLICATION_RECOVERY_COMPLETE] = pending
+        except (KeyError, TypeError, ValueError, SourceWorkspaceError) as error:
+            _store_publication_failure_diagnostic(
+                item, result if not result.ok else replace(result, ok=False, error=str(error))
+            )
+            item.payload[_PUBLICATION_RECOVERY_FAILED] = True
+        return True
+
+    @staticmethod
+    def _validate_first_publication_result(
+        item: WorkItem, pending: GitJob, result: JobResult
+    ) -> dict[str, Any]:
+        """Bind successful publication and fresh checks to the retained head."""
+        value = result.value
+        if not result.ok or result.interrupted or not isinstance(value, dict):
+            raise ValueError("First-publication recovery did not complete.")
+        binding = _strict_recovery_workspace(value["source_workspace"])
+        receipt = SourceWorkspaceReceipt.from_dict(value["source_receipt"])
+        validation = value["first_publication_validation"]
+        publication = {
+            key: entry
+            for key, entry in value.items()
+            if key
+            not in {
+                "publication_recovery_request_id",
+                "first_publication_candidate",
+                "source_workspace",
+                "source_receipt",
+                "first_publication_validation",
+            }
+        }
+        command = (
+            FIRST_PUBLICATION_CHECK_ARGV
+            if pending.transport_repository.casefold() == "homericintelligence/hephaestus"
+            else pending.kwargs.get("publication_test_argv")
+        )
+        if (
+            binding != pending.workspace
+            or receipt != _existing_impl_receipt(item)
+            or not _writer_publication_matches_refresh(publication, None)
+            or value.get("publication_state") != "published"
+            or value.get("head_sha") != binding.revision
+            or value.get("observed_remote_sha") != binding.revision
+            or not isinstance(validation, dict)
+            or validation.get("argv") != command
+            or validation.get("head_sha") != binding.revision
+            or not is_full_commit_sha(validation.get("tree_sha"))
+            or validation.get("publication_recovery_request_id")
+            != pending.kwargs["publication_recovery_request_id"]
+        ):
+            raise ValueError("The first-publication result does not match its request.")
+        return publication
+
+    @staticmethod
+    def _rebase_discovery(item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Request one source-owned read before a fresh rebase attempt."""
+        if item.payload.get(_REBASE_DISCOVERY_FAILED):
+            cause = item.payload.get("rebase_discovery_error")
+            note = "rebase_recovery_unavailable"
+            if isinstance(cause, str) and cause:
+                note = f"{note}: {cause}"
+                logger.warning("implementation:%d: %s", item.issue, note)
+            return StageOutcome(Disposition.BLOCKED, note)
+        if item.payload.get(_REBASE_DISCOVERY_CHECKED):
+            return None
+        pending = item.payload.get(_REBASE_DISCOVERY_PENDING)
+        if not isinstance(pending, GitJob):
+            pending = GitJob(
+                repo=item.repo,
+                op="discover_pending_rebase",
+                timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "issue_number": item.issue,
+                    "pr_number": item.pr,
+                    "branch": item.branch,
+                    "discovery_request_id": uuid.uuid4().hex,
+                },
+                descr="discover_pending_rebase",
+            )
+            item.payload[_REBASE_DISCOVERY_PENDING] = pending
+        return JobRequest(pending, on_done_state=item.state)
+
+    @staticmethod
+    def _receive_rebase_discovery(item: WorkItem, result: JobResult) -> bool:
+        """Consume only the current discovery callback before generic Git handling."""
+        value = result.value if isinstance(result.value, dict) else {}
+        pending = item.payload.get(_REBASE_DISCOVERY_PENDING)
+        if "discovery_request_id" not in value and not isinstance(pending, GitJob):
+            return False
+        if (
+            item.state not in {REBASE_WAIT, REBASE_CONTINUE_WAIT}
+            or not isinstance(pending, GitJob)
+            or pending.op != "discover_pending_rebase"
+            or (
+                "discovery_request_id" in value
+                and pending.kwargs.get("discovery_request_id") != value["discovery_request_id"]
+            )
+            or pending.repo != item.repo
+            or pending.kwargs.get("issue_number") != item.issue
+            or pending.kwargs.get("pr_number") != item.pr
+            or pending.kwargs.get("branch") != item.branch
+        ):
+            return True
+        item.payload.pop(_REBASE_DISCOVERY_PENDING)
+        try:
+            if not result.ok or result.interrupted or "discovery_request_id" not in value:
+                raise ValueError("The rebase discovery did not complete.")
+            binding = _strict_recovery_workspace(value["source_workspace"])
+            candidate = value.get("rebase_recovery_candidate")
+            handoff = item.payload.get("first_publication_rebase_candidate")
+            if handoff is not None and candidate != handoff:
+                raise ValueError("The pending rebase handoff changed during discovery.")
+            if (
+                binding.reusable_root != Path(pending.kwargs["repo_root"])
+                or binding.schema_version != 1
+                or binding.detached
+                or (candidate is not None and re.fullmatch(r"[0-9a-f]{32}", candidate) is None)
+            ):
+                raise ValueError("The rebase discovery result is invalid.")
+            old_path = item.worktree
+            item.worktree = str(binding.cwd)
+            try:
+                _store_impl_source_metadata(item, value)
+            except (KeyError, TypeError, ValueError):
+                item.worktree = old_path
+                raise
+            item.payload["rebase_recovery_candidate"] = candidate
+            item.payload[_REBASE_DISCOVERY_CHECKED] = True
+        except (KeyError, TypeError, ValueError) as error:
+            item.payload[_REBASE_DISCOVERY_FAILED] = True
+            # Retain the cause. The generic message alone left an operator with
+            # a permanent block and no way to learn which check refused.
+            item.payload["rebase_discovery_error"] = (result.error or str(error))[
+                :_REBASE_DIAGNOSTIC_MAX
+            ]
+        return True
+
+    def _rebase_request(self, item: WorkItem, ctx: StageContext, reason: str) -> StepResult:
+        """Check live admission and submit the next rebase operation."""
+        if item.pr is not None:
+            state = ctx.github.gh_pr_state(item.pr)
+            if not _is_confirmed_open_unarmed(state):
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_state_unverified")
+            expected_head = state.get("headRefOid") if isinstance(state, dict) else None
+        else:
+            expected_head = item.payload.get("_impl_source_revision")
+        if not is_full_commit_sha(expected_head):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_head_unavailable")
+        if reason == "review_conflict":
+            if item.pr is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_unavailable")
+            admission = self._review_conflict_admission(item, ctx, str(expected_head))
+            if admission is not None:
+                return admission
+        restart_base = item.payload.get("rebase_restart_base_sha")
+        if (
+            restart_base is not None
+            and item.payload.get("rebase_restart_head_sha") != expected_head
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "manual_rebase_head_changed")
+        if (reason == "review_conflict" or restart_base is not None) and not item.payload.get(
+            "rebase_agent_started"
+        ):
+            return self._prepare_rebase_agent(item, ctx)
+        kwargs = self._rebase_git_kwargs(item, ctx, reason, expected_head, restart_base)
+        try:
+            workspace = _existing_impl_workspace(item)
+            capability_target = self._rebase_capability_target(item, ctx, workspace)
+        except (KeyError, TypeError, ValueError):
+            return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
+        return JobRequest(
+            GitJob(
+                repo=item.repo,
+                op="rebase",
+                workspace=workspace,
+                capability_target=capability_target,
+                rebase_recovery_candidate=item.payload.get("rebase_recovery_candidate"),
+                timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs=kwargs,
+                descr="rebase_implementation_writer",
+            ),
+            on_done_state=REBASE_WAIT,
+        )
+
+    @staticmethod
+    def _rebase_capability_target(
+        item: WorkItem, ctx: StageContext, workspace: WorkspaceBinding
+    ) -> CapabilityRequestTarget:
+        """Bind a fresh capability attempt to the accepted rebase input source."""
+        generation = item.payload.get("rebase_capability_generation", 0)
+        if (
+            type(generation) is not int
+            or generation < 0
+            or workspace.revision is None
+            or workspace.reusable_root is None
+        ):
+            raise ValueError("The rebase capability attempt identity is invalid.")
+        target = CapabilityRequestTarget(
+            repository=f"{ctx.org}/{item.repo}",
+            issue_number=_issue_number(item),
+            pr_number=item.pr,
+            repository_root=workspace.reusable_root,
+            checkout_path=workspace.cwd,
+            expected_head_sha=workspace.revision,
+            phase="rebase",
+            purpose="scratch",
+            request_id=secrets.token_hex(16),
+            workspace=workspace,
+            generation=generation + 1,
+        )
+        item.payload["rebase_capability_generation"] = target.generation
+        return target
+
+    @staticmethod
+    def _rebase_git_kwargs(
+        item: WorkItem,
+        ctx: StageContext,
+        reason: str,
+        expected_head: object,
+        restart_base: object,
+    ) -> dict[str, object]:
+        """Build the Git inputs after rebase admission is confirmed."""
+        kwargs: dict[str, object] = {
+            "cwd": _worktree_path(item, ctx),
+            "repo_root": str(ctx.paths.repo_root),
+            "issue_number": _issue_number(item),
+            "base_branch": "main",
+            "remote": "origin",
+            "publish_rebased_head": item.pr is not None,
+            "branch": item.branch,
+            "rebase_reason": reason,
+            "pr_number": item.pr,
+        }
+        review_kwargs = {
+            "reviewed_head_sha": item.payload.get("reviewed_pr_head_sha"),
+            "reviewed_base_sha": item.payload.get("reviewed_pr_base_sha"),
+            "review_audit": item.payload.get("review_audit"),
+        }
+        kwargs.update({key: value for key, value in review_kwargs.items() if value is not None})
+        if reason == "implementation_start" and DIRECT_SCOPE_RESERVATION_KEY in item.payload:
+            kwargs["direct_scope_reservation"] = item.payload[DIRECT_SCOPE_RESERVATION_KEY]
+        kwargs["expected_remote_sha" if item.pr is not None else "expected_head_sha"] = (
+            expected_head
+        )
+        if restart_base is not None:
+            kwargs["resolve_conflicts"] = True
+            kwargs["expected_base_sha"] = restart_base
+        if item.payload.get(_SYNC_RESTORED_WRITER_BEFORE_REBASE):
+            kwargs["sync_to_expected_remote_head"] = True
+            kwargs["pr_number"] = item.pr
+        return kwargs
+
+    @staticmethod
+    def _prepare_rebase_agent(item: WorkItem, ctx: StageContext) -> StepResult:
+        """Start the conflict agent before the host begins the rebase."""
+        try:
+            workspace = _existing_impl_workspace(item)
+        except (KeyError, TypeError, ValueError):
+            return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
+        item.payload[_REBASE_AGENT_INFLIGHT] = True
+        return JobRequest(
+            AgentJob(
+                repo=item.repo,
+                issue=_issue_number(item),
+                agent=agent_provider(ctx, "implementer"),
+                model=stage_model(ctx, "implementer", implementer_model),
+                prompt_builder=build_rebase_preparation_prompt,
+                cwd=workspace.cwd,
+                workspace=workspace,
+                timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+                sandbox="read-only",
+                allowed_tools="Read,Glob,Grep",
+                session_agent=AGENT_IMPLEMENTER,
+                execution_request=ExecutionRequest(
+                    AgentRole.IMPLEMENTER,
+                    AgentOperation.IMPLEMENT,
+                    SessionLifecycle.START_NEW,
+                ),
+                **_codex_isolation_job_kwargs(ctx),
+                descr="prepare_conflict_rebase",
+            ),
+            on_done_state=REBASE_AGENT_WAIT,
+        )
+
+    @staticmethod
+    def _rebase_agent_wait(item: WorkItem, ctx: StageContext) -> StepResult:
+        """Continue only after the rebase agent completes its preparation."""
+        if not item.payload.get("rebase_agent_started"):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_agent_failed")
+        return Continue(next_state=REBASE_WAIT)
+
+    def _rebase_continue_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Let the host validate, complete, sign, and lease-publish a paused rebase."""
+        if item.payload.pop("rebase_error", None):
+            if item.payload.pop("rebase_runner_blocked", False):
+                return self._block_rebase_runner(item, ctx)
+            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
+        if item.payload.pop(_REBASE_HEAD_DRIFT, None):
+            return self._finish_rebase(item, ctx)
+        if item.payload.pop("rebase_complete", None):
+            for key in (
+                "rebase_conflict",
+                "rebase_conflict_paths",
+                "rebase_conflict_snapshot",
+                "rebase_content_snapshot",
+                "rebase_conflict_hunks",
+                "rebase_conflict_context_version",
+                "rebase_conflict_index_snapshot",
+                "rebase_paused_head_sha",
+                "rebase_base_sha",
+                "rebase_expected_remote_sha",
+                _REBASE_CONFLICT_RESOLUTION_KEY,
+                _REBASE_CONFLICT_DIAGNOSIS_KEY,
+                _REBASE_CONFLICT_AGENT_SUMMARY_KEY,
+                "rebase_conflict_agent_error_detail",
+                _REBASE_CONFLICT_VALIDATION_KEY,
+            ):
+                item.payload.pop(key, None)
+            return self._finish_rebase(item, ctx)
+        if item.payload.pop("rebase_conflict_agent_error", None):
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        recovery = self._discover_rebase_continuation(item, ctx)
+        if recovery is not None:
+            return recovery
+        if not item.payload.pop("rebase_conflict_agent_complete", False):
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        if item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY) != "resolved_content":
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        try:
+            workspace = _existing_impl_workspace(item)
+            capability_target = self._rebase_capability_target(item, ctx, workspace)
+        except (KeyError, TypeError, ValueError):
+            return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
+        job = GitJob(
+            repo=item.repo,
+            op="continue_rebase",
+            workspace=workspace,
+            capability_target=capability_target,
+            timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
+            kwargs={
+                "cwd": _worktree_path(item, ctx),
+                "publish_rebased_head": item.pr is not None,
+                "expected_head_sha": item.payload.get("rebase_expected_remote_sha"),
+                "issue_number": item.issue,
+                "repo_root": str(ctx.paths.repo_root),
+                "rebase_reason": item.payload.get("rebase_reason"),
+                "pr_number": item.pr,
+                "reviewed_head_sha": item.payload.get("reviewed_pr_head_sha"),
+                "reviewed_base_sha": item.payload.get("reviewed_pr_base_sha"),
+                "review_audit": item.payload.get("review_audit"),
+                "direct_scope_reservation": (
+                    item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
+                    if item.payload.get("rebase_reason") == "implementation_start"
+                    else None
+                ),
+                "base_sha": item.payload.get("rebase_base_sha"),
+                "remote": "origin",
+                "branch": item.branch,
+                "expected_remote_sha": item.payload.get("rebase_expected_remote_sha"),
+                "conflict_paths": item.payload.get("rebase_conflict_paths"),
+                "conflict_snapshot": item.payload.get("rebase_conflict_snapshot"),
+                "conflict_index_snapshot": item.payload.get("rebase_conflict_index_snapshot"),
+                "paused_head_sha": item.payload.get("rebase_paused_head_sha"),
+                "rebase_recovery_intent_id": item.payload.get("rebase_recovery_intent_id"),
+            },
+            descr="complete_host_owned_rebase",
+        )
+        return JobRequest(job, on_done_state=REBASE_CONTINUE_WAIT)
+
+    def _block_rebase_runner(self, item: WorkItem, ctx: StageContext) -> StageOutcome:
+        """Publish one bounded operator diagnostic without changing source verdicts."""
+        raw = item.payload.get("rebase_failure_diagnostic")
+        diagnostic = dict(raw) if isinstance(raw, dict) else {}
+        diagnostic.update(
+            {
+                "operation": "rebase",
+                "capability_failure": True,
+                "labels_unchanged": True,
+                "head_sha": item.payload.get("_impl_source_revision", ""),
+                "error": diagnostic.get("cause") or self._rebase_failure_note(item),
+            }
+        )
+        published = publish_host_verification_failure(
+            ctx.github, item.pr or _issue_number(item), None, diagnostic, logger
+        )
+        item.payload["rebase_diagnostic_published"] = published
+        note = self._rebase_failure_note(item)
+        if not published:
+            note = f"{note}; operator diagnostic publication failed"[:500]
+        return StageOutcome(Disposition.BLOCKED, note)
+
+    @staticmethod
+    def _rebase_failure_note(item: WorkItem) -> str:
+        """Return the bounded host diagnostic for a terminal rebase failure."""
+        summary = item.payload.get("git_failure_summary")
+        if isinstance(summary, str) and summary:
+            return f"implementation_rebase_failed: {summary}"[:500]
+        return str(item.payload.get("rebase_error_detail") or "implementation_rebase_failed")
+
+    def _adopted(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """ADOPTED advances to pr_review after the adopted worktree is ready."""
+        issue = _issue_number(item)
+        if item.payload.pop("empty_diff_reimplementation", False):
+            logger.info(
+                "implementation:%d: adopted PR #%s has an empty diff; "
+                "running a substantive implementation pass",
+                issue,
+                item.pr,
+            )
+            return Continue(next_state=ADVISE_WAIT)
+        # Existing-PR fast path complete: worktree ready on the PR's real
+        # head branch — hand the PR to pr_review (doc step 1 "skip to
+        # step 8": nothing to implement, commit, or create).
+        logger.info(
+            "implementation:%d: adopted PR #%s (branch %r); advancing to pr_review",
+            issue,
+            item.pr,
+            item.branch,
+        )
+        return StageOutcome(Disposition.ADVANCE, f"existing PR #{item.pr}")
+
+    def _advise_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """ADVISE_WAIT either skips advice or submits the advise job."""
+        issue = _issue_number(item)
+        if not ctx.config.enable_advise:
+            logger.info("implementation:%d: advise disabled; skipping", issue)
+            return Continue(next_state=IMPLEMENT_WAIT)
+        logger.info("implementation:%d: requesting advise job", issue)
+        try:
+            workspace = _existing_impl_workspace(item)
+        except (KeyError, TypeError, ValueError):
+            return Continue(next_state=WORKTREE_WAIT)
+        job = AthenaSkillJob(
+            request=AthenaSkillRequest(
+                kind="advise",
+                repo=item.repo,
+                issue=issue,
+                agent=agent_provider(ctx, "implementer"),
+                model=stage_model(ctx, "advise", advise_model),
+                cwd=workspace.cwd,
+                timeout_s=stage_timeout(ctx, "advise", advise_claude_timeout),
+                workspace=workspace,
+                payload={
+                    "issue_number": item.issue,
+                    "issue_title": item.payload.get("issue_title", ""),
+                    "issue_body": item.payload.get("issue_body", ""),
+                },
+            ),
+            descr="advise",
+        )
+        return JobRequest(job, on_done_state=IMPLEMENT_WAIT)
+
+    def _implement_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
+        """IMPLEMENT_WAIT submits the implementation job when budget remains."""
+        issue = _issue_number(item)
+        if item.payload.get("athena_advise_error"):
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                athena_advise_failure_reason(item),
+            )
+        if item.payload.get("dirty_direct_active"):
+            return self._dirty_direct_implement(item, ctx)
+        entry_outcome = self._implementation_agent_turn_entry_outcome(item, ctx, issue)
+        if entry_outcome is not None:
+            return entry_outcome
+        # Clear stale results at submission so a failed later attempt can
+        # never replay an earlier attempt's output downstream.
+        item.payload.pop("implement_error", None)
+        item.payload.pop("implement_summary", None)
+        if item.payload.get("implementation_remediation"):
+            remediation_threads = item.payload.get("remediation_threads")
+            if (
+                item.pr is None
+                or not isinstance(remediation_threads, list)
+                or not remediation_threads
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "remediation_threads_invalid")
+            logger.info(
+                "implementation:%d: addressing %d review thread(s)",
+                issue,
+                len(remediation_threads),
+            )
+            scope_retraction_paths = scope_retraction_paths_for_threads(remediation_threads)
+            if scope_retraction_paths is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+            if item.payload.get("scope_retraction_before_scope_block") and (
+                not scope_retraction_paths
+                or any(
+                    not scope_retraction_paths_for_threads([thread])
+                    for thread in remediation_threads
+                )
+            ):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "scope_retraction_projection_invalid",
+                )
+            if scope_retraction_paths:
+                base_sha = item.payload.get("reviewed_pr_base_sha")
+                if not is_full_commit_sha(base_sha):
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        "scope_retraction_base_unavailable",
+                    )
+                item.payload["scope_retraction_paths"] = scope_retraction_paths
+            else:
+                item.payload.pop("scope_retraction_paths", None)
+            if item.payload.get("_impl_source_receipt") is None:
+                return Continue(next_state=WORKTREE_WAIT)
+            try:
+                workspace = _existing_impl_workspace(item)
+            except (KeyError, TypeError, ValueError):
+                return Continue(next_state=WORKTREE_WAIT)
+            if pending := _require_plan_scope(item, ctx):
+                return pending
+            job = AgentJob(
+                repo=item.repo,
+                issue=issue,
+                agent=agent_provider(ctx, "implementer"),
+                model=stage_model(ctx, "implementer", implementer_model),
+                prompt_builder=get_address_review_prompt,
+                cwd=workspace.cwd,
+                timeout_s=stage_timeout(ctx, "address_review", implementer_claude_timeout),
+                workspace=workspace,
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
+                session_agent=AGENT_IMPLEMENTER,
+                resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+                execution_request=ExecutionRequest(
+                    AgentRole.IMPLEMENTER,
+                    AgentOperation.ADDRESS_REVIEW,
+                    agent_session_lifecycle(item, AGENT_IMPLEMENTER),
+                ),
+                resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+                prompt_kwargs={
+                    "pr_number": item.pr,
+                    "issue_number": issue,
+                    "worktree_path": item.worktree,
+                    "threads_json": json.dumps(remediation_threads),
+                    "task_block": "\n\n".join(
+                        part
+                        for part in (
+                            f"Linked issue #{issue}: {item.payload.get('issue_title', '')}".strip(),
+                            str(item.payload.get("issue_body", "")),
+                            str(item.payload.get("pr_description", "")),
+                        )
+                        if part
+                    ),
+                    "diff_text": str(item.payload.get("pr_diff", "")),
+                    "scope_retraction_paths": scope_retraction_paths or (),
+                },
+                **_codex_isolation_job_kwargs(ctx),
+                descr="address_review",
+            )
+            _consume_plan_scope(item)
+            return JobRequest(job, on_done_state=TEST_WAIT)
+        logger.info("implementation:%d: requesting implement job", issue)
+        try:
+            workspace = _existing_impl_workspace(item)
+        except (KeyError, TypeError, ValueError):
+            return Continue(next_state=WORKTREE_WAIT)
+        scope_correction_paths = item.payload.pop(_SCOPE_CORRECTION_PATHS, ())
+        if not isinstance(scope_correction_paths, tuple):
+            scope_correction_paths = ()
+        checkpoint_interval = interval_from_config(ctx.config)
+        resume_context = resume_context_for(
+            config=ctx.config,
+            worktree=workspace.cwd,
+            issue=issue,
+            branch=item.branch,
+            timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
+        )
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx, "implementer"),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=build_implementation_prompt,
+            cwd=workspace.cwd,
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout),
+            workspace=workspace,
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+            session_agent=AGENT_IMPLEMENTER,
+            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.IMPLEMENT,
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "branch_name": item.branch,
+                "worktree_path": item.worktree,
+                "advise_findings": item.payload.get("advise_findings", ""),
+                "scope_correction_paths": scope_correction_paths,
+                "resume_context": resume_context,
+            },
+            **_codex_isolation_job_kwargs(ctx),
+            descr="implement",
+        )
+        if checkpoint_interval > 0:
+            stamp_turn(item, now=ctx.now())
+        return JobRequest(job, on_done_state=TEST_WAIT)
+
+    @staticmethod
+    def _implementation_agent_turn_entry_outcome(
+        item: WorkItem, ctx: StageContext, issue: int
+    ) -> StepResult | None:
+        """Return any outcome that must happen before an ordinary implement turn."""
+        if item.payload.get("rebase_conflict"):
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        return ImplementationStage._ordinary_implement_budget_outcome(item, ctx, issue)
+
+    @staticmethod
+    def _ordinary_implement_budget_outcome(
+        item: WorkItem, ctx: StageContext, issue: int
+    ) -> StageOutcome | None:
+        """Return the ordinary implementation exhaustion outcome, if reached."""
+        budget = ctx.budget("implement")
+        attempts = item.attempts.get("implement", 0)
+        if attempts < budget:
+            return None
+        logger.error(
+            "implementation:%d: implement budget exhausted (%d/%d)",
+            issue,
+            attempts,
+            budget,
+        )
+        return StageOutcome(Disposition.FINISH_FAIL, "implement_exhausted")
+
+    def _discover_rebase_continuation(self, item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Keep a completed-result retry separate from admitted paused edits."""
+        if item.payload.get("rebase_conflict_agent_complete"):
+            return None
+        discovery = self._rebase_discovery(item, ctx)
+        if discovery is not None:
+            return discovery
+        if item.payload.get("rebase_recovery_candidate"):
+            return self._rebase_request(item, ctx, str(item.payload.get("rebase_reason")))
+        return None
+
+    def _rebase_conflict_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Build one separately-budgeted edit-only conflict-resolution turn."""
+        issue = _issue_number(item)
+        if not item.payload.get("rebase_conflict"):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_receipt_missing")
+        if item.attempts.get("rebase_conflict", 0) >= ctx.budget("rebase_conflict"):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_exhausted")
+        try:
+            workspace = _existing_impl_workspace(item)
+            source_operation = DirtySourceOperation(
+                "rebase-conflict",
+                tuple(item.payload["rebase_conflict_paths"]),
+                content_snapshot=tuple(sorted(item.payload["rebase_content_snapshot"].items())),
+                paused_head_sha=item.payload["rebase_paused_head_sha"],
+            )
+        except (KeyError, TypeError, ValueError):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_source_authority_unavailable")
+        if not self._has_current_rebase_conflict_context(item):
+            return JobRequest(
+                self._rebase_conflict_validation_job(item, ctx, workspace),
+                on_done_state=REBASE_CONFLICT_REFRESH_WAIT,
+            )
+        logger.info("implementation:%d: requesting edit-only rebase resolution", issue)
+        raw_hunks = item.payload.get("rebase_conflict_hunks")
+        conflict_hunks = raw_hunks if isinstance(raw_hunks, dict) else {}
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx, "implementer"),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=get_rebase_conflict_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
+            allowed_tools="Read,Write,Edit,Glob,Grep",
+            session_agent=AGENT_IMPLEMENTER,
+            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.REBASE_CONFLICT,
+                agent_session_lifecycle(item, AGENT_IMPLEMENTER),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+            prompt_kwargs={
+                "conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
+                "conflict_hunks": dict(conflict_hunks),
+                "diagnosis": str(item.payload.get(_REBASE_CONFLICT_DIAGNOSIS_KEY) or ""),
+            },
+            **_codex_isolation_job_kwargs(ctx),
+            workspace=workspace,
+            source_operation=source_operation,
+            descr="resolve_rebase_conflict",
+        )
+        return JobRequest(job, on_done_state=REBASE_CONFLICT_VALIDATE_WAIT)
+
+    @staticmethod
+    def _has_current_rebase_conflict_context(item: WorkItem) -> bool:
+        """Return true when the receipt has complete current context."""
+        paths = item.payload.get("rebase_conflict_paths")
+        hunks = item.payload.get("rebase_conflict_hunks")
+        return bool(
+            item.payload.get("rebase_conflict_context_version") == _REBASE_CONFLICT_CONTEXT_VERSION
+            and isinstance(paths, (list, tuple))
+            and paths
+            and isinstance(hunks, dict)
+            and set(hunks) == set(paths)
+            and all(isinstance(hunks.get(path), str) and hunks[path] for path in paths)
+        )
+
+    @staticmethod
+    def _rebase_conflict_validation_job(
+        item: WorkItem, ctx: StageContext, workspace: WorkspaceBinding
+    ) -> GitJob:
+        """Build one read-only host conflict-classification job."""
+        return GitJob(
+            repo=item.repo,
+            op="validate_rebase_conflict",
+            workspace=workspace,
+            timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
+            kwargs={
+                "cwd": _worktree_path(item, ctx),
+                "repo_root": str(ctx.paths.repo_root),
+                "issue_number": item.issue,
+                "publish_rebased_head": item.pr is not None,
+                "expected_head_sha": item.payload.get("rebase_expected_remote_sha"),
+                "rebase_reason": item.payload.get("rebase_reason"),
+                "pr_number": item.pr,
+                "direct_scope_reservation": (
+                    item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
+                    if item.payload.get("rebase_reason") == "implementation_start"
+                    else None
+                ),
+                "base_sha": item.payload.get("rebase_base_sha"),
+                "remote": "origin",
+                "branch": item.branch,
+                "expected_remote_sha": item.payload.get("rebase_expected_remote_sha"),
+                "conflict_paths": item.payload.get("rebase_conflict_paths"),
+                "conflict_snapshot": item.payload.get("rebase_conflict_snapshot"),
+                "conflict_index_snapshot": item.payload.get("rebase_conflict_index_snapshot"),
+                "paused_head_sha": item.payload.get("rebase_paused_head_sha"),
+                "agent_summary": item.payload.get(_REBASE_CONFLICT_AGENT_SUMMARY_KEY, ""),
+            },
+            descr="validate_rebase_conflict",
+        )
+
+    def _rebase_conflict_refresh_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Route a host refresh of a legacy conflict receipt."""
+        if item.payload.pop("rebase_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
+        classification = item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY)
+        if classification == "resolved_content":
+            item.payload["rebase_conflict_agent_complete"] = True
+            return Continue(next_state=REBASE_CONTINUE_WAIT)
+        if classification == "out_of_scope_edit":
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_out_of_scope_edit")
+        if classification in _REBASE_CONFLICT_RETRYABLE:
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+            item.payload.pop("rebase_conflict_agent_complete", None)
+            if not self._has_current_rebase_conflict_context(item):
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_receipt_incompatible")
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_receipt_incompatible")
+
+    def _rebase_conflict_validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Classify one agent turn before host-owned rebase continuation."""
+        if item.payload.pop("rebase_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
+        if item.payload.pop("rebase_conflict_validation_pending", False):
+            try:
+                workspace = _existing_impl_workspace(item)
+            except (KeyError, TypeError, ValueError):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable"
+                )
+            return JobRequest(
+                self._rebase_conflict_validation_job(item, ctx, workspace),
+                on_done_state=REBASE_CONFLICT_VALIDATE_WAIT,
+            )
+        classification = item.payload.get(_REBASE_CONFLICT_VALIDATION_KEY)
+        if classification in _REBASE_CONFLICT_RETRYABLE:
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+            if item.attempts.get("rebase_conflict", 0) >= ctx.budget("rebase_conflict"):
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_exhausted")
+            if (
+                AGENT_IMPLEMENTER not in item.session_ids
+                and AGENT_IMPLEMENTER not in item.session_bindings
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_session_unavailable")
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        if classification == "resolved_content":
+            item.payload["rebase_conflict_agent_complete"] = True
+            return Continue(next_state=REBASE_CONTINUE_WAIT)
+        if classification == "out_of_scope_edit":
+            item.payload.pop(_REBASE_CONFLICT_VALIDATION_KEY, None)
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_out_of_scope_edit")
+        return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_validation_missing")
+
+    def _test_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """TEST_WAIT either retries the implementer or runs the pre-PR tests."""
+        issue = _issue_number(item)
+        if item.payload.pop("implement_error", None):
+            if item.payload.pop("codex_isolation_quarantined", None):
+                return StageOutcome(Disposition.FINISH_FAIL, "codex_isolation_quarantined")
+            # The implement job hard-failed. The attempt was counted in
+            # on_job_done (doc: agent_error consumes the implement
+            # budget); RETRY re-enters the stage for the next attempt.
+            _reset_dirty_direct_probe_for_retry(item)
+            item.state = WORKTREE_WAIT
+            return StageOutcome(Disposition.RETRY, "agent_error")
+        is_hephaestus = (ctx.org.casefold(), item.repo.casefold()) == (
+            "homericintelligence",
+            "hephaestus",
+        )
+        remediation = bool(item.payload.get("implementation_remediation"))
+        run_hephaestus_pre_pr_checks = is_hephaestus and (
+            remediation or (item.pr is None and not bool(item.payload.get("existing_pr")))
+        )
+        run_configured_pre_pr_checks = not is_hephaestus and bool(
+            getattr(ctx.config, "run_pre_pr_tests", False)
+        )
+        if not (run_hephaestus_pre_pr_checks or run_configured_pre_pr_checks):
+            return Continue(next_state=COMMIT_PUSH_WAIT)
+        item.payload.pop("tests_failed", None)
+        item.payload.pop("test_output", None)
+        item.payload.pop("test_receipt", None)
+        logger.info("implementation:%d: requesting pre-PR test job", issue)
+        if (
+            run_hephaestus_pre_pr_checks
+            and getattr(ctx.config, "podman_machine_preflight_failed", False)
+            and sys.platform == "darwin"
+        ):
+            item.payload["pre_pr_runner_mode"] = "native"
+            item.payload["pre_pr_fallback_reason"] = "container-engine-unavailable"
+        runner_mode = item.payload.get("pre_pr_runner_mode")
+        native_fallback_authorized = _native_pre_pr_fallback_is_authorized(item)
+        if runner_mode == "native" and not native_fallback_authorized:
+            return StageOutcome(Disposition.FINISH_FAIL, "pre_pr_runner_unavailable")
+        run_native_fallback = run_hephaestus_pre_pr_checks and native_fallback_authorized
+        verified_runner_source_revision: str | None = None
+        if run_native_fallback:
+            test_argv = PRE_PR_TEST_ARGV
+            receipt_argv = PRE_PR_TEST_ARGV
+            test_descr = "pre_pr_tests_native_fallback"
+        elif run_hephaestus_pre_pr_checks:
+            source_revision = item.payload.get("_impl_source_revision")
+            verified_runner_source_revision = (
+                source_revision if is_full_commit_sha(source_revision) else ""
+            )
+            test_argv = HEPHAESTUS_REQUIRED_CHECK_ARGV
+            receipt_argv = HEPHAESTUS_REQUIRED_CHECK_ARGV
+            test_descr = "pre_pr_tests"
+            item.payload["pre_pr_runner_mode"] = "container"
+            item.payload.pop("pre_pr_fallback_reason", None)
+        else:
+            test_argv = tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
+            receipt_argv = test_argv
+            test_descr = "pre_pr_tests"
+            item.payload["pre_pr_runner_mode"] = "configured"
+            item.payload.pop("pre_pr_fallback_reason", None)
+        item.payload["test_command"] = shlex.join(receipt_argv)
+        test_job = BuildTestJob(
+            repo=item.repo,
+            cwd=_worktree_path(item, ctx),
+            argv=test_argv,
+            timeout_s=stage_timeout(
+                ctx,
+                "pre_pr_test",
+                (
+                    HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S
+                    if run_hephaestus_pre_pr_checks and not run_native_fallback
+                    else PRE_PR_TEST_TIMEOUT_S
+                ),
+            ),
+            verified_runner_source_revision=verified_runner_source_revision,
+            descr=test_descr,
+        )
+        return JobRequest(test_job, on_done_state=COMMIT_PUSH_WAIT)
+
+    def _testfix_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """TESTFIX_WAIT submits the test-fix job while budget remains."""
+        issue = _issue_number(item)
+        budget = ctx.budget("test_fix")
+        if item.attempts.get("test_fix", 0) >= budget:
+            logger.error(
+                "implementation:%d: tests still red after %d fix attempt(s)",
+                issue,
+                budget,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "tests_red")
+        if pending := _require_plan_scope(item, ctx):
+            return pending
+        pretest_kwargs: dict[str, Any] = {}
+        try:
+            pretest_kwargs["workspace"] = _existing_impl_workspace(item)
+            allowed_paths, _scope_digest = _pretest_scope(item, ctx)
+            pretest_kwargs["source_operation"] = DirtySourceOperation("test-fix", allowed_paths)
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            return StageOutcome(Disposition.FINISH_FAIL, "test_fix_source_authority_unavailable")
+        logger.info("implementation:%d: requesting test-fix job", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx, "implementer"),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=build_test_fix_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+            session_agent=AGENT_IMPLEMENTER,
+            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.TEST_FIX,
+                SessionLifecycle.RESUME_REQUIRED,
+            ),
+            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "prev_iteration": item.attempts.get("test_fix", 0),
+                "test_output": item.payload.get("test_output", ""),
+            },
+            **_codex_isolation_job_kwargs(ctx),
+            **pretest_kwargs,
+            descr="test_fix",
+        )
+        _consume_plan_scope(item)
+        return JobRequest(job, on_done_state=TEST_WAIT)
+
+    def _commit_push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """COMMIT_PUSH_WAIT either re-enters test-fix or submits commit+push."""
+        issue = _issue_number(item)
+        if item.payload.get("pre_pr_runner_unavailable") is True or (
+            item.payload.get("pre_pr_runner_mode") == "native"
+            and not _native_pre_pr_fallback_is_authorized(item)
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "pre_pr_runner_unavailable")
+        if item.payload.get("tests_failed"):
+            return Continue(next_state=TESTFIX_WAIT)
+        if (
+            item.payload.get("pre_pr_runner_mode") == "native"
+            and item.payload.get("pre_pr_fallback_reason") in RUNNER_FALLBACK_REASONS
+            and not item.payload.get("test_receipt")
+        ):
+            logger.warning(
+                "implementation:%d: container runner failure=%s; platform=%s; "
+                "requesting fixed native verification: command=%s",
+                issue,
+                item.payload.get("pre_pr_fallback_reason"),
+                sys.platform,
+                shlex.join(PRE_PR_TEST_ARGV),
+            )
+            return Continue(next_state=TEST_WAIT)
+        if item.payload.get("dirty_direct_active"):
+            return JobRequest(
+                GitJob(
+                    repo=item.repo,
+                    op="publish_dirty_direct_continuation",
+                    timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                    expected_repository=f"{ctx.org}/{item.repo}",
+                    kwargs={
+                        "repo_root": str(ctx.paths.repo_root),
+                        "issue_number": issue,
+                        "source_workspace": item.payload.get("dirty_direct_binding"),
+                    },
+                    descr="publish_dirty_direct_continuation",
+                ),
+                on_done_state=PR_CREATE,
+            )
+        logger.info("implementation:%d: requesting commit+push job", issue)
+        return _commit_push_request(item, ctx)
+
+    def on_job_done(  # noqa: C901
+        self, item: WorkItem, result: JobResult, ctx: StageContext
+    ) -> None:
+        """Store job results on the item payload (state is still the WAIT state).
+
+        The implement attempt is counted HERE, on job completion (success or
+        hard failure alike — doc: "agent_error -> RETRY (consumes the
+        implement budget)"). Interrupted results never reach this method, so
+        an interrupt can never burn budget.
+
+        Args:
+            item: The work item to update.
+            result: The job result from the worker pool.
+            ctx: Stage context.
+
+        """
+        if self._receive_first_publication_recovery(item, result, ctx):
+            return
+        if self._receive_first_publication_discovery(item, result):
+            return
+        if self._receive_rebase_discovery(item, result):
+            return
+        pending = item.payload.get(PENDING_GITHUB_REQUEST)
+        if isinstance(pending, ReadCurrentPlanScopeRequest):
+            item.payload.pop(PENDING_GITHUB_REQUEST, None)
+            receipt = result.value
+            if (
+                not result.ok
+                or result.interrupted
+                or not isinstance(receipt, CurrentPlanScopeRead)
+                or receipt.request != pending
+                or pending.repository != f"{ctx.org}/{item.repo}".casefold()
+                or pending.issue_number != item.issue
+            ):
+                item.payload[_PLAN_SCOPE_FAILURE] = True
+                _consume_plan_scope(item)
+                return
+            item.payload[_PLAN_SCOPE_RECEIPT] = receipt
+            item.payload[_PLAN_SCOPE_STATE] = item.state
+            return
+        host_source_result = item.state in {
+            REBASE_WAIT,
+            REBASE_CONTINUE_WAIT,
+            COMMIT_PUSH_WAIT,
+            PR_CREATE,
+        } or item.payload.get("dirty_recovery_inflight")
+        if (
+            host_source_result
+            and isinstance(result.value, dict)
+            and "source_workspace" in result.value
+        ):
+            value = dict(result.value)
+            try:
+                _store_impl_source_metadata(item, value)
+                value.pop("source_workspace")
+                value.pop("source_receipt")
+            except (KeyError, TypeError, ValueError):
+                result = replace(result, ok=False, error="implementation source result is invalid")
+            else:
+                result = replace(result, value=value)
+        if item.payload.pop(_DIRTY_FINALIZATION_INFLIGHT, False):
+            item.payload[_DIRTY_FINALIZATION_RESULT] = result
+            return
+        if item.payload.pop("dirty_direct_claim_inflight", False):
+            item.payload["dirty_direct_claim_result"] = {"ok": result.ok, "value": result.value}
+            return
+        if item.state == COMMIT_PUSH_WAIT and item.payload.get("dirty_direct_active"):
+            item.payload["dirty_direct_publication_result"] = {
+                "ok": result.ok,
+                "value": result.value,
+            }
+            return
+        if item.state == WORKTREE_WAIT:
+            self._on_worktree_done(item, result, repository=f"{ctx.org}/{item.repo}")
+            return
+
+        if item.state == DIRTY_DECISION_WAIT:
+            if item.payload.pop("dirty_recovery_inflight", False):
+                value = result.value if isinstance(result.value, dict) else {}
+                item.payload["dirty_recovery_receipt"] = dict(value)
+                if not result.ok and "failure_kind" not in value:
+                    item.payload["dirty_recovery_receipt"] = {
+                        "outcome": "failed",
+                        "failure_kind": "worker_error",
+                        "cause": redact_diagnostic_text(result.error or "dirty recovery failed")[
+                            :500
+                        ],
+                    }
+                return
+            lines = [line.strip() for line in str(result.value or "").splitlines() if line.strip()]
+            decision = lines[-1] if result.ok and lines else None
+            if decision in {"COMMIT", "STASH"}:
+                item.payload["dirty_decision"] = decision
+                item.payload.pop("dirty_decision_invalid", None)
+            else:
+                item.payload.pop("dirty_decision", None)
+                item.payload["dirty_decision_invalid"] = True
+            return
+
+        if item.state == DIRTY_RECOVERY_WAIT:
+            value = result.value if isinstance(result.value, dict) else {}
+            item.payload["dirty_recovery_receipt"] = dict(value)
+            if not result.ok and "failure_kind" not in value:
+                item.payload["dirty_recovery_receipt"] = {
+                    "outcome": "failed",
+                    "failure_kind": "worker_error",
+                    "cause": redact_diagnostic_text(result.error or "dirty recovery failed")[:500],
+                }
+            return
+
+        if item.payload.pop(_REBASE_AGENT_INFLIGHT, False):
+            item.payload["rebase_agent_started"] = result.ok
+            return
+
+        if item.state in {REBASE_WAIT, REBASE_CONTINUE_WAIT} and result.ok:
+            value = result.value if isinstance(result.value, dict) else {}
+            reviewed_head = item.payload.get("reviewed_pr_head_sha")
+            if (
+                value.get("rebased") is False
+                and value.get("published") is False
+                and value.get("head_sha") == reviewed_head
+            ):
+                item.payload["rebase_unchanged_review"] = True
+            elif reviewed_head and value.get("published") is True:
+                item.payload["rebase_published_review"] = True
+
+        if item.state == REBASE_WAIT:
+            result = _consume_initial_rebase_reservation(item, result)
+            if result.ok:
+                value = result.value if isinstance(result.value, dict) else {}
+                if value.get("implementation_started") is True:
+                    item.payload["implementation_started"] = True
+                if value.get("head_drift"):
+                    item.payload[_REBASE_HEAD_DRIFT] = True
+                else:
+                    head_sha = value.get("head_sha")
+                    if is_full_commit_sha(head_sha):
+                        item.payload["_impl_source_revision"] = head_sha
+                    item.payload["rebase_complete"] = True
+            elif (
+                isinstance(result.value, dict)
+                and result.value.get("rebase_admission_changed") is True
+            ):
+                item.payload[_REBASE_HEAD_DRIFT] = True
+            elif _publication_remote_changed(result):
+                self._record_rebase_failure(item, result)
+            elif result.error == "rebase conflict restart required":
+                value = result.value if isinstance(result.value, dict) else {}
+                if (
+                    item.payload.get("rebase_reason") == "manual"
+                    and is_full_commit_sha(value.get("base_sha"))
+                    and is_full_commit_sha(value.get("head_sha"))
+                ):
+                    item.payload["rebase_restart_base_sha"] = value["base_sha"]
+                    item.payload["rebase_restart_head_sha"] = value["head_sha"]
+                else:
+                    self._record_rebase_failure(item, result)
+            elif result.error == "mechanical rebase hit conflicts; resolution required":
+                logger.warning(
+                    "implementation:%s: writer rebase paused for host-owned conflict resolution",
+                    item.issue,
+                )
+                self._record_rebase_conflict(item, result)
+            else:
+                logger.warning(
+                    "implementation:%s: writer rebase failed: %s", item.issue, result.error
+                )
+                self._record_rebase_failure(item, result)
+            return
+
+        if item.state == REBASE_CONTINUE_WAIT:
+            result = _consume_initial_rebase_reservation(item, result)
+            if result.ok:
+                value = result.value if isinstance(result.value, dict) else {}
+                if value.get("implementation_started") is True:
+                    item.payload["implementation_started"] = True
+                head_sha = value.get("head_sha")
+                if is_full_commit_sha(head_sha):
+                    item.payload["_impl_source_revision"] = head_sha
+                item.payload["rebase_complete"] = True
+            elif _publication_remote_changed(result):
+                self._record_rebase_failure(item, result)
+            elif (result.error or "").startswith("rebase conflict resolution required"):
+                self._record_rebase_conflict(item, result)
+                item.payload.pop("rebase_conflict_agent_complete", None)
+            else:
+                logger.warning(
+                    "implementation:%s: host rebase completion failed: %s",
+                    item.issue,
+                    result.error,
+                )
+                self._record_rebase_failure(item, result)
+                diagnostic = _rebase_failure_diagnostic(result)
+                if diagnostic is not None:
+                    item.payload["rebase_failure_diagnostic"] = diagnostic
+            return
+
+        if item.state == REBASE_CONFLICT_VALIDATE_WAIT:
+            self._on_rebase_conflict_validation_done(item, result)
+            return
+
+        if item.state == REBASE_CONFLICT_REFRESH_WAIT:
+            self._on_rebase_conflict_validation_done(item, result)
+            return
+
+        if item.state == ADVISE_WAIT:
+            if not result.ok:
+                item.payload["athena_advise_error"] = result.error or "advise failed"
+                return
+            if result.value:
+                if not isinstance(result.value, AthenaSkillResult) or not result.value.ok:
+                    item.payload["athena_advise_error"] = "invalid Athena advise result"
+                    return
+                item.payload["advise_findings"] = result.value.context
+                item.payload["athena_advise_receipt"] = result.value.receipt
+            return
+
+        if item.state == IMPLEMENT_WAIT:
+            self._on_implement_done(item, result)
+            return
+
+        if item.state == REBASE_CONFLICT_WAIT:
+            self._on_rebase_conflict_agent_done(item, result)
+            return
+
+        if item.state == TEST_WAIT:
+            self._on_tests_done(item, result)
+            return
+
+        if item.state == TESTFIX_WAIT:
+            item.attempts["test_fix"] = item.attempts.get("test_fix", 0) + 1
+            return
+
+        if item.state == COMMIT_PUSH_WAIT:
+            self._on_commit_push_done(item, result)
+
+    @staticmethod
+    def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
+        """Record publication success, a no-commit result, or Git failure."""
+        if not result.ok and result.error in _TERMINAL_GIT_LOCK_FAILURES:
+            item.payload["git_lock_failure"] = result.error
+            item.payload.pop("git_error_retries", None)
+            return
+        result = _consume_writer_publication(item, result)
+        if _COMMIT_PUSH_TERMINAL in item.payload:
+            return
+        if result.ok:
+            item.payload.pop("publication_failure_diagnostic", None)
+            item.payload.pop("git_failure_summary", None)
+            receipt = result.value if isinstance(result.value, dict) else {}
+            receipt_head = receipt.get("head_sha")
+            if is_full_commit_sha(receipt_head):
+                item.payload["_worktree_cleanup_head_sha"] = receipt_head
+            pushed = receipt.get("pushed") is True if receipt else bool(result.value)
+            if not pushed:
+                item.payload["no_commits"] = True
+                # The worker's no-commit path conditionally released the
+                # remote branch.  Keep the exact receipt so Finished can
+                # remove the now-unused local branch after its worktree is
+                # detached; otherwise the next direct run would fail closed
+                # on that stale local ref.
+                reservation = item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+                if isinstance(reservation, dict):
+                    item.payload[DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY] = reservation
+            else:
+                # A published branch has real commits and must not be
+                # released by terminal cleanup.
+                item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+                if item.payload.get("implementation_remediation") and is_full_commit_sha(
+                    receipt_head
+                ):
+                    item.payload["_impl_source_revision"] = receipt_head
+            # A successful worker result ends the consecutive-git-failure
+            # streak even when no commit was produced; PR_CREATE reports it.
+            item.payload.pop("git_error_retries", None)
+            return
+        error_text = (result.error or "").lower()
+        if "no commits" in error_text:
+            # Retain the legacy transport result as a no-commit outcome.
+            # PR_CREATE reports incomplete work with the agent summary.
+            item.payload["no_commits"] = True
+            return
+        if "outside approved scope" in error_text:
+            # A deterministic scope-policy rejection is not a transient Git
+            # failure: do not retry the identical commit, and report the
+            # specific cause. The worktree is preserved for correction.
+            item.payload["scope_violation"] = True
+            item.payload["scope_violation_summary"] = _git_failure_fallback(result)
+            evidence = result.value if isinstance(result.value, dict) else {}
+            unexpected = validated_scope_violation_paths(evidence.get(SCOPE_VIOLATION_PATHS_KEY))
+            if unexpected is None:
+                item.payload.pop(SCOPE_VIOLATION_PATHS_KEY, None)
+            else:
+                item.payload[SCOPE_VIOLATION_PATHS_KEY] = unexpected
+            item.payload.pop("git_error_retries", None)
+            return
+        logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
+        _store_publication_failure_diagnostic(item, result)
+        item.payload["git_error"] = True
+
+    @staticmethod
+    def _on_implement_done(item: WorkItem, result: JobResult) -> None:
+        """Count the implement attempt and record its outcome.
+
+        The attempt is counted on completion, success or hard failure alike
+        (doc: "agent_error -> RETRY (consumes the implement budget)").
+
+        Args:
+            item: The work item to update.
+            result: The implement job result.
+
+        """
+        item.attempts["implement"] = item.attempts.get("implement", 0) + 1
+        if not result.ok:
+            logger.warning("implementation:%s: implement job failed: %s", item.issue, result.error)
+            item.payload["implement_error"] = True
+            if result.error == "codex_adapter_inventory_uncertain":
+                item.payload["codex_isolation_quarantined"] = True
+            return
+        item.payload.pop("post_review_rebase_required", None)
+        item.payload.pop("rebase_conflict", None)
+        if result.value and not item.payload.get("implementation_remediation"):
+            item.payload["implement_summary"] = str(result.value)
+
+    @staticmethod
+    def _on_rebase_conflict_agent_done(item: WorkItem, result: JobResult) -> None:
+        """Count one conflict-only turn without consuming implementation budget."""
+        item.attempts["rebase_conflict"] = item.attempts.get("rebase_conflict", 0) + 1
+        item.payload.pop("rebase_conflict_agent_complete", None)
+        item.payload.pop("rebase_conflict_agent_error_detail", None)
+        item.payload["rebase_conflict_validation_pending"] = True
+        summary = result.value if isinstance(result.value, str) else result.stdout_tail
+        if not summary:
+            summary = result.error or "agent returned no summary"
+        item.payload[_REBASE_CONFLICT_AGENT_SUMMARY_KEY] = redact_diagnostic_text(summary)[:500]
+        if result.error:
+            item.payload["rebase_conflict_agent_error_detail"] = redact_diagnostic_text(
+                result.error
+            )[:500]
+
+    @staticmethod
+    def _on_rebase_conflict_validation_done(item: WorkItem, result: JobResult) -> None:
+        """Store host classification and diagnosis for one conflict turn."""
+        item.payload.pop("rebase_conflict_validation_pending", None)
+        value = result.value if isinstance(result.value, dict) else {}
+        classification = value.get("conflict_resolution")
+        if classification not in _REBASE_CONFLICT_OUTCOMES:
+            ImplementationStage._record_rebase_failure(item, result)
+            return
+
+        preserve_snapshot = classification == "resolved_content"
+        ImplementationStage._record_rebase_conflict(
+            item, result, preserve_snapshot=preserve_snapshot
+        )
+        if item.payload.get("rebase_error"):
+            return
+        item.payload[_REBASE_CONFLICT_VALIDATION_KEY] = classification
+        if classification in _REBASE_CONFLICT_RETRYABLE or classification == "out_of_scope_edit":
+            detail = result.error or f"host classified the turn as {classification}"
+            summary = str(item.payload.get(_REBASE_CONFLICT_AGENT_SUMMARY_KEY) or "")
+            diagnosis = (
+                f"classification={classification}; host diagnosis={detail}; "
+                f"agent summary={summary or 'none'}"
+            )
+            diagnosis = redact_diagnostic_text(diagnosis)[:500]
+            item.payload[_REBASE_CONFLICT_DIAGNOSIS_KEY] = diagnosis
+            logger.warning(
+                "implementation:%s: rebase conflict turn classified as %s: %s",
+                item.issue,
+                classification,
+                diagnosis,
+            )
+
+    @staticmethod
+    def _record_rebase_failure(item: WorkItem, result: JobResult) -> None:
+        """Keep bounded diagnostics and distinguish host setup from source failure."""
+        item.payload["rebase_error"] = True
+        if result.error:
+            item.payload["rebase_error_detail"] = redact_diagnostic_text(result.error)[:500]
+        if result.stdout_tail:
+            item.payload["rebase_stdout_tail"] = redact_diagnostic_text(result.stdout_tail)[-4000:]
+        if result.stderr_tail:
+            item.payload["rebase_stderr_tail"] = redact_diagnostic_text(result.stderr_tail)[-4000:]
+        value = result.value if isinstance(result.value, dict) else {}
+        if value.get("initial_reservation_pending") is True and is_full_commit_sha(
+            value.get("head_sha")
+        ):
+            item.payload["_impl_source_revision"] = value["head_sha"]
+        failure_kind = value.get("failure_kind")
+        if isinstance(failure_kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", failure_kind):
+            item.payload["rebase_error_kind"] = failure_kind
+        policy = value.get("rebase_policy")
+        if isinstance(policy, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", policy):
+            item.payload["rebase_error_policy"] = policy
+        else:
+            item.payload.pop("rebase_error_policy", None)
+        if (
+            isinstance(failure_kind, str)
+            and failure_kind in {"signing_configuration", "validation_runner"}
+            and result.error != "implementation source result is invalid"
+        ):
+            item.payload["rebase_runner_blocked"] = True
+            runner_diagnostic = _rebase_runner_failure_diagnostic(result)
+            item.payload["rebase_failure_diagnostic"] = runner_diagnostic
+            item.payload["git_failure_summary"] = _git_failure_summary(runner_diagnostic)
+            return
+        diagnostic = _rebase_failure_diagnostic(result)
+        if diagnostic is not None:
+            item.payload["rebase_failure_diagnostic"] = diagnostic
+            item.payload["git_failure_summary"] = _git_failure_summary(diagnostic)
+            return
+        publication = _publication_failure_diagnostic(result)
+        if publication is not None:
+            item.payload["publication_failure_diagnostic"] = publication
+            item.payload["git_failure_summary"] = _git_failure_summary(publication)
+            return
+        item.payload.pop("git_failure_summary", None)
+
+    @staticmethod
+    def _record_rebase_conflict(
+        item: WorkItem, result: JobResult, *, preserve_snapshot: bool = False
+    ) -> None:
+        """Retain only a complete host-produced conflict receipt on the item."""
+        value = result.value if isinstance(result.value, dict) else {}
+        paths = value.get("conflict_paths")
+        snapshot = value.get("conflict_snapshot")
+        content_snapshot = value.get("content_snapshot")
+        hunks = value.get("conflict_hunks")
+        context_version = value.get("conflict_context_version")
+        index_snapshot = value.get("conflict_index_snapshot")
+        paused_head_sha = value.get("paused_head_sha")
+        base_sha = value.get("base_sha")
+        expected_remote_sha = value.get("expected_remote_sha")
+        if (
+            not isinstance(paths, (list, tuple))
+            or not paths
+            or not all(isinstance(path, str) and path for path in paths)
+            or not isinstance(snapshot, dict)
+            or context_version != _REBASE_CONFLICT_CONTEXT_VERSION
+            or not isinstance(hunks, dict)
+            or set(hunks) != set(paths)
+            or not all(isinstance(hunks.get(path), str) and hunks[path] for path in paths)
+            or not _is_valid_dirty_content_snapshot(content_snapshot)
+            or not _is_full_digest(index_snapshot)
+            or not is_full_commit_sha(paused_head_sha)
+            or not is_full_commit_sha(base_sha)
+            or not is_full_commit_sha(expected_remote_sha)
+        ):
+            item.payload["rebase_error"] = True
+            return
+        item.payload["rebase_conflict"] = True
+        item.payload["rebase_conflict_paths"] = tuple(paths)
+        item.payload["rebase_conflict_context_version"] = context_version
+        if not preserve_snapshot:
+            item.payload["rebase_conflict_snapshot"] = snapshot
+        item.payload["rebase_content_snapshot"] = content_snapshot
+        if isinstance(hunks, dict):
+            item.payload["rebase_conflict_hunks"] = {
+                str(path): str(hunk)
+                for path, hunk in hunks.items()
+                if str(path) in paths and isinstance(hunk, str)
+            }
+        classification = value.get("conflict_resolution")
+        if classification in _REBASE_CONFLICT_OUTCOMES:
+            item.payload[_REBASE_CONFLICT_RESOLUTION_KEY] = classification
+        item.payload["rebase_conflict_index_snapshot"] = index_snapshot
+        item.payload["rebase_paused_head_sha"] = paused_head_sha
+        item.payload["rebase_base_sha"] = base_sha
+        item.payload["rebase_expected_remote_sha"] = expected_remote_sha
+        intent_id = value.get("rebase_recovery_intent_id")
+        if isinstance(intent_id, str) and re.fullmatch(r"[0-9a-f]{32}", intent_id):
+            item.payload["rebase_recovery_intent_id"] = intent_id
+        elif not preserve_snapshot:
+            item.payload.pop("rebase_recovery_intent_id", None)
+
+    @staticmethod
+    def _on_worktree_done(item: WorkItem, result: JobResult, *, repository: str) -> None:  # noqa: C901
+        """Record the created worktree's path and dirty snapshot.
+
+        A failed worktree job flags ``git_error`` (transient — the
+        DIRTY_DECISION_WAIT step RETRYs without burning the implement
+        budget).
+
+        Args:
+            item: The work item to update.
+            result: The create_worktree job result.
+
+        """
+        if not result.ok:
+            logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
+            if result.error in _TERMINAL_GIT_LOCK_FAILURES:
+                item.payload["git_lock_failure"] = result.error
+                item.payload.pop("git_error_retries", None)
+                return
+            result_value = result.value if isinstance(result.value, dict) else {}
+            if (
+                result_value.get("failure_kind") == "adopted_head_fetch"
+                and result.error in ADOPTED_HEAD_FAILURES
+            ):
+                item.payload["adopted_head_failure"] = result.error
+                item.payload.pop("git_error", None)
+                item.payload.pop("git_error_retries", None)
+                return
+            if result_value.get("failure_kind") == "source_workspace_terminal":
+                item.payload["source_workspace_preserve"] = True
+                item.payload["source_workspace_creation_failure"] = (
+                    normalize_source_workspace_creation_failure(
+                        result_value.get("source_workspace_creation_failure")
+                    ).value
+                )
+                try:
+                    reference = SourceWorkspaceTerminalReference.from_dict(
+                        result_value.get("source_workspace_terminal")
+                    )
+                    item.payload["source_workspace_terminal"] = reference.to_dict()
+                except SourceWorkspaceError:
+                    item.payload["source_workspace_terminal"] = None
+                path = result_value.get("path")
+                if isinstance(path, str) and path:
+                    item.worktree = path
+                reservation = result_value.get("direct_scope_reservation")
+                if (
+                    isinstance(reservation, dict)
+                    and set(reservation) == {"branch", "base_sha"}
+                    and isinstance(reservation.get("branch"), str)
+                    and is_full_commit_sha(reservation.get("base_sha"))
+                    and reservation.get("branch") == item.branch
+                    and reservation.get("base_sha") == item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+                ):
+                    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = dict(reservation)
+                return
+            if (result.error or "").startswith("source_workspace_ownership_unavailable:"):
+                item.payload["source_workspace_ownership_unavailable"] = True
+                item.payload["source_workspace_ownership_error"] = redact_diagnostic_text(
+                    result.error or "source workspace ownership unavailable"
+                )[:500]
+                result_value = result.value if isinstance(result.value, dict) else {}
+                if result_value.get("failure_kind") == "source_workspace_ownership":
+                    recovery = _validated_source_workspace_recovery(
+                        result_value.get("source_workspace_recovery"),
+                        item_number=_issue_number(item),
+                    )
+                    if recovery is None:
+                        recovery_path = result_value.get("path")
+                        if not isinstance(recovery_path, str) or not recovery_path:
+                            recovery_path = item.worktree or "deterministic implementation worktree"
+                        recovery = {
+                            "kind": SourceWorkspaceRecoveryKind.UNPROVEN_PREDECESSOR.value,
+                            "item_number": _issue_number(item),
+                            "path": redact_diagnostic_text(recovery_path),
+                            "receipt_path": "",
+                            "manual_action": (
+                                f"Inspect and preserve {recovery_path}. Use the approved "
+                                "source-workspace cleanup only after you preserve the work. "
+                                f"Then rerun issue #{_issue_number(item)}."
+                            ),
+                        }
+                    item.payload["source_workspace_recovery"] = recovery
+                direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+                reservation = (
+                    result.value.get("direct_scope_reservation")
+                    if isinstance(result.value, dict)
+                    else None
+                )
+                if (
+                    is_full_commit_sha(direct_base_sha)
+                    and isinstance(reservation, dict)
+                    and reservation.get("branch") == item.branch
+                    and reservation.get("base_sha") == direct_base_sha
+                ):
+                    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
+                        "branch": item.branch,
+                        "base_sha": direct_base_sha,
+                    }
+                else:
+                    item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+                materialized_path = (
+                    result.value.get("path")
+                    if isinstance(result.value, dict)
+                    and result.value.get(WORKTREE_MATERIALIZED_KEY) is True
+                    else None
+                )
+                if isinstance(materialized_path, str) and materialized_path:
+                    item.worktree = materialized_path
+                    item.payload[WORKTREE_MATERIALIZED_KEY] = True
+                else:
+                    item.worktree = ""
+                    item.payload.pop(WORKTREE_MATERIALIZED_KEY, None)
+                for key in (
+                    "worktree_dirty",
+                    "worktree_status",
+                    "worktree_diff",
+                    "worktree_content_snapshot",
+                    "worktree_branch",
+                    "worktree_head_sha",
+                    "_impl_source_revision",
+                ):
+                    item.payload.pop(key, None)
+                return
+            if result.error == BRANCH_WORKTREE_OWNED:
+                ownership = result.value if isinstance(result.value, dict) else {}
+                item.payload["branch_worktree_owner"] = {
+                    "branch": ownership.get("branch"),
+                    "owner_path": ownership.get("owner_path"),
+                }
+                item.worktree = ""
+                return
+            collision = (
+                result.value.get("direct_scope_reservation_collision")
+                if result.error == "direct_scope_reservation_collision"
+                and isinstance(result.value, dict)
+                else None
+            )
+            if isinstance(collision, dict) and collision.get("branch") == item.branch:
+                item.payload[DIRECT_SCOPE_RESERVATION_COLLISION_KEY] = True
+                item.worktree = ""
+                return
+            stale_state = (
+                result.value.get("direct_scope_stale_state")
+                if (result.error or "").startswith("direct_scope_stale_state:")
+                and isinstance(result.value, dict)
+                else None
+            )
+            if isinstance(stale_state, dict) and stale_state.get("branch") == item.branch:
+                item.payload[DIRECT_SCOPE_STALE_STATE_KEY] = {
+                    "predicate": stale_state.get("predicate"),
+                    "branch": stale_state.get("branch"),
+                    "detail": stale_state.get("detail"),
+                }
+                reservation = (
+                    result.value.get("direct_scope_reservation")
+                    if isinstance(result.value, dict)
+                    else None
+                )
+                if isinstance(reservation, dict):
+                    item.payload[DIRECT_SCOPE_RESERVATION_KEY] = reservation
+                item.worktree = ""
+                return
+            materialized_path = (
+                result.value.get("path")
+                if isinstance(result.value, dict)
+                and result.value.get(WORKTREE_MATERIALIZED_KEY) is True
+                else None
+            )
+            if isinstance(materialized_path, str) and materialized_path:
+                item.worktree = materialized_path
+                item.payload[WORKTREE_MATERIALIZED_KEY] = True
+            else:
+                item.worktree = ""
+            direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+            requires_fresh_direct_reservation = (
+                not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+            )
+            reservation = (
+                result.value.get("direct_scope_reservation")
+                if isinstance(result.value, dict)
+                else None
+            )
+            if (
+                requires_fresh_direct_reservation
+                and is_full_commit_sha(direct_base_sha)
+                and isinstance(reservation, dict)
+                and reservation.get("branch") == item.branch
+                and reservation.get("base_sha") == direct_base_sha
+            ):
+                # The worktree did not materialize, but a failed rollback
+                # left our server-side reservation at its base. Preserve the
+                # receipt so Finished can use its bounded, conditional release
+                # protocol if the retriable worktree job is exhausted.
+                item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
+                    "branch": item.branch,
+                    "base_sha": direct_base_sha,
+                }
+            for key in (
+                "worktree_dirty",
+                "worktree_status",
+                "worktree_diff",
+                "worktree_content_snapshot",
+                "worktree_branch",
+                "worktree_head_sha",
+            ):
+                item.payload.pop(key, None)
+            item.payload["git_error"] = True
+            return
+        # A successful worktree job ends the consecutive-git-failure streak.
+        item.payload.pop(WORKTREE_MATERIALIZED_KEY, None)
+        item.payload.pop("git_error_retries", None)
+        for key in (
+            "worktree_dirty",
+            "worktree_status",
+            "worktree_diff",
+            "worktree_content_snapshot",
+            "worktree_branch",
+            "worktree_head_sha",
+        ):
+            item.payload.pop(key, None)
+        value = result.value
+        if isinstance(value, dict):
+            item.worktree = str(value.get("path", item.worktree))
+            try:
+                binding = WorkspaceBinding.from_dict(value["source_workspace"])
+                source_revision = value.get("impl_source_revision", binding.revision)
+                if source_revision != binding.revision:
+                    raise ValueError("implementation source revision changed")
+                _store_impl_source_metadata(item, value)
+            except (KeyError, TypeError, ValueError):
+                item.payload["source_workspace_preserve"] = True
+                item.payload["git_error"] = True
+                return
+            source_revision = value.get("impl_source_revision")
+            if is_full_commit_sha(source_revision):
+                item.payload["_impl_source_revision"] = source_revision
+            item.payload["worktree_dirty"] = bool(value.get("dirty"))
+            item.payload["worktree_status"] = str(value.get("status", ""))
+            item.payload["worktree_diff"] = str(value.get("diff", ""))
+            if item.payload["worktree_dirty"]:
+                item.payload["worktree_branch"] = value.get("branch")
+                item.payload["worktree_head_sha"] = value.get("head_sha")
+                item.payload["worktree_content_snapshot"] = value.get("content_snapshot")
+            direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+            requires_fresh_direct_reservation = (
+                not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+            )
+            if requires_fresh_direct_reservation:
+                reservation = value.get("direct_scope_reservation")
+                if (
+                    not is_full_commit_sha(direct_base_sha)
+                    or not isinstance(reservation, dict)
+                    or reservation.get("branch") != item.branch
+                    or reservation.get("base_sha") != direct_base_sha
+                ):
+                    logger.warning(
+                        "implementation:%s: direct worktree result omitted or corrupted its "
+                        "remote reservation receipt",
+                        item.issue,
+                    )
+                    item.worktree = ""
+                    item.payload["git_error"] = True
+                    return
+                item.payload[DIRECT_SCOPE_RESERVATION_KEY] = {
+                    "branch": item.branch,
+                    "base_sha": direct_base_sha,
+                }
+        else:
+            item.payload["git_error"] = True
+
+    @staticmethod
+    def _on_tests_done(item: WorkItem, result: JobResult) -> None:
+        """Record the pre-PR test outcome (output tail travels to the fixer).
+
+        Args:
+            item: The work item to update.
+            result: The pre-PR test job result.
+
+        """
+        if result.ok and result.value in (0, None, True):
+            item.payload.pop("tests_failed", None)
+            item.payload.pop("test_output", None)
+            runner_mode = item.payload.get("pre_pr_runner_mode")
+            submitted_command = item.payload.pop("test_command", None)
+            if runner_mode == "container":
+                command = shlex.join(HEPHAESTUS_REQUIRED_CHECK_ARGV)
+            elif runner_mode == "native":
+                command = shlex.join(PRE_PR_TEST_ARGV)
+            else:
+                command = submitted_command
+            if isinstance(command, str) and command:
+                fallback_reason = item.payload.get("pre_pr_fallback_reason")
+                receipt = f"`{command}` — passed"
+                if runner_mode == "native" and fallback_reason in RUNNER_FALLBACK_REASONS:
+                    receipt += f" (native fallback after {fallback_reason})"
+                item.payload["test_receipt"] = _receipt_with_test_summary(receipt, result)
+            return
+        output = "\n".join(
+            part for part in (result.stdout_tail, result.stderr_tail, result.error) if part
+        )
+        handoff_reason = (
+            _pre_pr_runner_handoff_reason(result)
+            if item.payload.get("pre_pr_runner_mode") == "container"
+            else None
+        )
+        if handoff_reason is not None:
+            item.payload.pop("test_command", None)
+            if sys.platform == "darwin":
+                item.payload["pre_pr_runner_mode"] = "native"
+                item.payload["pre_pr_fallback_reason"] = handoff_reason
+            else:
+                item.payload["pre_pr_runner_unavailable"] = True
+            return
+        item.payload["tests_failed"] = True
+        item.payload["test_output"] = output
+
+    @staticmethod
+    def _skip_gate(issue: int, labels: list[str]) -> StageOutcome | None:
+        """Operator override: state:skip -> SKIP, warning on a GO contradiction.
+
+        Split out of :meth:`_gate` so the top-of-GATE check (#1835) stays a
+        single readable branch regardless of the existing-PR/fresh-implement
+        logic below it.
+
+        Args:
+            issue: The GitHub issue number (for log messages).
+            labels: The issue's current labels (already refreshed by caller).
+
+        Returns:
+            A SKIP outcome when ``state:skip`` is present, else None.
+
+        """
+        if not is_skipped(labels):
+            return None
+        if is_plan_go(labels) or is_implementation_go(labels):
+            contradicting = (
+                STATE_IMPLEMENTATION_GO if is_implementation_go(labels) else STATE_PLAN_GO
+            )
+            logger.warning(
+                "implementation:%d: state:skip AND %s both present — "
+                "skip wins; see docs/runbooks/state-skip-revival.md if "
+                "this issue should be revived",
+                issue,
+                contradicting,
+            )
+        logger.info("implementation:%d: state:skip; skipping", issue)
+        return StageOutcome(Disposition.SKIP, "state:skip")
+
+    @staticmethod
+    def _external_arm_gate(pr_number: int, ctx: StageContext) -> StageOutcome | None:
+        """Block adoption when the live PR arm is external or ambiguous.
+
+        Split out of :meth:`_gate` for the same readability reason as
+        :meth:`_skip_gate`. Existing PRs may have been armed by the
+        a previous auto-merge configuration; a failed read-back must stop
+        adoption before worktree preparation or review routing.
+
+        Args:
+            issue: The GitHub issue number (for log messages).
+            pr_number: The adopted PR's number.
+            ctx: Stage context carrying the GitHub accessor.
+
+        Returns:
+            A terminal or blocked outcome unless the read proves OPEN and
+            unarmed, else None.
+
+        """
+        pr_state = ctx.github.gh_pr_state(pr_number)
+        if pr_state is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
+        if pr_state.get("autoMergeRequest") is not None:
+            return StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
+        if not _is_confirmed_open_unarmed(pr_state):
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
+        return None
+
+    @staticmethod
+    def _impl_go_route(
+        item: WorkItem,
+        existing_pr: int,
+        pr_implementation_state: tuple[bool, bool],
+    ) -> StepResult | None:
+        """Route an adopted PR that already carries ``state:implementation-go``.
+
+        Split out of :meth:`_gate` for the same readability reason as
+        :meth:`_skip_gate`. The loop-owned label is the durable authorization,
+        so both fresh and adopted entries route directly to ``merge_wait``.
+
+        Args:
+            item: The work item under evaluation (``item.pr``/``item.branch``
+                are already set by the caller).
+            existing_pr: The adopted PR's number.
+            pr_implementation_state: Fresh ``(GO, NOGO)`` PR-label state
+                already read by the admission gate.
+
+        Returns:
+            A routing result when the PR already carries
+            ``state:implementation-go``, else None (not this PR's route).
+
+        """
+        has_go, _has_no_go = pr_implementation_state
+        if not has_go:
+            return None
+        if item.payload.get("post_review_rebase_required") or item.payload.get(
+            "manual_rebase_required"
+        ):
+            return None
+        logger.info(
+            "implementation:%d: PR #%d already implementation-go; routing to merge-wait",
+            item.issue,
+            existing_pr,
+        )
+        return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
+
+    @staticmethod
+    def _writable_head_guard(
+        item: WorkItem, ctx: StageContext, existing_pr: int
+    ) -> StageOutcome | None:
+        """Fail closed when an existing PR head belongs to a fork.
+
+        Fork heads can be fetched for review, but implementation must never
+        address them by creating a same-named branch on the base repository's
+        origin.
+        """
+        if ctx.github.pr_head_is_writable(existing_pr):
+            return None
+        logger.warning(
+            "implementation:%d: PR #%d head is not writable through this repository; "
+            "refusing to address a fork from the base origin",
+            item.issue,
+            existing_pr,
+        )
+        return StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
+
+    def _adopt_existing_pr(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        existing_pr: int,
+        *,
+        agent_error_reentry: bool,
+        pr_implementation_state: tuple[bool, bool],
+    ) -> StepResult:
+        """Validate and adopt an existing writable PR for normal review."""
+        item.pr = existing_pr
+        terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
+        if terminal is not None:
+            return terminal
+        external_arm = self._external_arm_gate(existing_pr, ctx)
+        if external_arm is not None:
+            return external_arm
+        head_branch = ctx.github.get_pr_head_branch(existing_pr)
+        if not isinstance(head_branch, str) or not head_branch.strip():
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_head_branch_unavailable")
+        head_branch = head_branch.strip()
+        item.branch = head_branch
+        impl_go_route = self._impl_go_route(item, existing_pr, pr_implementation_state)
+        if impl_go_route is not None:
+            return impl_go_route
+        writable_head = self._writable_head_guard(item, ctx, existing_pr)
+        if writable_head is not None:
+            return writable_head
+        if agent_error_reentry:
+            # M1: consume the implement budget at GATE-adoption so the
+            # pr_review agent_error -> re-adopt cycle is bounded.
+            attempts = item.attempts.get("implement", 0) + 1
+            item.attempts["implement"] = attempts
+            budget = ctx.budget("implement")
+            if attempts >= budget:
+                logger.error(
+                    "implementation:%d: agent_error fail-backs exhausted the "
+                    "implement budget (%d/%d) re-adopting PR #%d — stopping; "
+                    "the review/address infrastructure failed repeatedly and "
+                    "re-adopting the same PR cannot fix it (manual look needed)",
+                    item.issue,
+                    attempts,
+                    budget,
+                    existing_pr,
+                )
+                return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
+        # Adopt the PR's REAL head branch — never assume {issue}-auto-impl.
+        item.payload["existing_pr"] = True
+        adopted_head = self._fresh_adopted_pr_head(item, ctx)
+        if adopted_head is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_head_revision_unavailable")
+        item.payload["adopted_pr_head_sha"] = adopted_head
+        logger.info(
+            "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
+            item.issue,
+            existing_pr,
+            item.branch,
+        )
+        return Continue(next_state=WORKTREE_WAIT)
+
+    @staticmethod
+    def _fresh_adopted_pr_head(item: WorkItem, ctx: StageContext) -> str | None:
+        """Return the current exact head for an adopted PR, or ``None``."""
+        if item.pr is None:
+            return None
+        state = ctx.github.gh_pr_state(item.pr)
+        head = state.get("headRefOid") if isinstance(state, dict) else None
+        return head if is_full_commit_sha(head) else None
+
+    def _gate(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
+        """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
+
+        Re-houses ``_review_existing_pr`` (:750) and ``_ensure_plan_ready``
+        (:429). All checks are at-or-past reads; PR adoption is read-only.
+
+        agent_error bound (M1): a re-entry from a pr_review ``agent_error``
+        fail-back (``payload["agent_error_failback"]``) that adopts an
+        existing PR CONSUMES the ``implement`` budget — the adoption produces
+        no implement job whose completion would otherwise count it, and
+        without a moving counter the fail-back -> adopt -> ADVANCE cycle
+        would ping-pong forever. Exhaustion terminates with
+        ``agent_error_exhausted``.
+        """
+        if item.issue is None:  # guarded by step(); kept for type narrowing
+            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+
+        # Operator override: state:skip -> SKIP, checked before either the
+        # existing-PR fast path or the fresh-implement plan-go gate (#1835 —
+        # the existing-PR path previously adopted PRs unconditionally with no
+        # label read at all; closes the reachable gap even though the 11
+        # incidents that raised #1835 were all confirmed skip-after-PR races,
+        # not this chokepoint).
+        gate_labels = _require_issue_labels(item, ctx)
+        skip_outcome = self._skip_gate(item.issue, gate_labels)
+        if skip_outcome is not None:
+            return skip_outcome
+        if STATE_BLOCKED in gate_labels:
+            return StageOutcome(
+                Disposition.BLOCKED,
+                "issue is blocked pending external intervention",
+            )
+
+        existing_pr = item.pr or ctx.github.find_pr_for_issue(item.issue)
+        if existing_pr:
+            terminal = _terminal_pr_outcome(ctx.github.gh_pr_state(existing_pr), existing_pr)
+            if terminal is not None:
+                return terminal
+            pr_implementation_state = ctx.github.pr_has_implementation_state_label(existing_pr)
+            has_impl_go, has_impl_no_go = pr_implementation_state
+            if has_impl_go and has_impl_no_go:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "contradictory_implementation_state",
+                )
+            if not item.payload.get("manual_rebase_required") and not (
+                is_plan_go(gate_labels) or has_impl_go or has_impl_no_go
+            ):
+                item.payload.pop("_implementation_file_claims", None)
+                item.payload.pop(_CODEX_PUBLICATION_SCOPE_KEY, None)
+                logger.info(
+                    "implementation:%d: existing PR #%d lacks an authoritative "
+                    "plan/implementation label; failing back",
+                    item.issue,
+                    existing_pr,
+                )
+                return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
+            codex_scope_failure = (
+                None
+                if item.payload.get("manual_rebase_required")
+                else _capture_codex_publication_scope(item, ctx)
+            )
+            if codex_scope_failure is not None:
+                return codex_scope_failure
+            return self._adopt_existing_pr(
+                item,
+                ctx,
+                existing_pr,
+                agent_error_reentry=bool(item.payload.pop("agent_error_failback", None)),
+                pr_implementation_state=pr_implementation_state,
+            )
+
+        # At-or-past (never equality): plan-go OR already implementation-go
+        # both satisfy the gate; anything earlier fails back to plan_review.
+        if not item.payload.get("manual_rebase_required") and not (
+            is_plan_go(gate_labels) or is_implementation_go(gate_labels)
+        ):
+            item.payload.pop("_implementation_file_claims", None)
+            item.payload.pop(_CODEX_PUBLICATION_SCOPE_KEY, None)
+            logger.info("implementation:%d: plan not GO; failing back", item.issue)
+            return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
+
+        codex_scope_failure = (
+            None
+            if item.payload.get("manual_rebase_required")
+            or item.payload.get("first_publication_candidate")
+            else _capture_codex_publication_scope(item, ctx)
+        )
+        if codex_scope_failure is not None:
+            return codex_scope_failure
+
+        dependency_reason = _live_dependency_block_reason(item, ctx)
+        if dependency_reason is not None:
+            return _dependency_retry(item, dependency_reason)
+        _clear_dependency_retry(item)
+
+        discovery = self._first_publication_discovery(item, ctx)
+        if discovery is not None:
+            return discovery
+
+        # A queued scope read must retain the marker. A fresh writer turn
+        # charges its own attempt after source preparation.
+        item.payload.pop("agent_error_failback", None)
+        if not item.branch:
+            item.branch = issue_auto_impl_branch_name(item.issue)
+        resume = item.payload.pop("first_publication_resume_state", WORKTREE_WAIT)
+        if resume not in _STEP_HANDLER_NAMES or resume in {ENTER, GATE}:
+            return StageOutcome(Disposition.BLOCKED, "first_publication_resume_state_invalid")
+        rebase_context = item.payload.pop(_PUBLICATION_REBASE_RESUME, None)
+        if rebase_context is not None:
+            item.payload.pop(_PUBLICATION_DISCOVERY_CHECKED, None)
+            if rebase_context["publication_manual_rebase"] and resume not in _REBASE_RESUME_STATES:
+                resume = WORKTREE_WAIT
+        return Continue(next_state=resume)
+
+    @staticmethod
+    def _complete_dirty_direct_pr(item: WorkItem, result: object, head: str) -> StageOutcome:
+        """Advance only after the worker confirms the clean successor receipt."""
+        try:
+            receipt = _existing_impl_receipt(item)
+        except (KeyError, TypeError, ValueError):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_source_finalization_failed")
+        if (
+            not isinstance(result, JobResult)
+            or not result.ok
+            or result.interrupted
+            or result.value
+            != {"dirty_direct_finalized": True, "head_sha": head, "pr_number": item.pr}
+            or receipt.revision != head
+            or receipt.schema_version != 1
+            or receipt.dirty_claim is not None
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_source_finalization_failed")
+        item.payload.pop("dirty_direct_preserve", None)
+        item.payload.pop("dirty_direct_active", None)
+        item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+        return StageOutcome(Disposition.ADVANCE, f"PR #{item.pr} ready for review")
+
+    @staticmethod
+    def _retry_no_commit(item: WorkItem) -> StageOutcome:
+        """Warn about a run that produced no commit and retry within the budget."""
+        issue = _issue_number(item)
+        logger.warning(
+            "implementation:%d: run ended without a commit; retrying within the implement budget",
+            issue,
+        )
+        item.payload.pop("no_commits", None)
+        item.state = GATE
+        return StageOutcome(Disposition.RETRY, "no commits; retrying implementation")
+
+    def _create_dirty_direct_pr(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Create one PR without adopting a concurrent PR or clearing failed work."""
+        result = item.payload.get("dirty_direct_publication_result")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_publication_failed")
+        value = result.get("value")
+        if not isinstance(value, dict) or value.get("pushed") is not True:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_publication_invalid")
+        head = value.get("head_sha")
+        if not is_full_commit_sha(head) or item.issue is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_pr_identity_invalid")
+        if _DIRTY_FINALIZATION_RESULT in item.payload:
+            return self._complete_dirty_direct_pr(
+                item, item.payload.pop(_DIRTY_FINALIZATION_RESULT), head
+            )
+        if item.pr is not None:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_pr_identity_invalid")
+        try:
+            binding = WorkspaceBinding.from_dict(item.payload["dirty_direct_binding"])
+            if binding.reusable_root is None:
+                raise ValueError("dirty direct source root is unavailable")
+            title = normalize_strict_conventional_title(
+                str(item.payload.get("issue_title") or f"Implement issue #{item.issue}")
+            )
+            body = get_pr_description(
+                item.issue,
+                summary=f"Implements the requested changes for issue #{item.issue}.",
+                changes="See the PR diff for the full change set.",
+                testing=item.payload.get("test_receipt") or "Not run by the automation pipeline.",
+            )
+            item.pr = ctx.github.create_pr(
+                item.issue, item.branch, title, body, strict_absence=True
+            )
+            state = ctx.github.gh_pr_state(item.pr)
+            if (
+                not isinstance(state, dict)
+                or state.get("state") != "OPEN"
+                or state.get("headRefOid") != head
+                or state.get("baseRefName") != "main"
+                or ctx.github.get_pr_head_branch(item.pr) != item.branch
+                or not ctx.github.pr_head_is_writable(item.pr)
+            ):
+                raise ValueError("dirty direct created PR head is unconfirmed")
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_direct_pr_creation_failed")
+        item.payload[_DIRTY_FINALIZATION_INFLIGHT] = True
+        return JobRequest(
+            GitJob(
+                repo=item.repo,
+                op="finish_dirty_direct_publication",
+                timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={
+                    "repo_root": str(binding.reusable_root),
+                    "issue_number": item.issue,
+                    "source_workspace": binding.to_dict(),
+                    "expected_head": head,
+                    "pr_number": item.pr,
+                },
+                descr="finish_dirty_direct_publication",
+            ),
+            on_done_state=PR_CREATE,
+        )
+
+    def _create_pr(  # noqa: C901
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult:
+        """PR_CREATE [M]: create the durable PR journal entry for review.
+
+        The ``create_pr`` write is the stage's journal entry and happens
+        BEFORE the advancing outcome (durable write precedes the queue push).
+        """
+        if item.payload.get("dirty_direct_active"):
+            return self._create_dirty_direct_pr(item, ctx)
+        if item.issue is None:  # guarded by step(); kept for type narrowing
+            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if terminal := item.payload.pop(_COMMIT_PUSH_TERMINAL, None):
+            item.payload.pop(_COMMIT_PUSH_REFRESH, None)
+            item.payload.pop("git_error", None)
+            return StageOutcome(Disposition.FINISH_FAIL, str(terminal))
+        if item.payload.get("implementation_remediation") and item.payload.get("no_commits"):
+            # The agent answered and resolved the threads without a code change.
+            # GitHub holds the thread state, so the next review round judges it.
+            item.payload.pop("no_commits", None)
+            _refresh_pr_body_testing(item, ctx)
+            _clear_remediation_cycle(item)
+            return StageOutcome(
+                Disposition.ADVANCE, f"PR #{item.pr} ready for fresh review after address-review"
+            )
+        if item.payload.get("no_commits"):
+            dependency_reason = _live_dependency_block_reason(item, ctx)
+            if dependency_reason is not None:
+                return _dependency_retry(item, dependency_reason)
+            _clear_dependency_retry(item)
+            # Preserve the external ownership gate for retained PRs. An empty
+            # implementation does not prove that the issue is complete.
+            if item.pr is not None:
+                external_arm = self._external_arm_gate(item.pr, ctx)
+                if external_arm is not None:
+                    return external_arm
+            return self._retry_no_commit(item)
+        lock_failure = item.payload.pop("git_lock_failure", None)
+        if lock_failure in _TERMINAL_GIT_LOCK_FAILURES:
+            item.payload.pop("git_error_retries", None)
+            return StageOutcome(Disposition.FINISH_FAIL, lock_failure)
+        if item.payload.pop("scope_violation", None):
+            summary = item.payload.pop("scope_violation_summary", "")
+            safe_summary = summary if isinstance(summary, str) and summary else ""
+            unexpected = validated_scope_violation_paths(
+                item.payload.pop(SCOPE_VIOLATION_PATHS_KEY, None)
+            )
+            # A remediation turn is driven by the review threads and answers
+            # them through the address-review prompt, which cannot carry this
+            # directive. That lane keeps today's terminal scope result.
+            if (
+                unexpected is not None
+                and not item.payload.get("implementation_remediation")
+                and _scope_correction_is_valid(item, ctx)
+            ):
+                item.payload[_SCOPE_CORRECTION_PATHS] = unexpected
+                logger.info(
+                    "implementation:%s: routing one bounded scope correction",
+                    item.issue,
+                )
+                return Continue(next_state=IMPLEMENT_WAIT)
+            terminal_note = (
+                f"scope_violation: {safe_summary}" if safe_summary else "scope_violation"
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, terminal_note)
+        if item.payload.pop("git_error", None):
+            # Push failed: transient git/network trouble — RETRY the stage
+            # without burning the implement budget, bounded by
+            # GIT_ERROR_RETRY_CAP (M5).
+            summary = item.payload.get("git_failure_summary")
+            safe_summary = summary if isinstance(summary, str) and summary else ""
+            retry_note = (
+                f"commit_push failed: {safe_summary}" if safe_summary else "commit_push failed"
+            )
+            terminal_note = f"git_error: {safe_summary}" if safe_summary else "git_error"
+            outcome = self._git_retry(item, retry_note, terminal_note=terminal_note)
+            if outcome.disposition is Disposition.RETRY:
+                item.state = COMMIT_PUSH_WAIT
+            return outcome
+
+        if item.pr is None:
+            raw_title = item.payload.get("issue_title") or f"Implement issue #{item.issue}"
+            title = normalize_strict_conventional_title(str(raw_title))
+            body = get_pr_description(
+                item.issue,
+                # Agent summaries may contain local paths, stale working-tree
+                # state, or unbound test totals. The durable PR journal must
+                # be deterministic; the reviewed diff carries the detail.
+                summary=f"Implements the requested changes for issue #{item.issue}.",
+                changes="See the PR diff for the full change set.",
+                testing=item.payload.get("test_receipt") or "Not run by the automation pipeline.",
+            )
+            pr_number = ctx.github.create_pr(item.issue, item.branch, title, body)
+            item.pr = pr_number
+            logger.info("implementation:%d: created PR #%d", item.issue, pr_number)
+        if item.payload.get("implementation_remediation"):
+            _refresh_pr_body_testing(item, ctx)
+            _clear_remediation_cycle(item)
+        return StageOutcome(Disposition.ADVANCE, f"PR #{item.pr} ready for review")
+
+    @staticmethod
+    def _git_retry(item: WorkItem, note: str, *, terminal_note: str = "git_error") -> StageOutcome:
+        """RETRY a transient git failure, bounded by GIT_ERROR_RETRY_CAP (M5).
+
+        Transient worktree/push failures never burn the implement budget,
+        but a persistently failing remote must still terminate: at the cap
+        the item finishes failed (``git_error``). The consecutive-failure
+        counter lives in ``payload["git_error_retries"]`` and is reset by
+        any successful git job (see ``on_job_done``).
+
+        Args:
+            item: The work item whose git job failed.
+            note: Human-readable failure note for the RETRY outcome.
+
+        Returns:
+            RETRY below the cap; FINISH_FAIL(``git_error``) at the cap.
+
+        """
+        retries = item.payload.get("git_error_retries", 0) + 1
+        item.payload["git_error_retries"] = retries
+        if retries > GIT_ERROR_RETRY_CAP:
+            logger.error(
+                "implementation:%s: %s; %d consecutive git failures (cap %d) — "
+                "finishing failed (git_error): the remote/worktree is persistently "
+                "broken and needs a manual look",
+                item.issue,
+                note,
+                retries,
+                GIT_ERROR_RETRY_CAP,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, terminal_note[:500])
+        logger.warning(
+            "implementation:%s: %s; git retry %d/%d (implement budget untouched)",
+            item.issue,
+            note,
+            retries,
+            GIT_ERROR_RETRY_CAP,
+        )
+        return StageOutcome(Disposition.RETRY, note)
+
+
+def _rebase_failure_diagnostic(result: JobResult) -> dict[str, object] | None:
+    """Extract bounded rebase-recovery evidence from a host Git result."""
+    value = result.value
+    if not isinstance(value, dict):
+        return None
+    if value.get("failure_kind") not in {"signing", "continuation"}:
+        return None
+    if value.get("phase") not in {"stage_conflicts", "validate_index", "rebase_continue"}:
+        return None
+    returncode = value.get("returncode")
+    if returncode is not None and (isinstance(returncode, bool) or not isinstance(returncode, int)):
+        return None
+    exception_class = value.get("exception_class")
+    if exception_class is not None and (
+        not isinstance(exception_class, str)
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", exception_class) is None
+    ):
+        return None
+    diagnostic: dict[str, object] = {
+        "failure_kind": value["failure_kind"],
+        "phase": value["phase"],
+        "receipt_error": redact_diagnostic_text(str(value.get("receipt_error") or ""))[:500],
+        "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
+        "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
+    }
+    if returncode is not None:
+        diagnostic["returncode"] = returncode
+    if exception_class is not None:
+        diagnostic["exception_class"] = exception_class
+    return diagnostic
+
+
+def _publication_remote_changed(result: JobResult) -> bool:
+    """Return whether exact publication proved that the remote head changed."""
+    value = result.value
+    return isinstance(value, dict) and value.get("failure_kind") in {
+        "publish_lease_drift",
+        "publish_remote_head_changed",
+    }
+
+
+def _publication_failure_diagnostic(result: JobResult) -> dict[str, object] | None:
+    """Extract one allowlisted publication failure from a worker result."""
+    value = result.value
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("publication_failure_diagnostic")
+    if isinstance(raw, dict):
+        required = {"failure_kind", "phase", "head_sha", "exception_class", "remote_state"}
+        if not required.issubset(raw) or set(raw) - (required | {"returncode"}):
+            return None
+        failure_kind = raw.get("failure_kind")
+        phase = raw.get("phase")
+        head_sha = raw.get("head_sha")
+        remote_state = raw.get("remote_state")
+        exception_class = raw.get("exception_class")
+        returncode = raw.get("returncode")
+        if (
+            failure_kind != "publication"
+            or phase not in {"push", "remote_probe"}
+            or not is_full_commit_sha(head_sha)
+            or remote_state not in {"unchanged", "changed", "unverified"}
+            or not isinstance(exception_class, str)
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", exception_class) is None
+            or (
+                returncode is not None
+                and (isinstance(returncode, bool) or not isinstance(returncode, int))
+            )
+        ):
+            return None
+    else:
+        state = value.get("publication_state")
+        states = {
+            "remote_absent": ("push", "absent"),
+            "remote_unchanged": ("push", "unchanged"),
+            "remote_changed": ("push", "changed"),
+            "probe_failed": ("remote_probe", "unverified"),
+        }
+        if state not in states or not is_full_commit_sha(value.get("head_sha")):
+            return None
+        phase, remote_state = states[state]
+        failure_kind = "publication"
+        head_sha = value["head_sha"]
+        process_failure = result.process_failure
+        if process_failure is None:
+            exception_class = None
+            returncode = None
+        else:
+            exception_class = process_failure.exception_class
+            returncode = process_failure.returncode
+            if (
+                not isinstance(exception_class, str)
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", exception_class) is None
+                or (
+                    returncode is not None
+                    and (isinstance(returncode, bool) or not isinstance(returncode, int))
+                )
+            ):
+                return None
+    diagnostic: dict[str, object] = {
+        "failure_kind": failure_kind,
+        "phase": phase,
+        "head_sha": head_sha,
+    }
+    if returncode is not None:
+        diagnostic["returncode"] = returncode
+    if exception_class is not None:
+        diagnostic["exception_class"] = exception_class
+    diagnostic["remote_state"] = remote_state
+    if result.stdout_tail:
+        diagnostic["stdout_tail"] = redact_diagnostic_text(result.stdout_tail)[-4000:]
+    if result.stderr_tail:
+        diagnostic["stderr_tail"] = redact_diagnostic_text(result.stderr_tail)[-4000:]
+    return diagnostic
+
+
+def _rebase_runner_failure_diagnostic(result: JobResult) -> dict[str, object]:
+    """Keep validated cleanup evidence for a recoverable rebase runner failure."""
+    value = result.value if isinstance(result.value, dict) else {}
+    diagnostic: dict[str, object] = {
+        "failure_kind": value.get("failure_kind"),
+        "cause": redact_diagnostic_text(result.error or "")[:500],
+        "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
+        "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
+        "labels_unchanged": True,
+    }
+    receipt = value.get("capability_receipt")
+    if type(receipt) is not HostCapabilityReceipt:
+        return diagnostic
+    try:
+        replace(receipt)
+    except (AttributeError, TypeError, ValueError):
+        return diagnostic
+    diagnostic.update(
+        {
+            "failed_step": receipt.failed_step,
+            "cleanup_state": receipt.cleanup_state,
+            "retained_root": redact_diagnostic_text(receipt.retained_root),
+            "receipt_id": receipt.receipt_id,
+            "purpose": receipt.purpose,
+            "source_head_sha": receipt.target.source_head_sha,
+            "persistence_error": redact_diagnostic_text(receipt.persistence_error),
+            "persistence_exception_type": redact_diagnostic_text(
+                receipt.persistence_exception_type
+            ),
+            "operating_system_error": redact_diagnostic_text(receipt.operating_system_error),
+            "exception_type": receipt.exception_type,
+            "return_code": receipt.return_code,
+        }
+    )
+    return diagnostic
+
+
+def _git_failure_summary(diagnostic: dict[str, object]) -> str:
+    """Return one deterministic, redacted Git failure summary."""
+    ordered = (
+        ("failure_kind", diagnostic.get("failure_kind")),
+        ("cause", diagnostic.get("cause")),
+        ("phase", diagnostic.get("phase")),
+        ("remote_state", diagnostic.get("remote_state")),
+        ("returncode", diagnostic.get("returncode")),
+        ("exception_class", diagnostic.get("exception_class")),
+        ("failed_step", diagnostic.get("failed_step")),
+        ("retained_root", diagnostic.get("retained_root")),
+        ("stderr", diagnostic.get("stderr_tail")),
+        ("stdout", diagnostic.get("stdout_tail")),
+    )
+    summary = "; ".join(f"{key}={value}" for key, value in ordered if value not in {None, ""})
+    return redact_diagnostic_text(summary)[:500]
+
+
+def _store_publication_failure_diagnostic(item: WorkItem, result: JobResult) -> str:
+    """Store one validated publication diagnostic and return its summary."""
+    diagnostic = _publication_failure_diagnostic(result)
+    if diagnostic is not None:
+        item.payload["publication_failure_diagnostic"] = diagnostic
+        summary = _git_failure_summary(diagnostic)
+    else:
+        item.payload.pop("publication_failure_diagnostic", None)
+        summary = _git_failure_fallback(result)
+    item.payload["git_failure_summary"] = summary
+    return summary
+
+
+def _git_failure_fallback(result: JobResult) -> str:
+    """Return a bounded fallback when a worker did not supply a valid receipt."""
+    return redact_diagnostic_text(result.error or "Git operation failed")[:500]

@@ -1,6 +1,6 @@
 """Clear transient review state before a new review round."""
 
-from ..work_item import WorkItem
+from ...work_item import WorkItem
 
 #: Round-scoped payload keys cleared when a review starts, so a later round
 #: never replays an earlier round's results.

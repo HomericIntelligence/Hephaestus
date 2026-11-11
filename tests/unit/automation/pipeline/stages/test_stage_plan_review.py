@@ -20,12 +20,12 @@ from hephaestus.automation.pipeline.stages import (
     Continue,
     JobRequest,
     StageOutcome,
-    plan_review,
 )
 from hephaestus.automation.pipeline.stages.plan_review import (
     REVIEW_ERROR_RETRY_CAP,
     PlanReviewStage,
     build_amend_prompt,
+    plan_review,
 )
 from hephaestus.automation.plan_review_session import PlanReviewSessionStore
 from hephaestus.automation.prompts._shared import get_untrusted_notice

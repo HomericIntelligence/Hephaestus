@@ -11,10 +11,10 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.prompts.pr_review import build_bounded_pr_review_analysis_prompt
 from hephaestus.automation.source_worktree import SourceWorkspaceError
 
-from ..coordinator_sessions import agent_session_lifecycle
-from ..diagnostics import redact_diagnostic_text
-from ..stage_base import _terminal_pr_outcome, source_workspace_binding
-from ..summary import record_review_run
+from ...coordinator_sessions import agent_session_lifecycle
+from ...diagnostics import redact_diagnostic_text
+from ...stage_base import _terminal_pr_outcome, source_workspace_binding
+from ...summary import record_review_run
 from .pr_review_threads import *
 
 

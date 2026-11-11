@@ -17,7 +17,10 @@ from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB_REQUEST
-from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+from hephaestus.automation.pipeline.stages.implementation.implementation import (
+    ImplementationStage,
+    logger as implementation_logger,
+)
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.review_journal import PlanDiscoveryResult
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
@@ -537,7 +540,7 @@ def test_failed_discovery_logs_the_redacted_detail_once(
         error="The pending rebase directory permissions are unsafe: /tmp/x (mode 0775).",
     )
 
-    with caplog.at_level("WARNING", logger="hephaestus.automation.pipeline.stages.implementation"):
+    with caplog.at_level("WARNING", logger=implementation_logger.name):
         stage.on_job_done(item, result, ctx)
 
     messages = [record.getMessage() for record in caplog.records]
@@ -548,7 +551,7 @@ def test_failed_discovery_logs_the_redacted_detail_once(
     )
 
     caplog.clear()
-    with caplog.at_level("WARNING", logger="hephaestus.automation.pipeline.stages.implementation"):
+    with caplog.at_level("WARNING", logger=implementation_logger.name):
         stage.on_job_done(item, result, ctx)
 
     assert caplog.records == []

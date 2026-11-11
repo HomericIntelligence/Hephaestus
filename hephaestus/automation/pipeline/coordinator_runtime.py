@@ -8,10 +8,10 @@ from pathlib import Path
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 import hephaestus.automation.pipeline.coordinator_types as ct
+import hephaestus.automation.pipeline.direct_scope_keys as direct_scope_keys
 import hephaestus.automation.pipeline.implementer_checkpoint as _checkpoint
 import hephaestus.automation.pipeline.stage_base as stage_base_mod
 import hephaestus.automation.pipeline.stages as stages_mod
-import hephaestus.automation.pipeline.stages.repo as repo_stage_mod
 import hephaestus.automation.pipeline.summary as summary_mod
 import hephaestus.automation.pipeline.work_item as work_item_mod
 from hephaestus.automation.direct_review_recovery import (
@@ -45,7 +45,7 @@ from .job_failures import (
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
 _DYNAMIC_METRIC_SERIES_CAP = 100
-_DIRECT_SCOPE_BOOTSTRAP_KEY = repo_stage_mod.DIRECT_SCOPE_BOOTSTRAP_KEY
+_DIRECT_SCOPE_BOOTSTRAP_KEY = direct_scope_keys.DIRECT_SCOPE_BOOTSTRAP_KEY
 _PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in ct.StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 _LANE_LABELS = frozenset({"main", "auxiliary"})
@@ -1159,8 +1159,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 reason=outcome.note or "direct scope checkout preparation failed",
             )
             return
-        base_sha = item.payload.get(repo_stage_mod.DIRECT_SCOPE_BASE_SHA_KEY)
-        if not repo_stage_mod.is_full_commit_sha(base_sha):
+        base_sha = item.payload.get(direct_scope_keys.DIRECT_SCOPE_BASE_SHA_KEY)
+        if not direct_scope_keys.is_full_commit_sha(base_sha):
             if not self.config.dry_run:
                 self._direct_scope_bootstrap_pending = False
                 self._finish(

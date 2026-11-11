@@ -21,12 +21,14 @@ from hephaestus.automation.issue_waves import (
     WAVE_NON_CODE_PAYLOAD,
     IssueWaveStore,
 )
+from hephaestus.automation.pipeline.direct_scope_keys import DIRECT_SCOPE_RESERVATION_KEY
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stage_base import Continue, JobRequest, StageOutcome
-from hephaestus.automation.pipeline.stages import finished as finished_module
-from hephaestus.automation.pipeline.stages.finished import FinishedStage
-from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_RESERVATION_KEY
+from hephaestus.automation.pipeline.stages.finished import (
+    FinishedStage,
+    finished as finished_module,
+)
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,
     ItemResult,
@@ -1089,7 +1091,7 @@ def test_completed_item_archives_and_prunes_opencode_sessions() -> None:
     archived = Path("/home/.agent_brain/transcripts/ses_opencode_1.json")
 
     with patch(
-        "hephaestus.automation.pipeline.stages.finished.archive_and_prune_opencode_session",
+        "hephaestus.automation.pipeline.stages.finished.finished.archive_and_prune_opencode_session",
         return_value=archived,
     ) as archive:
         FinishedStage._archive_agent_sessions(item)
@@ -1116,7 +1118,7 @@ def test_failed_opencode_export_keeps_the_session() -> None:
     item.session_selections["implementer"] = ("opencode", "model")
 
     with patch(
-        "hephaestus.automation.pipeline.stages.finished.archive_and_prune_opencode_session",
+        "hephaestus.automation.pipeline.stages.finished.finished.archive_and_prune_opencode_session",
         return_value=None,
     ):
         FinishedStage._archive_agent_sessions(item)
@@ -1134,7 +1136,7 @@ def test_opencode_archive_runs_once_per_item() -> None:
     item.session_selections["implementer"] = ("opencode", "model")
 
     with patch(
-        "hephaestus.automation.pipeline.stages.finished.archive_and_prune_opencode_session",
+        "hephaestus.automation.pipeline.stages.finished.finished.archive_and_prune_opencode_session",
         return_value=None,
     ) as archive:
         FinishedStage._archive_agent_sessions(item)

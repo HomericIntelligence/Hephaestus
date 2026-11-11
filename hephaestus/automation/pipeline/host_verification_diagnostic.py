@@ -1,4 +1,10 @@
-"""Bounded, inert diagnostics published by the PR-review stage."""
+"""Bounded, inert host-verification diagnostics.
+
+A fixed host check can fail before source review starts. The host then
+publishes one exact-head comment that names the failure. The comment is
+stage-neutral: the implementation stage publishes it for a rebase or a
+capability failure, and no other stage owns the text.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,7 @@ from collections.abc import Mapping
 from logging import Logger
 from typing import Protocol
 
-from ..diagnostics import redact_diagnostic_text
+from .diagnostics import redact_diagnostic_text
 
 HOST_VERIFICATION_DIAGNOSTIC_MAX = 4_000
 

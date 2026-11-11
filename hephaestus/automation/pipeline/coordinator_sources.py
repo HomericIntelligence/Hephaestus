@@ -15,8 +15,9 @@ from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_issue_classification import _PERMANENT_ROW_CLASSIFICATION_ERRORS
+from .direct_scope_keys import DIRECT_SCOPE_BOOTSTRAP_KEY
 from .stages import StageGitHub
-from .stages.repo import DIRECT_SCOPE_BOOTSTRAP_KEY, SYNCED_MAIN_SHA_KEY
+from .stages.repo.repo import SYNCED_MAIN_SHA_KEY
 from .work_item import ItemKind
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")

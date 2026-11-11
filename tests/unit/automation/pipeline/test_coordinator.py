@@ -35,6 +35,10 @@ from hephaestus.automation.pipeline.admission import PlanFileClaim
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.coordinator import Coordinator
 from hephaestus.automation.pipeline.coordinator_types import _FAIL_BACK_CAP, PipelineConfig
+from hephaestus.automation.pipeline.direct_scope_keys import (
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_RESERVATION_KEY,
+)
 from hephaestus.automation.pipeline.events import RepositoryBusyEvent
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
@@ -60,10 +64,6 @@ from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.stage_base import JobRequest, Stage
 from hephaestus.automation.pipeline.stages.durable_request import PENDING_GITHUB_REQUEST
 from hephaestus.automation.pipeline.stages.implementation import DIRTY_RECOVERY_WAIT
-from hephaestus.automation.pipeline.stages.repo import (
-    DIRECT_SCOPE_BASE_SHA_KEY,
-    DIRECT_SCOPE_RESERVATION_KEY,
-)
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.repo_intake import RepoIntakeError, RepoIntakeManager

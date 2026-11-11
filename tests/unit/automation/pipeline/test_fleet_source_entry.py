@@ -112,7 +112,7 @@ def test_direct_intake_reaches_one_bound_implementation_without_source_preparati
     tmp_path, monkeypatch
 ):
     """Normal stage callbacks retain the admitted branch, receipt and current plan."""
-    from hephaestus.automation.pipeline.stages.repo import DIRECT_SCOPE_BASE_SHA_KEY
+    from hephaestus.automation.pipeline.direct_scope_keys import DIRECT_SCOPE_BASE_SHA_KEY
 
     coordinator, executor, manager, binding, loop, entry = _stage_case(tmp_path)
     submitted = []

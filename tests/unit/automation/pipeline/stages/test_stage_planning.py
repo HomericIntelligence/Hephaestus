@@ -1087,7 +1087,7 @@ class TestPlanningSourceWorkspacePreparation:
             )
 
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.stages.planning.planning_source_workspace_binding",
+            "hephaestus.automation.pipeline.stages.planning.planning.planning_source_workspace_binding",
             unavailable,
         )
         payload: dict[str, Any] = {}
@@ -1130,7 +1130,7 @@ class TestPlanningSourceWorkspacePreparation:
             )
 
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.stages.planning.planning_source_workspace_binding",
+            "hephaestus.automation.pipeline.stages.planning.planning.planning_source_workspace_binding",
             unavailable,
         )
         item = make_work_item(issue=2983, state="ADVISE_WAIT")

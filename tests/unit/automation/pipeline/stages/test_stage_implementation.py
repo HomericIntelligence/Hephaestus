@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+import hephaestus.automation.pipeline.stages.implementation.implementation as implementation_module
 from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
@@ -40,12 +41,10 @@ from hephaestus.automation.pipeline.stages import (
     Continue,
     JobRequest,
     StageOutcome,
-    implementation as implementation_module,
 )
 from hephaestus.automation.pipeline.stages.implementation import (
     BRANCH_WORKTREE_OWNER_PENDING_DELAY_S,
     GIT_ERROR_RETRY_CAP,
-    HEPHAESTUS_REQUIRED_CHECK_ARGV,
     PRE_PR_TEST_ARGV,
     ImplementationStage,
     _git_failure_fallback,
@@ -80,7 +79,9 @@ _DIRTY_CONTENT_SNAPSHOT = {
     "worktree_sha256": "2" * 64,
     "untracked_sha256": "3" * 64,
 }
-_IMPLEMENTATION_PLATFORM = "hephaestus.automation.pipeline.stages.implementation.sys.platform"
+_IMPLEMENTATION_PLATFORM = (
+    "hephaestus.automation.pipeline.stages.implementation.implementation.sys.platform"
+)
 _WRITER_PLAN = "## Files to Modify\n- `a.py`\n"
 
 
@@ -4138,7 +4139,7 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.argv == implementation_module.HEPHAESTUS_REQUIRED_CHECK_ARGV
         assert result.job.verified_runner_source_revision == ""
         assert result.job.timeout_s == 7200
         assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
@@ -4186,7 +4187,7 @@ class TestTestsAndFix:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
-        assert result.job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert result.job.argv == implementation_module.HEPHAESTUS_REQUIRED_CHECK_ARGV
         assert result.job.verified_runner_source_revision == ""
 
     @pytest.mark.parametrize("candidate_kind", ["modified", "symlink"])
@@ -5002,7 +5003,7 @@ class TestTestsAndFix:
         )
 
         assert item.payload["test_receipt"] == (
-            f"`{shlex.join(HEPHAESTUS_REQUIRED_CHECK_ARGV)}` — passed; "
+            f"`{shlex.join(implementation_module.HEPHAESTUS_REQUIRED_CHECK_ARGV)}` — passed; "
             "last pytest summary: 7 passed, 1 warning in 4.20s"
         )
 
@@ -6064,7 +6065,7 @@ class TestFullWalks:
             "pre_pr_tests_native_fallback",
             "commit_push",
         ]
-        assert pool.submitted[6].job.argv == HEPHAESTUS_REQUIRED_CHECK_ARGV
+        assert pool.submitted[6].job.argv == implementation_module.HEPHAESTUS_REQUIRED_CHECK_ARGV
         assert pool.submitted[6].job.verified_runner_source_revision == "a" * 40
         assert pool.submitted[7].job.argv == PRE_PR_TEST_ARGV
         assert item.pr == 1001

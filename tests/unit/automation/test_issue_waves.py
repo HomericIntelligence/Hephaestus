@@ -99,7 +99,7 @@ def test_partial_two_issue_wave_resumes_after_first_merge_advances_main(
     )
     facts_by_issue = {19: merged_facts}
     monkeypatch.setattr(
-        "hephaestus.automation.pipeline.stages.repo._seeding.seed_issue_from_github",
+        "hephaestus.automation.pipeline.stages.repo.repo._seeding.seed_issue_from_github",
         lambda number, github: facts_by_issue[number],
     )
 
