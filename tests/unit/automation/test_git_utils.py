@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-import hephaestus.automation.git_runtime as git_runtime
+import hephaestus.git.runtime as git_runtime
 from hephaestus.automation import git_utils
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
 from hephaestus.automation.git_utils import (

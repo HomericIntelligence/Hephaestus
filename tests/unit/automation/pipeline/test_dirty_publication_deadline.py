@@ -26,8 +26,8 @@ from hephaestus.automation.source_worktree import (
     SourceWorkspacePreparationCause,
     SourceWorkspacePreparationError,
 )
-from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.git.snapshot import _dirty_worktree_content_snapshot
 from hephaestus.utils.file_lock import file_lock
 from tests.unit.agents.test_dirty_workspace import _claim
 from tests.unit.automation.pipeline.conftest import FakeSigningProvider

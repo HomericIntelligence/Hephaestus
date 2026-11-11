@@ -12,8 +12,9 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation import git_utils, worktree_snapshot
-from hephaestus.automation.worktree_snapshot import _path_content_identity
+from hephaestus.automation import git_utils
+from hephaestus.git import snapshot as worktree_snapshot
+from hephaestus.git.snapshot import _path_content_identity
 
 
 @pytest.mark.parametrize(
@@ -29,14 +30,14 @@ def test_snapshot_trusts_exact_apple_developer_git(candidate: Path, binding: str
     mode = stat.S_IFREG | 0o755
     directory_mode = stat.S_IFDIR | 0o755
     with (
-        patch("hephaestus.automation.worktree_snapshot.shutil.which", return_value=str(candidate)),
+        patch("hephaestus.git.snapshot.shutil.which", return_value=str(candidate)),
         patch.object(worktree_snapshot, "_TRUSTED_GIT_CANDIDATES", ()),
         patch.object(Path, "resolve", lambda self, strict=False: self),
         patch.object(Path, "is_symlink", return_value=False),
         patch.object(Path, "stat", return_value=SimpleNamespace(st_mode=mode)),
         patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=directory_mode)),
         patch.object(Path, "is_file", return_value=True),
-        patch("hephaestus.automation.worktree_snapshot.os.access", return_value=True),
+        patch("hephaestus.git.snapshot.os.access", return_value=True),
     ):
         assert getattr(worktree_snapshot, binding)() == str(candidate)
 
@@ -53,12 +54,12 @@ def test_snapshot_rejects_other_apple_developer_git_path(candidate: Path, bindin
     """Similar Apple paths outside the two exact leaves stay untrusted."""
     mode = stat.S_IFREG | 0o755
     with (
-        patch("hephaestus.automation.worktree_snapshot.shutil.which", return_value=str(candidate)),
+        patch("hephaestus.git.snapshot.shutil.which", return_value=str(candidate)),
         patch.object(worktree_snapshot, "_TRUSTED_GIT_CANDIDATES", ()),
         patch.object(Path, "is_symlink", return_value=False),
         patch.object(Path, "stat", return_value=SimpleNamespace(st_mode=mode)),
         patch.object(Path, "is_file", return_value=True),
-        patch("hephaestus.automation.worktree_snapshot.os.access", return_value=True),
+        patch("hephaestus.git.snapshot.os.access", return_value=True),
     ):
         assert getattr(worktree_snapshot, binding)() is None
 
@@ -75,14 +76,14 @@ def test_snapshot_rejects_unsafe_apple_git_parent() -> None:
         return SimpleNamespace(st_mode=mode)
 
     with (
-        patch("hephaestus.automation.worktree_snapshot.shutil.which", return_value=str(candidate)),
+        patch("hephaestus.git.snapshot.shutil.which", return_value=str(candidate)),
         patch.object(worktree_snapshot, "_TRUSTED_GIT_CANDIDATES", ()),
         patch.object(Path, "resolve", lambda self, strict=False: self),
         patch.object(Path, "is_symlink", return_value=False),
         patch.object(Path, "stat", return_value=SimpleNamespace(st_mode=file_mode)),
         patch.object(Path, "lstat", parent_status),
         patch.object(Path, "is_file", return_value=True),
-        patch("hephaestus.automation.worktree_snapshot.os.access", return_value=True),
+        patch("hephaestus.git.snapshot.os.access", return_value=True),
     ):
         assert worktree_snapshot._trusted_git_executable() is None
 
@@ -111,7 +112,7 @@ def test_content_hash_uses_the_remaining_operation_deadline(tmp_path: Path, bind
     (tmp_path / "file").write_text("content")
     with (
         git_utils.operation_deadline(10.0),
-        patch("hephaestus.automation.worktree_snapshot.time.monotonic", return_value=11.0),
+        patch("hephaestus.git.snapshot.time.monotonic", return_value=11.0),
         pytest.raises(subprocess.TimeoutExpired),
     ):
         getattr(worktree_snapshot, binding)(tmp_path, "file\0", timeout=30)

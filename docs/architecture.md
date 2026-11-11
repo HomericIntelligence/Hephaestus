@@ -302,6 +302,12 @@ base import surface (`import hephaestus`) MUST NOT pull `curses`, `fcntl`,
 `pydantic` or any `hephaestus.automation.*` module. Library subpackages
 therefore cannot import `hephaestus.automation`.
 
+[`hephaestus/fleet/`](../hephaestus/fleet/) and [`hephaestus/git/`](../hephaestus/git/)
+are library members. `hephaestus/fleet/` holds the contained runtime, the build
+controller, and the worker entry points. It does not import
+`hephaestus.automation`. Fleet code that needs Git capture or deadline helpers
+imports `hephaestus.git`.
+
 ---
 
 ## 3. Cross-cutting invariants
@@ -2927,15 +2933,15 @@ queue, or change implementation state labels. The existing pipeline keeps its
 label and publication authority. The Fleet modules move to `hephaestus/fleet/`
 under #3519.
 
-[`FleetWorker`](../hephaestus/automation/fleet_worker.py) owns one pinned Codex
+[`FleetWorker`](../hephaestus/fleet/worker.py) owns one pinned Codex
 0.153.4 app-server process through
-[`CodexAppServer`](../hephaestus/automation/fleet_provider.py). Each logical
+[`CodexAppServer`](../hephaestus/fleet/provider.py). Each logical
 session has its own task, agent, workspace, execution generation, and provider
 thread. The target remains five provider runtimes: one with 12 laptop sessions
 and two with 24 sessions on each cluster. A shared provider process does not
 combine those task owners.
 
-[`WorkerJournal`](../hephaestus/automation/fleet_journal.py) records command
+[`WorkerJournal`](../hephaestus/fleet/journal.py) records command
 intent before provider dispatch and retains uncertain outcomes for recovery.
 It also records an unresolved runtime attempt before provider startup. A recorded
 PID or confirmed cleanup resolves that marker. Failed initialization or PID
@@ -2944,7 +2950,7 @@ These private receipts cannot authorize a replacement task. Public facts contain
 bounded activity metadata. Prompts, tool requests, answers, and credentials stay
 on private worker storage and attachments.
 
-[`FleetJobResults`](../hephaestus/automation/fleet_job_results.py) adds an explicit
+[`FleetJobResults`](../hephaestus/fleet/job_results.py) adds an explicit
 private association for one admitted session and its next input. It records the
 existing assignment, stage, workspace, generation, provider thread, and contained
 lease. Its upstream digest is a correlation reference, not admission authority.
@@ -2989,7 +2995,7 @@ new admission. Generic events omit the private final answer; retained output
 continues through the authenticated reader. See the
 [single-attempt runbook](fleet-worker.md#run-one-admitted-implementation-through-the-pipeline).
 
-[`fleet_session_output`](../hephaestus/automation/fleet_session_output.py)
+[`fleet_session_output`](../hephaestus/fleet/session_output.py)
 retains completed Codex command items under the private worker state directory.
 The worker checks the session owner and current thread and turn before capture.
 Immutable item files and an atomic capture manifest survive worker disposal.
@@ -3007,18 +3013,18 @@ Odysseus can display an explicitly registered bundle after it verifies the
 bytes and canonical owner. This operation does not grant task admission or
 establish a review result. See [retained command output](fleet-worker.md#retained-command-output).
 
-The [private socket CLI](../hephaestus/automation/fleet_worker_cli.py) supplies
+The [private socket CLI](../hephaestus/fleet/worker_cli.py) supplies
 inventory, pending requests, and
-[current file-change evidence](../hephaestus/automation/fleet_request_evidence.py).
+[current file-change evidence](../hephaestus/fleet/request_evidence.py).
 The evidence helper checks the current request, session, thread, turn, and item
 before and after the provider read. Odysseus must bind an approval to those
 identities and the displayed evidence. A response still requires an admitted
 command and an immutable private response reference. The private read interface
 does not dispatch a response or grant approval.
 
-[`ContainedExecSupervisor`](../hephaestus/automation/fleet_containment.py) is a
+[`ContainedExecSupervisor`](../hephaestus/fleet/containment.py) is a
 separate, journaled lifecycle boundary for one tool container per session.
-[`PodmanEngine` and `LinuxKernel`](../hephaestus/automation/fleet_podman.py) bind
+[`PodmanEngine` and `LinuxKernel`](../hephaestus/fleet/podman.py) bind
 the private engine context, immutable image and container IDs, workspace,
 generation, resource limits, namespaces, and process identities. They must run
 on the engine's Linux host. The supervisor records removal intent before it
@@ -3040,13 +3046,13 @@ remain required. Domain selection is not a containment-equivalence claim or
 runtime qualification. The [worker contract](fleet-worker.md#contained-exec-server-supervisor)
 defines the checks and remaining bounded startup gate.
 
-The private [`AttachmentEndpoint`](../hephaestus/automation/fleet_attachment.py)
+The private [`AttachmentEndpoint`](../hephaestus/fleet/attachment.py)
 connects provider program transport to one retained supervisor lease. Its client
 sends only the immutable binding, then forwards bounded process streams. The
 endpoint completes supervisor engine and kernel checks before exposing the
 stream. An operation lock serializes supervisor journal access across attachment
 threads. Detachment retains the lease and its workspace reservation.
-[`EnvironmentRegistry`](../hephaestus/automation/fleet_environments.py) supplies
+[`EnvironmentRegistry`](../hephaestus/fleet/environments.py) supplies
 immutable remote-only selection and the private attachment command. It rejects
 missing supervisor bindings and checks worker, session, execution, and generation
 ownership on every selection. It verifies those declared fields against the
@@ -3057,7 +3063,7 @@ The registry checks private socket directories against all configured workspaces
 the supervisor persists declared private roots and checks future mounts and
 unresolved leases against them. Metadata alone cannot prove containment.
 
-[`ContainedRuntime`](../hephaestus/automation/fleet_runtime.py) is the local
+[`ContainedRuntime`](../hephaestus/fleet/runtime.py) is the local
 startup and shutdown owner for this fixed resource set. The CLI selects it
 with an optional private `--contained-config` file. It checks retained worker
 ownership and the complete assignment inventory, prepares inert leases, and
@@ -3106,7 +3112,7 @@ instead confirms disposal before producing its private result. Both paths keep
 the canonical issue claim; neither completes the issue.
 
 Native macOS and Linux without a verified owned boundary remain disabled by
-[`fleet_isolation`](../hephaestus/automation/fleet_isolation.py).
+[`fleet_isolation`](../hephaestus/fleet/isolation.py).
 Capacity above one and cold resume remain unsupported. Deployment must still
 demonstrate restricted startup and ordinary model/tool routing with the pinned
 provider, native authentication, and its actual engine and kernel. Deterministic
@@ -3116,9 +3122,9 @@ records the supported contracts, bounded probes, and remaining gates.
 
 ### Transferable build source
 
-[`fleet_snapshot`](../hephaestus/automation/fleet_snapshot.py) supplies optional
+[`snapshot`](../hephaestus/fleet/snapshot.py) supplies optional
 Python export, verification, and checked restore for eligible working source.
-It uses supported bounded capture bindings from `worktree_snapshot` and keeps
+It uses supported bounded capture bindings from `hephaestus.git.snapshot` and keeps
 the existing recovery API and its three-digest contract. Snapshot-specific
 policy rejects unsupported files, unsafe Git configuration, and unavailable
 capabilities before capture. One deadline covers the complete operation.
@@ -3139,13 +3145,13 @@ work; snapshot operation has no MCP runtime dependency.
 ### Private retained build logs
 
 The separate
-[`BuildArtifactServer`](../hephaestus/automation/fleet_build_artifact_server.py)
+[`BuildArtifactServer`](../hephaestus/fleet/build_artifact_server.py)
 serves terminal build output over authenticated loopback HTTPS. Agamemnon
 retains work admission and durable decisions. Odysseus reads logs through
 Agamemnon. This service does not change the worker socket, metrics interface,
 or execution gates.
 
-[`ArtifactCatalog`](../hephaestus/automation/fleet_build_artifacts.py) loads
+[`ArtifactCatalog`](../hephaestus/fleet/build_artifacts.py) loads
 explicit private registrations before the listener starts. Each registration
 pins the receipt, complete identity, admitted build attempt, worker allocation
 and generation, snapshot, and terminal log commitment. The loader checks fixed

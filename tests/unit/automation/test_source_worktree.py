@@ -320,7 +320,7 @@ def test_dirty_operation_lease_yields_the_worktree_and_keeps_changes(
 def test_rebase_operation_rejects_changed_pause_pins(tmp_path: Path, changed_pin: str) -> None:
     """The edit lease requires the exact host-captured paused rebase."""
     from hephaestus.agents.workspace import DirtySourceOperation
-    from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
+    from hephaestus.git.snapshot import _dirty_worktree_content_snapshot
 
     repo, first, second = _repository(tmp_path)
     manager = SourceWorkspaceManager(repo, repository="example/project")

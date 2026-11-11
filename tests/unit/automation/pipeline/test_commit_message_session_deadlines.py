@@ -11,8 +11,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from hephaestus.automation import agent_config, claude_invoke, git_runtime, git_utils
+from hephaestus.automation import agent_config, claude_invoke, git_utils
 from hephaestus.automation.pipeline import worker_pool
+from hephaestus.git import runtime as git_runtime
 
 
 def _git_result(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:

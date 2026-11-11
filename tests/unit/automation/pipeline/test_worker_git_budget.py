@@ -10,10 +10,10 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from hephaestus.automation import git_runtime
 from hephaestus.automation.pipeline import repository_lock, worker_pool
 from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.pipeline.job_results import JobResult
+from hephaestus.git import runtime as git_runtime
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from tests.unit.automation.test_source_worktree import _repository
 

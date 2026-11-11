@@ -56,7 +56,6 @@ from hephaestus.automation.agent_config import (
     AGENT_PR_REVIEWER,
 )
 from hephaestus.automation.commit_runtime import CommitIssueMetadata
-from hephaestus.automation.git_runtime import operation_file_lock
 from hephaestus.automation.host_capabilities import ValidatedSigningProvider
 from hephaestus.automation.implementation_writer import ImplementationWriterHandoff
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -150,11 +149,12 @@ from hephaestus.automation.worktree_manager import (
     WorktreeManager,
     consume_implementation_writer_authority,
 )
-from hephaestus.automation.worktree_snapshot import _terminate_bounded_process_tree
 from hephaestus.config.child_environments import (
     build_git_child_env,
     build_nested_host_verification_env,
 )
+from hephaestus.git.runtime import operation_file_lock
+from hephaestus.git.snapshot import _terminate_bounded_process_tree
 from hephaestus.prompts import PromptCatalog
 from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock, file_lock_at
@@ -763,7 +763,7 @@ def test_trusted_git_executable_rejects_discovered_binary_outside_fixed_roots(
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     executable.chmod(0o555)
     monkeypatch.setattr(f"{_WP}.shutil.which", lambda _name: str(executable))
-    monkeypatch.setattr("hephaestus.automation.worktree_snapshot._TRUSTED_GIT_CANDIDATES", ())
+    monkeypatch.setattr("hephaestus.git.snapshot._TRUSTED_GIT_CANDIDATES", ())
 
     assert _trusted_git_executable() is None
 
@@ -5863,9 +5863,7 @@ class TestGitOps:
         self, tmp_path: Path
     ) -> None:
         """A clean writer does not require host path-traversal primitives."""
-        with patch(
-            "hephaestus.automation.worktree_snapshot._secure_dir_fd_supported", return_value=False
-        ):
+        with patch("hephaestus.git.snapshot._secure_dir_fd_supported", return_value=False):
             digest = _path_content_identity(tmp_path, "", seed_digest="seed")
 
         expected = hashlib.sha256(b"Dseed").hexdigest()
@@ -6464,7 +6462,7 @@ class TestGitOps:
         """A group termination error cannot skip direct-child cleanup."""
         process = MagicMock(pid=1234)
         with patch(
-            "hephaestus.automation.worktree_snapshot.os.killpg", side_effect=termination_error
+            "hephaestus.git.snapshot.os.killpg", side_effect=termination_error
         ) as kill_group:
             _terminate_bounded_process_tree(process, process_group=True)
 
@@ -6500,7 +6498,7 @@ class TestGitOps:
             stack.enter_context(patch(f"{_WP}.subprocess.Popen", side_effect=launch))
             stack.enter_context(
                 patch(
-                    "hephaestus.automation.worktree_snapshot.selectors.DefaultSelector",
+                    "hephaestus.git.snapshot.selectors.DefaultSelector",
                     return_value=selector,
                 )
             )
@@ -6999,7 +6997,7 @@ class TestGitOps:
         with (
             patch(f"{_WP}._secure_dir_fd_supported", return_value=False),
             patch(
-                "hephaestus.automation.worktree_snapshot._secure_dir_fd_supported",
+                "hephaestus.git.snapshot._secure_dir_fd_supported",
                 return_value=False,
             ),
         ):
@@ -14107,7 +14105,7 @@ class TestGitOps:
         git_utils_mocks.run.side_effect = fail_push
         with (
             patch(
-                "hephaestus.automation.git_runtime.time.monotonic",
+                "hephaestus.git.runtime.time.monotonic",
                 side_effect=(100.0, 102.0),
             ),
             git_utils.operation_deadline(101.0),
@@ -17881,7 +17879,7 @@ class TestGitOps:
 
         with (
             patch(f"{_WP}.time.monotonic", side_effect=lambda: clock[0]),
-            patch("hephaestus.automation.git_runtime.time.monotonic", side_effect=lambda: clock[0]),
+            patch("hephaestus.git.runtime.time.monotonic", side_effect=lambda: clock[0]),
             patch(f"{_WP}._checkout_preflight_error", side_effect=preflight),
             patch(
                 "hephaestus.automation.git_utils.run",
@@ -18292,7 +18290,7 @@ class TestGitLocking:
             patch(f"{_WP}.time.monotonic", side_effect=lambda: clock[0]),
             patch(f"{_WP}._trusted_gh_executable", return_value="gh"),
             patch(f"{_WP}._trusted_remote_git_config", return_value=()),
-            patch("hephaestus.automation.git_runtime._shared_run_git", side_effect=run_child),
+            patch("hephaestus.git.runtime._shared_run_git", side_effect=run_child),
             patch.object(pool, "_repo_lock") as repo_lock,
             patch.object(pool, "_dispatch_locked_git") as dispatch,
         ):
@@ -21283,7 +21281,7 @@ def _dirty_test_job(job: AgentJob, worktree: Path, manager: Any, initial_head: s
     from hephaestus.agents.workspace import validate_workspace_binding
     from hephaestus.automation.pipeline.jobs import DirtyDirectPlanInput
     from hephaestus.automation.pipeline.worker_pool import _dirty_plan_input_identity
-    from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
+    from hephaestus.git.snapshot import _dirty_worktree_content_snapshot
     from tests.unit.agents.test_dirty_workspace import _claim
 
     assert manager is not None

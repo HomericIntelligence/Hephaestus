@@ -7,7 +7,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from hephaestus.automation import git_runtime, source_worktree
+from hephaestus.automation import source_worktree
+from hephaestus.git import runtime as git_runtime
 
 
 def test_source_git_obeys_the_outer_cancellation_request(

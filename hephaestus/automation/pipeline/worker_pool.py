@@ -90,12 +90,6 @@ from hephaestus.agents.workspace import (
 from hephaestus.automation.agent_config import AGENT_COMMIT_MESSAGE
 from hephaestus.automation.commit_paths import CommitPaths, is_bounded_commit_paths
 from hephaestus.automation.first_publication_recovery import FirstPublicationStore
-from hephaestus.automation.git_config_safety import unsafe_local_git_config_key
-from hephaestus.automation.git_runtime import (
-    current_operation_shutdown,
-    operation_file_lock,
-    operation_file_lock_held,
-)
 from hephaestus.automation.host_capabilities import (
     QuotaLifecycleError,
     UnavailableQuotaBackend,
@@ -271,7 +265,21 @@ from hephaestus.automation.worktree_manager import (
     WorktreeCreationReceiptError,
     WorktreeManager,
 )
-from hephaestus.automation.worktree_snapshot import (
+from hephaestus.config.child_environments import (
+    build_codex_implementation_child_env,
+    build_git_child_env,
+    build_git_signing_env,
+    build_host_verification_env,
+    build_python_phase_env,
+)
+from hephaestus.git.config_safety import unsafe_local_git_config_key
+from hephaestus.git.gh.client import GitHubRateLimitError, GitHubUnavailableError
+from hephaestus.git.runtime import (
+    current_operation_shutdown,
+    operation_file_lock,
+    operation_file_lock_held,
+)
+from hephaestus.git.snapshot import (
     _BoundedGitOutput as _BoundedGitOutput,
     _controlled_git_env as _controlled_git_env,
     _dirty_worktree_content_snapshot as _dirty_worktree_content_snapshot,
@@ -285,14 +293,6 @@ from hephaestus.automation.worktree_snapshot import (
     _trusted_git_executable as _trusted_git_executable,
     _valid_dirty_content_snapshot as _valid_dirty_content_snapshot,
 )
-from hephaestus.config.child_environments import (
-    build_codex_implementation_child_env,
-    build_git_child_env,
-    build_git_signing_env,
-    build_host_verification_env,
-    build_python_phase_env,
-)
-from hephaestus.git.gh.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
     CircuitBreakerOpenError,

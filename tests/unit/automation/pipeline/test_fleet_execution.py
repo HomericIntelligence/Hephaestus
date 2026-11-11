@@ -27,12 +27,12 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.current_plan import CurrentPlanRead
-from hephaestus.automation.fleet_job_results import digest, owner_identity
 from hephaestus.automation.pipeline import fleet_execution, fleet_pipeline_runner
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.review_journal import PlanDiscoveryResult
 from hephaestus.automation.source_worktree import FleetAttemptFence, SourceWorkspaceManager
+from hephaestus.fleet.job_results import digest, owner_identity
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 _WORKER = "hephaestus.automation.pipeline.worker_pool"

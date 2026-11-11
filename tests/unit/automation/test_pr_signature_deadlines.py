@@ -11,8 +11,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from hephaestus.automation import git_runtime, github_api
+from hephaestus.automation import github_api
 from hephaestus.automation.pipeline_github import PipelineGitHub
+from hephaestus.git import runtime as git_runtime
 
 
 def _create_adapter(

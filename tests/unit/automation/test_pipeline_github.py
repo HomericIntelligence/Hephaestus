@@ -22,13 +22,13 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-import hephaestus.automation.git_runtime as git_runtime
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.github_api.prs as prs_mod
 import hephaestus.automation.pipeline_github_mutations as mutations_mod
 import hephaestus.automation.pipeline_github_queries as queries_mod
 import hephaestus.automation.pipeline_github_reviews as reviews_mod
 import hephaestus.automation.pipeline_github_transport as transport_mod
+import hephaestus.git.runtime as git_runtime
 from hephaestus.automation.dependency_parser import DependencyFact
 from hephaestus.automation.github_api.graphql import GraphQLSpec
 from hephaestus.automation.models import DEFAULT_STATE_DIR

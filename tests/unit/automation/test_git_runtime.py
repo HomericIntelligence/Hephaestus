@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-import hephaestus.automation.git_runtime as git_runtime
+import hephaestus.git.runtime as git_runtime
 
 
 @pytest.fixture(autouse=True)
@@ -38,8 +38,8 @@ class TestRun:
         sensitive_argument = "do-not-log-this-command-argument"
         completed = subprocess.CompletedProcess([sensitive_argument], 0, stdout="", stderr="")
         with (
-            caplog.at_level(logging.DEBUG, logger="hephaestus.automation.git_runtime"),
-            patch("hephaestus.automation.git_runtime.run_subprocess", return_value=completed),
+            caplog.at_level(logging.DEBUG, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime.run_subprocess", return_value=completed),
         ):
             result = git_runtime.run([sensitive_argument])
 
@@ -53,8 +53,8 @@ class TestRun:
         sensitive_argument = "do-not-log-this-failed-command-argument"
         failure = subprocess.CalledProcessError(1, [sensitive_argument], stderr=sensitive_argument)
         with (
-            caplog.at_level(logging.ERROR, logger="hephaestus.automation.git_runtime"),
-            patch("hephaestus.automation.git_runtime.run_subprocess", side_effect=failure),
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime.run_subprocess", side_effect=failure),
             pytest.raises(subprocess.CalledProcessError),
         ):
             git_runtime.run([sensitive_argument])
@@ -68,8 +68,8 @@ class TestRun:
         sensitive_argument = "do-not-log-this-timed-out-command-argument"
         timeout = subprocess.TimeoutExpired([sensitive_argument], 60)
         with (
-            caplog.at_level(logging.ERROR, logger="hephaestus.automation.git_runtime"),
-            patch("hephaestus.automation.git_runtime.run_subprocess", side_effect=timeout),
+            caplog.at_level(logging.ERROR, logger="hephaestus.git.runtime"),
+            patch("hephaestus.git.runtime.run_subprocess", side_effect=timeout),
             pytest.raises(subprocess.TimeoutExpired),
         ):
             git_runtime.run([sensitive_argument], timeout=60)
@@ -79,9 +79,7 @@ class TestRun:
 
     def test_git_command_delegates_to_shared_git_helper(self) -> None:
         completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
-        with patch(
-            "hephaestus.automation.git_runtime._shared_run_git", return_value=completed
-        ) as mock_run:
+        with patch("hephaestus.git.runtime._shared_run_git", return_value=completed) as mock_run:
             result = git_runtime.run(
                 ["git", "status"],
                 cwd=Path("/repo"),
@@ -177,7 +175,7 @@ def test_get_repo_slug_falls_back_when_remote_is_unavailable(
 
 def test_reference_helpers_use_repository_slug() -> None:
     """Format issue and pull-request references from the current slug."""
-    with patch("hephaestus.automation.git_runtime.get_repo_slug", return_value="hephaestus"):
+    with patch("hephaestus.git.runtime.get_repo_slug", return_value="hephaestus"):
         assert git_runtime.issue_ref(7) == "hephaestus#7"
         assert git_runtime.pr_ref("8") == "hephaestus#8"
 

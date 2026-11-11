@@ -2,7 +2,7 @@
 # ruff: noqa: F403, F405
 import subprocess
 
-import hephaestus.automation.git_runtime as git_runtime
+import hephaestus.git.runtime as git_runtime
 from hephaestus.automation.github_api import prs as github_prs
 from hephaestus.automation.operation_deadlines import operation_deadline_after
 

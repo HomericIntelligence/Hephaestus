@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation import git_runtime, worktree_manager
+from hephaestus.automation import worktree_manager
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
@@ -24,6 +24,7 @@ from hephaestus.automation.source_worktree import (
 )
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.git import runtime as git_runtime
 
 
 def _git(repo: Path, *args: str) -> str:

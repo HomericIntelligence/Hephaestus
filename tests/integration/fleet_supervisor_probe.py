@@ -12,8 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation.fleet_containment import ContainedExecSupervisor, ContainerSpec
-from hephaestus.automation.fleet_podman import LinuxKernel, PodmanEngine
+from hephaestus.fleet.containment import ContainedExecSupervisor, ContainerSpec
+from hephaestus.fleet.podman import LinuxKernel, PodmanEngine
 
 
 class Connection:

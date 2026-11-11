@@ -17,7 +17,7 @@ from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import JobRequest, StageOutcome, implementation
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
-from hephaestus.automation.worktree_snapshot import _dirty_worktree_content_snapshot
+from hephaestus.git.snapshot import _dirty_worktree_content_snapshot
 from tests.unit.agents.test_dirty_workspace import _claim
 from tests.unit.automation.test_source_worktree import _git, _repository
 

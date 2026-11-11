@@ -97,6 +97,7 @@ Hephaestus/
 │   ├── config/                 # Configuration management
 │   ├── datasets/               # Dataset downloading utilities
 │   ├── discovery/              # Discovery of agents, skills, and code blocks
+│   ├── fleet/                  # Contained runtime, build controller, and worker entry points
 │   ├── forensics/              # Coredump capture + gdb post-mortem runner
 │   ├── git/                    # Git-family library subpackage; gh/ today; github/ under #3514, verification/ under #3517
 │   ├── github/                 # GitHub automation (PR merging, fleet sync, tidy, stats)
@@ -767,6 +768,7 @@ pre-commit run --all-files
 - `hephaestus/logging/` - Enhanced logging (ContextLogger, setup_logging)
 - `hephaestus/cli/` - CLI utilities (argument parsing, output formatting)
 - `hephaestus/system/` - System information collection
+- `hephaestus/fleet/` - Fleet contained runtime, build controller, and worker entry points
 - `hephaestus/git/` - Git-family library subpackage (`gh/` today; `github/` under #3514, `verification/` under #3517)
 - `hephaestus/github/` - GitHub automation (PR merging)
 - `tests/unit/` - Unit test suite. It mirrors the hephaestus/ subpackages.

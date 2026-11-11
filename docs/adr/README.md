@@ -78,3 +78,4 @@ confirm all three.
 | [0062](0062-git-library-subpackage.md) | hephaestus.git is the Git-family library subpackage | Proposed |
 | [0063](0063-harness-model-transport-catalog.md) | Harness and model-transport catalog | Proposed |
 | [0064](0064-documentation-path-reference-maintenance.md) | Living documents follow the paths they name | Proposed |
+| [0065](0065-fleet-git-are-library-members.md) | hephaestus.fleet and hephaestus.git are library members | Accepted |

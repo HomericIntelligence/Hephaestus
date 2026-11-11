@@ -14,8 +14,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation.fleet_isolation import shell_environment_policy, validate_worker_storage
-from hephaestus.automation.fleet_provider import CodexAppServer
+from hephaestus.fleet.isolation import shell_environment_policy, validate_worker_storage
+from hephaestus.fleet.provider import CodexAppServer
 
 
 class ProbeError(ValueError):
