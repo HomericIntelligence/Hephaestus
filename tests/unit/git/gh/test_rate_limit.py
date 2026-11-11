@@ -18,6 +18,7 @@ import pytest
 
 from hephaestus.git.gh.rate_limit import (
     ALLOWED_TIMEZONES,
+    DEFAULT_GLOBAL_RATE,
     GRAPHQL_RATE_LIMIT_RE,
     RATE_LIMIT_RE,
     SECONDARY_RATE_LIMIT_RE,
@@ -1014,3 +1015,18 @@ class TestCountdownThrottle:
         assert spinner_calls, "expected at least one \\r spinner print on a TTY"
         # TTY mode must not emit throttled INFO progress lines.
         mock_logger.info.assert_not_called()
+
+
+def test_default_rate_paces_below_the_hourly_account_quota() -> None:
+    """The default refill rate must not permit more than the account allows.
+
+    #3620: the old default of 10 tokens/second permits 36,000 requests per
+    hour against a 5,000/hour quota, so the bucket could never engage and the
+    guard let the account go over. The default must stay under the quota.
+    """
+    hourly_quota = 5_000.0
+    assert DEFAULT_GLOBAL_RATE > 0
+    assert hourly_quota > DEFAULT_GLOBAL_RATE * 3600, (
+        f"default rate {DEFAULT_GLOBAL_RATE}/s permits "
+        f"{DEFAULT_GLOBAL_RATE * 3600:.0f}/hour against a {hourly_quota:.0f} quota"
+    )
