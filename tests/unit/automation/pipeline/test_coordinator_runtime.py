@@ -1,16 +1,24 @@
 """Tests for durable coordinator runtime event classification."""
 
 import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, Protocol, cast
 
 import pytest
 
+from hephaestus.automation.pipeline.coordinator_execution import ExecutionCoordinator
 from hephaestus.automation.pipeline.coordinator_runtime import CoordinatorRuntime
 from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.github_jobs import (
+    GitHubJob,
     MergeWaitCycleCompleted,
+    ReadRateBudgetRequest,
     RunMergeWaitCycleRequest,
 )
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
+from hephaestus.automation.pipeline.stage_results import JobRequest
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 
 
 def _merge_receipt(
@@ -399,3 +407,84 @@ def test_unrelated_job_cannot_emit_rebase_conflict_audit_fields() -> None:
 
     assert "rebase_conflict_resolution" not in fields
     assert "rebase_conflict_agent_summary" not in fields
+
+
+class _SubmitHost(Protocol):
+    """The narrow host surface ``ExecutionCoordinator._submit`` uses."""
+
+    config: PipelineConfig
+
+    def _ctx_for(self, item: WorkItem) -> Any: ...
+
+    def _monotonic(self) -> float: ...
+
+    def _submit_ready_job(self, item: WorkItem, request: JobRequest) -> None: ...
+
+
+class _SubmitRecorder:
+    """Record what ``_submit`` hands to the ready-jobs sink."""
+
+    def __init__(self, *, rate_guard_enabled: bool) -> None:
+        self.config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            dry_run=True,
+            projects_dir=Path("/tmp"),
+            rate_guard_enabled=rate_guard_enabled,
+        )
+        self.submitted: list[JobRequest] = []
+
+    def _ctx_for(self, item: WorkItem) -> Any:
+        del item
+        return _Ctx()
+
+    def _monotonic(self) -> float:
+        return 0.0
+
+    def _submit_ready_job(self, item: WorkItem, request: JobRequest) -> None:
+        del item
+        self.submitted.append(request)
+
+
+class _Ctx:
+    """Minimal stage context shape used by ``_submit``."""
+
+    paths = type("Paths", (), {"repo_root": Path("/tmp/repo")})()
+
+
+def _github_job() -> GitHubJob:
+    return GitHubJob(
+        repo="repo-a",
+        repo_root=Path("/tmp/repo"),
+        request=ReadRateBudgetRequest(60.0),
+        descr="probe",
+    )
+
+
+def test_a_github_read_passes_the_rate_guard_before_it_runs() -> None:
+    """A GitHub read is admitted through the quota check, not submitted directly.
+
+    A read that runs while the budget is exhausted poisons the item, so the read
+    must wait for a budget verdict like an agent job does.
+    """
+    recorder = _SubmitRecorder(rate_guard_enabled=True)
+    item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=1)
+
+    submit = cast(Callable[[_SubmitHost, WorkItem, JobRequest], None], ExecutionCoordinator._submit)
+    submit(recorder, item, JobRequest(_github_job(), "DONE"))
+
+    assert len(recorder.submitted) == 1
+    assert getattr(recorder.submitted[0].job, "descr", "") == "read_rate_budget"
+
+
+def test_the_rate_guard_can_be_disabled_for_a_github_read() -> None:
+    """With the guard disabled the read submits directly."""
+    recorder = _SubmitRecorder(rate_guard_enabled=False)
+    item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=1)
+    original = _github_job()
+
+    submit = cast(Callable[[_SubmitHost, WorkItem, JobRequest], None], ExecutionCoordinator._submit)
+    submit(recorder, item, JobRequest(original, "DONE"))
+
+    assert len(recorder.submitted) == 1
+    assert recorder.submitted[0].job is original

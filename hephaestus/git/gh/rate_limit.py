@@ -285,8 +285,21 @@ def gh_rate_limit_reset_epoch(resource: str = "graphql", *, allow_probe: bool = 
 # state file so all callers compose into a single global rate budget.
 # ---------------------------------------------------------------------------
 
-_DEFAULT_GLOBAL_RATE = 10.0  # tokens per second
+# GitHub meters 5,000 GraphQL points and 5,000 REST requests per hour for an
+# ordinary user. A token-bucket rate above that ceiling can never engage: it
+# permits more requests than the quota allows, so callers hit the limit while
+# the bucket still reports tokens available. Pace below the quota instead.
+#
+# 5,000 per hour is about 1.39 per second. The default leaves headroom so a
+# concurrent loop, a CI check, or an operator command on the same account does
+# not exhaust the shared budget.
+_GH_HOURLY_QUOTA = 5_000.0
+_DEFAULT_GLOBAL_RATE = _GH_HOURLY_QUOTA / 3600.0 * 0.5  # about 0.69 tokens/second
 _DEFAULT_BURST = 30.0  # max tokens stored
+
+#: Public alias for CLI argument defaults.
+DEFAULT_GLOBAL_RATE = _DEFAULT_GLOBAL_RATE
+
 _global_throttle_rate = _DEFAULT_GLOBAL_RATE
 _global_throttle_burst = _DEFAULT_BURST
 
@@ -441,11 +454,12 @@ def gh_global_throttle_acquire(
     """Block until one token from the global ``gh`` rate budget is available.
 
     The bucket is shared across all processes on this machine via a small
-    JSON state file guarded by ``fcntl.flock``. Refill rate defaults to
-    ``10`` tokens/sec with a burst of ``30``; CLI entrypoints can override
-    both through :func:`configure_gh_global_throttle`. Setting the rate to
-    ``0`` disables the throttle entirely (useful for tests and for callers
-    that already hold a known budget).
+    JSON state file guarded by ``fcntl.flock``. Refill rate defaults to half
+    the 5,000/hour account quota (about ``0.69`` tokens/sec) with a burst of
+    ``30``; CLI entrypoints can override both through
+    :func:`configure_gh_global_throttle`. Setting the rate to ``0`` disables
+    the throttle entirely (useful for tests and for callers that already hold
+    a known budget).
 
     An enabled throttle requires ``fcntl``. If that primitive is unavailable,
     its import error propagates before token acquisition.
