@@ -445,8 +445,17 @@ class TestAddGithubThrottleArgs:
         parser = argparse.ArgumentParser()
         add_github_throttle_args(parser)
         args = parser.parse_args([])
-        assert args.gh_global_rate == 10.0
+        # An omitted rate defers to the quota-derived default, which paces below
+        # the account budget instead of permitting more than it allows.
+        assert args.gh_global_rate is None
         assert args.gh_global_burst == 30.0
+
+    def test_the_default_rate_paces_below_the_hourly_quota(self) -> None:
+        from hephaestus.git.gh.rate_limit import DEFAULT_GLOBAL_RATE
+
+        per_hour = DEFAULT_GLOBAL_RATE * 3600
+        assert per_hour < 5_000, "the throttle must permit fewer calls than the quota"
+        assert per_hour > 1_000, "the throttle must not stall a normal run"
 
     def test_custom_values(self) -> None:
         parser = argparse.ArgumentParser()

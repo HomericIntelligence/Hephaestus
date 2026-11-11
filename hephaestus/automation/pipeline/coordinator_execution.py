@@ -176,8 +176,16 @@ class ExecutionCoordinator(_CoordinatorHost):
             )
 
     def _submit(self, item: ct.WorkItem, request: ct.JobRequest) -> None:
-        """Submit a frozen job to its lane and register its ownership."""
-        if isinstance(request.job, AgentJob) and self.config.rate_guard_enabled:
+        """Submit a frozen job to its lane and register its ownership.
+
+        Every job that consumes the shared GitHub budget passes the quota
+        check first, not only agent jobs. A GitHub read that runs while the
+        account budget is exhausted is exactly what poisons an item, so a
+        ``GitHubJob`` needs the same admission control an ``AgentJob`` has.
+        The quota read itself is submitted directly to avoid recursion.
+        """
+        spends_github_budget = isinstance(request.job, (AgentJob, GitHubJob))
+        if spends_github_budget and self.config.rate_guard_enabled:
             item.payload["_pending_agent_request"] = request
             quota_job = GitHubJob(
                 repo=item.repo,

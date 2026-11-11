@@ -399,10 +399,11 @@ def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--gh-global-rate",
         type=_non_negative_float,
-        default=10.0,
+        default=None,
         metavar="FLOAT",
         help=text(
-            "Global gh token-bucket refill rate in calls/sec (default: 10.0). "
+            "Global gh token-bucket refill rate in calls/sec "
+            "(default: half the 5,000/hour account quota, about 0.69). "
             "Pass 0 to disable the global throttle."
         ),
     )
@@ -466,10 +467,15 @@ def add_github_read_cache_args(parser: argparse.ArgumentParser) -> None:
 
 def configure_github_throttle_from_args(args: argparse.Namespace) -> None:
     """Apply GitHub global-throttle options parsed from CLI args."""
-    from hephaestus.git.gh.rate_limit import configure_gh_global_throttle
+    from hephaestus.git.gh.rate_limit import (
+        DEFAULT_GLOBAL_RATE,
+        configure_gh_global_throttle,
+    )
 
     configure_gh_global_throttle(
-        rate=float(args.gh_global_rate),
+        # An omitted flag uses the quota-derived default, so the throttle paces
+        # below the account budget instead of permitting more than it allows.
+        rate=DEFAULT_GLOBAL_RATE if args.gh_global_rate is None else float(args.gh_global_rate),
         burst=float(args.gh_global_burst),
     )
 

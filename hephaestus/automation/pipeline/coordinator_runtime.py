@@ -3,6 +3,7 @@ from __future__ import annotations
 import heapq
 import logging
 import signal
+import time
 from contextlib import suppress
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.github_jobs import MergeWaitCycleCompleted
 from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, Route
+from hephaestus.automation.pipeline.worker_pool import _classify_github_failure
 from hephaestus.resilience import is_transient_subprocess_error
 from hephaestus.utils import subprocess_registry
 
@@ -975,6 +977,21 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     item.stage.value,
                 )
                 self._park_resumable(item)
+                return
+            github_failure = _classify_github_failure(exc, now_epoch=time.time())
+            if github_failure is not None and github_failure[0] == "github_rate_limit":
+                # The account budget is spent. This is a wait, not a defect in
+                # the item, so park until the quota resets instead of failing
+                # the item permanently.
+                delay = max(0.0, float(github_failure[1]) + 5.0)
+                logger.warning(
+                    "GitHub rate limit reached for item %s at %s; parking resumable "
+                    "for %.0fs until the quota resets",
+                    self._item_key(item),
+                    item.stage.value,
+                    delay,
+                )
+                self._timer_park(item, delay)
                 return
             logger.exception(
                 "pipeline item %s poisoned at %s; routing to finished(fail)",
