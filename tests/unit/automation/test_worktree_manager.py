@@ -642,6 +642,42 @@ class TestWorktreeManager:
         remove.assert_not_called()
         assert writer.exists()
 
+    def test_worktree_holds_no_work_accepts_base_names_in_either_form(self, tmp_path: Path) -> None:
+        """Detection yields ``main`` or ``origin/main``; both name one ref.
+
+        Prefixing the detected base unconditionally produced
+        ``refs/remotes/origin/origin/main``, which Git rejects. The helper then
+        reported "holds work" for a clean checkout and the issue stayed blocked.
+        """
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        for key, value in (("user.email", "t@e.invalid"), ("user.name", "T")):
+            subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
+        (repo / "f.txt").write_text("one\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "first"], check=True)
+        head = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", head],
+            check=True,
+        )
+        writer = tmp_path / "writer"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "9-auto-impl", str(writer)],
+            check=True,
+        )
+
+        for detected in ("main", "origin/main"):
+            manager = WorktreeManager(repo_root=repo, base_branch=detected)
+            assert manager._base_ref(timeout=None) == "refs/remotes/origin/main"
+            assert manager._worktree_holds_no_work(writer, timeout=None) is True
+
     def test_worktree_holds_no_work_accepts_a_clean_checkout_at_the_base(
         self, tmp_path: Path
     ) -> None:
