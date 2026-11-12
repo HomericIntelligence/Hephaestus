@@ -3846,7 +3846,19 @@ class ImplementationStage(Stage):
                 item.payload["pre_pr_runner_mode"] = "native"
                 item.payload["pre_pr_fallback_reason"] = handoff_reason
             else:
-                item.payload["pre_pr_runner_unavailable"] = True
+                # Linux has no authorized native fallback. Failing the item
+                # here would discard completed implementation work over a
+                # missing container engine, so skip the local checks and let
+                # the required CI checks on the pull request verify it (#3629).
+                item.payload.pop("test_command", None)
+                logger.warning(
+                    "implementation:%d: container runner unavailable (%s) on %s; "
+                    "skipping pre-PR checks — the required CI checks verify the "
+                    "pull request",
+                    item.issue,
+                    handoff_reason,
+                    sys.platform,
+                )
             return
         item.payload["tests_failed"] = True
         item.payload["test_output"] = output
