@@ -1,19 +1,23 @@
 """Shared helpers and constants for prompt templates.
 
-Provides the untrusted-input fencing helper used by every review prompt,
-path-relativization, iteration helpers used by the loop prompts, and the
-untrusted-content notice boilerplate.
+Provides path-relativization and iteration helpers used by the loop
+prompts, and re-exports the untrusted-input fencing units from
+``hephaestus.prompts.fencing`` (issue #3509) so existing prompt-builder
+imports keep working.
 
 Prompt builders share these primitives and the library prompt catalog.
 """
 
 import logging
-import secrets
-from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.prompts import PromptCatalog
-from hephaestus.prompts.fencing import fence_untrusted as fence_untrusted
+from hephaestus.prompts.fencing import (
+    FencedContent as FencedContent,
+    fence_content as fence_content,
+    fence_untrusted as fence_untrusted,
+    get_untrusted_notice as get_untrusted_notice,
+)
 
 _prompts_logger = logging.getLogger("hephaestus.automation.prompts")
 
@@ -59,32 +63,6 @@ def _relativize_path(path: str, repo_root: str | None) -> str:
             repo_root,
         )
         return path
-
-
-def get_untrusted_notice() -> str:
-    """Render the shared untrusted-content notice from the active catalog."""
-    return PromptCatalog.current().render("shared/untrusted_notice.j2")
-
-
-@dataclass(frozen=True)
-class FencedContent:
-    """Prompt-scoped helper for fencing untrusted fields with one nonce."""
-
-    nonce: str
-
-    @property
-    def untrusted_notice(self) -> str:
-        """Return the standard untrusted-content notice for prompt templates."""
-        return get_untrusted_notice()
-
-    def fence(self, label: str, content: str) -> str:
-        """Fence one untrusted prompt field using this prompt's nonce."""
-        return _fence_untrusted(label, content, self.nonce)
-
-
-def fence_content() -> FencedContent:
-    """Create a prompt-scoped fencer with a fresh random nonce."""
-    return FencedContent(secrets.token_hex(8).upper())
 
 
 def _iteration_label(iteration: int) -> str:
