@@ -36,3 +36,26 @@ def test_base_import_does_not_load_git_package() -> None:
     payload = loaded_line.removeprefix("LOADED:")
     loaded = payload.split(",") if payload else []
     assert loaded == [], f"`import hephaestus` loaded hephaestus.git modules: {loaded}"
+
+
+def test_constants_home_loads_without_models_or_pydantic() -> None:
+    """Verify `hephaestus.git.constants` resolves without the product layer (#3509)."""
+    code = (
+        "import sys\n"
+        "from hephaestus.git.constants import DEFAULT_STATE_DIR\n"
+        "assert DEFAULT_STATE_DIR == 'build/.issue_implementer'\n"
+        "loaded = [m for m in sys.modules if m == 'pydantic' "
+        "or m.startswith('pydantic.') or m == 'hephaestus.automation' "
+        "or m.startswith('hephaestus.automation.')]\n"
+        "print('LOADED:' + ','.join(loaded))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    loaded_line = next(line for line in result.stdout.splitlines() if line.startswith("LOADED:"))
+    payload = loaded_line.removeprefix("LOADED:")
+    loaded = payload.split(",") if payload else []
+    assert loaded == [], f"`hephaestus.git.constants` loaded product modules: {loaded}"

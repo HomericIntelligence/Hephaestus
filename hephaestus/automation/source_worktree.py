@@ -2360,7 +2360,7 @@ class SourceWorkspaceManager:
 
     @staticmethod
     def _is_dirty(path: Path, *, deadline: _PreparationDeadline | None = None) -> bool:
-        from hephaestus.automation.models import DEFAULT_STATE_DIR
+        from hephaestus.git.constants import DEFAULT_STATE_DIR
 
         result = _git(
             path,

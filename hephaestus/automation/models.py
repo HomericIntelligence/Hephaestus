@@ -6,8 +6,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from hephaestus.git.constants import DEFAULT_STATE_DIR as DEFAULT_STATE_DIR
+
 DEFAULT_WORKER_COUNT = 3
-DEFAULT_STATE_DIR = "build/.issue_implementer"
 
 
 class IssueState(StrEnum):
