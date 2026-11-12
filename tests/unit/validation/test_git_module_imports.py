@@ -45,20 +45,18 @@ MOVERS = frozenset(
 )
 
 # The exact mover-to-mover import pairs allowed on the final tree. Each pair
-# is (consumer module name, imported module name). The pairs that import
-# ``implementation_writer`` retire with the module's move to
-# ``hephaestus.git.writer`` (#3509); they must leave this set in the same
-# change that retargets the consumers.
+# is (consumer module name, imported module name). The two pairs that import
+# ``implementation_writer`` retired with the module's move to
+# ``hephaestus.git.writer`` (#3509); their consumers retargeted in the same
+# change.
 INTERNAL_ALLOWED = frozenset(
     {
         ("commit_runtime", "commit_paths"),
         ("commit_runtime", "commit_policy"),
         ("git_utils", "commit_runtime"),
         ("source_worktree", "commit_paths"),
-        ("source_worktree", "implementation_writer"),
         ("source_worktree", "worktree_manager"),
         ("worktree_manager", "git_utils"),
-        ("worktree_manager", "implementation_writer"),
         ("worktree_manager", "repo_intake"),
     }
 )
@@ -140,3 +138,14 @@ def test_mover_edges_match_the_exact_allowlist() -> None:
         f"added={sorted(internal - INTERNAL_ALLOWED)}, "
         f"stale={sorted(INTERNAL_ALLOWED - internal)}"
     )
+
+
+def test_retired_mover_files_stay_absent() -> None:
+    """A mover name whose file moved to the library layer must not come back.
+
+    ``implementation_writer`` lives at ``hephaestus.git.writer`` since
+    #3509. Its absence from the product layer is the state the MOVERS
+    skip rule exists for, so the guard pins it explicitly.
+    """
+    assert not (_AUTOMATION_ROOT / "implementation_writer.py").exists()
+    assert (_LIB_ROOT / "git" / "writer.py").exists()
