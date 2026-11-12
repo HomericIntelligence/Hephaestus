@@ -444,3 +444,77 @@ def test_history_markers_are_revision_and_kind_specific() -> None:
         revision=4,
         kind="review",
     )
+
+
+def test_consolidation_provenance_header_round_trips_through_the_journal() -> None:
+    """A rendered provenance header is stripped back out of the plan body."""
+    from hephaestus.automation.review_journal import (
+        ConsolidationSource,
+        parse_consolidation_provenance,
+        render_consolidation_provenance,
+    )
+
+    sources = (
+        ConsolidationSource(
+            role="plan",
+            comment_id=5444284559,
+            login="mvillmow",
+            alias_tag="athena",
+            digest="a" * 64,
+        ),
+        ConsolidationSource(
+            role="plan",
+            comment_id=5446247620,
+            login="mvillmow",
+            alias_tag="shared",
+            digest="b" * 64,
+        ),
+    )
+    line = render_consolidation_provenance(
+        issue_owner="LLM360",
+        issue_name="comet",
+        issue_number=705,
+        requirements_digest="c" * 64,
+        epoch=4,
+        sources=sources,
+    )
+    body = render_current_plan(
+        "Merged plan\n",
+        revision=4,
+        prior_fingerprints=("a" * 64, "b" * 64),
+        consolidation_provenance=line,
+    )
+
+    snapshot = journal_snapshot([_owned(body)])
+
+    assert snapshot.consolidation_provenance == line
+    assert snapshot.current_plan == "Merged plan"
+    assert snapshot.revision == 4
+    parsed = parse_consolidation_provenance(snapshot.consolidation_provenance or "")
+    assert parsed is not None
+    assert parsed.epoch == 4
+    assert parsed.sources == sources
+
+
+def test_malformed_consolidation_provenance_header_fails_closed() -> None:
+    """A header-shaped line that cannot parse stops the journal read."""
+    body = (
+        "<!-- HomericIntelligence:plan-issue -->\n"
+        "# Implementation Plan\n"
+        "<!-- revision: 2 -->\n"
+        "<!-- HomericIntelligence:plan-consolidation:v=1:not-a-binding -->\n"
+        "\nPlan\n"
+    )
+
+    with pytest.raises(CommentJournalReadError, match="provenance"):
+        journal_snapshot([_owned(body)])
+
+
+def test_render_current_plan_rejects_an_invalid_provenance_line() -> None:
+    """The renderer refuses a provenance argument it cannot parse."""
+    with pytest.raises(ValueError, match="provenance"):
+        render_current_plan(
+            "Plan\n",
+            revision=1,
+            consolidation_provenance="<!-- not-a-provenance -->",
+        )
