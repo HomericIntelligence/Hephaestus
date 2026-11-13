@@ -1074,6 +1074,79 @@ Architectural contract:
   sequence. Two consecutive retries are allowed; the third failure stops the
   item. Session replacement preserves logical review rounds.
 
+#### Plan decomposition triggers (issue #2982)
+
+Every real NOGO verdict publishes one durable record comment on the parent
+issue, bound to the review identity and the requirements epoch (the SHA-256
+digest of the authoritative issue body). The record publish is idempotent:
+an exact duplicate recovers, a conflicting payload fails closed, and a
+foreign or malformed comment is ignored by the count. Missing verdicts,
+provider errors, timeouts, and BLOCKED outcomes never persist a record, so
+they never increase the count. Only an issue-body change starts a new epoch;
+plan-cycle resets and process restarts keep the count.
+
+After the record is durable, two triggers route the item to the
+operator-owned blocked path instead of another amendment:
+
+- **Lossless size** — the complete normalized plan cannot fit the
+  `MAX_CURRENT_REVISION_CONTEXT_CHARS` amendment budget
+  ([`complete_current_plan_context`](../hephaestus/automation/review_journal.py)),
+  and at least one real NOGO is confirmed for the epoch. A first review can
+  still approve a large plan; the trigger prevents an amendment from a
+  truncated excerpt.
+- **Convergence** — five confirmed real NOGO records exist for the epoch
+  ([`plan_nogo_count`](../hephaestus/automation/pipeline/plan_journal.py)).
+  The fifth NOGO replaces the sixth review and any further plan cycle.
+
+The validated work-unit domain
+([`plan_decomposition`](../hephaestus/automation/plan_decomposition.py)) and
+the durable decomposition record protocol
+(intent, draft, seal, bindings, transition) support the full
+epic-of-single-PR-issues conversion; see
+[ADR-0066](../docs/adr/0066-plan-decomposition.md).
+
+```mermaid
+flowchart LR
+    NOGO["Confirmed real NOGO"] --> Record["Durable NOGO record"]
+    Record --> Trigger{"Trigger?"}
+    Trigger -->|"epoch count >= 5, or oversized plan with count >= 1"| Blocked["state:plan-blocked"]
+    Trigger -->|"no trigger"| Amend["Amendment"]
+```
+
+#### Plan decomposition transaction (issue #2982)
+
+After a trigger holds, the plan-review stage runs one durable
+host-supervised transaction. The model output stays untrusted at every
+step; only the host validates, publishes, and mutates:
+
+1. **Generation.** One one-shot decomposition session receives the complete
+   normalized plan, the requirement and finding manifests, and the writing
+   standard, and returns one complete normalized work-unit manifest.
+2. **Independent review.** A separate one-shot review session, bound to the
+   exact draft digest, must return a `GO` verdict. A changed draft invalidates
+   the review. Every non-`GO` verdict blocks the item.
+3. **Child creation and readback.** The host creates or recovers every child
+   issue by its deterministic recovery marker (repository, parent, epoch,
+   generation, node id), verifies one exact readback against the sealed
+   specification, and applies the confirmed child labels
+   (`state:needs-plan` plus the parent severity).
+4. **Parent transition.** The host publishes one parent summary comment and
+   applies the exclusive label transition: `epic` and `state:skip` replace
+   `state:needs-plan`, `state:plan-no-go`, and `state:plan-go`. The exact
+   parent title and body are digest-verified before and after the write.
+5. **Admission.** The coordinator re-reads the seal, bindings, and
+   transition records, verifies each bound child, and queues ready children
+   one topological layer at a time. A child queues only when all of its
+   direct prerequisites finished successfully; one failed prerequisite
+   finishes every not-yet-queued descendant failed.
+
+Restart reconciliation resumes inside the transaction and fast-forwards
+through recovered records. Provider and GitHub write failures retry within
+the bounded budget and then block the item; a partial tree is never
+admitted. The same-run recursion guard defers a generated child issue to a
+later run, and dry-run publishes no decomposition mutation and queues no
+child. See [ADR-0066](adr/0066-plan-decomposition.md).
+
 ### 5.4 Implementation
 
 Implementation converts an approved plan into a published pull request. It may

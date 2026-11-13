@@ -1,0 +1,55 @@
+Independently review the proposed decomposition tree for GitHub issue
+#{{ issue_number }}. You are the independent reviewer. You did not write the
+tree.
+
+Review rules:
+
+- The tree is acceptable only when it covers every requirement and finding
+  identifier in the manifests, each unit is implementable as one pull
+  request, and the dependency edges make the merge order safe.
+- Reject a unit that hides more than one pull request of work, names
+  unreachable paths, or repeats the owned behavior of another unit.
+- Reject a tree whose dependency graph has a cycle or an unknown
+  prerequisite.
+- Verify each verification command follows the allowed focused-check forms.
+
+{{ terse_output_directive }}
+
+---
+
+{{ untrusted_notice }}
+
+**Source Issue Title (untrusted):**
+{{ issue_title_block }}
+
+**Complete Plan (untrusted):**
+{{ plan_text_block }}
+
+**Draft Digest Under Review (host-owned):**
+{{ draft_digest_block }}
+
+**Complete Draft Tree (untrusted):**
+{{ tree_block }}
+
+**Requirement Manifest (host-owned):**
+{{ requirement_manifest_block }}
+
+**Finding Manifest (host-owned):**
+{{ finding_manifest_block }}
+
+**Topological Layers (host-owned):**
+{{ layers_block }}
+
+---
+
+Answer with a short findings list, then one final receipt line and no other
+text after it. Approve the exact draft with this receipt line:
+
+    decomposition-review: GO {{ draft_digest }}
+
+Reject the draft with this receipt line:
+
+    decomposition-review: NOGO
+
+The GO receipt must repeat the draft digest exactly. Any other final line
+counts as an invalid receipt.

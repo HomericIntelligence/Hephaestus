@@ -50,11 +50,14 @@ re-pointed at the pipeline (#1820):
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import SubprocessError
+from typing import Final
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -82,19 +85,34 @@ from hephaestus.automation.comment_identity import (
     CommentAliasConflictError,
 )
 from hephaestus.automation.current_plan import read_current_plan
-from hephaestus.automation.plan_review_session import PlanReviewSessionLostError
+from hephaestus.automation.plan_decomposition import (
+    WorkUnit,
+    normalize_work_tree,
+    topological_layers,
+    tree_digest,
+    work_tree_errors,
+)
+from hephaestus.automation.plan_review_session import (
+    PlanReviewSessionLostError,
+    decomposition_generation_session_key,
+    decomposition_review_session_key,
+)
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
+    get_plan_decomposition_prompt,
+    get_plan_decomposition_review_prompt,
     get_plan_loop_review_prompt,
 )
 from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.review_journal import (
+    MAX_CURRENT_REVISION_CONTEXT_CHARS,
     CommentJournalReadError,
     IssueComment,
     JournalSnapshot,
     PlanDiscoveryStatus,
+    complete_current_plan_context,
     current_plan_context,
     is_pending_review,
     journal_snapshot,
@@ -107,6 +125,7 @@ from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
+    STATE_SKIP,
     apply_plan_verdict,
     enter_planning_transition,
     is_exclusive_plan_state,
@@ -116,11 +135,47 @@ from hephaestus.prompts import PromptCatalog
 from ...admission import parse_publication_scope_files
 from ...coordinator_sessions import agent_session_lifecycle
 from ...diagnostics import redact_diagnostic_text
-from ...plan_journal import publish_plan_revision, reconcile_plan_journal
+from ...github_jobs import (
+    DecompositionChildLabelsApplied,
+    DecompositionChildLabelsRequest,
+    DecompositionChildrenCreated,
+    DecompositionChildrenRequest,
+    DecompositionParentTransitioned,
+    DecompositionParentTransitionRequest,
+    FrozenJson,
+)
+from ...plan_journal import (
+    DecompositionBindings,
+    DecompositionIntent,
+    DecompositionReviewReceipt,
+    DecompositionSeal,
+    DecompositionTransitionReceipt,
+    PlanNogoRecord,
+    plan_nogo_count,
+    plan_nogo_digest,
+    plan_nogo_records,
+    publish_decomposition_bindings,
+    publish_decomposition_draft,
+    publish_decomposition_intent,
+    publish_decomposition_review_receipt,
+    publish_decomposition_seal,
+    publish_decomposition_transition,
+    publish_plan_nogo,
+    publish_plan_revision,
+    reconcile_plan_journal,
+    recover_decomposition_bindings,
+    recover_decomposition_draft,
+    recover_decomposition_intent,
+    recover_decomposition_seal,
+    recover_decomposition_transition,
+    render_decomposition_summary_body,
+    requirements_epoch,
+)
 from ...stage_base import (
     AgentJob,
     Continue,
     Disposition,
+    GitHubJob,
     JobRequest,
     JobResult,
     Stage,
@@ -132,7 +187,9 @@ from ...stage_base import (
     _worktree_path,
     agent_provider,
     planning_source_workspace_binding,
+    records_retry_exceeded_cap,
     stage_model,
+    stage_network_deadline,
     stage_timeout,
 )
 from ..planning import build_plan_prompt
@@ -190,6 +247,57 @@ AMEND_WAIT = "AMEND_WAIT"
 #: Bounds the in-stage ERROR retry loop without burning ``plan_review_iter``
 #: or stamping labels (#911). Reset whenever a real verdict arrives.
 REVIEW_ERROR_RETRY_CAP = 2
+
+#: The convergence trigger: decomposition starts after this many confirmed
+#: real NOGO records in one requirements epoch (issue #2982).
+NOGO_DECOMPOSITION_THRESHOLD: Final[int] = 5
+
+# --- Decomposition state machine (issue #2982) -----------------------------
+# Stage-local mini-states, never GitHub labels. The decomposition flow runs
+# inside the plan-review stage: generation -> independent review -> sealed
+# tree -> host-owned GitHub mutations -> coordinator admission.
+DECOMP_GEN_WAIT = "DECOMP_GEN_WAIT"
+DECOMP_GEN_EVAL = "DECOMP_GEN_EVAL"
+DECOMP_REVIEW_WAIT = "DECOMP_REVIEW_WAIT"
+DECOMP_REVIEW_EVAL = "DECOMP_REVIEW_EVAL"
+DECOMP_CHILDREN_WAIT = "DECOMP_CHILDREN_WAIT"
+DECOMP_CHILDREN_EVAL = "DECOMP_CHILDREN_EVAL"
+DECOMP_PARENT_WAIT = "DECOMP_PARENT_WAIT"
+DECOMP_PARENT_EVAL = "DECOMP_PARENT_EVAL"
+DECOMP_LABELS_WAIT = "DECOMP_LABELS_WAIT"
+DECOMP_LABELS_EVAL = "DECOMP_LABELS_EVAL"
+
+#: Bounded model rounds (generation or independent review) before the stage
+#: gives up and applies the operator-owned blocked path (#2982).
+DECOMPOSITION_MODEL_ROUNDS: Final[int] = 3
+
+#: Bounded retries for a failed decomposition GitHub job before fail closed.
+DECOMPOSITION_GITHUB_RETRIES: Final[int] = 2
+
+#: The generated-child same-run deferral reason (issue #2982).
+GENERATED_CHILD_DEFERRAL: Final[str] = "generated-child decomposition deferred to a later run"
+
+_DECOMP_TRIGGER_KEY = "decomposition_trigger"
+_DECOMP_INTENT_KEY = "decomposition_intent"
+_DECOMP_OUTPUT_KEY = "decomposition_output"
+_DECOMP_DRAFT_KEY = "decomposition_draft"
+_DECOMP_DRAFT_DIGEST_KEY = "decomposition_draft_digest"
+_DECOMP_REJECTED_KEY = "decomposition_rejected_draft"
+_DECOMP_ERRORS_KEY = "decomposition_validation_errors"
+_DECOMP_GEN_ROUNDS_KEY = "decomposition_generation_rounds"
+_DECOMP_REVIEW_OUTPUT_KEY = "decomposition_review_output"
+_DECOMP_REVIEW_ROUNDS_KEY = "decomposition_review_rounds"
+_DECOMP_FINDINGS_KEY = "decomposition_review_findings"
+_DECOMP_CHILDREN_JOB_KEY = "decomposition_children_created"
+_DECOMP_CHILDREN_RETRIES_KEY = "decomposition_children_retries"
+_DECOMP_PARENT_JOB_KEY = "decomposition_parent_transition"
+_DECOMP_PARENT_RETRIES_KEY = "decomposition_parent_retries"
+_DECOMP_LABELS_JOB_KEY = "decomposition_child_labels"
+_DECOMP_LABELS_RETRIES_KEY = "decomposition_labels_retries"
+_DECOMP_CHILDREN_KEY = "decomposition_children"
+_DECOMP_EPOCH_KEY = "decomposition_requirements_epoch"
+
+_DECOMPOSITION_REVIEW_GO_PREFIX = "decomposition-review: GO"
 
 _PLAN_SCOPE_INVALID = "plan_scope_invalid"
 _REVIEWED_PLAN_COMMENT_BODY = "reviewed_plan_comment_body"
@@ -296,6 +404,190 @@ _PLAN_REVIEW_LABELS = {
     STATE_PLAN_GO: "GO",
     STATE_PLAN_NO_GO: "NOGO",
 }
+
+
+def _plan_is_oversized(comments: Sequence[IssueComment]) -> bool:
+    """Return whether the complete current plan cannot fit the amendment budget.
+
+    The lossless-size trigger renders the complete normalized plan without the
+    amendment truncation and compares it with
+    ``MAX_CURRENT_REVISION_CONTEXT_CHARS`` (issue #2982).
+    """
+    return len(complete_current_plan_context(comments)) > MAX_CURRENT_REVISION_CONTEXT_CHARS
+
+
+def _issue_body(item: WorkItem) -> str:
+    """Return the authoritative issue body carried by the work item."""
+    body = item.payload.get("issue_body")
+    return body if isinstance(body, str) else ""
+
+
+def _nogo_findings(item: WorkItem) -> tuple[str, ...]:
+    """Return the bounded unresolved findings carried by the prior review."""
+    review = item.payload.get("prior_review")
+    if not isinstance(review, str) or not review.strip():
+        return ()
+    return (review.strip()[:500],)
+
+
+def recorded_at() -> str:
+    """Return the durable record timestamp for one publication."""
+    return datetime.now(UTC).isoformat()
+
+
+def decomposition_required(
+    item: WorkItem,
+    comments: Sequence[IssueComment],
+    *,
+    epoch: str | None = None,
+) -> str | None:
+    """Return the decomposition trigger name, or None when the plan still amends.
+
+    Triggers (issue #2982):
+
+    - ``lossless-size``: the complete plan cannot fit the amendment context
+      budget and at least one real NOGO is confirmed for the epoch (a first
+      review can still approve the large plan).
+    - ``convergence``: five confirmed real NOGO records exist for the epoch.
+
+    Infrastructure failures never persist a record, so they never count.
+    """
+    epoch = epoch or requirements_epoch(_issue_body(item))
+    count = plan_nogo_count(comments, epoch)
+    if count >= NOGO_DECOMPOSITION_THRESHOLD:
+        return "convergence"
+    if count >= 1 and _plan_is_oversized(comments):
+        return "lossless-size"
+    return None
+
+
+def parent_requirement_texts(issue_body: str) -> tuple[str, ...]:
+    """Return the deterministic parent requirement texts for one issue body.
+
+    Every non-empty bullet line of the authoritative issue body is one parent
+    requirement. The intent manifest freezes their stable identifiers at the
+    first trigger, so later body edits cannot silently change one open tree.
+    """
+    texts: list[str] = []
+    seen: set[str] = set()
+    for line in issue_body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(("-", "*")):
+            continue
+        text = stripped.lstrip("-*").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        texts.append(text)
+    return tuple(texts)
+
+
+def _finding_texts(comments: Sequence[IssueComment], epoch: str) -> tuple[str, ...]:
+    """Return the deduplicated findings of one epoch's confirmed NOGO records."""
+    texts: list[str] = []
+    seen: set[str] = set()
+    for record in plan_nogo_records(comments):
+        if record.requirements_epoch != epoch:
+            continue
+        for finding in record.findings:
+            if finding not in seen:
+                seen.add(finding)
+                texts.append(finding)
+    return tuple(texts)
+
+
+def parse_decomposition_tree_output(text: str) -> tuple[WorkUnit, ...] | None:
+    """Parse one model-supplied generation output into a normalized tree.
+
+    The output must carry exactly one fenced ```` ```json ```` block holding a
+    JSON array (or ``{"nodes": [...]}``). Anything else is untrusted invalid
+    data and returns ``None``.
+    """
+    marker = "```json"
+    start = text.find(marker)
+    if start == -1:
+        return None
+    payload_start = text.index("\n", start) + 1
+    payload_end = text.find("```", payload_start)
+    if payload_end == -1:
+        return None
+    try:
+        value = json.loads(text[payload_start:payload_end].strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if isinstance(value, dict):
+        value = value.get("nodes")
+    return normalize_work_tree(value)
+
+
+def parse_decomposition_review_receipt(text: str, draft_digest: str) -> str | None:
+    """Return the accepted receipt verdict, or None for an invalid receipt.
+
+    Only ``decomposition-review: GO <draft_digest>`` as the final receipt line
+    accepts the exact draft digest. A NOGO line or any other text returns
+    ``None`` (an infrastructure-style invalid result that burns no record).
+    """
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.startswith("decomposition-review: NOGO"):
+            return None
+        if line.startswith(_DECOMPOSITION_REVIEW_GO_PREFIX):
+            digest = line[len(_DECOMPOSITION_REVIEW_GO_PREFIX) :].strip()
+            return "GO" if digest == draft_digest else None
+    return None
+
+
+def build_decomposition_intent(
+    item: WorkItem,
+    comments: Sequence[IssueComment],
+    epoch: str,
+    trigger: str,
+) -> DecompositionIntent:
+    """Build the immutable intent for one parent, epoch, and first trigger."""
+    from hephaestus.automation.plan_decomposition import (
+        build_finding_manifest,
+        build_requirement_manifest,
+    )
+
+    requirements = build_requirement_manifest(parent_requirement_texts(_issue_body(item)))
+    findings = build_finding_manifest(_finding_texts(comments, epoch))
+    return DecompositionIntent(
+        repository=item.repo,
+        parent=item.issue or 0,
+        requirements_epoch=epoch,
+        trigger=trigger,
+        source_plan_revision=int(item.payload.get("plan_revision") or 1),
+        source_plan_fingerprint=plan_fingerprint(str(item.payload.get("plan_text") or "")),
+        requirement_manifest=tuple(ref.as_dict() for ref in requirements),
+        finding_manifest=tuple(ref.as_dict() for ref in findings),
+        created_at=recorded_at(),
+    )
+
+
+def _tree_json(units: Sequence[WorkUnit]) -> str:
+    """Return the canonical JSON of one normalized tree."""
+    return json.dumps(
+        sorted((unit.as_dict() for unit in units), key=lambda unit: str(unit["node_id"])),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _decomposition_retry(
+    item: WorkItem,
+    key: str,
+    *,
+    wait_state: str,
+    cap: int,
+    reason: str,
+) -> StepResult:
+    """Bounded retry for one failed decomposition job, fail closed at the cap."""
+    if records_retry_exceeded_cap(item.payload, key, cap):
+        logger.error("plan_review:%d: %s retries exhausted", item.issue, reason)
+        return StageOutcome(Disposition.BLOCKED, f"plan_decomposition_{reason}_unavailable")
+    item.payload["retry_delay_s"] = 2.0
+    return Continue(next_state=wait_state)
 
 
 def _safe_agent_failure_diagnostic(stderr_tail: str) -> str | None:
@@ -849,138 +1141,7 @@ class PlanReviewStage(Stage):
             return Continue(next_state="REVIEW_WAIT")
 
         if item.state == "REVIEW_WAIT":
-            _retry_after_provider_unavailable(item)
-            transition_outcome = _confirm_pending_amendment_transition(item, ctx)
-            if transition_outcome is not None:
-                return transition_outcome
-
-            no_progress_reason = str(item.payload.get("no_progress_reason") or "")
-            if no_progress_reason:
-                return StageOutcome(
-                    Disposition.FINISH_FAIL,
-                    "planning made no progress; the plan did not change",
-                )
-
-            # Counters advance in EVAL, and only for real verdicts — a
-            # submission is not an iteration (#1554/#1794). The 0-based
-            # prompt iteration is the cycle-relative round count.
-            round_index = item.payload.get("review_round", 0)
-            store = ctx.plan_review_sessions
-            cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
-            try:
-                review_session = store.load(cycle_id) if store is not None and cycle_id else None
-                transcript = store.transcript(cycle_id) if review_session is not None else ""
-            except PlanReviewSessionLostError as exc:
-                logger.error("plan_review:%d: review-session-lost: %s", item.issue, exc)
-                assert store is not None and cycle_id  # noqa: S101 - guarded store access above
-                store.mark_recovery_required(cycle_id)
-                item.payload["review_session_error"] = "review-session-lost"
-                recovery_outcome = _restart_review_conversation(item, ctx)
-                if recovery_outcome is not None:
-                    return recovery_outcome
-                return Continue(next_state="REVIEW_WAIT")
-            # Clear any stale verdict at submission so a failed later round
-            # can never replay an earlier round's verdict in EVAL.
-            item.payload.pop("review_verdict", None)
-            item.payload.pop("accepted_plan_review", None)
-            logger.info(
-                "plan_review:%d: requesting review job cycle=%s session=%s round=%d revision=%s",
-                item.issue,
-                cycle_id or "legacy",
-                (review_session.session_id if review_session is not None else None) or "pending",
-                round_index,
-                item.payload.get("plan_revision", 1),
-            )
-            workspace = planning_source_workspace_binding(item, ctx)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=(
-                    review_session.provider
-                    if review_session is not None
-                    else agent_provider(ctx, "reviewer")
-                ),
-                model=(
-                    _restore_reviewer_selection(
-                        review_session.provider,
-                        review_session.reviewer_model,
-                        review_session.reviewer_config,
-                    )
-                    if review_session is not None
-                    else stage_model(ctx, "reviewer", reviewer_model)
-                ),
-                prompt_builder=get_plan_loop_review_prompt,
-                cwd=_review_job_cwd(item, ctx, workspace),
-                timeout_s=stage_timeout(ctx, "reviewer", plan_reviewer_claude_timeout),
-                workspace=workspace,
-                sandbox="read-only",
-                allowed_tools="Read,Glob,Grep",
-                session_agent=AGENT_PLAN_REVIEWER,
-                session_key=review_session.session_key if review_session is not None else "",
-                require_new_session=review_session is not None,
-                resume_session_id=(
-                    review_session.session_id if review_session is not None else None
-                ),
-                resume_binding=(
-                    AgentSessionBinding.from_json(review_session.session_binding)
-                    if review_session is not None and review_session.session_binding
-                    else None
-                ),
-                resume_selection=(
-                    (
-                        review_session.provider,
-                        str(
-                            _restore_reviewer_selection(
-                                review_session.provider,
-                                review_session.reviewer_model,
-                                review_session.reviewer_config,
-                            )
-                        ),
-                    )
-                    if review_session is not None
-                    else None
-                ),
-                session_checkpoint=_review_session_checkpoint(ctx, cycle_id),
-                execution_request=ExecutionRequest(
-                    AgentRole.PLAN_REVIEWER,
-                    AgentOperation.PLAN_REVIEW,
-                    (
-                        SessionLifecycle.RESUME_REQUIRED
-                        if review_session is not None and review_session.session_id
-                        else SessionLifecycle.START_NEW
-                    ),
-                ),
-                # get_plan_loop_review_prompt takes a 0-based iteration index
-                # (full-sweep suffix on the final iteration). Issue title/body
-                # are seeded into item.payload by the coordinator (#1817).
-                prompt_kwargs={
-                    "issue_number": item.issue,
-                    "issue_title": item.payload.get("issue_title", ""),
-                    "issue_body": item.payload.get("issue_body", ""),
-                    "plan_text": item.payload.get("plan_text", ""),
-                    # Populated from the payload when present; wiring the
-                    # legacy capture_planner_learnings step into the pipeline
-                    # is deferred to the coordinator slice (#1817).
-                    "learnings": item.payload.get("learnings", ""),
-                    "iteration": round_index,
-                    "prior_review": item.payload.get("prior_review") or None,
-                    "advise_findings": item.payload.get("advise_findings", ""),
-                    # The reviewer already receives the complete current plan
-                    # and direct prior critique; superseded journal entries
-                    # would only duplicate stale feedback.
-                    "plan_history": "",
-                    "planning_cycle_id": cycle_id,
-                    "reviewer_session_id": (
-                        review_session.session_id or "pending" if review_session is not None else ""
-                    ),
-                    "plan_revision": int(item.payload.get("plan_revision") or 1),
-                    "plan_fingerprint": plan_fingerprint(str(item.payload.get("plan_text") or "")),
-                    "review_transcript": transcript,
-                },
-                parse=parse_plan_review_verdict,  # verdict parsed in-worker
-                descr="review",
-            )
-            return JobRequest(job, on_done_state="EVAL")
+            return self._review_wait_step(item, ctx)
 
         if item.state == "EVAL":
             return self._publish_accepted_review(item, ctx)
@@ -1028,8 +1189,157 @@ class PlanReviewStage(Stage):
             )
             return JobRequest(job, on_done_state="REVIEW_WAIT")
 
+        if item.state.startswith("DECOMP_"):
+            decomposition_outcome = self._decomposition_step(item, ctx)
+            if decomposition_outcome is not None:
+                return decomposition_outcome
+
         logger.warning("plan_review:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
+
+    def _review_wait_step(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Own the REVIEW_WAIT submission path and its restart reconciliation."""
+        _retry_after_provider_unavailable(item)
+        transition_outcome = _confirm_pending_amendment_transition(item, ctx)
+        if transition_outcome is not None:
+            return transition_outcome
+
+        no_progress_reason = str(item.payload.get("no_progress_reason") or "")
+        if no_progress_reason:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "planning made no progress; the plan did not change",
+            )
+
+        # Restart reconciliation (issue #2982): a prior run that already
+        # reached a decomposition trigger starts or resumes decomposition
+        # without another plan review. Durable NOGO records and the
+        # complete-plan size are the only authority.
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        comments = ctx.github.issue_comments(item.issue)
+        epoch = requirements_epoch(_issue_body(item))
+        trigger = decomposition_required(item, comments, epoch=epoch)
+        if trigger is not None and item.issue not in ctx.generated_issue_ids:
+            return self._start_or_resume_decomposition(item, ctx, trigger)
+
+        # Counters advance in EVAL, and only for real verdicts — a
+        # submission is not an iteration (#1554/#1794). The 0-based
+        # prompt iteration is the cycle-relative round count.
+        round_index = item.payload.get("review_round", 0)
+        store = ctx.plan_review_sessions
+        cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+        try:
+            review_session = store.load(cycle_id) if store is not None and cycle_id else None
+            transcript = store.transcript(cycle_id) if review_session is not None else ""
+        except PlanReviewSessionLostError as exc:
+            logger.error("plan_review:%d: review-session-lost: %s", item.issue, exc)
+            assert store is not None and cycle_id  # noqa: S101 - guarded store access above
+            store.mark_recovery_required(cycle_id)
+            item.payload["review_session_error"] = "review-session-lost"
+            recovery_outcome = _restart_review_conversation(item, ctx)
+            if recovery_outcome is not None:
+                return recovery_outcome
+            return Continue(next_state="REVIEW_WAIT")
+        # Clear any stale verdict at submission so a failed later round
+        # can never replay an earlier round's verdict in EVAL.
+        item.payload.pop("review_verdict", None)
+        item.payload.pop("accepted_plan_review", None)
+        logger.info(
+            "plan_review:%d: requesting review job cycle=%s session=%s round=%d revision=%s",
+            item.issue,
+            cycle_id or "legacy",
+            (review_session.session_id if review_session is not None else None) or "pending",
+            round_index,
+            item.payload.get("plan_revision", 1),
+        )
+        workspace = planning_source_workspace_binding(item, ctx)
+        job = AgentJob(
+            repo=item.repo,
+            issue=item.issue,
+            agent=(
+                review_session.provider
+                if review_session is not None
+                else agent_provider(ctx, "reviewer")
+            ),
+            model=(
+                _restore_reviewer_selection(
+                    review_session.provider,
+                    review_session.reviewer_model,
+                    review_session.reviewer_config,
+                )
+                if review_session is not None
+                else stage_model(ctx, "reviewer", reviewer_model)
+            ),
+            prompt_builder=get_plan_loop_review_prompt,
+            cwd=_review_job_cwd(item, ctx, workspace),
+            timeout_s=stage_timeout(ctx, "reviewer", plan_reviewer_claude_timeout),
+            workspace=workspace,
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_PLAN_REVIEWER,
+            session_key=review_session.session_key if review_session is not None else "",
+            require_new_session=review_session is not None,
+            resume_session_id=(review_session.session_id if review_session is not None else None),
+            resume_binding=(
+                AgentSessionBinding.from_json(review_session.session_binding)
+                if review_session is not None and review_session.session_binding
+                else None
+            ),
+            resume_selection=(
+                (
+                    review_session.provider,
+                    str(
+                        _restore_reviewer_selection(
+                            review_session.provider,
+                            review_session.reviewer_model,
+                            review_session.reviewer_config,
+                        )
+                    ),
+                )
+                if review_session is not None
+                else None
+            ),
+            session_checkpoint=_review_session_checkpoint(ctx, cycle_id),
+            execution_request=ExecutionRequest(
+                AgentRole.PLAN_REVIEWER,
+                AgentOperation.PLAN_REVIEW,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if review_session is not None and review_session.session_id
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            # get_plan_loop_review_prompt takes a 0-based iteration index
+            # (full-sweep suffix on the final iteration). Issue title/body
+            # are seeded into item.payload by the coordinator (#1817).
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "plan_text": item.payload.get("plan_text", ""),
+                # Populated from the payload when present; wiring the
+                # legacy capture_planner_learnings step into the pipeline
+                # is deferred to the coordinator slice (#1817).
+                "learnings": item.payload.get("learnings", ""),
+                "iteration": round_index,
+                "prior_review": item.payload.get("prior_review") or None,
+                "advise_findings": item.payload.get("advise_findings", ""),
+                # The reviewer already receives the complete current plan
+                # and direct prior critique; superseded journal entries
+                # would only duplicate stale feedback.
+                "plan_history": "",
+                "planning_cycle_id": cycle_id,
+                "reviewer_session_id": (
+                    review_session.session_id or "pending" if review_session is not None else ""
+                ),
+                "plan_revision": int(item.payload.get("plan_revision") or 1),
+                "plan_fingerprint": plan_fingerprint(str(item.payload.get("plan_text") or "")),
+                "review_transcript": transcript,
+            },
+            parse=parse_plan_review_verdict,  # verdict parsed in-worker
+            descr="review",
+        )
+        return JobRequest(job, on_done_state="EVAL")
 
     def _publish_accepted_review(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Retry bounded publication failures with the same accepted verdict."""
@@ -1145,6 +1455,57 @@ class PlanReviewStage(Stage):
         if identity_outcome := self._review_identity_outcome(item, ctx, review):
             return identity_outcome
 
+        # Every real NOGO verdict is durable control state bound to its review
+        # identity. The record never persists for infrastructure failures, so
+        # the convergence count only reads real judgements (#2982).
+        epoch = requirements_epoch(_issue_body(item))
+        record = PlanNogoRecord(
+            repository=item.repo,
+            issue=item.issue,
+            requirements_epoch=epoch,
+            plan_revision=review.revision,
+            review_cycle=item.attempts.get("plan_cycles", 0),
+            review_round=review.charged_round or 0,
+            review_digest=plan_nogo_digest(
+                plan_revision=review.revision,
+                review_cycle=item.attempts.get("plan_cycles", 0),
+                review_round=review.charged_round or 0,
+                review_raw=verdict.raw,
+            ),
+            findings=_nogo_findings(item),
+            recorded_at=recorded_at(),
+        )
+        publish_plan_nogo(item.issue, record, ctx.github)
+        if item.issue in ctx.generated_issue_ids:
+            # Same-run generated-child rule (issue #2982): persist and confirm
+            # the one valid NOGO record and the exclusive state:plan-no-go
+            # label, create no decomposition artifact, skip only this run, and
+            # keep the label so a later run discovers the issue again.
+            _complete_review_cycle(item, ctx)
+            logger.info(
+                "plan_review:%d: generated child defers decomposition to a later run",
+                item.issue,
+            )
+            return StageOutcome(Disposition.SKIP, GENERATED_CHILD_DEFERRAL)
+        trigger = decomposition_required(
+            item,
+            ctx.github.issue_comments(item.issue),
+            epoch=epoch,
+        )
+        if trigger is not None:
+            # The record is durable first, so a later run or a restart keeps
+            # the confirmed convergence count. The stage now owns the
+            # decomposition transaction (#2982).
+            item.payload[_DECOMP_TRIGGER_KEY] = trigger
+            logger.warning(
+                "plan_review:%d: %s decomposition trigger after round %d",
+                item.issue,
+                trigger,
+                review.charged_round,
+            )
+            _complete_review_cycle(item, ctx)
+            return self._start_or_resume_decomposition(item, ctx, trigger)
+
         # NOGO: amend within the cycle-relative budget.
         budget_iter = ctx.budget("plan_review_iter")
         if round_done < budget_iter:
@@ -1179,6 +1540,590 @@ class PlanReviewStage(Stage):
             )
             return StageOutcome(Disposition.FAIL_BACK, "plan_cycles_exhausted")
         return StageOutcome(Disposition.FAIL_BACK, "nogo")
+
+    # --- Decomposition transaction (issue #2982) ---------------------------
+
+    def _decomposition_step(self, item: WorkItem, ctx: StageContext) -> StepResult | None:
+        """Dispatch one decomposition state, or None for an unknown state."""
+        handlers: dict[str, Callable[[WorkItem, StageContext], StepResult]] = {
+            DECOMP_GEN_WAIT: self._submit_decomposition_generation,
+            DECOMP_GEN_EVAL: self._eval_decomposition_generation,
+            DECOMP_REVIEW_WAIT: self._submit_decomposition_review,
+            DECOMP_REVIEW_EVAL: self._eval_decomposition_review,
+            DECOMP_CHILDREN_WAIT: self._submit_decomposition_children,
+            DECOMP_CHILDREN_EVAL: self._eval_decomposition_children,
+            DECOMP_PARENT_WAIT: self._submit_parent_transition,
+            DECOMP_PARENT_EVAL: self._eval_parent_transition,
+            DECOMP_LABELS_WAIT: self._submit_child_labels,
+            DECOMP_LABELS_EVAL: self._eval_child_labels,
+        }
+        handler = handlers.get(item.state)
+        if handler is None:
+            return None
+        return handler(item, ctx)
+
+    def _start_or_resume_decomposition(
+        self, item: WorkItem, ctx: StageContext, trigger: str
+    ) -> StepResult:
+        """Publish the intent, then resume at the exact durable record point.
+
+        The intent is immutable per parent and requirements epoch. A later
+        plan fingerprint in the same epoch recovers the intent and can never
+        create a second tree. Partial records from a restart reconcile in the
+        published order without redoing a confirmed step.
+        """
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        if ctx.dry_run:
+            preview = self._decomposition_dry_run_preview(item, ctx, trigger)
+            logger.warning(
+                "plan_review:%d: decomposition dry-run preview: %s",
+                item.issue,
+                preview,
+            )
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_dry_run_preview")
+        epoch = requirements_epoch(_issue_body(item))
+        item.payload[_DECOMP_EPOCH_KEY] = epoch
+        item.payload[_DECOMP_TRIGGER_KEY] = trigger
+        comments = ctx.github.issue_comments(item.issue)
+        intent = recover_decomposition_intent(comments, epoch)
+        if intent is None:
+            intent = publish_decomposition_intent(
+                item.issue,
+                build_decomposition_intent(item, comments, epoch, trigger),
+                ctx.github,
+            )
+        item.payload[_DECOMP_INTENT_KEY] = intent
+        comments = ctx.github.issue_comments(item.issue)
+        # Fast-forward through durable records, newest first.
+        transition = recover_decomposition_transition(comments, epoch)
+        bindings = recover_decomposition_bindings(comments, epoch)
+        if transition is not None and bindings is not None:
+            seal = recover_decomposition_seal(comments, epoch)
+            if seal is not None and bindings.seal_digest == seal.seal_digest:
+                return self._resume_bound_children(item, ctx, seal, bindings)
+        seal = recover_decomposition_seal(comments, epoch)
+        if seal is not None:
+            return Continue(next_state=DECOMP_CHILDREN_WAIT)
+        draft_nodes = recover_decomposition_draft(comments, epoch)
+        if draft_nodes is not None:
+            units = normalize_work_tree(draft_nodes)
+            if units is None:
+                logger.error(
+                    "plan_review:%d: durable draft record is unreadable; fail closed",
+                    item.issue,
+                )
+                return StageOutcome(Disposition.BLOCKED, "plan_decomposition_draft_unreadable")
+            item.payload[_DECOMP_DRAFT_KEY] = [unit.as_dict() for unit in units]
+            item.payload[_DECOMP_DRAFT_DIGEST_KEY] = tree_digest(units)
+            return Continue(next_state=DECOMP_REVIEW_WAIT)
+        return Continue(next_state=DECOMP_GEN_WAIT)
+
+    def _decomposition_dry_run_preview(
+        self, item: WorkItem, ctx: StageContext, trigger: str
+    ) -> dict[str, object]:
+        """Build the read-only preview of the complete decomposition transition."""
+        from hephaestus.automation.plan_decomposition import build_requirement_manifest
+
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        epoch = requirements_epoch(_issue_body(item))
+        comments = ctx.github.issue_comments(item.issue)
+        intent = recover_decomposition_intent(comments, epoch)
+        requirement_ids = (
+            [ref["identifier"] for ref in intent.requirement_manifest]
+            if intent is not None
+            else [
+                ref.identifier
+                for ref in build_requirement_manifest(parent_requirement_texts(_issue_body(item)))
+            ]
+        )
+        finding_ids = (
+            [ref["identifier"] for ref in intent.finding_manifest] if intent is not None else []
+        )
+        return {
+            "trigger": trigger,
+            "requirements_epoch": epoch,
+            "source_plan_revision": int(item.payload.get("plan_revision") or 1),
+            "requirement_identifiers": requirement_ids,
+            "finding_identifiers": finding_ids,
+            "generation_job": "one-shot decomposition generation session",
+            "review_job": "one-shot independent review bound to the draft digest",
+            "child_labels": [STATE_NEEDS_PLAN],
+            "parent_transition": {
+                "labels_added": ["epic", STATE_SKIP],
+                "labels_removed": [STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
+                "title_and_body": "preserved",
+            },
+        }
+
+    def _submit_decomposition_generation(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit the one-shot decomposition generation session."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        intent = item.payload.get(_DECOMP_INTENT_KEY)
+        epoch = str(item.payload.get(_DECOMP_EPOCH_KEY) or "")
+        if not isinstance(intent, DecompositionIntent) or not epoch:
+            return StageOutcome(Disposition.FINISH_FAIL, "decomposition intent is unavailable")
+        rounds = int(item.payload.get(_DECOMP_GEN_ROUNDS_KEY, 0))
+        if rounds >= DECOMPOSITION_MODEL_ROUNDS:
+            logger.error("plan_review:%d: generation rounds exhausted", item.issue)
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_generation_exhausted")
+        item.payload[_DECOMP_GEN_ROUNDS_KEY] = rounds + 1
+        comments = ctx.github.issue_comments(item.issue)
+        plan_text = complete_current_plan_context(comments)
+        logger.info(
+            "plan_review:%d: requesting decomposition generation job epoch=%s round=%d",
+            item.issue,
+            epoch,
+            rounds + 1,
+        )
+        workspace = planning_source_workspace_binding(item, ctx)
+        job = AgentJob(
+            repo=item.repo,
+            issue=item.issue,
+            agent=agent_provider(ctx, "planner"),
+            model=stage_model(ctx, "planner", planner_model),
+            prompt_builder=get_plan_decomposition_prompt,
+            cwd=_review_job_cwd(item, ctx, workspace),
+            timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
+            workspace=workspace,
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_PLANNER,
+            session_key=decomposition_generation_session_key(epoch),
+            require_new_session=True,
+            execution_request=ExecutionRequest(
+                AgentRole.PLANNER,
+                AgentOperation.PLAN,
+                SessionLifecycle.START_NEW,
+            ),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "plan_text": plan_text,
+                "requirement_manifest": intent.requirement_manifest,
+                "finding_manifest": intent.finding_manifest,
+                "requirements_epoch": epoch,
+                "source_plan_revision": intent.source_plan_revision,
+                "source_plan_fingerprint": intent.source_plan_fingerprint,
+                "rejected_draft_digest": str(item.payload.get(_DECOMP_REJECTED_KEY) or ""),
+                "validation_errors": item.payload.get(_DECOMP_ERRORS_KEY, ()),
+                "review_findings": str(item.payload.get(_DECOMP_FINDINGS_KEY) or ""),
+            },
+            descr="decompose",
+        )
+        return JobRequest(job, on_done_state=DECOMP_GEN_EVAL)
+
+    def _eval_decomposition_generation(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Validate one generation output, publish the draft, or re-request."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        output = item.payload.pop(_DECOMP_OUTPUT_KEY, None)
+        item.payload.pop(_DECOMP_ERRORS_KEY, None)
+        if not isinstance(output, str) or not output.strip():
+            return _decomposition_retry(
+                item,
+                "decomposition_generation_retries",
+                wait_state=DECOMP_GEN_WAIT,
+                cap=DECOMPOSITION_GITHUB_RETRIES,
+                reason="generation_output",
+            )
+        units = parse_decomposition_tree_output(output)
+        if units is None:
+            errors: list[str] = ["output did not contain one valid complete work-unit JSON array"]
+        else:
+            intent = item.payload.get(_DECOMP_INTENT_KEY)
+            requirement_ids = (
+                [ref["identifier"] for ref in intent.requirement_manifest]
+                if isinstance(intent, DecompositionIntent)
+                else []
+            )
+            finding_ids = (
+                [ref["identifier"] for ref in intent.finding_manifest]
+                if isinstance(intent, DecompositionIntent)
+                else []
+            )
+            errors = work_tree_errors(
+                units,
+                requirement_ids=requirement_ids,
+                finding_ids=finding_ids,
+            )
+        if errors:
+            if int(item.payload.get(_DECOMP_GEN_ROUNDS_KEY, 0)) >= DECOMPOSITION_MODEL_ROUNDS:
+                logger.error(
+                    "plan_review:%d: generation validation failed %d times; fail closed",
+                    item.issue,
+                    int(item.payload.get(_DECOMP_GEN_ROUNDS_KEY, 0)),
+                )
+                return StageOutcome(Disposition.BLOCKED, "plan_decomposition_generation_exhausted")
+            item.payload[_DECOMP_REJECTED_KEY] = hashlib.sha256(output.encode("utf-8")).hexdigest()
+            item.payload[_DECOMP_ERRORS_KEY] = tuple(errors[:16])
+            logger.warning(
+                "plan_review:%d: draft rejected with %d validation errors",
+                item.issue,
+                len(errors),
+            )
+            return Continue(next_state=DECOMP_GEN_WAIT)
+        if units is None:  # pragma: no cover - errors is empty only after a parse
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_generation_invalid")
+        epoch = str(item.payload.get(_DECOMP_EPOCH_KEY) or "")
+        draft_digest = tree_digest(units)
+        publish_decomposition_draft(
+            item.issue, epoch, draft_digest, [unit.as_dict() for unit in units], ctx.github
+        )
+        item.payload[_DECOMP_DRAFT_KEY] = [unit.as_dict() for unit in units]
+        item.payload[_DECOMP_DRAFT_DIGEST_KEY] = draft_digest
+        item.payload.pop(_DECOMP_REJECTED_KEY, None)
+        logger.info(
+            "plan_review:%d: validated draft %s with %d work units",
+            item.issue,
+            draft_digest[:12],
+            len(units),
+        )
+        return Continue(next_state=DECOMP_REVIEW_WAIT)
+
+    def _submit_decomposition_review(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit the one-shot independent review bound to the draft digest."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        draft = item.payload.get(_DECOMP_DRAFT_KEY)
+        digest = str(item.payload.get(_DECOMP_DRAFT_DIGEST_KEY) or "")
+        epoch = str(item.payload.get(_DECOMP_EPOCH_KEY) or "")
+        if not isinstance(draft, list) or not draft or not digest or not epoch:
+            return StageOutcome(Disposition.FINISH_FAIL, "decomposition draft is unavailable")
+        rounds = int(item.payload.get(_DECOMP_REVIEW_ROUNDS_KEY, 0))
+        if rounds >= DECOMPOSITION_MODEL_ROUNDS:
+            logger.error("plan_review:%d: review rounds exhausted", item.issue)
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_review_exhausted")
+        item.payload[_DECOMP_REVIEW_ROUNDS_KEY] = rounds + 1
+        units = normalize_work_tree(draft)
+        if units is None:
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_draft_unreadable")
+        layers = topological_layers(units)
+        if layers is None:
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_draft_unreadable")
+        intent = item.payload.get(_DECOMP_INTENT_KEY)
+        comments = ctx.github.issue_comments(item.issue)
+        logger.info(
+            "plan_review:%d: requesting independent decomposition review job draft=%s",
+            item.issue,
+            digest[:12],
+        )
+        workspace = planning_source_workspace_binding(item, ctx)
+        job = AgentJob(
+            repo=item.repo,
+            issue=item.issue,
+            agent=agent_provider(ctx, "reviewer"),
+            model=stage_model(ctx, "reviewer", reviewer_model),
+            prompt_builder=get_plan_decomposition_review_prompt,
+            cwd=_review_job_cwd(item, ctx, workspace),
+            timeout_s=stage_timeout(ctx, "reviewer", plan_reviewer_claude_timeout),
+            workspace=workspace,
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_PLAN_REVIEWER,
+            session_key=decomposition_review_session_key(epoch, digest),
+            require_new_session=True,
+            execution_request=ExecutionRequest(
+                AgentRole.PLAN_REVIEWER,
+                AgentOperation.PLAN_REVIEW,
+                SessionLifecycle.START_NEW,
+            ),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "plan_text": complete_current_plan_context(comments),
+                "draft_digest": digest,
+                "tree_json": _tree_json(units),
+                "requirement_manifest": (
+                    intent.requirement_manifest if isinstance(intent, DecompositionIntent) else []
+                ),
+                "finding_manifest": (
+                    intent.finding_manifest if isinstance(intent, DecompositionIntent) else []
+                ),
+                "layers": layers,
+            },
+            descr="decomposition review",
+        )
+        return JobRequest(job, on_done_state=DECOMP_REVIEW_EVAL)
+
+    def _eval_decomposition_review(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Accept only a valid GO receipt for the exact draft digest."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        output = item.payload.pop(_DECOMP_REVIEW_OUTPUT_KEY, None)
+        digest = str(item.payload.get(_DECOMP_DRAFT_DIGEST_KEY) or "")
+        epoch = str(item.payload.get(_DECOMP_EPOCH_KEY) or "")
+        if not isinstance(output, str) or not output.strip():
+            return _decomposition_retry(
+                item,
+                "decomposition_review_retries",
+                wait_state=DECOMP_REVIEW_WAIT,
+                cap=DECOMPOSITION_GITHUB_RETRIES,
+                reason="review_output",
+            )
+        verdict = parse_decomposition_review_receipt(output, digest)
+        if verdict != "GO":
+            if int(item.payload.get(_DECOMP_REVIEW_ROUNDS_KEY, 0)) >= DECOMPOSITION_MODEL_ROUNDS:
+                return StageOutcome(Disposition.BLOCKED, "plan_decomposition_review_exhausted")
+            item.payload[_DECOMP_FINDINGS_KEY] = output.strip()[:2000]
+            logger.warning("plan_review:%d: independent review did not approve", item.issue)
+            return Continue(next_state=DECOMP_GEN_WAIT)
+        publish_decomposition_review_receipt(
+            item.issue,
+            DecompositionReviewReceipt(
+                requirements_epoch=epoch,
+                draft_digest=digest,
+                verdict="GO",
+                recorded_at=recorded_at(),
+            ),
+            ctx.github,
+        )
+        draft = item.payload.get(_DECOMP_DRAFT_KEY)
+        units = normalize_work_tree(draft) if isinstance(draft, list) else None
+        if units is None:
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_draft_unreadable")
+        publish_decomposition_seal(
+            item.issue,
+            DecompositionSeal(
+                requirements_epoch=epoch,
+                draft_digest=digest,
+                nodes=tuple(unit.as_dict() for unit in units),
+            ),
+            ctx.github,
+        )
+        logger.info("plan_review:%d: sealed approved tree %s", item.issue, digest[:12])
+        return Continue(next_state=DECOMP_CHILDREN_WAIT)
+
+    def _submit_decomposition_children(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit the host-owned child creation and exact-readback job."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        epoch = str(item.payload.get(_DECOMP_EPOCH_KEY) or "")
+        draft = item.payload.get(_DECOMP_DRAFT_KEY)
+        units = normalize_work_tree(draft) if isinstance(draft, list) else None
+        if units is None or not epoch:
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_draft_unreadable")
+        layers = topological_layers(units)
+        if layers is None:
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_draft_unreadable")
+        request = DecompositionChildrenRequest(
+            repository=f"{ctx.org}/{item.repo}".casefold(),
+            issue_number=item.issue,
+            deadline_s=stage_network_deadline(ctx),
+            tree=FrozenJson.snapshot([unit.as_dict() for unit in units]),
+            requirements_epoch=epoch,
+            layers=FrozenJson.snapshot([list(layer) for layer in layers]),
+        )
+        return JobRequest(
+            GitHubJob(
+                repo=item.repo,
+                repo_root=Path(str(ctx.paths.repo_root)),
+                request=request,
+                descr="decomposition_children",
+            ),
+            on_done_state=DECOMP_CHILDREN_EVAL,
+        )
+
+    def _eval_decomposition_children(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Publish the bindings after the host verified every child readback."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        receipt = item.payload.get(_DECOMP_CHILDREN_JOB_KEY)
+        epoch = str(item.payload.get(_DECOMP_EPOCH_KEY) or "")
+        if not isinstance(receipt, DecompositionChildrenCreated):
+            return _decomposition_retry(
+                item,
+                _DECOMP_CHILDREN_RETRIES_KEY,
+                wait_state=DECOMP_CHILDREN_WAIT,
+                cap=DECOMPOSITION_GITHUB_RETRIES,
+                reason="children_job",
+            )
+        if receipt.failures:
+            logger.error(
+                "plan_review:%d: child creation failed closed: %s",
+                item.issue,
+                "; ".join(receipt.failures),
+            )
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_children_failed")
+        children = receipt.children.thaw()
+        if not isinstance(children, list):  # pragma: no cover - receipt validation
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_children_failed")
+        publish_decomposition_bindings(
+            item.issue,
+            DecompositionBindings(
+                requirements_epoch=epoch,
+                seal_digest=receipt.seal_digest,
+                bindings=tuple((str(entry["node_id"]), int(entry["issue"])) for entry in children),
+            ),
+            ctx.github,
+        )
+        item.payload[_DECOMP_CHILDREN_KEY] = [
+            {
+                "node_id": str(entry["node_id"]),
+                "issue": int(entry["issue"]),
+                "layer": int(entry["layer"]),
+            }
+            for entry in children
+        ]
+        return Continue(next_state=DECOMP_PARENT_WAIT)
+
+    def _submit_parent_transition(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit the ordered parent summary and exclusive epic transition."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        epoch = str(item.payload.get(_DECOMP_EPOCH_KEY) or "")
+        children = item.payload.get(_DECOMP_CHILDREN_KEY)
+        if not epoch or not isinstance(children, list) or not children:
+            return StageOutcome(Disposition.FINISH_FAIL, "decomposition bindings unavailable")
+        ordered = [(str(entry["node_id"]), int(entry["issue"])) for entry in children]
+        draft = item.payload.get(_DECOMP_DRAFT_KEY)
+        units = normalize_work_tree(draft) if isinstance(draft, list) else None
+        if units is None:
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_draft_unreadable")
+        layers = topological_layers(units)
+        if layers is None:
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_draft_unreadable")
+        summary_marker = f"<!-- hephaestus-plan-decomposition-summary:v1:{epoch} -->"
+        summary_body = render_decomposition_summary_body(
+            parent_issue=item.issue,
+            epoch=epoch,
+            ordered_issues=ordered,
+            layers=layers,
+            bindings=dict(ordered),
+        )
+        request = DecompositionParentTransitionRequest(
+            repository=f"{ctx.org}/{item.repo}".casefold(),
+            issue_number=item.issue,
+            deadline_s=stage_network_deadline(ctx),
+            summary_marker=summary_marker,
+            summary_body=summary_body,
+            labels_to_add=("epic", STATE_SKIP),
+            labels_to_remove=(STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO),
+        )
+        return JobRequest(
+            GitHubJob(
+                repo=item.repo,
+                repo_root=Path(str(ctx.paths.repo_root)),
+                request=request,
+                descr="decomposition_parent_transition",
+            ),
+            on_done_state=DECOMP_PARENT_EVAL,
+        )
+
+    def _eval_parent_transition(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Confirm the exclusive parent state before any child label write."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        receipt = item.payload.get(_DECOMP_PARENT_JOB_KEY)
+        if not isinstance(receipt, DecompositionParentTransitioned):
+            return _decomposition_retry(
+                item,
+                _DECOMP_PARENT_RETRIES_KEY,
+                wait_state=DECOMP_PARENT_WAIT,
+                cap=DECOMPOSITION_GITHUB_RETRIES,
+                reason="parent_transition",
+            )
+        if receipt.failures:
+            logger.error(
+                "plan_review:%d: parent transition failed closed: %s",
+                item.issue,
+                "; ".join(receipt.failures),
+            )
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_parent_failed")
+        return Continue(next_state=DECOMP_LABELS_WAIT)
+
+    def _submit_child_labels(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Add and confirm state:needs-plan on every child after the parent."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        epoch = str(item.payload.get(_DECOMP_EPOCH_KEY) or "")
+        children = item.payload.get(_DECOMP_CHILDREN_KEY)
+        if not epoch or not isinstance(children, list) or not children:
+            return StageOutcome(Disposition.FINISH_FAIL, "decomposition bindings unavailable")
+        labels = ctx.github.gh_issue_json(item.issue).get("labels", [])
+        names = [
+            entry["name"] if isinstance(entry, dict) else str(entry)
+            for entry in (labels if isinstance(labels, list) else [])
+        ]
+        severity = next(
+            (name for name in names if isinstance(name, str) and name.startswith("severity:")),
+            None,
+        )
+        request = DecompositionChildLabelsRequest(
+            repository=f"{ctx.org}/{item.repo}".casefold(),
+            issue_number=item.issue,
+            deadline_s=stage_network_deadline(ctx),
+            children=FrozenJson.snapshot(children),
+            labels_to_add=((STATE_NEEDS_PLAN, severity) if severity else (STATE_NEEDS_PLAN,)),
+        )
+        return JobRequest(
+            GitHubJob(
+                repo=item.repo,
+                repo_root=Path(str(ctx.paths.repo_root)),
+                request=request,
+                descr="decomposition_child_labels",
+            ),
+            on_done_state=DECOMP_LABELS_EVAL,
+        )
+
+    def _eval_child_labels(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Publish the complete transition receipt and release the children."""
+        assert item.issue is not None  # noqa: S101 - step() validates the issue
+        receipt = item.payload.get(_DECOMP_LABELS_JOB_KEY)
+        epoch = str(item.payload.get(_DECOMP_EPOCH_KEY) or "")
+        if not isinstance(receipt, DecompositionChildLabelsApplied):
+            return _decomposition_retry(
+                item,
+                _DECOMP_LABELS_RETRIES_KEY,
+                wait_state=DECOMP_LABELS_WAIT,
+                cap=DECOMPOSITION_GITHUB_RETRIES,
+                reason="child_labels",
+            )
+        if receipt.failures:
+            logger.error(
+                "plan_review:%d: child labels failed closed: %s",
+                item.issue,
+                "; ".join(receipt.failures),
+            )
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_labels_failed")
+        confirmed = receipt.confirmed.thaw()
+        confirmed_nodes = (
+            [str(entry.get("node_id") or "") for entry in confirmed]
+            if isinstance(confirmed, list)
+            else []
+        )
+        publish_decomposition_transition(
+            item.issue,
+            DecompositionTransitionReceipt(
+                requirements_epoch=epoch,
+                labels_added=("epic", STATE_SKIP),
+                labels_removed=(STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO),
+                needs_plan_confirmed=tuple(confirmed_nodes),
+                summary_confirmed=True,
+            ),
+            ctx.github,
+        )
+        children = item.payload.get(_DECOMP_CHILDREN_KEY)
+        count = len(children) if isinstance(children, list) else 0
+        logger.info(
+            "plan_review:%d: decomposition complete; %d single-pull-request children",
+            item.issue,
+            count,
+        )
+        return StageOutcome(
+            Disposition.FINISH_PASS,
+            f"plan decomposed into {count} single-pull-request issues",
+        )
+
+    def _resume_bound_children(
+        self,
+        item: WorkItem,
+        ctx: StageContext,
+        seal: DecompositionSeal,
+        bindings: DecompositionBindings,
+    ) -> StepResult:
+        """Complete a restart whose records already bind children to issues."""
+        units = normalize_work_tree(seal.nodes)
+        if units is None:
+            return StageOutcome(Disposition.BLOCKED, "plan_decomposition_draft_unreadable")
+        item.payload[_DECOMP_DRAFT_KEY] = [unit.as_dict() for unit in units]
+        item.payload[_DECOMP_DRAFT_DIGEST_KEY] = seal.draft_digest
+        item.payload[_DECOMP_CHILDREN_KEY] = [
+            {"node_id": node_id, "issue": issue, "layer": 0} for node_id, issue in bindings.bindings
+        ]
+        return Continue(next_state=DECOMP_PARENT_WAIT)
 
     @staticmethod
     def _review_identity_outcome(
@@ -1305,3 +2250,19 @@ class PlanReviewStage(Stage):
                 _record_review_value(item, result.value, ctx)
             elif item.state == "AMEND_WAIT" and isinstance(result.value, str):
                 _record_amendment_value(item, result.value, ctx)
+            elif item.state == DECOMP_GEN_WAIT and isinstance(result.value, str):
+                item.payload[_DECOMP_OUTPUT_KEY] = result.value
+            elif item.state == DECOMP_REVIEW_WAIT and isinstance(result.value, str):
+                item.payload[_DECOMP_REVIEW_OUTPUT_KEY] = result.value
+            elif item.state == DECOMP_CHILDREN_WAIT and isinstance(
+                result.value, DecompositionChildrenCreated
+            ):
+                item.payload[_DECOMP_CHILDREN_JOB_KEY] = result.value
+            elif item.state == DECOMP_PARENT_WAIT and isinstance(
+                result.value, DecompositionParentTransitioned
+            ):
+                item.payload[_DECOMP_PARENT_JOB_KEY] = result.value
+            elif item.state == DECOMP_LABELS_WAIT and isinstance(
+                result.value, DecompositionChildLabelsApplied
+            ):
+                item.payload[_DECOMP_LABELS_JOB_KEY] = result.value

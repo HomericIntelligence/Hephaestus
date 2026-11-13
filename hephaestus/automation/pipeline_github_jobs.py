@@ -16,6 +16,12 @@ from hephaestus.automation.operation_deadlines import operation_deadline_after
 from hephaestus.automation.pipeline.admission import parse_publication_scope_files
 from hephaestus.automation.pipeline.github_jobs import (
     CurrentPlanScopeRead,
+    DecompositionChildLabelsApplied,
+    DecompositionChildLabelsRequest,
+    DecompositionChildrenCreated,
+    DecompositionChildrenRequest,
+    DecompositionParentTransitioned,
+    DecompositionParentTransitionRequest,
     DirtyDirectPrStateRead,
     FrozenJson,
     GitHubJob,
@@ -179,6 +185,12 @@ class PipelineGitHubJobRunner:
                 return self._reconcile_pr_review(job.request, github)
             case RunMergeWaitCycleRequest():
                 return self._run_merge_wait_cycle(job.request, github)
+            case DecompositionChildrenRequest():
+                return _create_decomposition_children(job.request, github)
+            case DecompositionParentTransitionRequest():
+                return _transition_decomposition_parent(job.request, github)
+            case DecompositionChildLabelsRequest():
+                return _apply_decomposition_child_labels(job.request, github)
 
     @staticmethod
     def _read_current_plan_scope(
@@ -459,4 +471,289 @@ def _read_dirty_direct_state(
         plan_journal=FrozenJson.snapshot([asdict(comment) for comment in comments]),
         issue_state=state,
         issue_labels=tuple(label["name"] for label in labels),
+    )
+
+
+def _read_parent_preservation_digests(github: PipelineGitHub, issue_number: int) -> tuple[str, str]:
+    """Return exact SHA256 digests of the parent title and body."""
+    payload = github.gh_issue_json(issue_number)
+    title = str(payload.get("title") or "")
+    body = str(payload.get("body") or "")
+    return (
+        hashlib.sha256(title.encode("utf-8")).hexdigest(),
+        hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    )
+
+
+def _create_decomposition_children(
+    request: DecompositionChildrenRequest, github: PipelineGitHub
+) -> DecompositionChildrenCreated:
+    """Create or recover every child, then verify one exact readback each.
+
+    The deterministic marker derived from the repository, parent, epoch,
+    generation, and node id is the only recovery identity. An ambiguous
+    create operation fails closed instead of guessing.
+    """
+    from hephaestus.automation.plan_decomposition import (
+        child_recovery_marker,
+        normalize_work_tree,
+        render_child_body,
+        tree_digest,
+    )
+
+    failures: list[str] = []
+    units = normalize_work_tree(request.tree.thaw())
+    if units is None:
+        return DecompositionChildrenCreated(
+            request=request,
+            children=FrozenJson.snapshot([]),
+            seal_digest="0" * 64,
+            failures=("sealed tree is not a valid normalized work tree",),
+        )
+    units_by_id = {unit.node_id: unit for unit in units}
+    layers = request.layers.thaw()
+    assert isinstance(layers, list)  # noqa: S101 - request validation guarantees the shape
+    layer_of = {node_id: layer for layer, nodes in enumerate(layers) for node_id in nodes}
+    open_issues = _open_issue_bodies(github)
+    existing: dict[int, dict[str, object]] = {}
+    children: list[dict[str, object]] = []
+    bound_issues: dict[str, int] = {}
+    for unit in units:
+        marker = child_recovery_marker(
+            repository=request.repository,
+            parent_issue=request.issue_number,
+            requirements_epoch=request.requirements_epoch,
+            generation=1,
+            node_id=unit.node_id,
+        )
+        matches = [
+            payload
+            for number, payload in open_issues.items()
+            # The rendered child body carries the marker at its end; the
+            # marker identity, not its byte offset, is the recovery key.
+            if marker in str(payload.get("body") or "")
+        ]
+        issue_number: int | None = None
+        if len(matches) > 1:
+            failures.append(f"ambiguous child marker for node {unit.node_id}")
+            continue
+        if len(matches) == 1:
+            raw_number = matches[0]["number"]
+            if not isinstance(raw_number, int):
+                failures.append(f"child marker match for node {unit.node_id} is malformed")
+                continue
+            issue_number = raw_number
+            existing[issue_number] = matches[0]
+            children.append({"node_id": unit.node_id, "issue": issue_number, "adopted": True})
+        else:
+            prerequisite_issues = {
+                prerequisite: bound_issues[prerequisite]
+                for prerequisite in unit.prerequisites
+                if prerequisite in bound_issues
+            }
+            body = render_child_body(
+                parent_issue=request.issue_number,
+                unit=unit,
+                prerequisite_issues=prerequisite_issues,
+                plan_revision=_read_parent_revision(github, request.issue_number),
+                requirements_epoch=request.requirements_epoch,
+                marker=marker,
+            )
+            try:
+                issue_number = github.create_issue(unit.title, body)
+            except Exception as error:
+                failures.append(f"child {unit.node_id} creation failed: {error}")
+                continue
+            if not isinstance(issue_number, int) or issue_number <= 0:
+                failures.append(f"child {unit.node_id} creation returned no issue number")
+                continue
+            children.append({"node_id": unit.node_id, "issue": issue_number, "adopted": False})
+        bound_issues[unit.node_id] = issue_number
+    # Exact readback of every child before the receipt confirms admission.
+    verified: list[dict[str, object]] = []
+    for entry in children:
+        node_id = str(entry["node_id"])
+        raw_issue = entry["issue"]
+        if not isinstance(raw_issue, int):
+            failures.append(f"child {node_id} carries no issue number")
+            continue
+        issue_number = raw_issue
+        unit = units_by_id[node_id]
+        marker = child_recovery_marker(
+            repository=request.repository,
+            parent_issue=request.issue_number,
+            requirements_epoch=request.requirements_epoch,
+            generation=1,
+            node_id=node_id,
+        )
+        prerequisite_issues = {
+            prerequisite: bound_issues[prerequisite]
+            for prerequisite in unit.prerequisites
+            if prerequisite in bound_issues
+        }
+        expected_body = render_child_body(
+            parent_issue=request.issue_number,
+            unit=unit,
+            prerequisite_issues=prerequisite_issues,
+            plan_revision=_read_parent_revision(github, request.issue_number),
+            requirements_epoch=request.requirements_epoch,
+            marker=marker,
+        )
+        try:
+            payload = github.gh_issue_json(issue_number)
+        except Exception as error:
+            failures.append(f"child {node_id} readback failed: {error}")
+            continue
+        title = str(payload.get("title") or "")
+        body = str(payload.get("body") or "")
+        if title != unit.title or body != expected_body:
+            failures.append(
+                f"child {node_id} issue #{issue_number} does not match the sealed specification"
+            )
+            continue
+        verified.append(
+            {
+                "node_id": node_id,
+                "issue": issue_number,
+                "adopted": bool(entry["adopted"]),
+                "layer": layer_of.get(node_id, 0),
+            }
+        )
+    verified = sorted(
+        verified,
+        key=lambda entry: (layer_of.get(str(entry["node_id"]), 0), str(entry["node_id"])),
+    )
+    return DecompositionChildrenCreated(
+        request=request,
+        children=FrozenJson.snapshot(verified),
+        seal_digest=tree_digest(units),
+        failures=tuple(failures),
+    )
+
+
+def _read_parent_revision(github: PipelineGitHub, issue_number: int) -> int:
+    """Read the parent's current plan revision for child provenance."""
+    try:
+        from hephaestus.automation.review_journal import journal_snapshot
+
+        comments = github.issue_comments(issue_number)
+        return journal_snapshot(comments).revision
+    except Exception:
+        return 1
+
+
+def _open_issue_bodies(github: PipelineGitHub) -> dict[int, dict[str, object]]:
+    """Return one bounded snapshot of open issue title and body payloads."""
+    result = github._gh(
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,title,body",
+            "--limit",
+            "500",
+        ]
+    )
+    import json as _json
+
+    try:
+        payload = _json.loads(result.stdout or "[]")
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"open issue snapshot failed: {error}") from error
+    issues: dict[int, dict[str, object]] = {}
+    for entry in payload:
+        if isinstance(entry, dict) and isinstance(entry.get("number"), int):
+            issues[int(entry["number"])] = entry
+    return issues
+
+
+def _transition_decomposition_parent(
+    request: DecompositionParentTransitionRequest, github: PipelineGitHub
+) -> DecompositionParentTransitioned:
+    """Publish the summary, apply the exclusive labels, and read everything back."""
+    failures: list[str] = []
+    title_before, body_before = _read_parent_preservation_digests(github, request.issue_number)
+    from hephaestus.automation.github_api.issues import gh_issue_upsert_comment
+
+    try:
+        owner, name = github._owner_name()
+        gh_issue_upsert_comment(
+            request.issue_number,
+            request.summary_marker,
+            request.summary_body,
+            repo=(owner, name),
+        )
+    except Exception as error:
+        failures.append(f"summary publication failed: {error}")
+    try:
+        github.edit_labels(
+            request.issue_number,
+            add=list(request.labels_to_add),
+            remove=list(request.labels_to_remove),
+        )
+    except Exception as error:
+        failures.append(f"parent label transition failed: {error}")
+    payload = github.gh_issue_json(request.issue_number)
+    raw_labels = payload.get("labels")
+    labels_after = [
+        str(entry.get("name") if isinstance(entry, dict) else entry)
+        for entry in (raw_labels if isinstance(raw_labels, list) else [])
+    ]
+    for label in request.labels_to_add:
+        if label not in labels_after:
+            failures.append(f"parent label {label} was not confirmed")
+    for label in request.labels_to_remove:
+        if label in labels_after:
+            failures.append(f"parent label {label} was not removed")
+    title_after, body_after = _read_parent_preservation_digests(github, request.issue_number)
+    if (title_before, body_before) != (title_after, body_after):
+        failures.append("parent title or body changed during the transition")
+    return DecompositionParentTransitioned(
+        request=request,
+        labels_after=FrozenJson.snapshot(labels_after),
+        title_digest_before=title_before,
+        title_digest_after=title_after,
+        body_digest_before=body_before,
+        body_digest_after=body_after,
+        failures=tuple(failures),
+    )
+
+
+def _apply_decomposition_child_labels(
+    request: DecompositionChildLabelsRequest, github: PipelineGitHub
+) -> DecompositionChildLabelsApplied:
+    """Add and read back the confirmed labels on every bound child."""
+    failures: list[str] = []
+    confirmed: list[dict[str, object]] = []
+    children = request.children.thaw()
+    assert isinstance(children, list)  # noqa: S101 - request validation guarantees the shape
+    for entry in children:
+        assert isinstance(entry, dict)  # noqa: S101 - request validation guarantees the shape
+        node_id = str(entry.get("node_id") or "")
+        issue_number = entry.get("issue")
+        if not node_id or not isinstance(issue_number, int) or issue_number <= 0:
+            failures.append(f"child manifest entry is incomplete for {node_id or '?'}")
+            continue
+        try:
+            github.edit_labels(issue_number, add=list(request.labels_to_add), remove=[])
+            payload = github.gh_issue_json(issue_number)
+        except Exception as error:
+            failures.append(f"child {node_id} label write failed: {error}")
+            continue
+        raw_labels = payload.get("labels")
+        labels = [
+            str(item.get("name") if isinstance(item, dict) else item)
+            for item in (raw_labels if isinstance(raw_labels, list) else [])
+        ]
+        missing = [label for label in request.labels_to_add if label not in labels]
+        if missing:
+            failures.append(f"child {node_id} labels {missing} were not confirmed")
+            continue
+        confirmed.append({"node_id": node_id, "issue": issue_number})
+    return DecompositionChildLabelsApplied(
+        request=request,
+        confirmed=FrozenJson.snapshot(confirmed),
+        failures=tuple(failures),
     )

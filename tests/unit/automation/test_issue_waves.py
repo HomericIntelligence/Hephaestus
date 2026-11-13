@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+import hephaestus
 from hephaestus.automation.issue_waves import (
     IssueWaveBlockedError,
     IssueWaveConflictError,
@@ -588,3 +589,37 @@ def test_wave_entry_reconciles_post_seal_drift_without_mutation(tmp_path: Path) 
         repo="hephaestus",
     )
     assert closed.stage is StageName.FINISHED and not closed.passed
+
+
+def test_decomposition_child_admission_leaves_wave_selection_untouched(
+    tmp_path: Path,
+) -> None:
+    """Coordinator-owned child admission never mutates the sealed wave."""
+    store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    plan = store.plan_admission(BASE, 1)
+    lease = store.seal_selection(plan, [19])
+
+    # A decomposition child enters the pipeline through a direct coordinator
+    # queue push. The sealed wave still resumes the exact selected identities,
+    # and the generated child identity is invisible to wave selection.
+    reopened = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    resumed = reopened.plan_admission(BASE, 1)
+    assert resumed.mode == "resume"
+    assert resumed.lease == lease
+    assert resumed.lease is not None
+    assert resumed.lease.issue_numbers == (19,)
+    assert 41 not in resumed.lease.issue_numbers
+
+
+def test_decomposition_admission_imports_no_wave_machinery() -> None:
+    """The decomposition coordinator mixin cannot bypass or change the wave."""
+    source = (
+        Path(hephaestus.__file__).parent
+        / "automation"
+        / "pipeline"
+        / "coordinator_decomposition.py"
+    ).read_text(encoding="utf-8")
+    assert "issue_waves" not in source
+    assert "IssueWaveStore" not in source
+    assert "WaveCheckpoint" not in source
+    assert "wave_entry_from_facts" not in source

@@ -182,8 +182,10 @@ def test_verdict_publication_retry_counts_one_review(make_ctx: Any, make_work_it
     assert second == Continue(next_state="AMEND_WAIT")
     assert item.payload["review_round"] == 1
     assert item.attempts["plan_review_iter"] == 1
+    # The canonical review plus the durable NOGO record (#2982) are the only
+    # comment upserts; the retried publication never charges a second round.
     assert (
-        len([entry for entry in github.mutation_log if entry[0] == "gh_issue_upsert_comment"]) == 1
+        len([entry for entry in github.mutation_log if entry[0] == "gh_issue_upsert_comment"]) == 2
     )
 
 

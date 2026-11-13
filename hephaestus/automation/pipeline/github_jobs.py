@@ -26,6 +26,8 @@ from hephaestus.automation.pipeline.scope_retraction import (
 )
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_FULL_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_EPOCH_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _JOURNAL_MARKER_RE = re.compile(
     r"<!-- hephaestus-implementation-reply-handoff:"
     r"pr=[1-9][0-9]*:head=[0-9a-f]{40}:batch=[0-9a-f]{32} -->"
@@ -477,7 +479,197 @@ type GitHubRequest = (
     | InspectRebaseConflictRequest
     | ReconcilePrReviewRequest
     | RunMergeWaitCycleRequest
+    | DecompositionChildrenRequest
+    | DecompositionParentTransitionRequest
+    | DecompositionChildLabelsRequest
 )
+
+
+@dataclass(frozen=True)
+class DecompositionChildrenRequest:
+    """Create or recover and exactly verify every sealed decomposition child."""
+
+    repository: str
+    issue_number: int
+    deadline_s: float
+    tree: FrozenJson
+    requirements_epoch: str
+    layers: FrozenJson
+
+    def __post_init__(self) -> None:
+        """Require a complete parent identity, sealed tree, and deadline."""
+        if (
+            not isinstance(self.repository, str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository) is None
+        ):
+            raise ValueError("repository must be an owner/name identity")
+        _positive_identifier(self.issue_number, "issue_number")
+        if self.deadline_s is None:
+            raise ValueError("deadline_s is required for a child creation job")
+        _deadline(self.deadline_s)
+        tree = self.tree.thaw()
+        if not isinstance(tree, list) or not tree or any(not isinstance(n, dict) for n in tree):
+            raise ValueError("tree must be a non-empty JSON array of work units")
+        layers = self.layers.thaw()
+        if not isinstance(layers, list) or any(not isinstance(layer, list) for layer in layers):
+            raise ValueError("layers must be a JSON array of node-id arrays")
+        if (
+            not isinstance(self.requirements_epoch, str)
+            or _EPOCH_DIGEST_RE.fullmatch(self.requirements_epoch) is None
+        ):
+            raise ValueError("requirements_epoch must be a 64-character hex digest")
+
+
+@dataclass(frozen=True)
+class DecompositionChildrenCreated:
+    """Immutable receipt of one child creation and readback operation."""
+
+    request: DecompositionChildrenRequest
+    children: FrozenJson
+    seal_digest: str
+    failures: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the complete child evidence and failure manifest."""
+        if not isinstance(self.request, DecompositionChildrenRequest):
+            raise ValueError("request must be a decomposition child creation")
+        _json_root(self.children, list, "children")
+        if (
+            not isinstance(self.seal_digest, str)
+            or _FULL_SHA256_RE.fullmatch(self.seal_digest) is None
+        ):
+            raise ValueError("seal_digest must be a full SHA256 digest")
+        if not isinstance(self.failures, tuple) or any(
+            not isinstance(failure, str) or not failure for failure in self.failures
+        ):
+            raise ValueError("failures must be a tuple of non-empty strings")
+
+
+@dataclass(frozen=True)
+class DecompositionParentTransitionRequest:
+    """Apply the ordered parent summary and exclusive epic transition."""
+
+    repository: str
+    issue_number: int
+    deadline_s: float
+    summary_marker: str
+    summary_body: str
+    labels_to_add: tuple[str, ...]
+    labels_to_remove: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """Require a complete transition specification."""
+        if (
+            not isinstance(self.repository, str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository) is None
+        ):
+            raise ValueError("repository must be an owner/name identity")
+        _positive_identifier(self.issue_number, "issue_number")
+        if self.deadline_s is None:
+            raise ValueError("deadline_s is required for a parent transition")
+        _deadline(self.deadline_s)
+        for text in (self.summary_marker, self.summary_body):
+            if not isinstance(text, str) or not text:
+                raise ValueError("summary marker and body must be non-empty strings")
+        for labels in (self.labels_to_add, self.labels_to_remove):
+            if not isinstance(labels, tuple) or any(
+                not isinstance(label, str) or not label for label in labels
+            ):
+                raise ValueError("labels must be a tuple of non-empty strings")
+
+
+@dataclass(frozen=True)
+class DecompositionParentTransitioned:
+    """Immutable receipt proving the parent transition and body preservation."""
+
+    request: DecompositionParentTransitionRequest
+    labels_after: FrozenJson
+    title_digest_before: str
+    title_digest_after: str
+    body_digest_before: str
+    body_digest_after: str
+    failures: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the label snapshot and preservation digests."""
+        if not isinstance(self.request, DecompositionParentTransitionRequest):
+            raise ValueError("request must be a parent transition")
+        _json_root(self.labels_after, list, "labels_after")
+        for digest in (
+            self.title_digest_before,
+            self.title_digest_after,
+            self.body_digest_before,
+            self.body_digest_after,
+        ):
+            if not isinstance(digest, str) or _FULL_SHA256_RE.fullmatch(digest) is None:
+                raise ValueError("preservation digests must be full SHA256 digests")
+        if not isinstance(self.failures, tuple) or any(
+            not isinstance(failure, str) or not failure for failure in self.failures
+        ):
+            raise ValueError("failures must be a tuple of non-empty strings")
+
+    @property
+    def title_and_body_preserved(self) -> bool:
+        """Return whether the exact parent title and body survived the write."""
+        return (
+            self.title_digest_before == self.title_digest_after
+            and self.body_digest_before == self.body_digest_after
+        )
+
+
+@dataclass(frozen=True)
+class DecompositionChildLabelsRequest:
+    """Add and read back the confirmed planning labels on every child."""
+
+    repository: str
+    issue_number: int
+    deadline_s: float
+    children: FrozenJson
+    labels_to_add: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """Require a complete child manifest and label manifest."""
+        if (
+            not isinstance(self.repository, str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository) is None
+        ):
+            raise ValueError("repository must be an owner/name identity")
+        _positive_identifier(self.issue_number, "issue_number")
+        if self.deadline_s is None:
+            raise ValueError("deadline_s is required for a child label job")
+        _deadline(self.deadline_s)
+        children = self.children.thaw()
+        if (
+            not isinstance(children, list)
+            or not children
+            or any(not isinstance(entry, dict) for entry in children)
+        ):
+            raise ValueError("children must be a non-empty JSON array of entries")
+        if (
+            not isinstance(self.labels_to_add, tuple)
+            or not self.labels_to_add
+            or any(not isinstance(label, str) or not label for label in self.labels_to_add)
+        ):
+            raise ValueError("labels_to_add must be a non-empty tuple of label names")
+
+
+@dataclass(frozen=True)
+class DecompositionChildLabelsApplied:
+    """Immutable receipt of the confirmed child label state."""
+
+    request: DecompositionChildLabelsRequest
+    confirmed: FrozenJson
+    failures: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the confirmed label snapshot."""
+        if not isinstance(self.request, DecompositionChildLabelsRequest):
+            raise ValueError("request must be a child label application")
+        _json_root(self.confirmed, list, "confirmed")
+        if not isinstance(self.failures, tuple) or any(
+            not isinstance(failure, str) or not failure for failure in self.failures
+        ):
+            raise ValueError("failures must be a tuple of non-empty strings")
 
 
 @dataclass(frozen=True)
@@ -505,6 +697,9 @@ class GitHubJob:
                 InspectRebaseConflictRequest,
                 ReconcilePrReviewRequest,
                 RunMergeWaitCycleRequest,
+                DecompositionChildrenRequest,
+                DecompositionParentTransitionRequest,
+                DecompositionChildLabelsRequest,
             ),
         ):
             raise TypeError("request must be a supported GitHub request")
@@ -599,6 +794,9 @@ type GitHubReceipt = (
     | RebaseConflictInspected
     | PrReviewReconciled
     | MergeWaitCycleCompleted
+    | DecompositionChildrenCreated
+    | DecompositionParentTransitioned
+    | DecompositionChildLabelsApplied
 )
 
 
