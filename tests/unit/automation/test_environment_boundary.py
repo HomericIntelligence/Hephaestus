@@ -70,24 +70,82 @@ def test_process_environment_boundary_uses_only_literal_ambient_names() -> None:
     assert dynamic_reads == []
 
 
+def _all_export_element_ids(tree: ast.Module) -> set[int]:
+    """Return the id of each string constant that is a module-level ``__all__`` element."""
+    export_ids: set[int] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
+            continue
+        if not isinstance(node.value, (ast.List, ast.Tuple)):
+            continue
+        for element in node.value.elts:
+            if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                export_ids.add(id(element))
+    return export_ids
+
+
+def _removed_configuration_violation_lines(tree: ast.Module) -> list[str]:
+    """Return the ``lineno`` string of each string constant naming a removed configuration.
+
+    Module-level ``__all__`` entries quote re-exported Python symbol names, so they are
+    exempt: a symbol name is not an environment configuration name.
+    """
+    export_ids = _all_export_element_ids(tree)
+    lines: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in export_ids:
+            continue
+        words = node.value.replace("`", " ").replace("$", " ").split()
+        if any(
+            word.startswith(REMOVED_CONFIGURATION_PREFIXES) or word in REMOVED_CONFIGURATION_NAMES
+            for word in words
+        ):
+            lines.append(str(node.lineno))
+    return lines
+
+
 def test_automation_contains_no_removed_configuration_variable_literals() -> None:
     """Removed environment configuration names cannot be quietly reintroduced."""
     violations: list[str] = []
 
     for path in sorted(AUTOMATION_ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-                continue
-            words = node.value.replace("`", " ").replace("$", " ").split()
-            if any(
-                word.startswith(REMOVED_CONFIGURATION_PREFIXES)
-                or word in REMOVED_CONFIGURATION_NAMES
-                for word in words
-            ):
-                violations.append(f"{path.relative_to(AUTOMATION_ROOT)}:{node.lineno}")
+        for lineno in _removed_configuration_violation_lines(tree):
+            violations.append(f"{path.relative_to(AUTOMATION_ROOT)}:{lineno}")
 
     assert violations == []
+
+
+def test_all_quotes_symbol_names_stay_outside_removed_configuration_scan() -> None:
+    """A ``__all__`` entry quotes a re-exported symbol name, not a configuration name."""
+    tree = ast.parse(
+        '__all__ = ["HEPHAESTUS_REQUIRED_CHECK_ARGV"]\nREQUIRED_CHECK_ARGV = ("checks",)\n',
+    )
+    assert _removed_configuration_violation_lines(tree) == []
+
+
+def test_non_all_assignment_keeps_removed_configuration_scan() -> None:
+    """Only ``__all__`` element quotes are exempt from the word scan."""
+    tree = ast.parse('LEGACY_NAME = "HEPHAESTUS_REQUIRED_CHECK_ARGV"\n')
+    assert _removed_configuration_violation_lines(tree) == ["1"]
+
+
+@pytest.mark.parametrize(
+    "quoted",
+    ["HEPH_PROJECTS_DIR", "PROJECTS_ROOT"],
+)
+def test_removed_configuration_scan_keeps_prose_strength(quoted: str) -> None:
+    """The scan keeps full strength for prose outside ``__all__`` quotes."""
+    tree = ast.parse(f'"""Reads {quoted} from the ambient environment."""\n')
+    assert _removed_configuration_violation_lines(tree) == ["1"]
 
 
 def test_loop_parser_exposes_typed_environment_replacements_with_exact_defaults() -> None:
