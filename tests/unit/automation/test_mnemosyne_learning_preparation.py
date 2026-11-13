@@ -403,10 +403,10 @@ def test_default_preparation_fetch_uses_trusted_transport(tmp_path: Path) -> Non
     workspace._git = local
     with (
         patch.object(workspace, "_existing_pr", return_value=(7, head)),
-        patch("hephaestus.automation.remote_git.trusted_gh_executable", return_value="/trusted/gh"),
-        patch("hephaestus.automation.remote_git.trusted_gh_authenticated", return_value=True),
+        patch("hephaestus.github.remote_git.trusted_gh_executable", return_value="/trusted/gh"),
+        patch("hephaestus.github.remote_git.trusted_gh_authenticated", return_value=True),
         patch(
-            "hephaestus.automation.remote_git.trusted_remote_git_config",
+            "hephaestus.github.remote_git.trusted_remote_git_config",
             return_value=("-c", "credential.helper=trusted"),
         ),
         patch(

@@ -1025,7 +1025,12 @@ gates:
 
 - `/athena:myrmidon-swarm`: If host policy or task scope requires approval,
   present the plan and ask for approval. Start safe work that is in scope only
-  after you obtain all required approvals.
+  after you obtain all required approvals. One Myrmidon integration revision
+  can produce only one integrated result. Give each independent pull request
+  a separate receipt, namespace, worktree, integration root, and publication
+  call through `hephaestus-prepare-pr-worktree` and
+  `hephaestus-publish-pr-worktree`. Permit dependency ancestry only through
+  explicit `stacked` mode.
 - `athena:skill-advisor` — optional aid when available and useful. Always
   consult the installed skill catalog first. Advisor failure does not block
   work. Routing does not grant permission for other actions.

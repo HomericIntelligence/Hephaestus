@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import re
 import subprocess
 import threading
@@ -401,6 +402,31 @@ def _handle_rate_limit_attempt(
     time.sleep(wait_seconds)
 
 
+def require_gh_executable(executable: str) -> str:
+    """Return the exact ``gh`` executable argument after contract validation.
+
+    Only the default literal ``gh`` and an absolute path are accepted. Any
+    other relative value is rejected before throttle or circuit-breaker work.
+    An explicit path is caller-trusted: the caller must obtain it from
+    :func:`hephaestus.github.remote_git.trusted_gh_executable` or an
+    equivalent host-owned resolver. This function does not authorize an
+    arbitrary executable.
+
+    Args:
+        executable: Requested executable value.
+
+    Returns:
+        The validated executable value.
+
+    Raises:
+        ValueError: When the value is neither ``gh`` nor an absolute path.
+
+    """
+    if executable == "gh" or os.path.isabs(executable):
+        return executable
+    raise ValueError("gh executable must be the default 'gh' or an absolute caller-trusted path")
+
+
 def _gh_call_impl(
     args: list[str],
     check: bool = True,
@@ -413,6 +439,7 @@ def _gh_call_impl(
     throttle: bool = True,
     shutdown: threading.Event | None = None,
     probe_rate_limit: bool = True,
+    executable: str = "gh",
 ) -> subprocess.CompletedProcess[str]:
     """Implement gh CLI call with rate limit handling (circuit breaker will wrap this).
 
@@ -430,6 +457,10 @@ def _gh_call_impl(
         track_process_group: Make the child available to host shutdown.
         throttle: Whether to acquire the global and per-thread throttle gates.
         probe_rate_limit: Whether error classification can request a reset time.
+        executable: Exact executable to dispatch. Defaults to the literal
+            ``gh`` found on ``PATH``; an absolute path dispatches through that
+            exact caller-trusted file. Any other relative value is rejected
+            before dispatch.
 
     Returns:
         CompletedProcess instance
@@ -440,6 +471,7 @@ def _gh_call_impl(
         RuntimeError: For other non-transient or exhausted-retry failures.
 
     """
+    executable = require_gh_executable(executable)
     for attempt in range(max_retries):
         try:
             if throttle:
@@ -449,7 +481,7 @@ def _gh_call_impl(
             if shutdown is not None:
                 process_options["shutdown"] = shutdown
             result = run_subprocess(
-                ["gh", *args],
+                [executable, *args],
                 check=check,
                 timeout=timeout if timeout is not None else gh_cli_timeout(),
                 log_on_error=log_on_error,
@@ -562,6 +594,7 @@ def _gh_call(
     throttle: bool = True,
     deadline_s: float | None = None,
     shutdown: threading.Event | None = None,
+    executable: str = "gh",
 ) -> subprocess.CompletedProcess[str]:
     """Call gh CLI with rate limit handling and circuit breaker protection.
 
@@ -582,6 +615,11 @@ def _gh_call(
             :func:`gh_cli_timeout`.
         track_process_group: Make the child available to host shutdown.
         throttle: Whether to acquire the global and per-thread throttle gates.
+        executable: Exact executable to dispatch. Defaults to the literal
+            ``gh`` found through ``PATH``. An absolute path dispatches through
+            that exact file; the caller must obtain it from a host-owned
+            resolver such as ``trusted_gh_executable()``. Any other relative
+            value is rejected before throttle or circuit-breaker work.
 
     Returns:
         CompletedProcess instance
@@ -592,8 +630,10 @@ def _gh_call(
         GitHubUnavailableError: If the circuit breaker is open due to
             sustained GitHub API unavailability.
         RuntimeError: For other non-transient or exhausted-retry failures.
+        ValueError: When ``executable`` is not ``gh`` or an absolute path.
 
     """
+    executable = require_gh_executable(executable)
     timeout, throttle = _prepare_gh_operation(
         timeout=timeout, throttle=throttle, deadline_s=deadline_s, shutdown=shutdown
     )
@@ -617,6 +657,7 @@ def _gh_call(
             "log_on_error": log_on_error,
             "timeout": timeout,
             "throttle": throttle,
+            "executable": executable,
         }
         if env is not None:
             kwargs["env"] = env
@@ -649,4 +690,5 @@ __all__ = [
     "gh_call",
     "gh_cli_timeout",
     "positive_timeout",
+    "require_gh_executable",
 ]

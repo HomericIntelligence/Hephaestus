@@ -1,108 +1,55 @@
-"""Tests for bounded host-owned remote Git authentication."""
+"""Automation keeps the remote Git contract re-exported from the library.
+
+The behavior tests live with the owning module in
+``tests/unit/github/test_remote_git.py``. This module asserts the product
+layer keeps object identity for every re-exported name, so current automation
+callers and monkeypatch targets stay valid.
+"""
 
 # ruff: noqa: D103
-import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.remote_git import TrustedRemoteGit, trusted_gh_authenticated
-from hephaestus.config.child_environments import build_git_signing_env, build_remote_git_env
+import hephaestus.automation.remote_git as automation
+import hephaestus.github.remote_git as library
 
-
-@pytest.mark.parametrize(
-    "tokens", [{}, {"GH_TOKEN": "fixture-token"}, {"GITHUB_TOKEN": "fixture-token"}]
+_EXPORTED_NAMES = (
+    "TrustedRemoteGit",
+    "trusted_gh_authenticated",
+    "trusted_gh_executable",
+    "trusted_remote_git_config",
 )
-def test_remote_credentials_are_not_local(tokens: dict[str, str]) -> None:
-    with patch.dict("os.environ", tokens, clear=True):
-        remote = build_remote_git_env()
-        local = build_git_signing_env()
-    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
-        assert remote.get(key) == tokens.get(key)
-        assert key not in local
-    assert remote["GIT_CONFIG_GLOBAL"] == "/dev/null"
-    assert remote["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert remote["GIT_TERMINAL_PROMPT"] == "0"
 
 
-@pytest.mark.parametrize("failure", ["gh", "login", "ssh"])
-def test_missing_auth_never_runs_git(tmp_path: Path, failure: str) -> None:
-    with (
-        patch(
-            "hephaestus.automation.remote_git.trusted_gh_executable",
-            return_value=None if failure == "gh" else "/trusted/gh",
-        ),
-        patch(
-            "hephaestus.automation.remote_git.trusted_gh_authenticated",
-            return_value=failure != "login",
-        ),
-        patch(
-            "hephaestus.automation.remote_git.trusted_remote_git_config",
-            return_value=None if failure == "ssh" else ("-c", "credential.helper=trusted"),
-        ),
-        patch("hephaestus.utils.helpers.run_subprocess") as run,
-        pytest.raises(RuntimeError, match=r"^remote Git authentication unavailable$"),
-    ):
-        TrustedRemoteGit()(tmp_path, ("push", "origin", "branch"), 5)
-    run.assert_not_called()
+@pytest.mark.parametrize("name", _EXPORTED_NAMES)
+def test_automation_reexports_keep_library_identity(name: str) -> None:
+    assert getattr(automation, name) is getattr(library, name)
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [
-        OSError("secret"),
-        UnicodeDecodeError("utf-8", b"secret", 0, 1, "remote detail"),
-        subprocess.TimeoutExpired("secret", 1),
-        subprocess.CompletedProcess([], 1, "secret", "secret"),
-        subprocess.CompletedProcess([], 2, "secret", "secret"),
-    ],
-)
-def test_remote_failures_remove_diagnostics(tmp_path: Path, failure: object) -> None:
-    with (
-        patch("hephaestus.automation.remote_git.trusted_gh_executable", return_value="/trusted/gh"),
-        patch("hephaestus.automation.remote_git.trusted_gh_authenticated", return_value=True),
-        patch(
-            "hephaestus.automation.remote_git.trusted_remote_git_config",
-            return_value=("-c", "credential.helper=trusted"),
-        ),
-        patch(
-            "hephaestus.utils.helpers.run_subprocess",
-            side_effect=failure if isinstance(failure, Exception) else None,
-            return_value=failure,
-        ) as run,
-    ):
-        if isinstance(failure, Exception):
-            with pytest.raises(RuntimeError, match=r"^remote Git transport failed$"):
-                TrustedRemoteGit()(tmp_path, ("ls-remote", "origin", "branch"), 5)
-        else:
-            result = TrustedRemoteGit()(tmp_path, ("ls-remote", "origin", "branch"), 5)
-            assert result.returncode in (1, 2)
-            assert result.stdout == "" and result.stderr == "remote Git transport failed"
-    assert run.call_args.args[0] == [
-        "git",
-        "-c",
-        "credential.helper=trusted",
-        "ls-remote",
-        "origin",
-        "branch",
-    ]
-    assert run.call_args.kwargs["track_process_group"] is True
-    assert run.call_args.kwargs["timeout"] == 5
+def test_automation_module_exports_the_full_contract() -> None:
+    assert set(automation.__all__) == set(_EXPORTED_NAMES)
 
 
-def test_auth_check_uses_approved_token_environment() -> None:
-    with (
-        patch.dict("os.environ", {"GH_TOKEN": "fixture-token", "UNTRUSTED": "secret"}, clear=True),
-        patch(
-            "hephaestus.utils.helpers.run_subprocess",
-            return_value=subprocess.CompletedProcess([], 0),
-        ) as run,
-    ):
-        assert trusted_gh_authenticated("/trusted/gh", 7)
-    assert run.call_args.kwargs["env"]["GH_TOKEN"] == "fixture-token"  # noqa: S105 - synthetic fixture
-    assert "UNTRUSTED" not in run.call_args.kwargs["env"]
-    assert run.call_args.args[0] == ["/trusted/gh", "auth", "status", "--hostname", "github.com"]
+def test_automation_extra_root_parse_delegates_to_the_library() -> None:
+    from hephaestus.automation import _review_utils
+
+    sentinel = Path("/trusted/root")
+    with patch.object(library, "validate_gh_extra_path_root", return_value=sentinel) as validate:
+        assert _review_utils._parse_gh_extra_path_root("/trusted/root") == sentinel
+    assert validate.call_args.args == ("/trusted/root",)
+
+
+def test_automation_extra_root_arg_uses_the_library_type() -> None:
+    import argparse
+
+    from hephaestus.automation._review_utils import add_gh_extra_path_root_arg
+
+    parser = argparse.ArgumentParser()
+    add_gh_extra_path_root_arg(parser)
+    argument = next(action for action in parser._actions if action.dest == "gh_extra_path_root")
+    assert argument.type is library.gh_extra_path_root_type
 
 
 @pytest.mark.parametrize("extra", [None, Path("/host/tools")])
@@ -116,16 +63,18 @@ def test_default_host_transports_share_host_root(extra: Path | None) -> None:
     host = MnemosyneSkillHost(gh_extra_path_root=extra)
     backend = host.delivery_service
     assert isinstance(backend, DefaultLearnDeliveryBackend)
-    assert isinstance(backend._preparation._workspace, BoundLearningWorkspace)
-    assert isinstance(backend._service.remote_git, TrustedRemoteGit)
+    assert isinstance(backend._service.remote_git, library.TrustedRemoteGit)
     assert backend._service.remote_git.extra_path_root == extra
-    assert isinstance(backend._preparation._workspace._remote_git, TrustedRemoteGit)
+    assert isinstance(backend._preparation._workspace, BoundLearningWorkspace)
+    assert isinstance(backend._preparation._workspace._remote_git, library.TrustedRemoteGit)
     assert backend._preparation._workspace._remote_git.extra_path_root == extra
 
 
-def test_auth_decode_failure_is_safe() -> None:
-    with patch(
-        "hephaestus.utils.helpers.run_subprocess",
-        side_effect=UnicodeDecodeError("utf-8", b"secret", 0, 1, "remote detail"),
-    ):
-        assert not trusted_gh_authenticated("/trusted/gh", 3)
+def test_library_command_resolution_runs_through_library_globals() -> None:
+    sentinel = object()
+    with patch.object(library, "trusted_gh_executable", return_value=sentinel):
+        # Automation callers that patch the automation binding patch their own
+        # reference; the library command resolution patches the library one.
+        assert automation.trusted_gh_executable is not library.trusted_gh_executable
+        assert library.TrustedRemoteGit is automation.TrustedRemoteGit
+    assert automation.trusted_gh_executable is library.trusted_gh_executable

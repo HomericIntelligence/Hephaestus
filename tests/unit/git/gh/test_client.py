@@ -582,3 +582,42 @@ class TestNonTransientErrorClassification:
             )
             is True
         )
+
+
+class TestGhExecutableContract:
+    """Dispatch accepts only the default ``gh`` or a caller-trusted absolute path."""
+
+    @pytest.mark.parametrize("executable", ["gh", "/trusted/host/bin/gh"])
+    def test_valid_executable_dispatches_to_that_exact_file(
+        self, monkeypatch: pytest.MonkeyPatch, executable: str
+    ) -> None:
+        completed = subprocess.CompletedProcess(["gh"], 0, "", "")
+        run = Mock(return_value=completed)
+        monkeypatch.setattr(client_module, "run_subprocess", run)
+
+        assert gh_call(["api", "repos/o/r"], throttle=False, executable=executable) is completed
+        assert run.call_args.args[0][0] == executable
+
+    @pytest.mark.parametrize("executable", ["relative/gh", "../gh", "./gh", ""])
+    def test_relative_executable_is_rejected_before_throttle_or_breaker(
+        self, monkeypatch: pytest.MonkeyPatch, executable: str
+    ) -> None:
+        run = Mock(side_effect=AssertionError("no gh process may start"))
+        monkeypatch.setattr(client_module, "run_subprocess", run)
+        throttle = Mock(side_effect=AssertionError("throttling must not run"))
+        monkeypatch.setattr(client_module, "gh_global_throttle_acquire", throttle)
+
+        with pytest.raises(ValueError, match=r"absolute caller-trusted path"):
+            gh_call(["api", "repos/o/r"], executable=executable)
+
+        run.assert_not_called()
+        throttle.assert_not_called()
+        assert _GH_BREAKER.snapshot()["failure_count"] == 0
+
+    def test_require_gh_executable_returns_the_validated_value(self) -> None:
+        from hephaestus.git.gh.client import require_gh_executable
+
+        assert require_gh_executable("gh") == "gh"
+        assert require_gh_executable("/trusted/host/bin/gh") == "/trusted/host/bin/gh"
+        with pytest.raises(ValueError, match=r"absolute caller-trusted path"):
+            require_gh_executable("gh-fallback")

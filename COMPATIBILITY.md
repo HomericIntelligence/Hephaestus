@@ -91,7 +91,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-The 57 console scripts registered in `[project.scripts]` are classified into one
+The 59 console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
 The installed script inventory is `[project.scripts]` in `pyproject.toml`.
@@ -135,6 +135,8 @@ inventory or table before commit.
 | `hephaestus-audit-worktrees` | Provisional | Read-only registered-worktree inventory helper for workflow skills |
 | `hephaestus-remove-worktree` | Provisional | Approved clean-worktree removal helper for workflow skills |
 | `hephaestus-resolve-pr` | Provisional | Resolve and validate an open pull request for workflow skills |
+| `hephaestus-prepare-pr-worktree` | Provisional | Pull-request-bound repair worktree preparation with an immutable receipt |
+| `hephaestus-publish-pr-worktree` | Provisional | Receipt-bound repair publication with revalidation and an exact lease |
 | `hephaestus-collect-pr-evidence` | Provisional | Collect pull-request metadata, paths, and checks for workflow skills |
 | `hephaestus-pr-diff-context` | Provisional | Compute stable pull-request diff lenses for workflow skills |
 | `hephaestus-repository-evidence` | Provisional | Collect bounded Git history and source-pattern evidence for workflow skills |
@@ -269,6 +271,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `git_remote_url` | TBD | Read a remote URL through the shared Git adapter |
 | `git_rev_list_count` | TBD | Count revisions for a revspec through the shared Git adapter |
 | `git_unmerged_files` | TBD | List unresolved merge-conflict paths through the shared Git adapter |
+| `GitPreLaunchError` | TBD | Raised when a `run_git` pre-launch validator stops the launch; never retried as a network failure |
 | `in_git_repo` | TBD | Check whether cwd is inside a Git repository through the shared Git adapter |
 | `repo_root` | TBD | Resolve the current Git repository root through the shared Git adapter |
 | `run_git` | TBD | Execute Git commands through the shared subprocess adapter with bounded timeout and network retry protection; captures text output only |
